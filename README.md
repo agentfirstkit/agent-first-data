@@ -73,6 +73,7 @@ The field name is the schema. Encode units and semantics in the name itself:
 | `_epoch_ms` | unix timestamp ms | `2026-01-31T16:00:00.000Z` |
 | `_bytes` | size in bytes | `446.1KB` |
 | `_msats`, `_sats` | bitcoin units | `2056msats` |
+| `_percent` | percentage | `85%` |
 | `_usd_cents` | US dollar cents | `$9.99` |
 | `_secret` | sensitive, redact | `***` |
 
