@@ -9,12 +9,12 @@
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
   ],
   "changes": [
-    "Test validation pipeline"
+    "Add project scripts (test.sh, update.sh, upgrade.sh) enabling convenient testing and dependency management across all four language implementations (Rust/Go/Python/TypeScript) from a single unified command at the repository root"
   ],
   "license": "MIT",
   "references": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_3609a13dc7b7df6e32d9d28a42dd6a86f06ae4daa246c615c1a53cb3a8fef33e",
+      "uri": "cmn://cmn.dev/spore/blake3_87263352e8ea8cefaf28c3a9d89e33583d31318413b2bbcc24e069686248c26a",
       "relation": "spawned_from"
     }
   ],
