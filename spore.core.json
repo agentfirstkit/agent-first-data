@@ -18,7 +18,7 @@
   "license": "MIT",
   "references": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_d01519072d801bc4dcdf148e9cc0e364e000424dd1c83a6c55c587a3a214bf38",
+      "uri": "cmn://cmn.dev/spore/blake3_0db9ae478c2f0612b0abee5410f68d39e1e7b48ccaf63ce6a0e3dbc728b2163c",
       "relation": "spawned_from"
     }
   ],
