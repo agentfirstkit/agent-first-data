@@ -1,8 +1,12 @@
 {
   "name": "agent-first-data",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Agent-First Data (AFD) — suffix-driven output formatting and protocol templates for AI agents",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cmnspore/agent-first-data"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

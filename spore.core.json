@@ -9,14 +9,12 @@
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
   ],
   "changes": [
-    "add _percent to README suffix table",
-    "fix .gitignore egg-info pattern",
-    "fix TypeScript import extensions for tsc build"
+    "add repository URLs to package metadata (Python, TypeScript)"
   ],
   "license": "MIT",
   "references": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_daad215f3a71dc52b9a56ddc510683c2c6f74f7d57ef130c62c2f913e0c05149",
+      "uri": "cmn://cmn.dev/spore/blake3_56b4d68fed58fc12c1d3d457864ddb17c2e4acdea1994618c8a60379fcaa24f2",
       "relation": "spawned_from"
     }
   ],
