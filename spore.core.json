@@ -9,12 +9,12 @@
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
   ],
   "changes": [
-    "add repository URLs to package metadata (Python, TypeScript)"
+    "Test validation pipeline"
   ],
   "license": "MIT",
   "references": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_56b4d68fed58fc12c1d3d457864ddb17c2e4acdea1994618c8a60379fcaa24f2",
+      "uri": "cmn://cmn.dev/spore/blake3_3609a13dc7b7df6e32d9d28a42dd6a86f06ae4daa246c615c1a53cb3a8fef33e",
       "relation": "spawned_from"
     }
   ],
