@@ -1,0 +1,18 @@
+[package]
+name = "agent-first-data"
+version = "0.1.0"
+edition = "2021"
+description = "Agent-First Data (AFD) — suffix-driven output formatting and protocol templates for AI agents"
+license = "MIT"
+repository = "https://github.com/cmnspore/agent-first-data"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+[dependencies]
+serde_json = "1"
+chrono = "0.4"

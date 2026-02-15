@@ -1,0 +1,32 @@
+[
+  {
+    "name": "flat secret",
+    "input": {"api_key_secret": "sk-1234567890", "name": "test"},
+    "expected": {"api_key_secret": "***", "name": "test"}
+  },
+  {
+    "name": "nested secret",
+    "input": {"storage": {"postgres_url_secret": "postgres://user:pass@host/db"}},
+    "expected": {"storage": {"postgres_url_secret": "***"}}
+  },
+  {
+    "name": "preserves non-string",
+    "input": {"count_secret": 42},
+    "expected": {"count_secret": 42}
+  },
+  {
+    "name": "case insensitive",
+    "input": {"DATABASE_URL_SECRET": "postgres://user:pass@host/db", "name": "test"},
+    "expected": {"DATABASE_URL_SECRET": "***", "name": "test"}
+  },
+  {
+    "name": "array traversal",
+    "input": [{"api_key_secret": "sk-123", "name": "a"}, {"token_secret": "tok-456"}],
+    "expected": [{"api_key_secret": "***", "name": "a"}, {"token_secret": "***"}]
+  },
+  {
+    "name": "non-string secret with nested secrets",
+    "input": {"db_secret": {"password_secret": "real", "host": "localhost"}, "name": "test"},
+    "expected": {"db_secret": {"password_secret": "***", "host": "localhost"}, "name": "test"}
+  }
+]

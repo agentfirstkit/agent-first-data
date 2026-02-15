@@ -1,0 +1,158 @@
+[
+  {
+    "name": "key ordering plain",
+    "format": "plain",
+    "input": {"zebra": 1, "alpha": 2, "mid": 3},
+    "expected": "alpha: 2\nmid: 3\nzebra: 1"
+  },
+  {
+    "name": "key ordering yaml",
+    "format": "yaml",
+    "input": {"zebra": 1, "alpha": 2, "mid": 3},
+    "expected": "---\nalpha: 2\nmid: 3\nzebra: 1"
+  },
+  {
+    "name": "nested key ordering",
+    "format": "plain",
+    "input": {"config": {"zoo": true, "abc": "x"}, "app": "test"},
+    "expected": "app: test\nconfig:\n  abc: x\n  zoo: true"
+  },
+  {
+    "name": "mixed types plain",
+    "format": "plain",
+    "input": {"active": true, "count": 42, "name": "hello", "value": null},
+    "expected": "active: true\ncount: 42\nname: hello\nvalue: null"
+  },
+  {
+    "name": "mixed types yaml",
+    "format": "yaml",
+    "input": {"active": true, "count": 42, "name": "hello", "value": null},
+    "expected": "---\nactive: true\ncount: 42\nname: \"hello\"\nvalue: null"
+  },
+  {
+    "name": "suffix formatting with ordering",
+    "format": "plain",
+    "input": {"latency_ms": 42, "api_key_secret": "real", "cost_msats": 100},
+    "expected": "api_key_secret: ***\ncost_msats: 100msats\nlatency_ms: 42ms"
+  },
+  {
+    "name": "protocol ok plain",
+    "format": "plain",
+    "input": {"code": "ok", "result": {"count": 3, "active": true}, "trace": {"duration_ms": 12}},
+    "expected": "code: ok\nresult:\n  active: true\n  count: 3\ntrace:\n  duration_ms: 12ms"
+  },
+  {
+    "name": "array with ordering",
+    "format": "plain",
+    "input": {"items": ["b", "a"], "count": 2},
+    "expected": "count: 2\nitems:\n  - b\n  - a"
+  },
+  {
+    "name": "empty containers",
+    "format": "plain",
+    "input": {"data": {}, "list": [], "name": "x"},
+    "expected": "data:\nlist: []\nname: x"
+  },
+  {
+    "name": "empty containers yaml",
+    "format": "yaml",
+    "input": {"data": {}, "list": [], "name": "x"},
+    "expected": "---\ndata: {}\nlist: []\nname: \"x\""
+  },
+  {
+    "name": "array of objects",
+    "format": "plain",
+    "input": {"items": [{"name": "a", "value": 1}, {"name": "b", "value": 2}]},
+    "expected": "items:\n  -\n    name: a\n    value: 1\n  -\n    name: b\n    value: 2"
+  },
+  {
+    "name": "deep nesting",
+    "format": "plain",
+    "input": {"a": {"b": {"c": {"d": "deep"}}}},
+    "expected": "a:\n  b:\n    c:\n      d: deep"
+  },
+  {
+    "name": "deep nesting yaml",
+    "format": "yaml",
+    "input": {"a": {"b": {"c": {"d": "deep"}}}},
+    "expected": "---\na:\n  b:\n    c:\n      d: \"deep\""
+  },
+  {
+    "name": "ms boundary exact 1000",
+    "format": "plain",
+    "input": {"latency_ms": 1000},
+    "expected": "latency_ms: 1.00s"
+  },
+  {
+    "name": "bool not formatted as numeric",
+    "format": "plain",
+    "input": {"latency_ms": true, "size_bytes": false},
+    "expected": "latency_ms: true\nsize_bytes: false"
+  },
+  {
+    "name": "negative currency fallback",
+    "format": "plain",
+    "input": {"refund_usd_cents": -499},
+    "expected": "refund_usd_cents: -499"
+  },
+  {
+    "name": "yaml newline escaping",
+    "format": "yaml",
+    "input": {"msg": "line1\nline2"},
+    "expected": "---\nmsg: \"line1\\nline2\""
+  },
+  {
+    "name": "yaml tab escaping",
+    "format": "yaml",
+    "input": {"data": "col1\tcol2"},
+    "expected": "---\ndata: \"col1\\tcol2\""
+  },
+  {
+    "name": "negative epoch_ms",
+    "format": "plain",
+    "input": {"created_epoch_ms": -1000},
+    "expected": "created_epoch_ms: 1969-12-31T23:59:59.000Z"
+  },
+  {
+    "name": "negative epoch_s",
+    "format": "plain",
+    "input": {"cached_epoch_s": -60},
+    "expected": "cached_epoch_s: 1969-12-31T23:59:00.000Z"
+  },
+  {
+    "name": "negative bytes small",
+    "format": "plain",
+    "input": {"delta_bytes": -100},
+    "expected": "delta_bytes: -100B"
+  },
+  {
+    "name": "negative bytes KB",
+    "format": "plain",
+    "input": {"delta_bytes": -1024},
+    "expected": "delta_bytes: -1.0KB"
+  },
+  {
+    "name": "negative epoch_ns fractional",
+    "format": "plain",
+    "input": {"created_epoch_ns": -1},
+    "expected": "created_epoch_ns: 1969-12-31T23:59:59.999Z"
+  },
+  {
+    "name": "percent formatting",
+    "format": "plain",
+    "input": {"cpu_percent": 85, "mem_percent": 72.3},
+    "expected": "cpu_percent: 85%\nmem_percent: 72.3%"
+  },
+  {
+    "name": "jcs utf16 code unit ordering",
+    "format": "plain",
+    "input": {"b\uE000": 1, "b\uD83D\uDE00": 2, "a": 3},
+    "expected": "a: 3\nb\uD83D\uDE00: 2\nb\uE000: 1"
+  },
+  {
+    "name": "jcs utf16 ordering yaml",
+    "format": "yaml",
+    "input": {"b\uE000": 1, "b\uD83D\uDE00": 2},
+    "expected": "---\nb\uD83D\uDE00: 2\nb\uE000: 1"
+  }
+]

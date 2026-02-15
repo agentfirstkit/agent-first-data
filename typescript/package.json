@@ -1,0 +1,23 @@
+{
+  "name": "agent-first-data",
+  "version": "0.1.0",
+  "description": "Agent-First Data (AFD) — suffix-driven output formatting and protocol templates for AI agents",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test src/*.test.ts --experimental-strip-types"
+  },
+  "devDependencies": {
+    "typescript": "^5.7"
+  }
+}

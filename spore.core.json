@@ -1,0 +1,34 @@
+{
+  "id": "agent-first-data",
+  "name": "Agent-First Data",
+  "domain": "cmn.dev",
+  "synopsis": "The field name is the schema \u2014 agents read latency_ms and know milliseconds, api_key_secret and know to redact, no external schema needed",
+  "intent": [
+    "Encode all semantic information in the field name itself so agents parse structured data without external schemas, documentation, or type systems \u2014 _ms/_s/_epoch_ms for time, _msats/_sats/_usd_cents for currency, _bytes for size, _secret for auto-redaction",
+    "Define a JSONL output protocol where every line carries a code field (startup for config state, tool-defined for status/progress, ok/error for results) plus a trace object for execution context (duration, token counts, cost, data source) \u2014 same structure whether the transport is CLI stdout, REST API response, MCP tool result, or SSE stream",
+    "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
+  ],
+  "changes": [
+    "fix _epoch_ns floor division for negative values",
+    "add _percent suffix with type guards",
+    "add parse_size utility across all languages",
+    "expand spec and skill docs with new conventions",
+    "add test fixtures for percent, negative epoch_ns, parse_size"
+  ],
+  "license": "MIT",
+  "references": [
+    {
+      "uri": "cmn://cmn.dev/spore/blake3_d01519072d801bc4dcdf148e9cc0e364e000424dd1c83a6c55c587a3a214bf38",
+      "relation": "spawned_from"
+    }
+  ],
+  "tree": {
+    "algorithm": "blob_tree_blake3_nfc",
+    "excludes": [
+      ".git"
+    ],
+    "ignore_rules": [
+      ".gitignore"
+    ]
+  }
+}
