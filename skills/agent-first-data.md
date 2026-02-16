@@ -98,6 +98,19 @@ TOKEN_VALIDITY_HOURS=24
 
 Fields whose meaning is obvious: `callback_url`, `redb_path`, `proof_count`, `search_enabled`, `method`, `domain`, `model`.
 
+### Database columns
+
+Use suffixes on generic types (`INTEGER`, `BIGINT`, `TEXT`). Native types that carry semantics (`TIMESTAMPTZ`, `INTERVAL`) don't need suffixes.
+
+| Column | Type | Suffix? | Why |
+|:-------|:-----|:--------|:----|
+| `created_at` | `TIMESTAMPTZ` | no | type says timestamp |
+| `duration_ms` | `INTEGER` | yes | integer is ambiguous |
+| `api_key_secret` | `TEXT` | yes | enables auto-redaction |
+| `retry_count` | `INTEGER` | no | meaning obvious |
+
+ORM struct fields preserve the suffix: `duration_ms: i64`, not `duration: i64`.
+
 ### Common mistakes
 
 | Bad | Good | Why |
@@ -314,3 +327,4 @@ When reviewing code that produces structured output:
 7. Config size values use `_size` suffix (`buffer_size: "10M"`, not `buffer: "10M"`)
 8. Environment variables follow `UPPER_SNAKE_CASE` with the same suffixes
 9. Logging uses AFD init functions (`init_json`/`init_plain`/`init_yaml`) — not raw `println!`/`fmt.Println`/`console.log` for structured output
+10. Database columns use AFD suffixes on generic types (`duration_ms INTEGER`, not `duration INTEGER`); native types like `TIMESTAMPTZ` don't need suffixes

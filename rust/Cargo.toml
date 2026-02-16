@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-data"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Agent-First Data (AFD) — suffix-driven output formatting and protocol templates for AI agents"
 license = "MIT"
@@ -22,4 +22,4 @@ tracing = ["dep:tracing", "dep:tracing-subscriber"]
 serde_json = "1"
 chrono = "0.4"
 tracing = { version = "0.1", optional = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"], optional = true }

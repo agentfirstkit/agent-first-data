@@ -201,6 +201,54 @@ api_key_secret = "sk-or-v1-actual-key"
 model = "google/gemini-3-flash-preview"
 ```
 
+## Database schemas
+
+Same suffixes in column names. Agents reading a table schema can determine units, formats, and sensitivity without external documentation.
+
+**When the database type already carries semantics, no suffix is needed.** `TIMESTAMPTZ` says "timestamp with timezone" — adding `_epoch_ms` is redundant. Suffixes are for generic types (`BIGINT`, `INTEGER`, `TEXT`) where the type alone is ambiguous.
+
+```sql
+CREATE TABLE events (
+    id TEXT PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL,   -- type says timestamp, no suffix needed
+    duration_ms INTEGER,               -- INTEGER is ambiguous, suffix needed
+    payload_bytes INTEGER,
+    api_key_secret TEXT,
+    retry_count INTEGER,               -- no suffix needed, meaning is obvious
+    domain TEXT NOT NULL
+);
+```
+
+| Column | Type | Suffix needed? | Why |
+|:-------|:-----|:---------------|:----|
+| `created_at` | `TIMESTAMPTZ` | no | type encodes semantics |
+| `duration_ms` | `INTEGER` | yes | 142 what? ms vs s vs μs |
+| `payload_bytes` | `INTEGER` | yes | bytes vs KB vs count |
+| `api_key_secret` | `TEXT` | yes | enables auto-redaction |
+| `retry_count` | `INTEGER` | no | meaning obvious from name |
+| `expires_at` | `TIMESTAMPTZ` | no | type encodes semantics |
+| `cached_epoch_ms` | `BIGINT` | yes | bare integer needs unit |
+
+**ORM / struct mapping**: Keep the suffix in the struct field name. The suffix is part of the semantic name, not a display concern:
+
+```rust
+struct Event {
+    created_at: DateTime<Utc>,   // native type — no suffix
+    duration_ms: i64,            // integer — suffix preserves semantics
+    // duration: i64,            // bad — 64-bit what? seconds? ms?
+}
+```
+
+**Queries**: Column aliases in views or query results should also follow AFD naming:
+
+```sql
+SELECT
+    duration_ms,
+    payload_bytes,
+    (cost_input_msats + cost_output_msats) AS total_cost_msats
+FROM requests;
+```
+
 ---
 
 # Part 2: Output Processing
