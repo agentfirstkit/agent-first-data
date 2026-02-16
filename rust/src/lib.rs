@@ -1,368 +1,152 @@
 //! Agent-First Data (AFD) output formatting and protocol templates.
 //!
-//! Implements the AFD output convention. JSON is the canonical lossless format.
-//! YAML preserves structure with quoted strings. Plain applies suffix-driven
-//! formatting for human readability.
-//!
-//! ```text
-//! --output json|yaml|plain
-//! ```
+//! 9 public APIs: 4 protocol builders + 3 output formatters + 1 redaction + 1 utility.
 
 use serde_json::Value;
 
-/// Output format for CLI and API responses.
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub enum OutputFormat {
-    #[default]
-    Json,
-    Yaml,
-    Plain,
+// ═══════════════════════════════════════════
+// Public API: Protocol Builders
+// ═══════════════════════════════════════════
+
+/// Build `{code: "startup", config: ..., args: ..., env: ...}`.
+pub fn build_json_startup(config: Value, args: Value, env: Value) -> Value {
+    serde_json::json!({"code": "startup", "config": config, "args": args, "env": env})
 }
 
-impl OutputFormat {
-    /// Format a JSON value as a single compact line (JSONL-compatible).
-    pub fn format(&self, value: &Value) -> String {
-        match self {
-            Self::Json => serde_json::to_string(value).unwrap_or_default(),
-            Self::Yaml => to_yaml(value),
-            Self::Plain => to_plain(value),
-        }
-    }
-
-    /// Format a JSON value with pretty printing (JSON only; yaml/plain unchanged).
-    pub fn format_pretty(&self, value: &Value) -> String {
-        match self {
-            Self::Json => serde_json::to_string_pretty(value).unwrap_or_default(),
-            Self::Yaml => to_yaml(value),
-            Self::Plain => to_plain(value),
-        }
+/// Build `{code: "ok", result: ..., trace?: ...}`.
+pub fn build_json_ok(result: Value, trace: Option<Value>) -> Value {
+    match trace {
+        Some(t) => serde_json::json!({"code": "ok", "result": result, "trace": t}),
+        None => serde_json::json!({"code": "ok", "result": result}),
     }
 }
 
+/// Build `{code: "error", error: message, trace?: ...}`.
+pub fn build_json_error(message: &str, trace: Option<Value>) -> Value {
+    match trace {
+        Some(t) => serde_json::json!({"code": "error", "error": message, "trace": t}),
+        None => serde_json::json!({"code": "error", "error": message}),
+    }
+}
+
+/// Build `{code: "<custom>", ...fields, trace?: ...}`.
+pub fn build_json(code: &str, fields: Value, trace: Option<Value>) -> Value {
+    let mut obj = match fields {
+        Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert("code".to_string(), Value::String(code.to_string()));
+    if let Some(t) = trace {
+        obj.insert("trace".to_string(), t);
+    }
+    Value::Object(obj)
+}
+
 // ═══════════════════════════════════════════
-// YAML
+// Public API: Output Formatters
 // ═══════════════════════════════════════════
 
-/// Convert a JSON Value into a YAML document.
-///
-/// Strings are always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float).
-/// Values are preserved as-is — no suffix-driven transformation.
-/// Starts with `---` for multi-document streaming compatibility.
-pub fn to_yaml(value: &Value) -> String {
+/// Format as single-line JSON. Secrets redacted, original keys, raw values.
+pub fn output_json(value: &Value) -> String {
+    let mut v = value.clone();
+    redact_secrets(&mut v);
+    serde_json::to_string(&v).unwrap_or_default()
+}
+
+/// Format as multi-line YAML. Keys stripped, values formatted, secrets redacted.
+pub fn output_yaml(value: &Value) -> String {
     let mut lines = vec!["---".to_string()];
-    render_yaml(value, 0, &mut lines);
+    render_yaml_processed(value, 0, &mut lines);
     lines.join("\n")
 }
 
-fn render_yaml(value: &Value, indent: usize, lines: &mut Vec<String>) {
-    let prefix = "  ".repeat(indent);
+/// Format as single-line logfmt. Keys stripped, values formatted, secrets redacted.
+pub fn output_plain(value: &Value) -> String {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    collect_plain_pairs(value, "", &mut pairs);
+    pairs.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
+    pairs
+        .into_iter()
+        .map(|(k, v)| {
+            if v.contains(' ') {
+                format!("{}=\"{}\"", k, v)
+            } else {
+                format!("{}={}", k, v)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// ═══════════════════════════════════════════
+// Public API: Redaction & Utility
+// ═══════════════════════════════════════════
+
+/// Redact `_secret` fields in-place.
+pub fn internal_redact_secrets(value: &mut Value) {
+    redact_secrets(value);
+}
+
+/// Parse a human-readable size string into bytes.
+///
+/// Accepts bare number, or number followed by unit letter
+/// (`B`, `K`, `M`, `G`, `T`). Case-insensitive. Trims whitespace.
+/// Returns `None` for invalid or negative input.
+pub fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let last = *s.as_bytes().last()?;
+    let (num_str, mult) = match last {
+        b'B' | b'b' => (&s[..s.len() - 1], 1u64),
+        b'K' | b'k' => (&s[..s.len() - 1], 1024),
+        b'M' | b'm' => (&s[..s.len() - 1], 1024 * 1024),
+        b'G' | b'g' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        b'T' | b't' => (&s[..s.len() - 1], 1024u64 * 1024 * 1024 * 1024),
+        b'0'..=b'9' | b'.' => (s, 1),
+        _ => return None,
+    };
+    if num_str.is_empty() {
+        return None;
+    }
+    if let Ok(n) = num_str.parse::<u64>() {
+        return n.checked_mul(mult);
+    }
+    let f: f64 = num_str.parse().ok()?;
+    if f < 0.0 || f.is_nan() || f.is_infinite() {
+        return None;
+    }
+    let result = f * mult as f64;
+    if result > u64::MAX as f64 {
+        return None;
+    }
+    Some(result as u64)
+}
+
+// ═══════════════════════════════════════════
+// Secret Redaction
+// ═══════════════════════════════════════════
+
+fn redact_secrets(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            for (k, v) in jcs_sorted(map) {
-                match v {
-                    Value::Object(inner) if !inner.is_empty() => {
-                        lines.push(format!("{}{}:", prefix, k));
-                        render_yaml(v, indent + 1, lines);
-                    }
-                    Value::Object(_) => {
-                        lines.push(format!("{}{}: {{}}", prefix, k));
-                    }
-                    Value::Array(arr) => {
-                        if arr.is_empty() {
-                            lines.push(format!("{}{}: []", prefix, k));
-                        } else {
-                            lines.push(format!("{}{}:", prefix, k));
-                            for item in arr {
-                                if item.is_object() {
-                                    lines.push(format!("{}  -", prefix));
-                                    render_yaml(item, indent + 2, lines);
-                                } else {
-                                    lines.push(format!("{}  - {}", prefix, yaml_scalar(item)));
-                                }
-                            }
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                if key.ends_with("_secret") || key.ends_with("_SECRET") {
+                    match map.get(&key) {
+                        Some(Value::Object(_)) | Some(Value::Array(_)) => {
+                            // Traverse containers, don't replace
+                        }
+                        _ => {
+                            map.insert(key.clone(), Value::String("***".into()));
+                            continue;
                         }
                     }
-                    _ => {
-                        lines.push(format!("{}{}: {}", prefix, k, yaml_scalar(v)));
-                    }
                 }
-            }
-        }
-        _ => {
-            lines.push(format!("{}{}", prefix, yaml_scalar(value)));
-        }
-    }
-}
-
-/// Sort map entries by UTF-16 code unit order (JCS, RFC 8785).
-fn jcs_sorted(map: &serde_json::Map<String, Value>) -> Vec<(&String, &Value)> {
-    let mut entries: Vec<_> = map.iter().collect();
-    entries.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
-    entries
-}
-
-fn yaml_scalar(value: &Value) -> String {
-    match value {
-        Value::String(s) => {
-            let escaped = s
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-                .replace('\t', "\\t");
-            format!("\"{}\"", escaped)
-        }
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        other => format!("\"{}\"", other.to_string().replace('"', "\\\"")),
-    }
-}
-
-// ═══════════════════════════════════════════
-// Plain
-// ═══════════════════════════════════════════
-
-/// Convert a JSON Value into human-readable plain text.
-///
-/// Applies agent-first-data suffix-driven formatting:
-/// - `_ms` → append `ms`, or convert to seconds if ≥ 1000
-/// - `_bytes` → human-readable (`446.1KB`)
-/// - `_epoch_ms` → RFC 3339
-/// - `_secret` → `***`
-/// - Currency suffixes → formatted amounts
-pub fn to_plain(value: &Value) -> String {
-    let mut lines = Vec::new();
-    render_plain(value, 0, &mut lines);
-    lines.join("\n")
-}
-
-fn render_plain(value: &Value, indent: usize, lines: &mut Vec<String>) {
-    let prefix = "  ".repeat(indent);
-    match value {
-        Value::Object(map) => {
-            for (k, v) in jcs_sorted(map) {
-                match v {
-                    Value::Object(_) => {
-                        lines.push(format!("{}{}:", prefix, k));
-                        render_plain(v, indent + 1, lines);
-                    }
-                    Value::Array(arr) => {
-                        if arr.is_empty() {
-                            lines.push(format!("{}{}: []", prefix, k));
-                        } else if arr.iter().all(|v| !v.is_object() && !v.is_array()) {
-                            lines.push(format!("{}{}:", prefix, k));
-                            for item in arr {
-                                lines.push(format!("{}  - {}", prefix, plain_scalar(item)));
-                            }
-                        } else {
-                            lines.push(format!("{}{}:", prefix, k));
-                            for item in arr {
-                                if item.is_object() {
-                                    lines.push(format!("{}  -", prefix));
-                                    render_plain(item, indent + 2, lines);
-                                } else {
-                                    lines.push(format!("{}  - {}", prefix, plain_scalar(item)));
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        lines.push(format!("{}{}: {}", prefix, k, format_plain_field(k, v)));
-                    }
+                if let Some(v) = map.get_mut(&key) {
+                    redact_secrets(v);
                 }
-            }
-        }
-        _ => {
-            lines.push(format!("{}{}", prefix, plain_scalar(value)));
-        }
-    }
-}
-
-/// Format a scalar value for plain output, applying suffix-driven rules.
-///
-/// Suffix priority (most specific first):
-/// 1. `_secret` → `***`
-/// 2. `_epoch_ms` / `_epoch_s` / `_epoch_ns` → RFC 3339
-/// 3. `_rfc3339` → pass through
-/// 4. `_bytes` → human-readable size
-/// 5. Currency: `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_cents`, `_jpy`
-/// 6. Duration: `_minutes`, `_hours`, `_days`, `_ms`, `_ns`, `_us`, `_s`
-fn format_plain_field(key: &str, value: &Value) -> String {
-    let lower = key.to_ascii_lowercase();
-
-    // Secret — always redact
-    if lower.ends_with("_secret") {
-        return "***".to_string();
-    }
-
-    // Timestamps → RFC 3339
-    if lower.ends_with("_epoch_ms") {
-        if let Some(ms) = value.as_i64() {
-            return format_rfc3339_ms(ms);
-        }
-    }
-    if lower.ends_with("_epoch_s") {
-        if let Some(s) = value.as_i64() {
-            return format_rfc3339_ms(s * 1000);
-        }
-    }
-    if lower.ends_with("_epoch_ns") {
-        if let Some(ns) = value.as_i64() {
-            return format_rfc3339_ms(ns.div_euclid(1_000_000));
-        }
-    }
-    if lower.ends_with("_rfc3339") {
-        return plain_scalar(value);
-    }
-
-    // Size
-    if lower.ends_with("_bytes") {
-        if let Some(n) = value.as_i64() {
-            return format_bytes_human(n);
-        }
-    }
-
-    // Percentage
-    if lower.ends_with("_percent") {
-        if value.is_number() {
-            return format!("{}%", plain_scalar(value));
-        }
-    }
-
-    // Currency — Bitcoin
-    if lower.ends_with("_msats") {
-        if value.is_number() {
-            return format!("{}msats", plain_scalar(value));
-        }
-    }
-    if lower.ends_with("_sats") {
-        if value.is_number() {
-            return format!("{}sats", plain_scalar(value));
-        }
-    }
-    if lower.ends_with("_btc") {
-        if value.is_number() {
-            return format!("{} BTC", plain_scalar(value));
-        }
-    }
-
-    // Currency — Fiat with symbol
-    if lower.ends_with("_usd_cents") {
-        if let Some(n) = value.as_u64() {
-            return format!("${}.{:02}", n / 100, n % 100);
-        }
-    }
-    if lower.ends_with("_eur_cents") {
-        if let Some(n) = value.as_u64() {
-            return format!("€{}.{:02}", n / 100, n % 100);
-        }
-    }
-    if lower.ends_with("_jpy") {
-        if let Some(n) = value.as_u64() {
-            return format!("¥{}", format_with_commas(n));
-        }
-    }
-    // Currency — Generic _{code}_cents
-    if lower.ends_with("_cents") {
-        if let Some(code) = extract_currency_code(&lower) {
-            if let Some(n) = value.as_u64() {
-                return format!("{}.{:02} {}", n / 100, n % 100, code.to_uppercase());
-            }
-        }
-    }
-
-    // Duration — long units (check before short)
-    if lower.ends_with("_minutes") {
-        if value.is_number() {
-            return format!("{} minutes", plain_scalar(value));
-        }
-    }
-    if lower.ends_with("_hours") {
-        if value.is_number() {
-            return format!("{} hours", plain_scalar(value));
-        }
-    }
-    if lower.ends_with("_days") {
-        if value.is_number() {
-            return format!("{} days", plain_scalar(value));
-        }
-    }
-
-    // Duration — ms (with ≥1000 → seconds conversion)
-    if lower.ends_with("_ms") && !lower.ends_with("_epoch_ms") {
-        if let Some(n) = value.as_u64() {
-            return if n >= 1000 {
-                format!("{:.2}s", n as f64 / 1000.0)
-            } else {
-                format!("{}ms", n)
-            };
-        }
-        if let Some(n) = value.as_f64() {
-            return if n >= 1000.0 {
-                format!("{:.2}s", n / 1000.0)
-            } else {
-                format!("{}ms", plain_scalar(value))
-            };
-        }
-    }
-
-    // Duration — ns, us, s
-    if lower.ends_with("_ns") && !lower.ends_with("_epoch_ns") {
-        if value.is_number() {
-            return format!("{}ns", plain_scalar(value));
-        }
-    }
-    if lower.ends_with("_us") {
-        if value.is_number() {
-            return format!("{}μs", plain_scalar(value));
-        }
-    }
-    if lower.ends_with("_s") && !lower.ends_with("_epoch_s") {
-        if value.is_number() {
-            return format!("{}s", plain_scalar(value));
-        }
-    }
-
-    // Default — no transformation
-    plain_scalar(value)
-}
-
-/// Plain scalar: no quotes, raw value.
-fn plain_scalar(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        other => other.to_string(),
-    }
-}
-
-// ═══════════════════════════════════════════
-// Secret redaction
-// ═══════════════════════════════════════════
-
-/// Walk a JSON Value tree and redact any field ending in `_secret`.
-///
-/// Applies the AFD convention: `_secret` suffix signals sensitive data.
-/// String values are replaced with `"***"`. Call this before serializing
-/// config or log output in any format (JSON, YAML, plain).
-pub fn redact_secrets(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            let secret_keys: Vec<String> = map
-                .keys()
-                .filter(|k| k.to_ascii_lowercase().ends_with("_secret"))
-                .cloned()
-                .collect();
-            for key in secret_keys {
-                if let Some(Value::String(s)) = map.get_mut(&key) {
-                    *s = "***".into();
-                }
-            }
-            for v in map.values_mut() {
-                redact_secrets(v);
             }
         }
         Value::Array(arr) => {
@@ -375,47 +159,217 @@ pub fn redact_secrets(value: &mut Value) {
 }
 
 // ═══════════════════════════════════════════
-// AFD Protocol templates
+// Suffix Processing
 // ═══════════════════════════════════════════
 
-/// Build `{code: "ok", result: ...}`.
-pub fn ok(result: Value) -> Value {
-    serde_json::json!({"code": "ok", "result": result})
+/// Strip a suffix matching exact lowercase or exact uppercase only.
+fn strip_suffix_ci(key: &str, suffix_lower: &str) -> Option<String> {
+    if let Some(s) = key.strip_suffix(suffix_lower) {
+        return Some(s.to_string());
+    }
+    let suffix_upper: String = suffix_lower.chars().map(|c| c.to_ascii_uppercase()).collect();
+    if let Some(s) = key.strip_suffix(&suffix_upper) {
+        return Some(s.to_string());
+    }
+    None
 }
 
-/// Build `{code: "ok", result: ..., trace: ...}`.
-pub fn ok_trace(result: Value, trace: Value) -> Value {
-    serde_json::json!({"code": "ok", "result": result, "trace": trace})
+/// Extract currency code from `_{code}_cents` / `_{CODE}_CENTS` pattern.
+fn try_strip_generic_cents(key: &str) -> Option<(String, String)> {
+    let code = extract_currency_code(key)?;
+    let suffix_len = code.len() + "_cents".len() + 1; // _{code}_cents
+    let stripped = &key[..key.len() - suffix_len];
+    if stripped.is_empty() {
+        return None;
+    }
+    Some((stripped.to_string(), code.to_string()))
 }
 
-/// Build `{code: "error", error: "message"}`.
-pub fn error(message: &str) -> Value {
-    serde_json::json!({"code": "error", "error": message})
+/// Try suffix-driven processing. Returns Some((stripped_key, formatted_value))
+/// when suffix matches and type is valid. None for no match or type mismatch.
+fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
+    // Group 1: compound timestamp suffixes
+    if let Some(stripped) = strip_suffix_ci(key, "_epoch_ms") {
+        return value.as_i64().map(|ms| (stripped, format_rfc3339_ms(ms)));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_epoch_s") {
+        return value.as_i64().map(|s| (stripped, format_rfc3339_ms(s * 1000)));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_epoch_ns") {
+        return value
+            .as_i64()
+            .map(|ns| (stripped, format_rfc3339_ms(ns.div_euclid(1_000_000))));
+    }
+
+    // Group 2: compound currency suffixes
+    if let Some(stripped) = strip_suffix_ci(key, "_usd_cents") {
+        return value
+            .as_u64()
+            .map(|n| (stripped, format!("${}.{:02}", n / 100, n % 100)));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_eur_cents") {
+        return value
+            .as_u64()
+            .map(|n| (stripped, format!("€{}.{:02}", n / 100, n % 100)));
+    }
+    if let Some((stripped, code)) = try_strip_generic_cents(key) {
+        return value.as_u64().map(|n| {
+            (
+                stripped,
+                format!("{}.{:02} {}", n / 100, n % 100, code.to_uppercase()),
+            )
+        });
+    }
+
+    // Group 3: multi-char suffixes
+    if let Some(stripped) = strip_suffix_ci(key, "_rfc3339") {
+        return value.as_str().map(|s| (stripped, s.to_string()));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_minutes") {
+        return value
+            .is_number()
+            .then(|| (stripped, format!("{} minutes", number_str(value))));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_hours") {
+        return value
+            .is_number()
+            .then(|| (stripped, format!("{} hours", number_str(value))));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_days") {
+        return value
+            .is_number()
+            .then(|| (stripped, format!("{} days", number_str(value))));
+    }
+
+    // Group 4: single-unit suffixes
+    if let Some(stripped) = strip_suffix_ci(key, "_msats") {
+        return value
+            .is_number()
+            .then(|| (stripped, format!("{}msats", number_str(value))));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_sats") {
+        return value
+            .is_number()
+            .then(|| (stripped, format!("{}sats", number_str(value))));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_bytes") {
+        return value.as_i64().map(|n| (stripped, format_bytes_human(n)));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_percent") {
+        return value
+            .is_number()
+            .then(|| (stripped, format!("{}%", number_str(value))));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_secret") {
+        return Some((stripped, "***".to_string()));
+    }
+
+    // Group 5: short suffixes (last to avoid false positives)
+    if let Some(stripped) = strip_suffix_ci(key, "_btc") {
+        return value
+            .is_number()
+            .then(|| (stripped, format!("{} BTC", number_str(value))));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_jpy") {
+        return value
+            .as_u64()
+            .map(|n| (stripped, format!("¥{}", format_with_commas(n))));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_ns") {
+        return value
+            .is_number()
+            .then(|| (stripped, format!("{}ns", number_str(value))));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_us") {
+        return value
+            .is_number()
+            .then(|| (stripped, format!("{}μs", number_str(value))));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_ms") {
+        return format_ms_value(value).map(|v| (stripped, v));
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_s") {
+        return value
+            .is_number()
+            .then(|| (stripped, format!("{}s", number_str(value))));
+    }
+
+    None
 }
 
-/// Build `{code: "error", error: "message", trace: ...}`.
-pub fn error_trace(message: &str, trace: Value) -> Value {
-    serde_json::json!({"code": "error", "error": message, "trace": trace})
-}
+/// Process object fields: strip keys, format values, detect collisions.
+fn process_object_fields<'a>(
+    map: &'a serde_json::Map<String, Value>,
+) -> Vec<(String, &'a Value, Option<String>)> {
+    let mut entries: Vec<(String, &'a str, &'a Value, Option<String>)> = Vec::new();
+    for (key, value) in map {
+        match try_process_field(key, value) {
+            Some((stripped, formatted)) => {
+                entries.push((stripped, key.as_str(), value, Some(formatted)));
+            }
+            None => {
+                entries.push((key.clone(), key.as_str(), value, None));
+            }
+        }
+    }
 
-/// Build `{code: "startup", config: ..., args: ..., env: ...}`.
-pub fn startup(config: Value, args: Value, env: Value) -> Value {
-    serde_json::json!({"code": "startup", "config": config, "args": args, "env": env})
-}
+    // Detect collisions
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (stripped, _, _, _) in &entries {
+        *counts.entry(stripped.clone()).or_insert(0) += 1;
+    }
 
-/// Build `{code: "<custom>", ...fields}` — tool-defined status line.
-pub fn status(code: &str, fields: Value) -> Value {
-    let mut obj = match fields {
-        Value::Object(map) => map,
-        _ => serde_json::Map::new(),
-    };
-    obj.insert("code".to_string(), Value::String(code.to_string()));
-    Value::Object(obj)
+    // Resolve collisions: revert both key and formatted value
+    let mut result: Vec<(String, &'a Value, Option<String>)> = entries
+        .into_iter()
+        .map(|(stripped, original, value, formatted)| {
+            if counts.get(&stripped).copied().unwrap_or(0) > 1
+                && original != stripped.as_str()
+            {
+                (original.to_string(), value, None)
+            } else {
+                (stripped, value, formatted)
+            }
+        })
+        .collect();
+
+    result.sort_by(|(a, _, _), (b, _, _)| a.encode_utf16().cmp(b.encode_utf16()));
+    result
 }
 
 // ═══════════════════════════════════════════
-// Helpers
+// Formatting Helpers
 // ═══════════════════════════════════════════
+
+fn number_str(value: &Value) -> String {
+    match value {
+        Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Format ms as seconds: 3 decimal places, trim trailing zeros, min 1 decimal.
+fn format_ms_as_seconds(ms: f64) -> String {
+    let formatted = format!("{:.3}", ms / 1000.0);
+    let trimmed = formatted.trim_end_matches('0');
+    if trimmed.ends_with('.') {
+        format!("{}0s", trimmed)
+    } else {
+        format!("{}s", trimmed)
+    }
+}
+
+/// Format `_ms` value: < 1000 → `{n}ms`, ≥ 1000 → seconds.
+fn format_ms_value(value: &Value) -> Option<String> {
+    let n = value.as_f64()?;
+    if n.abs() >= 1000.0 {
+        Some(format_ms_as_seconds(n))
+    } else if let Some(i) = value.as_i64() {
+        Some(format!("{}ms", i))
+    } else {
+        Some(format!("{}ms", number_str(value)))
+    }
+}
 
 /// Convert unix milliseconds (signed) to RFC 3339 with UTC timezone.
 fn format_rfc3339_ms(ms: i64) -> String {
@@ -465,231 +419,141 @@ fn format_with_commas(n: u64) -> String {
     result
 }
 
-/// Extract currency code from a `_{code}_cents` suffix.
-/// e.g., "fare_thb_cents" → Some("thb")
+/// Extract currency code from a `_{code}_cents` / `_{CODE}_CENTS` suffix.
 fn extract_currency_code(key: &str) -> Option<&str> {
-    let without_cents = key.strip_suffix("_cents")?;
+    let without_cents = key
+        .strip_suffix("_cents")
+        .or_else(|| key.strip_suffix("_CENTS"))?;
     let last_underscore = without_cents.rfind('_')?;
-    Some(&without_cents[last_underscore + 1..])
+    let code = &without_cents[last_underscore + 1..];
+    if code.is_empty() {
+        return None;
+    }
+    Some(code)
 }
 
 // ═══════════════════════════════════════════
-// Size parsing
+// YAML Rendering
 // ═══════════════════════════════════════════
 
-/// Parse a human-readable size string into bytes.
-///
-/// Accepts `_size` config values: bare number, or number followed by unit letter
-/// (`B`, `K`, `M`, `G`, `T`). Case-insensitive. Trims whitespace.
-/// Returns `None` for invalid or negative input.
-///
-/// ```text
-/// "10M"  → 10_485_760
-/// "1.5K" → 1_536
-/// "512B" → 512
-/// "1024" → 1_024
-/// ```
-pub fn parse_size(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
+fn render_yaml_processed(value: &Value, indent: usize, lines: &mut Vec<String>) {
+    let prefix = "  ".repeat(indent);
+    match value {
+        Value::Object(map) => {
+            let processed = process_object_fields(map);
+            for (display_key, v, formatted) in processed {
+                if let Some(fv) = formatted {
+                    lines.push(format!(
+                        "{}{}: \"{}\"",
+                        prefix,
+                        display_key,
+                        escape_yaml_str(&fv)
+                    ));
+                } else {
+                    match v {
+                        Value::Object(inner) if !inner.is_empty() => {
+                            lines.push(format!("{}{}:", prefix, display_key));
+                            render_yaml_processed(v, indent + 1, lines);
+                        }
+                        Value::Object(_) => {
+                            lines.push(format!("{}{}: {{}}", prefix, display_key));
+                        }
+                        Value::Array(arr) => {
+                            if arr.is_empty() {
+                                lines.push(format!("{}{}: []", prefix, display_key));
+                            } else {
+                                lines.push(format!("{}{}:", prefix, display_key));
+                                for item in arr {
+                                    if item.is_object() {
+                                        lines.push(format!("{}  -", prefix));
+                                        render_yaml_processed(item, indent + 2, lines);
+                                    } else {
+                                        lines.push(format!(
+                                            "{}  - {}",
+                                            prefix,
+                                            yaml_scalar(item)
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            lines.push(format!(
+                                "{}{}: {}",
+                                prefix,
+                                display_key,
+                                yaml_scalar(v)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            lines.push(format!("{}{}", prefix, yaml_scalar(value)));
+        }
     }
-    let last = *s.as_bytes().last()?;
-    let (num_str, mult) = match last {
-        b'B' | b'b' => (&s[..s.len() - 1], 1u64),
-        b'K' | b'k' => (&s[..s.len() - 1], 1024),
-        b'M' | b'm' => (&s[..s.len() - 1], 1024 * 1024),
-        b'G' | b'g' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
-        b'T' | b't' => (&s[..s.len() - 1], 1024u64 * 1024 * 1024 * 1024),
-        b'0'..=b'9' | b'.' => (s, 1),
-        _ => return None,
-    };
-    if num_str.is_empty() {
-        return None;
+}
+
+fn escape_yaml_str(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+fn yaml_scalar(value: &Value) -> String {
+    match value {
+        Value::String(s) => {
+            format!("\"{}\"", escape_yaml_str(s))
+        }
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        other => format!("\"{}\"", other.to_string().replace('"', "\\\"")),
     }
-    if let Ok(n) = num_str.parse::<u64>() {
-        return n.checked_mul(mult);
-    }
-    let f: f64 = num_str.parse().ok()?;
-    if f < 0.0 || f.is_nan() || f.is_infinite() {
-        return None;
-    }
-    let result = f * mult as f64;
-    if result > u64::MAX as f64 {
-        return None;
-    }
-    Some(result as u64)
 }
 
 // ═══════════════════════════════════════════
-// Tests
+// Plain Rendering (logfmt)
 // ═══════════════════════════════════════════
+
+fn collect_plain_pairs(value: &Value, prefix: &str, pairs: &mut Vec<(String, String)>) {
+    if let Value::Object(map) = value {
+        let processed = process_object_fields(map);
+        for (display_key, v, formatted) in processed {
+            let full_key = if prefix.is_empty() {
+                display_key
+            } else {
+                format!("{}.{}", prefix, display_key)
+            };
+            if let Some(fv) = formatted {
+                pairs.push((full_key, fv));
+            } else {
+                match v {
+                    Value::Object(_) => collect_plain_pairs(v, &full_key, pairs),
+                    Value::Array(arr) => {
+                        let joined = arr.iter().map(plain_scalar).collect::<Vec<_>>().join(",");
+                        pairs.push((full_key, joined));
+                    }
+                    Value::Null => pairs.push((full_key, String::new())),
+                    _ => pairs.push((full_key, plain_scalar(v))),
+                }
+            }
+        }
+    }
+}
+
+fn plain_scalar(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::Value;
-
-    const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../spec/fixtures");
-
-    fn load_fixture(name: &str) -> Value {
-        let path = format!("{}/{}", FIXTURES_DIR, name);
-        let data = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
-        serde_json::from_str(&data)
-            .unwrap_or_else(|e| panic!("failed to parse {}: {}", path, e))
-    }
-
-    #[test]
-    fn test_plain_fixtures() {
-        let cases = load_fixture("plain.json");
-        for case in cases.as_array().expect("plain.json must be an array") {
-            let name = case["name"].as_str().expect("missing name");
-            let input = &case["input"];
-            let plain = to_plain(input);
-            for expected in case["contains"].as_array().expect("missing contains") {
-                let s = expected.as_str().expect("contains must be strings");
-                assert!(plain.contains(s), "[plain/{name}] expected {s:?} in {plain:?}");
-            }
-            if let Some(not_contains) = case.get("not_contains") {
-                for nc in not_contains.as_array().expect("not_contains must be array") {
-                    let s = nc.as_str().expect("not_contains must be strings");
-                    assert!(!plain.contains(s), "[plain/{name}] unexpected {s:?} in {plain:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_yaml_fixtures() {
-        let cases = load_fixture("yaml.json");
-        for case in cases.as_array().expect("yaml.json must be an array") {
-            let name = case["name"].as_str().expect("missing name");
-            let input = &case["input"];
-            let yaml = to_yaml(input);
-            if let Some(prefix) = case.get("starts_with") {
-                let s = prefix.as_str().expect("starts_with must be string");
-                assert!(yaml.starts_with(s), "[yaml/{name}] expected starts_with {s:?} in {yaml:?}");
-            }
-            if let Some(contains) = case.get("contains") {
-                for expected in contains.as_array().expect("contains must be array") {
-                    let s = expected.as_str().expect("contains must be strings");
-                    assert!(yaml.contains(s), "[yaml/{name}] expected {s:?} in {yaml:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_redact_fixtures() {
-        let cases = load_fixture("redact.json");
-        for case in cases.as_array().expect("redact.json must be an array") {
-            let name = case["name"].as_str().expect("missing name");
-            let mut input = case["input"].clone();
-            let expected = &case["expected"];
-            redact_secrets(&mut input);
-            assert_eq!(&input, expected, "[redact/{name}]");
-        }
-    }
-
-    #[test]
-    fn test_protocol_fixtures() {
-        let cases = load_fixture("protocol.json");
-        for case in cases.as_array().expect("protocol.json must be an array") {
-            let name = case["name"].as_str().expect("missing name");
-            let typ = case["type"].as_str().expect("missing type");
-            let args = &case["args"];
-            let result = match typ {
-                "ok" => ok(args["result"].clone()),
-                "ok_trace" => ok_trace(args["result"].clone(), args["trace"].clone()),
-                "error" => error(args["message"].as_str().expect("missing message")),
-                "error_trace" => error_trace(
-                    args["message"].as_str().expect("missing message"),
-                    args["trace"].clone(),
-                ),
-                "startup" => startup(
-                    args["config"].clone(),
-                    args["args"].clone(),
-                    args["env"].clone(),
-                ),
-                "status" => {
-                    let code = args["code"].as_str().expect("missing code");
-                    let fields = args["fields"].clone();
-                    status(code, fields)
-                }
-                other => panic!("unknown protocol type: {other}"),
-            };
-            if let Some(expected) = case.get("expected") {
-                assert_eq!(&result, expected, "[protocol/{name}]");
-            }
-            if let Some(expected_contains) = case.get("expected_contains") {
-                let ec = expected_contains.as_object().expect("expected_contains must be object");
-                let ro = result.as_object().expect("result must be object");
-                for (k, v) in ec {
-                    assert_eq!(ro.get(k).unwrap_or(&Value::Null), v, "[protocol/{name}] key {k}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_exact_fixtures() {
-        let cases = load_fixture("exact.json");
-        for case in cases.as_array().expect("exact.json must be an array") {
-            let name = case["name"].as_str().expect("missing name");
-            let format = case["format"].as_str().expect("missing format");
-            let input = &case["input"];
-            let expected = case["expected"].as_str().expect("missing expected");
-            let got = match format {
-                "plain" => to_plain(input),
-                "yaml" => to_yaml(input),
-                other => panic!("unknown format: {other}"),
-            };
-            assert_eq!(got, expected, "[exact/{name}]");
-        }
-    }
-
-    #[test]
-    fn test_helper_fixtures() {
-        let cases = load_fixture("helpers.json");
-        for case in cases.as_array().expect("helpers.json must be an array") {
-            let name = case["name"].as_str().expect("missing name");
-            let test_cases = case["cases"].as_array().expect("missing cases");
-            match name {
-                "format_bytes_human" => {
-                    for tc in test_cases {
-                        let arr = tc.as_array().expect("case must be [input, expected]");
-                        let input = arr[0].as_i64().expect("input must be i64");
-                        let expected = arr[1].as_str().expect("expected must be string");
-                        assert_eq!(format_bytes_human(input), expected, "[helpers/format_bytes_human({input})]");
-                    }
-                }
-                "format_with_commas" => {
-                    for tc in test_cases {
-                        let arr = tc.as_array().expect("case must be [input, expected]");
-                        let input = arr[0].as_u64().expect("input must be u64");
-                        let expected = arr[1].as_str().expect("expected must be string");
-                        assert_eq!(format_with_commas(input), expected, "[helpers/format_with_commas({input})]");
-                    }
-                }
-                "extract_currency_code" => {
-                    for tc in test_cases {
-                        let arr = tc.as_array().expect("case must be [input, expected]");
-                        let input = arr[0].as_str().expect("input must be string");
-                        let expected = if arr[1].is_null() { None } else { arr[1].as_str() };
-                        assert_eq!(extract_currency_code(input), expected, "[helpers/extract_currency_code({input})]");
-                    }
-                }
-                "parse_size" => {
-                    for tc in test_cases {
-                        let arr = tc.as_array().expect("case must be [input, expected]");
-                        let input = arr[0].as_str().expect("input must be string");
-                        let expected = if arr[1].is_null() { None } else { arr[1].as_u64() };
-                        assert_eq!(parse_size(input), expected, "[helpers/parse_size({input:?})]");
-                    }
-                }
-                other => panic!("unknown helper: {other}"),
-            }
-        }
-    }
-}
+mod tests;

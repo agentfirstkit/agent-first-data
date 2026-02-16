@@ -10,9 +10,9 @@
     "expected": {"storage": {"postgres_url_secret": "***"}}
   },
   {
-    "name": "preserves non-string",
+    "name": "redacts non-string scalar",
     "input": {"count_secret": 42},
-    "expected": {"count_secret": 42}
+    "expected": {"count_secret": "***"}
   },
   {
     "name": "case insensitive",

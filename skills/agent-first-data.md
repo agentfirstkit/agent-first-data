@@ -7,12 +7,11 @@ allowed-tools: Bash, Read, Edit, Write, Glob, Grep
 
 # Agent-First Data
 
-Two independent conventions that work together:
+Three parts:
 
 1. **Naming** — encode units and semantics in field names so agents parse structured data without external schemas
-2. **Output** — a JSONL protocol with lifecycle phases and multi-format rendering
-
-You can adopt either one alone.
+2. **Output** — suffix-driven formatting with key stripping, value formatting, and automatic secret redaction
+3. **Protocol** — optional JSONL protocol with `code` (required) and `trace` (recommended)
 
 ---
 
@@ -36,7 +35,7 @@ The field name is the schema. Always encode units and semantics in the field nam
 
 | Suffix | Format | Example |
 |:-------|:-------|:--------|
-| `_epoch_ms` | milliseconds since Unix epoch | `tasted_epoch_ms: 1707868800000` |
+| `_epoch_ms` | milliseconds since Unix epoch | `created_at_epoch_ms: 1707868800000` |
 | `_epoch_s` | seconds since Unix epoch | `cached_epoch_s: 1707868800` |
 | `_epoch_ns` | nanoseconds since Unix epoch | `created_epoch_ns: 1707868800000000000` |
 | `_rfc3339` | RFC 3339 string | `expires_rfc3339: "2026-02-14T10:30:00Z"` |
@@ -83,7 +82,7 @@ Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` 
 |:-------|:---------|:--------|
 | `_secret` | redact to `***` | `api_key_secret: "sk-or-v1-abc..."` |
 
-All output (logs, CLI, API responses) MUST redact `_secret` fields to `"***"`. Case-insensitive matching.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Matching recognizes `_secret` and `_SECRET` only — no mixed case.
 
 ### Environment variables
 
@@ -114,7 +113,59 @@ Fields whose meaning is obvious: `callback_url`, `redb_path`, `proof_count`, `se
 
 ---
 
-## Part 2: Output Protocol
+## Part 2: Output Processing
+
+Three output formats. YAML and Plain apply key stripping + value formatting.
+
+### Formats
+
+- **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
+- **YAML** — multi-line, keys stripped, values formatted, secrets redacted
+- **Plain** — single-line logfmt, keys stripped, values formatted, secrets redacted
+
+### Key stripping (YAML and Plain)
+
+Remove recognized suffix from key. Longest match first, exact lowercase or uppercase only:
+
+1. `_epoch_ms`, `_epoch_s`, `_epoch_ns`
+2. `_usd_cents`, `_eur_cents`, `_{code}_cents`
+3. `_rfc3339`, `_minutes`, `_hours`, `_days`
+4. `_msats`, `_sats`, `_bytes`, `_percent`, `_secret`
+5. `_btc`, `_jpy`, `_ns`, `_us`, `_ms`, `_s`
+
+`_size` is NOT stripped (pass through). If two keys collide after stripping, both revert to original key AND raw value (no formatting).
+
+### Value formatting (YAML and Plain)
+
+- `_ms` < 1000 → `{n}ms`; ≥ 1000 → seconds (`1280` → `1.28s`, `5000` → `5.0s`)
+- `_s`, `_ns`, `_us` → append unit (`3600s`, `450000ns`, `830μs`)
+- `_minutes`, `_hours`, `_days` → append unit (`30 minutes`)
+- `_epoch_ms`/`_epoch_s`/`_epoch_ns` → RFC 3339 (negative = pre-1970)
+- `_rfc3339` → pass through
+- `_bytes` → human-readable (`456789` → `446.1KB`, `-5242880` → `-5.0MB`)
+- `_size` → pass through
+- `_percent` → append `%`
+- `_msats` → `{n}msats`, `_sats` → `{n}sats`, `_btc` → `{n} BTC`
+- `_usd_cents` → `$X.XX`, `_eur_cents` → `€X.XX`, `_jpy` → `¥X,XXX`, `_{code}_cents` → `X.XX CODE`
+- `_secret` → `***`
+
+**Type constraints**: `_bytes`/`_epoch_*` require integer. `_usd_cents`/`_eur_cents`/`_jpy`/`_{code}_cents` require non-negative integer. Duration/Bitcoin/`_percent` accept any number. Wrong type → raw value + original key.
+
+### Plain logfmt details
+
+- Nested keys use dot notation: `trace.duration=1.28s`
+- Values with spaces are quoted: `message="uploading chunks"`
+- Arrays comma-joined: `fields=email,age`
+- Null → empty value: `RUST_LOG=`
+- Sort by full dot path (JCS / UTF-16 code unit order)
+
+### Key ordering
+
+YAML and Plain sort keys (after stripping) by UTF-16 code unit order (JCS, RFC 8785). For ASCII keys this equals byte-order sorting.
+
+---
+
+## Part 3: Protocol Template (Optional)
 
 Every output line carries a `code` field:
 
@@ -131,26 +182,10 @@ Every output line carries a `code` field:
 {"code": "startup", "config": {...}, "args": {...}, "env": {...}}
 {"code": "ok", "result": {...}, "trace": {"duration_ms": 12, "source": "redb"}}
 {"code": "error", "error": "message", "trace": {"duration_ms": 3}}
+{"code": "not_found", "resource": "user", "id": 123, "trace": {"duration_ms": 8}}
 ```
 
-Include `trace` for execution context: duration, token counts, cost, data source.
-
-### Output formats
-
-`--output json|yaml|plain`
-
-- **json** — canonical, lossless, JSONL to stdout
-- **yaml** — `---` separated, strings always quoted, values as-is
-- **plain** — suffix-driven human formatting (lossy):
-  - `_ms` >= 1000 → seconds: `1280` → `1.28s`
-  - `_epoch_ms` → RFC 3339: `2026-01-31T16:00:00.000Z` (negative = pre-1970)
-  - `_bytes` → human-readable: `456789` → `446.1KB`, `-5242880` → `-5.0MB`
-  - `_percent` → append `%`: `85` → `85%`
-  - `_usd_cents` → dollars: `999` → `$9.99` (negative falls through)
-  - `_secret` → `***`
-  - `_bytes`/`_epoch_*` require integer; `_usd_cents`/`_jpy` require non-negative integer; duration/`_percent`/Bitcoin accept any number; float/bool fall through
-
-YAML and plain sort keys by UTF-16 code unit order (JCS, RFC 8785). For ASCII keys this equals byte-order sorting.
+Always include `trace` for execution context: duration, token counts, cost, data source.
 
 ### Same structure, any transport
 
@@ -167,33 +202,36 @@ All use `code` / `result` / `error` / `trace`.
 
 ## Using the Library
 
+9 public APIs (same across all languages):
+
 | Function | What it does |
 |:---------|:-------------|
-| `to_plain` / `to_yaml` | Render JSON value as plain or YAML string |
-| `redact_secrets` | Walk tree, replace `_secret` string values with `"***"` |
-| `parse_size` | Parse `_size` string to bytes: `"10M"` → `10485760` |
-| `ok` / `ok_trace` | Build `{"code": "ok", "result": ...}` |
-| `error` / `error_trace` | Build `{"code": "error", "error": ...}` |
-| `startup` | Build `{"code": "startup", "config": ..., "args": ..., "env": ...}` |
-| `status` | Build `{"code": "<custom>", ...fields}` |
-| `OutputFormat` | Enum: `json` / `yaml` / `plain` with `.format(value)` |
+| `build_json_startup` | Build `{code: "startup", config, args, env}` |
+| `build_json_ok` | Build `{code: "ok", result, trace?}` |
+| `build_json_error` | Build `{code: "error", error, trace?}` |
+| `build_json` | Build `{code: "<custom>", ...fields, trace?}` |
+| `output_json` | Single-line JSON, secrets redacted, original keys |
+| `output_yaml` | Multi-line YAML, keys stripped, values formatted |
+| `output_plain` | Single-line logfmt, keys stripped, values formatted |
+| `internal_redact_secrets` | Redact `_secret` fields in-place |
+| `parse_size` | Parse `"10M"` → bytes |
 
 ### Rust
 
 ```rust
-use agent_first_data::{to_plain, to_yaml, redact_secrets, parse_size, ok, ok_trace, error, error_trace, startup, status, OutputFormat};
+use agent_first_data::{build_json_startup, build_json_ok, build_json_error, build_json, output_json, output_yaml, output_plain, internal_redact_secrets, parse_size};
 ```
 
 ### Python
 
 ```python
-from agent_first_data import to_plain, to_yaml, redact_secrets, parse_size, ok, ok_trace, error, error_trace, startup, status, OutputFormat
+from agent_first_data import build_json_startup, build_json_ok, build_json_error, build_json, output_json, output_yaml, output_plain, internal_redact_secrets, parse_size
 ```
 
 ### TypeScript
 
 ```typescript
-import { toPlain, toYaml, redactSecrets, parseSize, ok, okTrace, error, errorTrace, startup, status, OutputFormat } from "agent-first-data";
+import { buildJsonStartup, buildJsonOk, buildJsonError, buildJson, outputJson, outputYaml, outputPlain, internalRedactSecrets, parseSize } from "agent-first-data";
 ```
 
 ### Go
@@ -201,10 +239,9 @@ import { toPlain, toYaml, redactSecrets, parseSize, ok, okTrace, error, errorTra
 ```go
 import afd "github.com/cmnspore/agent-first-data/go"
 
-afd.ToPlain(value)
-afd.RedactSecrets(value)
+afd.BuildJsonStartup(config, args, env)
+afd.OutputPlain(value)
 afd.ParseSize("10M")
-afd.Ok(result)
 ```
 
 ## Review Checklist

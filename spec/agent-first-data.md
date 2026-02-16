@@ -1,21 +1,42 @@
 # Agent-First Data
 
-Agent-First Data is two independent conventions that work together:
+**Self-describing structured data for AI agents and humans.**
 
-1. **Naming** — encode units and semantics in field names so agents parse structured data without external schemas
-2. **Output** — a JSONL protocol with lifecycle phases and multi-format rendering
+Field names encode units and semantics. Agents read `latency_ms` and know milliseconds, `api_key_secret` and know to redact — no external schema needed.
 
-You can adopt either one alone. Using both together gives agents a complete, self-describing data interface.
+## Overview
+
+Agent-First Data has three parts:
+
+1. **[Naming Convention](#part-1-naming-convention)** (required) — encode units and semantics in field names
+2. **[Output Processing](#part-2-output-processing)** (required) — suffix-driven formatting and automatic secret protection
+3. **[Protocol Template](#part-3-protocol-template-recommended-optional)** (optional) — structured format with `code` (required) and `trace` (recommended)
+
+**Parts 1 and 2 are the core.** Part 3 is optional — a recommended structure that works well with Parts 1 and 2, but you can use AFD naming with any JSON structure (REST APIs, GraphQL, databases, etc.).
+
+**Jump to:**
+- [Quick Reference: All Suffixes](#quick-reference-all-suffixes)
+- [Complete Example](#complete-example-cli-tool)
+
+## Quick Reference: All Suffixes
+
+| Category | Suffixes | YAML/Plain example |
+|:---------|:---------|:-------------------|
+| **Duration** | `_ns`, `_us`, `_ms`, `_s`, `_minutes`, `_hours`, `_days` | `latency_ms: 1280` → `latency: 1.28s` |
+| **Timestamps** | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` | `created_at_epoch_ms: 1707868800000` → `created_at: 2024-02-14T...` |
+| **Size** | `_bytes` (output), `_size` (config input) | `file_size_bytes: 5242880` → `file_size: 5.0MB` |
+| **Currency** | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` | `price_usd_cents: 999` → `price: $9.99` |
+| **Other** | `_percent`, `_secret` | `cpu_percent: 85` → `cpu: 85%` |
+
+**In YAML and Plain:** suffixes are stripped from keys (value already encodes the unit) and values are formatted for readability. JSON preserves original keys and raw values.
+
+**Secret protection:** All three formats automatically redact `_secret` fields.
 
 ---
 
 # Part 1: Naming Convention
 
-**The field name is the schema.**
-
-An agent reading `latency_ms: 142` knows this is a duration in milliseconds. An agent reading `api_key_secret: "sk-..."` knows this value must be redacted. No lookup required.
-
-This convention applies to all structured data: JSON, YAML, TOML, environment variables, config files, database columns, API responses, log fields.
+Applies to all structured data: JSON, YAML, TOML, environment variables, config files, database columns, API responses, log fields.
 
 ## Design rules
 
@@ -43,7 +64,7 @@ This convention applies to all structured data: JSON, YAML, TOML, environment va
 | Suffix | Format | Example |
 |:-------|:-------|:--------|
 | `_epoch_ns` | nanoseconds since Unix epoch | `created_epoch_ns: 1707868800000000000` |
-| `_epoch_ms` | milliseconds since Unix epoch | `tasted_epoch_ms: 1707868800000` |
+| `_epoch_ms` | milliseconds since Unix epoch | `created_at_epoch_ms: 1707868800000` |
 | `_epoch_s` | seconds since Unix epoch | `cached_epoch_s: 1707868800` |
 | `_rfc3339` | RFC 3339 string | `expires_rfc3339: "2026-02-14T10:30:00Z"` |
 
@@ -51,37 +72,41 @@ This convention applies to all structured data: JSON, YAML, TOML, environment va
 
 ### Size
 
-| Suffix | Value type | Example |
-|:-------|:-----------|:--------|
-| `_bytes` | numeric (bytes) | `payload_bytes: 456789` |
-| `_size` | human-readable string | `buffer_size: "10M"` |
+| Suffix | Value type | Usage | Example |
+|:-------|:-----------|:------|:--------|
+| `_bytes` | numeric | Output, APIs | `payload_bytes: 456789` |
+| `_size` | string with unit | Config input | `buffer_size: "10M"` |
 
-`_bytes` is always a number. Used in output, API responses, and anywhere agents need to compute on the value.
+**Simple rule:**
 
-`_size` is a human-readable string. Used **only in config files** where humans write values. Programs parse `_size` to bytes at load time. Never use `_size` in output — always use `_bytes`.
+- **Output/APIs** → use `_bytes` (numeric, agents compute on this)
+- **Config files** → use `_size` (string like "10M", humans write this)
 
-Parsing rules for `_size` (binary, consistent with nginx/systemd/docker):
+Programs parse `_size` at load time using `parse_size()` and convert to bytes for internal use.
 
-| Unit | Multiplier |
-|:-----|:-----------|
-| `B` or bare number | 1 |
-| `K` | 1024 |
-| `M` | 1024^2 |
-| `G` | 1024^3 |
-| `T` | 1024^4 |
+**Parsing rules for `_size` (binary units):**
 
-The library provides `parse_size` to convert `_size` strings to bytes:
+| Unit | Multiplier | Example |
+|:-----|:-----------|:--------|
+| `B` or bare number | 1 | `"512"` → 512 |
+| `K` | 1024 | `"10K"` → 10240 |
+| `M` | 1024² | `"10M"` → 10485760 |
+| `G` | 1024³ | `"2G"` → 2147483648 |
+| `T` | 1024⁴ | `"1T"` → 1099511627776 |
 
+Case-insensitive. Supports decimals (`"1.5M"`). Returns null for invalid/negative input.
+
+**Example config file:**
+
+```json
+{
+  "shared_buffers_size": "128M",
+  "max_wal_size": "1G",
+  "archive_retention_size": "2T"
+}
 ```
-parse_size("10M")   → 10485760
-parse_size("1.5K")  → 1536
-parse_size("512B")  → 512
-parse_size("1024")  → 1024
-parse_size("")      → null
-parse_size("-10M")  → null
-```
 
-Case-insensitive unit letter. Trims whitespace. Returns null/None for invalid or negative input.
+In YAML and Plain output, `_bytes` values auto-scale to human-readable format (5.0MB, 2.0GB).
 
 ### Percentage
 
@@ -108,12 +133,7 @@ Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` 
 | `_thb_cents` | Thai baht 1/100 | `fare_thb_cents: 15050` |
 | `_jpy` | Japanese yen (no minor unit) | `price_jpy: 1500` |
 
-Stablecoins pegged to fiat follow the same pattern as their peg:
-
-| Suffix | Unit | Example |
-|:-------|:-----|:--------|
-| `_usdt_cents` | USDT cents | `deposit_usdt_cents: 1000` |
-| `_usdc_cents` | USDC cents | `payout_usdc_cents: 500` |
+Stablecoins follow the same `_{code}_cents` pattern: `deposit_usdt_cents: 1000`, `payout_usdc_cents: 500`.
 
 ### Sensitive
 
@@ -121,7 +141,7 @@ Stablecoins pegged to fiat follow the same pattern as their peg:
 |:-------|:---------|:--------|
 | `_secret` | redact entire value to `***` | `api_key_secret: "sk-or-v1-abc..."` |
 
-Any program output (logs, CLI, API responses) must redact `_secret` fields to `"***"`. Matching is case-insensitive — `_secret` and `_SECRET` are both redacted. Config files store the real value; everything else shows `"***"`.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields to `***`. API responses return raw values — no redaction needed over secure channels. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value.
 
 ### No suffix needed
 
@@ -183,22 +203,208 @@ model = "google/gemini-3-flash-preview"
 
 ---
 
-# Part 2: Output Protocol
+# Part 2: Output Processing
 
-A structured output format for programs. Every output is a JSON object with a `code` field that tells agents what phase of execution the program is in. Field names within the output follow Part 1 naming conventions.
+Transform JSON values for CLI/log output with suffix-driven formatting and automatic secret protection. This applies to any JSON data, regardless of structure.
 
-## JSONL stream
+## Two Usage Contexts
+
+### Context 1: API Responses
+
+Return JSON values directly. Web frameworks handle serialization.
+
+**No output processing.** API responses are transmitted over secure channels (HTTPS). Return raw JSON:
+
+```json
+{"user_id": 123, "api_key_secret": "sk-1234567890abcdef", "balance_msats": 50000}
+```
+
+### Context 2: CLI / Logs
+
+Format JSON values for terminal/log display.
+
+**Automatic processing:** Suffix formatting + secret redaction.
+
+**Input:**
+```json
+{"user_id": 123, "api_key_secret": "sk-1234567890abcdef", "balance_msats": 50000}
+```
+
+**JSON:** `{"api_key_secret":"***","balance_msats":50000,"user_id":123}`
+
+**YAML:**
+```yaml
+---
+api_key: "***"
+balance: "50000msats"
+user_id: 123
+```
+
+**Plain:** `api_key=*** balance=50000msats user_id=123`
+
+## Output Formats
+
+CLI tools should support multiple output formats:
+
+```
+--output json|yaml|plain
+```
+
+Default is tool-defined. Interactive CLIs default to `yaml`, scripting/logging contexts to `json`.
+
+JSON is the canonical format. YAML and plain are derived from it.
+
+**All CLI output formats automatically redact `_secret` fields.** Any field ending in `_secret` (case-insensitive) is replaced with `***` before display. API responses bypass Part 2 and return raw values (see [Two Usage Contexts](#two-usage-contexts)).
+
+**Format characteristics:**
+- **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
+- **YAML** — multi-line, human-readable, keys stripped, values formatted, secrets redacted
+- **Plain** — single-line logfmt, human-readable, keys stripped, values formatted, secrets redacted
+
+### yaml
+
+Each JSON line becomes a YAML document, separated by `---`. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float). **Suffixes stripped from keys** (value already encodes the unit). **Secrets automatically redacted.**
+
+```yaml
+---
+code: "startup"
+config:
+  api_key: "***"
+  dns_ttl: "3600s"
+args:
+  config_path: "config.yml"
+---
+code: "ok"
+result:
+  hash: "abc123"
+  size: "446.1KB"
+trace:
+  duration: "1.28s"
+  cost: "2056msats"
+```
+
+### plain
+
+Single-line [logfmt](https://brandur.org/logfmt) style. **Suffixes stripped from keys.** **Secrets automatically redacted.**
+
+- Nested keys use dot notation: `trace.duration=1.28s`
+- Values containing spaces are quoted: `message="uploading chunks"`
+- Arrays are comma-joined: `fields=email,age`
+- Null values are empty: `RUST_LOG=`
+
+```
+args.config_path=config.yml code=startup config.api_key=*** config.dns_ttl=3600s
+code=ok result.hash=abc123 result.size=446.1KB trace.cost=2056msats trace.duration=1.28s
+```
+
+### Suffix processing (yaml and plain)
+
+YAML and plain apply two transformations:
+
+**1. Key stripping** — remove the suffix from the key name. The formatted value already encodes the unit, so the suffix is redundant for human readers.
+
+**Algorithm:** match the longest known suffix from the list below. Each suffix is recognized in two forms: lowercase (`_secret`) and uppercase (`_SECRET`). No other casing is matched. Remove the matched suffix from the key. If no suffix matches, keep the key unchanged. Match order (longest first):
+
+1. `_epoch_ms`, `_epoch_s`, `_epoch_ns` (compound timestamp suffixes)
+2. `_usd_cents`, `_eur_cents`, `_{code}_cents` (compound currency suffixes)
+3. `_rfc3339`, `_minutes`, `_hours`, `_days` (multi-char suffixes)
+4. `_msats`, `_sats`, `_bytes`, `_percent`, `_secret` (single-unit suffixes)
+5. `_btc`, `_jpy`, `_ns`, `_us`, `_ms`, `_s` (short suffixes, matched last to avoid false positives)
+
+**Collision:** if two keys in the same object produce the same stripped key (e.g., `download_bytes` and `download_size` both → `download`), revert both to their original key AND raw value (no formatting).
+
+| JSON key | YAML/Plain key | Why |
+|:---------|:---------------|:----|
+| `duration_ms` | `duration` | value shows `1.28s` |
+| `size_bytes` | `size` | value shows `446.1KB` |
+| `created_at_epoch_ms` | `created_at` | value shows `2025-02-07T...` |
+| `expires_rfc3339` | `expires` | value passes through |
+| `api_key_secret` | `api_key` | value shows `***` |
+| `cpu_percent` | `cpu` | value shows `85%` |
+| `balance_msats` | `balance` | value shows `50000msats` |
+| `price_usd_cents` | `price` | value shows `$9.99` |
+| `DATABASE_URL_SECRET` | `DATABASE_URL` | uppercase `_SECRET` matched |
+| `CACHE_TTL_S` | `CACHE_TTL` | uppercase `_S` matched |
+| `buffer_size` | `buffer_size` | `_size` passes through, key unchanged |
+| `config_path` | `config_path` | no suffix, unchanged |
+| `user_id` | `user_id` | no suffix, unchanged |
+
+**2. Value formatting** — transform the value for human readability. Same suffix matching as key stripping (lowercase or uppercase only):
+
+- `_ns`, `_us`, `_ms`, `_s` → append unit (`450000ns`, `830μs`, `42ms`, `3600s`)
+- `_ms` ≥ 1000 → convert to seconds (`1280` → `1.28s`)
+- `_minutes`, `_hours`, `_days` → append unit (`30 minutes`, `24 hours`)
+- `_epoch_ms` / `_epoch_s` / `_epoch_ns` → RFC 3339 (`2024-02-14T00:00:00.000Z`), negative values produce pre-1970 dates
+- `_rfc3339` → pass through
+- `_bytes` → human-readable (`456789` → `446.1KB`, `-5242880` → `-5.0MB`)
+- `_size` → pass through (config input string, e.g. `"10M"` stays `"10M"`)
+- `_percent` → append `%` (`85` → `85%`, `99.9` → `99.9%`)
+- `_msats` → append unit (`2056msats`)
+- `_sats` → append unit (`1234sats`)
+- `_btc` → append unit (`0.5 BTC`)
+- `_usd_cents` → dollars (`999` → `$9.99`), negative falls through
+- `_eur_cents` → euros (`850` → `€8.50`), negative falls through
+- other `_{code}_cents` → major unit with code (`15050` → `150.50 THB`), negative falls through
+- `_jpy` → yen (`1500` → `¥1,500`), negative falls through
+- `_secret` → `***`
+
+**Type constraints**: `_bytes` and `_epoch_*` require integer values. `_usd_cents`, `_eur_cents`, `_jpy`, and `_{code}_cents` require non-negative integers. Duration, Bitcoin, and `_percent` suffixes accept any number. When the value type doesn't match, formatting falls through to the raw value with the original key preserved.
+
+### Key ordering
+
+YAML and plain output sort keys (after stripping) by UTF-16 code unit order (JCS, [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785) §3.2.3). For ASCII keys — the common case — this equals simple byte-order sorting.
+
+In plain logfmt, nested keys are flattened to dot notation before sorting. Sort by the full dot path: `args.input_path` < `code` < `config.api_key` < `trace.duration`.
+
+JSON output is unordered per the JSON specification. YAML and plain sort for deterministic, cross-language-consistent output.
+
+## Using AFD Without Part 3
+
+Parts 1 and 2 (naming + output processing) work with any JSON structure — no protocol template needed:
+
+```json
+{"user_id": 123, "created_at_epoch_ms": 1738886400000, "balance_msats": 50000000, "api_key_secret": "sk-..."}
+```
+
+Plain: `api_key=*** balance=50000000msats created_at=2025-02-07T00:00:00.000Z user_id=123`
+
+This works with REST APIs, GraphQL, database results, config files — anywhere you have structured data. Just use AFD naming and let output processing handle the rest.
+
+---
+
+# Part 3: Protocol Template (Recommended, Optional)
+
+A recommended structure for program output. This part is **optional** — adopt it when you want consistent structure across CLI tools, streaming output, or internal protocols.
+
+## Core Fields
+
+**Required:**
+- `code` — identifies the message type (`"startup"`, `"ok"`, `"error"`, or tool-defined)
+
+**Recommended:**
+- `trace` — execution context (duration, source, resource usage)
+
+**Everything else is flexible.** Fields can be flat or nested. Both styles are valid. Examples below show both approaches.
+
+## JSONL Stream
 
 Programs emit JSONL to stdout — one JSON object per line. Every line has a `code` field identifying its type:
 
 | `code` | Meaning |
 |:-------|:--------|
 | `"startup"` | Program startup state |
-| tool-defined | Status / progress / log |
 | `"ok"` | Success result |
-| `"error"` | Error result |
+| `"error"` | Generic error (prefer specific codes) |
+| tool-defined | Status / errors / progress |
 
-Three values are reserved: `startup`, `ok`, `error`. Status lines use any other value — the tool defines what makes sense (`"request"`, `"progress"`, `"sync"`, etc.).
+Three values are reserved: `startup`, `ok`, `error`. All other values are tool-defined.
+
+**Error codes:** Use specific codes instead of generic `"error"`:
+- `"not_found"`, `"unauthorized"`, `"validation_error"`, `"rate_limit"`, `"internal_error"`, etc.
+- Generic `"error"` is supported but specific codes are preferred
+
+**Status codes:** Progress, requests, custom events:
+- `"request"`, `"progress"`, `"sync"`, etc.
 
 Not all phases are required. A simple CLI tool may emit only a result line. A long-running service may never emit a result.
 
@@ -216,27 +422,86 @@ Not all phases are required. A simple CLI tool may emit only a result line. A lo
 
 ### Status
 
-`code` is tool-defined. Content is tool-defined.
+`code` is tool-defined. Content is tool-defined. Include `trace` for execution context.
 
 ```json
-{"code": "progress", "current": 3, "total": 10, "message": "indexing spores"}
+{"code": "progress", "current": 3, "total": 10, "message": "indexing spores", "trace": {"duration_ms": 500}}
 ```
 
 ```json
-{"code": "request", "method": "POST", "path": "/v1/chat", "status": 200, "latency_ms": 42}
+{"code": "request", "method": "POST", "path": "/v1/chat", "http_status": 200, "trace": {"latency_ms": 42}}
 ```
 
 ### Result
 
-`code: "ok"` on success, `code: "error"` on failure. An agent watching a stream can treat either as the signal that the operation is complete. Include `trace` for execution context — data sources, processing steps, verification results, resource usage.
+`code: "ok"` on success, `code: "error"` or specific error code on failure. An agent watching a stream can treat any result code as the signal that the operation is complete.
 
+**Always include `trace`** for execution context — duration, data sources, resource usage, query details.
+
+**Success - both styles valid:**
+
+Nested (structured):
 ```json
-{"code": "ok", "result": {"hash": "abc123", "size_bytes": 456789}, "trace": {"duration_ms": 1280, "tokens_input": 512, "tokens_output": 86, "cost_msats": 2056}}
+{"code": "ok", "result": {"hash": "abc123", "size_bytes": 456789}, "trace": {"duration_ms": 1280, "tokens_input": 512}}
 ```
 
+Flat:
+```json
+{"code": "ok", "hash": "abc123", "size_bytes": 456789, "trace": {"duration_ms": 1280, "tokens_input": 512}}
+```
+
+**Error - both styles valid:**
+
+Simple message:
 ```json
 {"code": "error", "error": "config file not found", "trace": {"duration_ms": 3}}
 ```
+
+Nested error details:
+```json
+{"code": "not_found", "error": {"resource": "user", "id": 123}, "trace": {"duration_ms": 8}}
+```
+
+Flat error details:
+```json
+{"code": "not_found", "resource": "user", "id": 123, "trace": {"duration_ms": 8}}
+```
+
+More examples (flat style):
+```json
+{"code": "validation_error", "fields": ["email", "age"], "trace": {"duration_ms": 2}}
+{"code": "unauthorized", "message": "invalid token", "trace": {"duration_ms": 5}}
+{"code": "rate_limit", "retry_after_s": 60, "quota_remaining": 0, "trace": {"duration_ms": 1}}
+```
+
+### Best Practices
+
+**Always include `trace` field.** Even simple operations should report execution context:
+
+- `duration_ms` — operation duration
+- `source` — data source (db, cache, api, file)
+- Resource usage — `tokens_input`, `tokens_output`, `cost_msats`, `memory_bytes`
+- Metadata — `query`, `method`, `path`, `model`
+
+**Good (with trace):**
+```json
+{"code": "ok", "count": 42, "trace": {"duration_ms": 150, "source": "db"}}
+{"code": "error", "error": "not found", "trace": {"duration_ms": 5}}
+```
+
+**Also good (structured):**
+```json
+{"code": "ok", "result": {"count": 42}, "trace": {"duration_ms": 150, "source": "db"}}
+{"code": "validation_error", "error": {"fields": [...]}, "trace": {"duration_ms": 2}}
+```
+
+**Avoid (missing trace):**
+```json
+{"code": "ok", "count": 42}
+{"code": "error", "error": "not found"}
+```
+
+Missing `trace` makes debugging harder. Agents can't analyze performance, cost, or data flow without execution context.
 
 ### Agent consumption
 
@@ -245,104 +510,32 @@ Not all phases are required. A simple CLI tool may emit only a result line. A lo
 3. `"ok"` or `"error"` → operation complete.
 4. Anything else → status/progress, tool-specific.
 
-## Output formats
+## Usage in APIs
 
-```
---output json|yaml|plain
-```
+The protocol structure can be used in REST APIs. APIs return raw JSON — no output formatting, no secret redaction.
 
-Default is tool-defined. Services default to `json`, interactive CLIs to `plain`.
+### REST API Examples
 
-JSON is the canonical format. YAML and plain are derived from it.
+Response body follows the protocol structure:
 
-### yaml
-
-Each JSON line becomes a YAML document, separated by `---`. Values preserved as-is. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float):
-
-```yaml
----
-code: "startup"
-config:
-  api_key_secret: "***"
-  dns_ttl_s: 3600
-args:
-  config_path: "config.yml"
----
-code: "ok"
-result:
-  hash: "abc123"
-  size_bytes: 456789
-trace:
-  duration_ms: 1280
-  cost_msats: 2056
-```
-
-### plain
-
-No quotes, values transformed for human readability. Plain is lossy — only json is the lossless canonical format.
-
-```
-code: startup
-config:
-  api_key_secret: ***
-  dns_ttl_s: 3600s
-args:
-  config_path: config.yml
----
-code: ok
-result:
-  hash: abc123
-  size_bytes: 446.1KB
-trace:
-  duration_ms: 1.28s
-  cost_msats: 2056msats
-```
-
-Suffix-driven formatting rules for plain. Default: append the unit abbreviation. Special cases override:
-
-- `_ns`, `_us`, `_ms`, `_s` → append unit (`450000ns`, `830μs`, `42ms`, `3600s`)
-- `_ms` ≥ 1000 → convert to seconds (`1280` → `1.28s`)
-- `_minutes`, `_hours`, `_days` → append unit (`30 minutes`, `24 hours`)
-- `_epoch_ms` / `_epoch_s` / `_epoch_ns` → RFC 3339 (`2024-02-14T00:00:00.000Z`), negative values produce pre-1970 dates
-- `_rfc3339` → pass through
-- `_bytes` → human-readable (`456789` → `446.1KB`, `-5242880` → `-5.0MB`)
-- `_percent` → append `%` (`85` → `85%`, `99.9` → `99.9%`)
-- `_msats` → append unit (`2056msats`)
-- `_sats` → append unit (`1234sats`)
-- `_btc` → append unit (`0.5 BTC`)
-- `_usd_cents` → dollars (`999` → `$9.99`), negative falls through
-- `_eur_cents` → euros (`850` → `€8.50`), negative falls through
-- other `_{code}_cents` → major unit with code (`15050` → `150.50 THB`), negative falls through
-- `_jpy` → yen (`1500` → `¥1,500`), negative falls through
-- `_secret` → `***`
-
-**Type constraints**: `_bytes` and `_epoch_*` require integer values. `_usd_cents`, `_eur_cents`, `_jpy`, and `_{code}_cents` require non-negative integers. Duration, Bitcoin, and `_percent` suffixes accept any number. When the value type doesn't match (string, boolean, float where integer expected), formatting falls through to the raw value.
-
-### Key ordering
-
-YAML and plain output sort object keys by UTF-16 code unit order (JCS, [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785) §3.2.3). For ASCII keys — the common case — this equals simple byte-order sorting. The difference matters only when keys contain supplementary Unicode characters (U+10000+), where UTF-16 surrogate code units (0xD800–0xDBFF) sort before BMP code points in the 0xE000–0xFFFF range.
-
-JSON output is unordered per the JSON specification. YAML and plain sort for deterministic, cross-language-consistent output.
-
-## Beyond CLI
-
-The `code` / `result` / `error` / `trace` structure applies beyond CLI. An agent uses the same parsing logic regardless of transport.
-
-### REST API
-
-Response body follows the same structure. HTTP status code maps to `code`.
-
-HTTP 200:
+**HTTP 200:**
 ```json
 {"code": "ok", "result": {"balance_msats": 97900}, "trace": {"source": "redb", "duration_ms": 3}}
 ```
 
-HTTP 402:
+**HTTP 404:**
 ```json
-{"code": "error", "error": "insufficient balance", "trace": {"balance_msats": 0, "required_msats": 2056}}
+{"code": "not_found", "error": {"resource": "user", "id": 123}, "trace": {"duration_ms": 5}}
 ```
 
-### MCP tool response
+**HTTP 402:**
+```json
+{"code": "insufficient_balance", "error": {"balance_msats": 0, "required_msats": 2056}, "trace": {"source": "redb", "duration_ms": 2}}
+```
+
+### MCP Tool Response
+
+Same structure, raw JSON:
 
 ```json
 {"code": "ok", "result": {"files": ["src/main.rs"]}, "trace": {"source": "glob", "matched": 1, "duration_ms": 12}}
@@ -350,17 +543,144 @@ HTTP 402:
 
 ### Streaming (SSE)
 
+JSONL stream, raw JSON per line:
+
 ```json
-{"code": "startup", "config": {"model": "gpt-4", "max_tokens": 1024}}
-{"code": "progress", "current": 1, "total": 5, "message": "processing"}
+{"code": "startup", "config": {"model": "gpt-4", "max_tokens": 1024}, "args": {}, "env": {}}
+{"code": "progress", "current": 1, "total": 5, "message": "processing", "trace": {"duration_ms": 500}}
 {"code": "ok", "result": {"answer": "..."}, "trace": {"tokens_input": 512, "duration_ms": 1280}}
 ```
 
-### One protocol, any transport
+### One Protocol, Multiple Contexts
 
-| Transport | Format | Same structure |
-|:----------|:-------|:---------------|
-| CLI stdout | JSONL | `code` / `result` / `error` / `trace` |
-| REST API | JSON body | `code` / `result` / `error` / `trace` |
-| MCP tool | JSON | `code` / `result` / `error` / `trace` |
-| SSE stream | JSONL | `code` / `result` / `error` / `trace` |
+| Context | Output | Secret Protection |
+|:--------|:-------|:------------------|
+| **CLI / Logs** | JSONL (json/yaml/plain formats) | ✅ Automatic |
+| **REST API** | JSON body (raw Value) | ❌ None needed |
+| **MCP tool** | JSON (raw Value) | ❌ None needed |
+| **SSE stream** | JSONL (raw JSON) | ❌ None needed |
+
+All contexts can use the protocol structure from Part 3. Only `code` (required) and `trace` (recommended) are standardized. Other fields can be flat or nested — both styles work. CLI/logs apply output formatting and secret protection from Part 2. APIs return raw JSON Values.
+
+---
+
+# Complete Example: CLI Tool
+
+A complete example showing all three parts working together. A backup tool that uploads files to cloud storage.
+
+## Raw JSON (before output processing)
+
+```json
+{
+  "code": "startup",
+  "config": {
+    "api_key_secret": "sk-1234567890abcdef",
+    "endpoint": "https://storage.example.com",
+    "timeout_s": 30,
+    "max_file_size_bytes": 10737418240
+  },
+  "args": {
+    "input_path": "/data/backup.tar.gz",
+    "compression_level": 9
+  }
+}
+```
+
+Field names encode semantics:
+- `api_key_secret` → agent knows to redact
+- `timeout_s` → 30 seconds
+- `max_file_size_bytes` → 10GB in bytes
+
+## Output Formats (Part 2: Output Processing)
+
+**JSON** (raw, for machines):
+```json
+{"code":"startup","config":{"api_key_secret":"***","endpoint":"https://storage.example.com","timeout_s":30,"max_file_size_bytes":10737418240},"args":{"input_path":"/data/backup.tar.gz","compression_level":9}}
+```
+
+**YAML** (structured, keys stripped, for human inspection):
+```yaml
+---
+code: "startup"
+args:
+  compression_level: 9
+  input_path: "/data/backup.tar.gz"
+config:
+  api_key: "***"
+  endpoint: "https://storage.example.com"
+  max_file_size: "10.0GB"
+  timeout: "30s"
+```
+
+**Plain** (single-line logfmt, keys stripped, for compact scanning):
+```
+args.compression_level=9 args.input_path=/data/backup.tar.gz code=startup config.api_key=*** config.endpoint=https://storage.example.com config.max_file_size=10.0GB config.timeout=30s
+```
+
+Note:
+- **Key stripping**: `api_key_secret` → `api_key`, `timeout_s` → `timeout`, `max_file_size_bytes` → `max_file_size`
+- **Secret protection**: `api_key_secret` redacted in all three formats
+- **Suffix formatting**: `_bytes` → `10.0GB`, `_s` → `30s` in YAML and Plain
+
+## Progress Update (Part 3: Protocol Template)
+
+```json
+{"code": "progress", "current": 3, "total": 10, "message": "uploading chunks", "trace": {"duration_ms": 5420, "uploaded_bytes": 3221225472}}
+```
+
+YAML:
+```yaml
+---
+code: "progress"
+current: 3
+message: "uploading chunks"
+total: 10
+trace:
+  duration: "5.42s"
+  uploaded: "3.0GB"
+```
+
+Plain:
+```
+code=progress current=3 message="uploading chunks" total=10 trace.duration=5.42s trace.uploaded=3.0GB
+```
+
+## Final Result
+
+```json
+{"code": "ok", "result": {"url": "https://storage.example.com/backup.tar.gz", "size_bytes": 10485760, "checksum": "sha256:abc123...", "uploaded_at_epoch_ms": 1738886400000}, "trace": {"duration_ms": 15300, "chunks": 10, "retries": 2}}
+```
+
+YAML:
+```yaml
+---
+code: "ok"
+result:
+  checksum: "sha256:abc123..."
+  size: "10.0MB"
+  uploaded_at: "2025-02-07T00:00:00.000Z"
+  url: "https://storage.example.com/backup.tar.gz"
+trace:
+  chunks: 10
+  duration: "15.3s"
+  retries: 2
+```
+
+Plain:
+```
+code=ok result.checksum=sha256:abc123... result.size=10.0MB result.uploaded_at=2025-02-07T00:00:00.000Z result.url=https://storage.example.com/backup.tar.gz trace.chunks=10 trace.duration=15.3s trace.retries=2
+```
+
+## What This Demonstrates
+
+1. **Part 1 (Naming)**: Every field is self-describing — `api_key_secret` → redact, `timeout_s` → seconds, `max_file_size_bytes` → bytes, `uploaded_at_epoch_ms` → timestamp
+
+2. **Part 2 (Output Processing)**: Three formats for different needs
+   - JSON: single-line, original keys, raw values, for programs and logs
+   - YAML: multi-line, keys stripped, values formatted, for human inspection
+   - Plain: single-line logfmt, keys stripped, values formatted, for compact scanning
+   - All formats protect secrets automatically
+
+3. **Part 3 (Protocol)**: Consistent structure across all output — `code` identifies message type, `trace` provides execution context, other fields flexible
+
+**Key insight**: An agent reading JSON output understands everything without documentation. `duration_ms: 15300` is 15.3 seconds. `uploaded_bytes: 3221225472` is 3.0GB. A human reading YAML/Plain output sees the same data with clean keys and formatted values: `duration: 15.3s`, `uploaded: 3.0GB`.
