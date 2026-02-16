@@ -9,14 +9,12 @@
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
   ],
   "changes": [
-    "Add AFD-compliant structured logging module to all four languages (Rust/Go/Python/TypeScript), integrating with each language's native logging ecosystem (tracing, log/slog, logging, built-in) with span support for concurrent request disambiguation \u2014 Rust uses tracing spans, Go uses slog WithAttrs + context, Python uses contextvars, TypeScript uses AsyncLocalStorage",
-    "Support all three output formats (JSON/Plain/YAML) in every logging module by routing through the library's own output_json/output_plain/output_yaml functions, so AFD suffix processing (key stripping, value formatting, secret redaction) applies to log fields identically to the core output API",
-    "Update all documentation \u2014 four language READMEs with detailed logging API reference, root README with format comparison table, skill file with logging init table, span examples, CLI --output flag convention, and review checklist item for structured logging"
+    "Remove unused json feature from tracing-subscriber dependency in Rust crate, reducing compiled dependency footprint \u2014 AFD tracing layer uses its own output_json() formatting, not tracing-subscriber built-in JSON formatter"
   ],
   "license": "MIT",
   "references": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_8d507cb24143b5666a8d9d40a6b8c756ce8a34891a052e4a21858e99e2d384fe",
+      "uri": "cmn://cmn.dev/spore/blake3_59ed563e49f1105f05fd7f9f299eec28f4fa790e2d256eabf6cf15ec63c56228",
       "relation": "spawned_from"
     }
   ],
