@@ -244,6 +244,63 @@ afd.OutputPlain(value)
 afd.ParseSize("10M")
 ```
 
+## AFD Logging
+
+Structured logging that outputs via the library's own `output_json`/`output_plain`/`output_yaml`. Each language integrates with its native logging ecosystem. All three formats apply the same suffix processing, key stripping, and secret redaction as the core output API.
+
+### Init (pick one format per process)
+
+| Format | Rust | Go | Python | TypeScript |
+|:-------|:-----|:---|:-------|:-----------|
+| **JSON** | `afd_tracing::init_json(filter)` | `afd.InitJson()` | `init_logging_json("INFO")` | `initJson()` |
+| **Plain** | `afd_tracing::init_plain(filter)` | `afd.InitPlain()` | `init_logging_plain("INFO")` | `initPlain()` |
+| **YAML** | `afd_tracing::init_yaml(filter)` | `afd.InitYaml()` | `init_logging_yaml("INFO")` | `initYaml()` |
+
+Rust requires `cargo add agent-first-data --features tracing`.
+
+### Spans (add fields to all log events in scope)
+
+```rust
+// Rust — tracing spans
+let span = info_span!("request", request_id = %uuid);
+let _guard = span.enter();
+```
+
+```go
+// Go — context-based
+ctx := afd.WithSpan(ctx, map[string]any{"request_id": uuid})
+logger := afd.LoggerFromContext(ctx)
+```
+
+```python
+# Python — contextvars
+with span(request_id=uuid):
+    logger.info("Processing")
+```
+
+```typescript
+// TypeScript — AsyncLocalStorage
+await span({ request_id: uuid }, async () => {
+  log.info("Processing");
+});
+```
+
+### Output fields
+
+Every log line contains: `timestamp_epoch_ms`, `message`, `code` (defaults to log level, overridable), plus span fields and event fields.
+
+## CLI Flags
+
+CLI tools that use AFD should support an output format flag:
+
+```
+--output json|yaml|plain    # default is tool-defined (interactive → yaml, scripting/logging → json)
+```
+
+- Protocol output (`build_json_*` + `output_*`) follows `--output`
+- Log format follows `--output` or a separate `--log-format` flag if independent control is needed
+- Document the default format and available options in `--help`
+
 ## Review Checklist
 
 When reviewing code that produces structured output:
@@ -256,3 +313,4 @@ When reviewing code that produces structured output:
 6. No unit-less ambiguous fields (`timeout: 30` — 30 what?)
 7. Config size values use `_size` suffix (`buffer_size: "10M"`, not `buffer: "10M"`)
 8. Environment variables follow `UPPER_SNAKE_CASE` with the same suffixes
+9. Logging uses AFD init functions (`init_json`/`init_plain`/`init_yaml`) — not raw `println!`/`fmt.Println`/`console.log` for structured output

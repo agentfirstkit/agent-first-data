@@ -4,7 +4,7 @@
  * 9 public APIs: 4 protocol builders + 3 output formatters + 1 redaction + 1 utility.
  */
 
-type JsonValue =
+export type JsonValue =
   | string
   | number
   | boolean

@@ -2,6 +2,9 @@
 //!
 //! 9 public APIs: 4 protocol builders + 3 output formatters + 1 redaction + 1 utility.
 
+#[cfg(feature = "tracing")]
+pub mod afd_tracing;
+
 use serde_json::Value;
 
 // ═══════════════════════════════════════════

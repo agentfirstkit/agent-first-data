@@ -12,7 +12,7 @@ pip install agent-first-data
 
 ## API Reference
 
-Total: **9 public APIs** (4 protocol builders + 3 output functions + 1 internal + 1 utility)
+Total: **9 public APIs** + **AFD logging** (4 protocol builders + 3 output functions + 1 internal + 1 utility)
 
 ### Protocol Builders (returns dict)
 
@@ -246,6 +246,132 @@ print(output_yaml(data))
 print(output_plain(data))
 # api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_size=5.0MB payment=50000000msats price=$99.99 request_timeout=5.0s success_rate=95.5% user_name=alice
 ```
+
+## AFD Logging
+
+AFD-compliant structured logging via Python's `logging` module. Every log line is formatted using the library's own `output_json`/`output_plain`/`output_yaml` functions. Span fields are carried via `contextvars` (async-safe), automatically flattened into each log line.
+
+### API
+
+```python
+from agent_first_data import init_logging_json, init_logging_plain, init_logging_yaml
+from agent_first_data.afd_logging import AfdHandler, get_logger, span
+
+# Convenience initializers — set up the root logger with AFD output to stdout
+init_logging_json(level="INFO")    # Single-line JSONL (secrets redacted, original keys)
+init_logging_plain(level="INFO")   # Single-line logfmt (keys stripped, values formatted)
+init_logging_yaml(level="INFO")    # Multi-line YAML (keys stripped, values formatted)
+
+# Low-level — create a handler for custom logger stacks
+AfdHandler(format="json")  # format: "json" | "plain" | "yaml"
+
+# Logger with default fields (returns logging.LoggerAdapter)
+get_logger(name, **fields)
+
+# Span context manager — adds fields to all log events within the block
+span(**fields)
+```
+
+### Setup
+
+```python
+from agent_first_data import init_logging_json, init_logging_plain, init_logging_yaml
+
+# JSON output for production (one JSONL line per event, secrets redacted)
+init_logging_json("INFO")
+
+# Plain logfmt for development (keys stripped, values formatted)
+init_logging_plain("DEBUG")
+
+# YAML for detailed inspection (multi-line, keys stripped, values formatted)
+init_logging_yaml("DEBUG")
+```
+
+### Log Output
+
+Standard `logging` calls work unchanged. Output format depends on the init function used.
+
+```python
+import logging
+logger = logging.getLogger("myapp")
+
+logger.info("Server started")
+# JSON:  {"timestamp_epoch_ms":1739000000000,"message":"Server started","target":"myapp","code":"info"}
+# Plain: code=info message="Server started" target=myapp timestamp_epoch_ms=1739000000000
+# YAML:  ---
+#        code: "info"
+#        message: "Server started"
+#        target: "myapp"
+#        timestamp_epoch_ms: 1739000000000
+
+logger.warning("DNS lookup failed")
+# JSON:  {"timestamp_epoch_ms":...,"message":"DNS lookup failed","target":"myapp","code":"warn"}
+```
+
+### Span Support
+
+Use the `span` context manager to add fields to all log events within the block. Spans nest and work with both sync and async code.
+
+```python
+from agent_first_data import span
+
+with span(request_id="abc-123"):
+    logger.info("Processing")
+    # {"timestamp_epoch_ms":...,"message":"Processing","target":"myapp","request_id":"abc-123","code":"info"}
+
+    with span(step="validate"):
+        logger.info("Validating input")
+        # {"timestamp_epoch_ms":...,"message":"Validating input","target":"myapp","request_id":"abc-123","step":"validate","code":"info"}
+```
+
+### Logger with Default Fields
+
+Use `get_logger` for per-component fields that appear on every log line:
+
+```python
+from agent_first_data import get_logger
+
+logger = get_logger("myapp.auth", component="auth")
+logger.info("Token verified")
+# {"timestamp_epoch_ms":...,"message":"Token verified","target":"myapp.auth","component":"auth","code":"info"}
+```
+
+### Custom Code Override
+
+The `code` field defaults to the log level. Override with an explicit field:
+
+```python
+from agent_first_data import get_logger
+
+logger = get_logger("myapp")
+logger.info("Server ready", extra={"code": "startup"})
+# {"timestamp_epoch_ms":...,"message":"Server ready","target":"myapp","code":"startup"}
+```
+
+### Output Fields
+
+Every log line contains:
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `timestamp_epoch_ms` | number | Unix milliseconds |
+| `message` | string | Log message |
+| `target` | string | Logger name |
+| `code` | string | Level (debug/info/warn/error) or explicit override |
+| *span fields* | any | From `span()` context manager |
+| *event fields* | any | From `extra=` or `get_logger` fields |
+
+### Log Output Formats
+
+All three formats use the library's own output functions, so AFD suffix processing applies to log fields too:
+
+| Format | Function | Keys | Values | Use case |
+|:-------|:---------|:-----|:-------|:---------|
+| **JSON** | `init_logging_json` | original (with suffix) | raw | production, log aggregation |
+| **Plain** | `init_logging_plain` | stripped | formatted | development, compact scanning |
+| **YAML** | `init_logging_yaml` | stripped | formatted | debugging, detailed inspection |
+
+All formats automatically redact `_secret` fields in log output.
 
 ## Output Formats
 
