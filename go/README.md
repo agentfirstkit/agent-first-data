@@ -12,7 +12,7 @@ go get github.com/cmnspore/agent-first-data/go
 
 ## API Reference
 
-Total: **9 public APIs** (4 protocol builders + 3 output functions + 1 internal + 1 utility)
+Total: **9 public APIs** + **AFD logging** (4 protocol builders + 3 output functions + 1 internal + 1 utility)
 
 ### Protocol Builders (returns map[string]any)
 
@@ -247,6 +247,124 @@ fmt.Println(afd.OutputYaml(data))
 fmt.Println(afd.OutputPlain(data))
 // api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_size=5.0MB payment=50000000msats price=$99.99 request_timeout=5.0s success_rate=95.5% user_name=alice
 ```
+
+## AFD Logging
+
+AFD-compliant structured logging via Go's `log/slog`. Every log line is formatted using the library's own `OutputJson`/`OutputPlain`/`OutputYaml` functions. Span fields are carried via `WithAttrs` / context, automatically flattened into each log line.
+
+### API
+
+```go
+import afd "github.com/cmnspore/agent-first-data/go"
+
+// Convenience initializers — set up the default slog logger with AFD output to stdout
+afd.InitJson()    // Single-line JSONL (secrets redacted, original keys)
+afd.InitPlain()   // Single-line logfmt (keys stripped, values formatted)
+afd.InitYaml()    // Multi-line YAML (keys stripped, values formatted)
+
+// Low-level — create a handler for custom logger stacks
+afd.NewAfdHandler(w io.Writer, format LogFormat) *AfdHandler  // implements slog.Handler
+afd.FormatJson | afd.FormatPlain | afd.FormatYaml
+
+// Context-based spans for concurrent code
+afd.WithSpan(ctx context.Context, fields map[string]any) context.Context
+afd.LoggerFromContext(ctx context.Context) *slog.Logger
+
+// Global span (non-concurrent, uses slog.SetDefault)
+afd.Span(fields map[string]any, fn func())
+```
+
+### Setup
+
+```go
+import afd "github.com/cmnspore/agent-first-data/go"
+
+// JSON output for production (one JSONL line per event, secrets redacted)
+afd.InitJson()
+
+// Plain logfmt for development (keys stripped, values formatted)
+afd.InitPlain()
+
+// YAML for detailed inspection (multi-line, keys stripped, values formatted)
+afd.InitYaml()
+```
+
+### Log Output
+
+Standard `slog` functions work unchanged. Output format depends on the init function used.
+
+```go
+slog.Info("Server started")
+// JSON:  {"timestamp_epoch_ms":1739000000000,"message":"Server started","code":"info"}
+// Plain: code=info message="Server started" timestamp_epoch_ms=1739000000000
+// YAML:  ---
+//        code: "info"
+//        message: "Server started"
+//        timestamp_epoch_ms: 1739000000000
+
+slog.Warn("DNS lookup failed", "error", err, "domain", domain)
+// JSON:  {"timestamp_epoch_ms":...,"message":"DNS lookup failed","domain":"example.com","error":"timeout","code":"warn"}
+// Plain: code=warn domain=example.com error=timeout message="DNS lookup failed" ...
+```
+
+### Span Support (WithAttrs)
+
+Create child loggers with span-level fields. All log events from the child include the span fields.
+
+```go
+reqLogger := slog.Default().With("request_id", uuid)
+reqLogger.Info("Processing")
+// {"timestamp_epoch_ms":...,"message":"Processing","request_id":"abc-123","code":"info"}
+
+reqLogger.Warn("Not found", "path", "/users/42")
+// {"timestamp_epoch_ms":...,"message":"Not found","request_id":"abc-123","path":"/users/42","code":"warn"}
+```
+
+### Context-Based Spans
+
+For concurrent code (goroutines), use context-based spans:
+
+```go
+ctx := afd.WithSpan(ctx, map[string]any{"request_id": uuid})
+
+// In handler or goroutine
+logger := afd.LoggerFromContext(ctx)
+logger.Info("Handling request", "method", "GET")
+// {"timestamp_epoch_ms":...,"message":"Handling request","request_id":"abc-123","method":"GET","code":"info"}
+```
+
+### Custom Code Override
+
+The `code` field defaults to the log level. Override with an explicit field:
+
+```go
+slog.Info("Server ready", "code", "startup")
+// {"timestamp_epoch_ms":...,"message":"Server ready","code":"startup"}
+```
+
+### Output Fields
+
+Every log line contains:
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `timestamp_epoch_ms` | number | Unix milliseconds |
+| `message` | string | Log message |
+| `code` | string | Level (trace/debug/info/warn/error) or explicit override |
+| *span fields* | any | From `WithAttrs` / `WithSpan` |
+| *event fields* | any | From `slog` call arguments |
+
+### Log Output Formats
+
+All three formats use the library's own output functions, so AFD suffix processing applies to log fields too:
+
+| Format | Function | Keys | Values | Use case |
+|:-------|:---------|:-----|:-------|:---------|
+| **JSON** | `InitJson` | original (with suffix) | raw | production, log aggregation |
+| **Plain** | `InitPlain` | stripped | formatted | development, compact scanning |
+| **YAML** | `InitYaml` | stripped | formatted | debugging, detailed inspection |
+
+All formats automatically redact `_secret` fields in log output.
 
 ## Output Formats
 

@@ -12,7 +12,7 @@ npm install agent-first-data
 
 ## API Reference
 
-Total: **9 public APIs** (4 protocol builders + 3 output functions + 1 internal + 1 utility)
+Total: **9 public APIs** + **AFD logging** (4 protocol builders + 3 output functions + 1 internal + 1 utility)
 
 ### Protocol Builders (returns JsonValue)
 
@@ -248,6 +248,115 @@ console.log(outputYaml(data));
 console.log(outputPlain(data));
 // api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_size=5.0MB payment=50000000msats price=$99.99 request_timeout=5.0s success_rate=95.5% user_name=alice
 ```
+
+## AFD Logging
+
+AFD-compliant structured logging. Every log line is formatted using the library's own `outputJson`/`outputPlain`/`outputYaml` functions. Span fields are carried via `AsyncLocalStorage` (async-safe), automatically flattened into each log line. Zero dependencies beyond Node.js built-ins.
+
+### API
+
+```typescript
+import { log, span, initJson, initPlain, initYaml } from "agent-first-data";
+
+// Format selectors — set the output format for all subsequent log calls
+initJson()    // Single-line JSONL (secrets redacted, original keys) — default
+initPlain()   // Single-line logfmt (keys stripped, values formatted)
+initYaml()    // Multi-line YAML (keys stripped, values formatted)
+
+// Logger — each method outputs a single log line to stdout
+log.trace(msg, fields?)
+log.debug(msg, fields?)
+log.info(msg, fields?)
+log.warn(msg, fields?)
+log.error(msg, fields?)
+
+// Span — run fn with additional fields on all log events
+span<T>(fields, fn: () => T): T  // works with sync and async functions
+```
+
+### Setup
+
+```typescript
+import { log, initJson, initPlain, initYaml } from "agent-first-data";
+
+// JSON output for production (one JSONL line per event, secrets redacted)
+initJson();  // default, can be omitted
+
+// Plain logfmt for development (keys stripped, values formatted)
+initPlain();
+
+// YAML for detailed inspection (multi-line, keys stripped, values formatted)
+initYaml();
+```
+
+### Log Output
+
+Output format depends on the init function used.
+
+```typescript
+log.info("Server started");
+// JSON:  {"timestamp_epoch_ms":1739000000000,"message":"Server started","code":"info"}
+// Plain: code=info message="Server started" timestamp_epoch_ms=1739000000000
+// YAML:  ---
+//        code: "info"
+//        message: "Server started"
+//        timestamp_epoch_ms: 1739000000000
+
+log.warn("DNS lookup failed", { error: "timeout", domain: "example.com" });
+// JSON:  {"timestamp_epoch_ms":...,"message":"DNS lookup failed","error":"timeout","domain":"example.com","code":"warn"}
+// Plain: code=warn domain=example.com error=timeout message="DNS lookup failed" ...
+```
+
+### Span Support
+
+Use `span()` to add fields to all log events within the callback. Spans nest and work with both sync and async functions.
+
+```typescript
+import { log, span } from "agent-first-data";
+
+await span({ request_id: "abc-123" }, async () => {
+  log.info("Processing");
+  // {"timestamp_epoch_ms":...,"message":"Processing","request_id":"abc-123","code":"info"}
+
+  await span({ step: "validate" }, async () => {
+    log.info("Validating input");
+    // {"timestamp_epoch_ms":...,"message":"Validating input","request_id":"abc-123","step":"validate","code":"info"}
+  });
+});
+```
+
+### Custom Code Override
+
+The `code` field defaults to the log level. Override with an explicit field:
+
+```typescript
+log.info("Server ready", { code: "startup" });
+// {"timestamp_epoch_ms":...,"message":"Server ready","code":"startup"}
+```
+
+### Output Fields
+
+Every log line contains:
+
+| Field | Type | Description |
+|:------|:-----|:------------|
+| `timestamp_epoch_ms` | number | Unix milliseconds |
+| `message` | string | Log message |
+| `code` | string | Level (trace/debug/info/warn/error) or explicit override |
+| *span fields* | any | From `span()` callback |
+| *event fields* | any | From fields argument |
+
+### Log Output Formats
+
+All three formats use the library's own output functions, so AFD suffix processing applies to log fields too:
+
+| Format | Function | Keys | Values | Use case |
+|:-------|:---------|:-----|:-------|:---------|
+| **JSON** | `initJson` | original (with suffix) | raw | production, log aggregation |
+| **Plain** | `initPlain` | stripped | formatted | development, compact scanning |
+| **YAML** | `initYaml` | stripped | formatted | debugging, detailed inspection |
+
+All formats automatically redact `_secret` fields in log output.
 
 ## Output Formats
 

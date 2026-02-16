@@ -9,18 +9,14 @@
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
   ],
   "changes": [
-    "Unify secret redaction across all 4 languages to redact ALL scalar types (numbers, booleans, null) to ***, not just strings, with containers recursively traversed \u2014 prevents accidental leakage of numeric secrets like API key IDs or token counts",
-    "Fix collision handling to revert BOTH the display key AND formatted value to raw when two keys strip to the same name, preventing ambiguous output where two different fields appear identical",
-    "Integrate extractCurrencyCode into production code path across Go/Python/TypeScript, supporting dynamic currency suffixes like _usd_cents and _eur_cents with both lowercase and UPPERCASE variants",
-    "Remove explicit JSON output sorting from Python and TypeScript, aligning with spec that JSON format preserves original key order for machine consumption",
-    "Add native Go int/int64 type support to suffix processing, enabling Go users to pass natural integer values without requiring float64 or json.Number conversion",
-    "Add 68 comprehensive Go output formatter tests and fix all 4 language README function signatures to exactly match actual code types",
-    "Lower minimum version requirements (Go 1.21, TypeScript 5.0) and clean up stale fixture files from old implementation"
+    "Add AFD-compliant structured logging module to all four languages (Rust/Go/Python/TypeScript), integrating with each language's native logging ecosystem (tracing, log/slog, logging, built-in) with span support for concurrent request disambiguation \u2014 Rust uses tracing spans, Go uses slog WithAttrs + context, Python uses contextvars, TypeScript uses AsyncLocalStorage",
+    "Support all three output formats (JSON/Plain/YAML) in every logging module by routing through the library's own output_json/output_plain/output_yaml functions, so AFD suffix processing (key stripping, value formatting, secret redaction) applies to log fields identically to the core output API",
+    "Update all documentation \u2014 four language READMEs with detailed logging API reference, root README with format comparison table, skill file with logging init table, span examples, CLI --output flag convention, and review checklist item for structured logging"
   ],
   "license": "MIT",
   "references": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_cf0f6d4d87eb2ce19244a3bbd401f630808b037b1fd36b33321f6580f7234c76",
+      "uri": "cmn://cmn.dev/spore/blake3_8d507cb24143b5666a8d9d40a6b8c756ce8a34891a052e4a21858e99e2d384fe",
       "relation": "spawned_from"
     }
   ],

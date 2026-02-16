@@ -7,6 +7,7 @@ Agent-First Data (AFD) is a convention for self-describing structured data:
 1. **Naming** — Encode units and semantics in field name suffixes (`_ms`, `_bytes`, `_secret`, ...)
 2. **Output** — Three formats (JSON/YAML/Plain) with automatic key stripping, value formatting, and secret redaction
 3. **Protocol** — Optional structured templates (`ok`, `error`, `startup`) with `trace` for execution context
+4. **Logging** — AFD-compliant structured logging with span support (per-language integration)
 
 See the full [specification](spec/agent-first-data.md).
 
@@ -68,6 +69,65 @@ api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_si
 | `internal_redact_secrets` | void | Redact `_secret` fields in-place |
 | `parse_size` | int | Parse `"10M"` → bytes |
 
+## AFD Logging
+
+AFD-compliant structured logging. Log output is formatted using the library's own `output_json`/`output_plain`/`output_yaml` functions — same suffix processing, key stripping, and secret redaction as the core output API. Span fields are automatically flattened into each event line, solving concurrent request interleaving.
+
+Each language integrates with its native logging ecosystem:
+
+| Language | Integration | Span Mechanism | Output Formats |
+|:---------|:------------|:---------------|:---------------|
+| **Rust** | `tracing` Layer (feature `"tracing"`) | tracing spans | `init_json` / `init_plain` / `init_yaml` |
+| **Go** | `log/slog` Handler | `WithAttrs` / `WithSpan(ctx)` | `InitJson` / `InitPlain` / `InitYaml` |
+| **Python** | `logging` Handler | `contextvars` | `init_logging_json` / `init_logging_plain` / `init_logging_yaml` |
+| **TypeScript** | Built-in logger | `AsyncLocalStorage` | `initJson` / `initPlain` / `initYaml` |
+
+**JSON output** (production — secrets redacted, original keys):
+```json
+{"timestamp_epoch_ms":1739000000000,"message":"Processing","request_id":"abc-123","code":"info"}
+```
+
+**Plain output** (development — keys stripped, values formatted):
+```
+code=info message=Processing request_id=abc-123 timestamp_epoch_ms=1739000000000
+```
+
+**Rust:**
+```rust
+use agent_first_data::afd_tracing;
+afd_tracing::init_json(EnvFilter::new("info"));   // or init_plain / init_yaml
+
+let span = info_span!("request", request_id = %uuid);
+let _guard = span.enter();
+info!("Processing");
+```
+
+**Go:**
+```go
+afd.InitJson()   // or InitPlain / InitYaml
+
+ctx := afd.WithSpan(ctx, map[string]any{"request_id": uuid})
+afd.LoggerFromContext(ctx).Info("Processing")
+```
+
+**Python:**
+```python
+from agent_first_data import init_logging_json, span  # or init_logging_plain / init_logging_yaml
+
+init_logging_json("INFO")
+with span(request_id=uuid):
+    logger.info("Processing")
+```
+
+**TypeScript:**
+```typescript
+import { log, span, initJson } from "agent-first-data";  // or initPlain / initYaml
+
+await span({ request_id: uuid }, async () => {
+  log.info("Processing");
+});
+```
+
 ## Supported Suffixes
 
 | Category | Suffixes | Example |
@@ -80,10 +140,10 @@ api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_si
 
 ## Language Documentation
 
-- **[Rust](rust/)** — Full API reference and examples
-- **[Go](go/)** — Full API reference and examples
-- **[Python](python/)** — Full API reference and examples
-- **[TypeScript](typescript/)** — Full API reference and examples
+- **[Rust](rust/)** — Full API reference, examples, and AFD tracing
+- **[Go](go/)** — Full API reference, examples, and AFD logging
+- **[Python](python/)** — Full API reference, examples, and AFD logging
+- **[TypeScript](typescript/)** — Full API reference, examples, and AFD logging
 
 ## License
 
