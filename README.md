@@ -1,106 +1,89 @@
 # Agent-First Data
 
-Two independent conventions that work together:
+**The field name is the schema.** Agents read `latency_ms` and know milliseconds, `api_key_secret` and know to redact — no external schema needed.
 
-1. **Naming** — encode units and semantics in field names so agents parse structured data without external schemas
-2. **Output** — a JSONL protocol with lifecycle phases and multi-format rendering
+Agent-First Data (AFD) is a convention for self-describing structured data:
 
-You can adopt either one alone. Using both together gives agents a complete, self-describing data interface.
+1. **Naming** — Encode units and semantics in field name suffixes (`_ms`, `_bytes`, `_secret`, ...)
+2. **Output** — Three formats (JSON/YAML/Plain) with automatic key stripping, value formatting, and secret redaction
+3. **Protocol** — Optional structured templates (`ok`, `error`, `startup`) with `trace` for execution context
 
-`latency_ms: 142` → agents know milliseconds. `api_key_secret: "sk-..."` → agents know to redact. No lookup required.
+See the full [specification](spec/agent-first-data.md).
 
-## Install
+## Installation
 
 ```bash
-# Rust
-cargo add agent-first-data
-
-# Python
-pip install agent-first-data
-
-# TypeScript
-npm install agent-first-data
-
-# Go
-go get github.com/cmnspore/agent-first-data/go
+cargo add agent-first-data        # Rust
+pip install agent-first-data       # Python
+npm install agent-first-data       # TypeScript
+go get github.com/cmnspore/agent-first-data/go  # Go
 ```
 
-## Quick start
+## Quick Example
 
-**Rust**
-```rust
-use agent_first_data::{to_plain, redact_secrets, ok};
-
-let result = ok(serde_json::json!({"balance_msats": 97900}));
-println!("{}", to_plain(&result));
-// code: ok
-// result:
-//   balance_msats: 97900msats
-```
-
-**Python**
-```python
-from agent_first_data import to_plain, redact_secrets, ok
-
-result = ok({"balance_msats": 97900})
-print(to_plain(result))
-```
-
-**TypeScript**
-```typescript
-import { toPlain, redactSecrets, ok } from "agent-first-data";
-
-const result = ok({ balance_msats: 97900 });
-console.log(toPlain(result));
-```
-
-**Go**
-```go
-import afd "github.com/cmnspore/agent-first-data/go"
-
-result := afd.Ok(map[string]any{"balance_msats": 97900})
-fmt.Println(afd.ToPlain(result))
-```
-
-## Part 1: Naming Convention
-
-The field name is the schema. Encode units and semantics in the name itself:
-
-| Suffix | Meaning | Plain output |
-|:-------|:--------|:-------------|
-| `_ms` | milliseconds | `42ms` or `1.28s` |
-| `_s`, `_ns`, `_us` | seconds / nano / micro | `3600s` |
-| `_epoch_ms` | unix timestamp ms | `2026-01-31T16:00:00.000Z` |
-| `_bytes` | size in bytes | `446.1KB` |
-| `_msats`, `_sats` | bitcoin units | `2056msats` |
-| `_percent` | percentage | `85%` |
-| `_usd_cents` | US dollar cents | `$9.99` |
-| `_secret` | sensitive, redact | `***` |
-
-Full suffix list: [spec/agent-first-data.md](spec/agent-first-data.md)
-
-## Part 2: Output Protocol
-
-A JSONL protocol where every line carries a `code` field:
-
+Input JSON:
 ```json
-{"code": "startup", "config": {...}, "args": {...}, "env": {...}}
-{"code": "progress", "current": 3, "total": 10}
-{"code": "ok", "result": {...}, "trace": {"duration_ms": 12}}
-{"code": "error", "error": "not found", "trace": {"duration_ms": 3}}
+{
+  "created_at_epoch_ms": 1738886400000,
+  "file_size_bytes": 5242880,
+  "cache_ttl_s": 3600,
+  "api_key_secret": "sk-1234567890abcdef",
+  "user_name": "alice",
+  "count": 42
+}
 ```
 
-Three output formats via `--output json|yaml|plain`:
+**JSON** (single-line, secrets redacted, original keys):
+```
+{"api_key_secret":"***","cache_ttl_s":3600,"count":42,"created_at_epoch_ms":1738886400000,"file_size_bytes":5242880,"user_name":"alice"}
+```
 
-- **JSON** — canonical, lossless, JSONL-compatible
-- **YAML** — quoted strings, `---` separated, values as-is
-- **Plain** — suffix-driven human formatting (lossy)
+**YAML** (keys stripped, values formatted):
+```yaml
+---
+api_key: "***"
+cache_ttl: "3600s"
+count: 42
+created_at: "2025-02-07T00:00:00.000Z"
+file_size: "5.0MB"
+user_name: "alice"
+```
 
-Same structure works across CLI stdout, REST API, MCP tools, and SSE streams.
+**Plain** (single-line logfmt, keys stripped):
+```
+api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_size=5.0MB user_name=alice
+```
 
-## Skill
+## API (9 functions, same across all languages)
 
-`skills/agent-first-data.md` is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-code) that teaches agents to apply AFD conventions when writing structured data, configs, logs, API responses, or CLI output. Copy it into your project's `.claude/skills/` directory to enable it.
+| Function | Returns | Description |
+|:---------|:--------|:------------|
+| `build_json_startup` | JSON | `{code: "startup", config, args, env}` |
+| `build_json_ok` | JSON | `{code: "ok", result, trace?}` |
+| `build_json_error` | JSON | `{code: "error", error, trace?}` |
+| `build_json` | JSON | `{code: "<custom>", ...fields, trace?}` |
+| `output_json` | String | Single-line JSON, secrets redacted |
+| `output_yaml` | String | Multi-line YAML, keys stripped, values formatted |
+| `output_plain` | String | Single-line logfmt, keys stripped, values formatted |
+| `internal_redact_secrets` | void | Redact `_secret` fields in-place |
+| `parse_size` | int | Parse `"10M"` → bytes |
+
+## Supported Suffixes
+
+| Category | Suffixes | Example |
+|:---------|:---------|:--------|
+| **Duration** | `_ns`, `_us`, `_ms`, `_s`, `_minutes`, `_hours`, `_days` | `latency_ms: 1280` → `latency: 1.28s` |
+| **Timestamps** | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` | `created_at_epoch_ms: 1738886400000` → `created_at: 2025-02-07T00:00:00.000Z` |
+| **Size** | `_bytes` (output), `_size` (config input) | `file_size_bytes: 5242880` → `file_size: 5.0MB` |
+| **Currency** | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` | `price_usd_cents: 999` → `price: $9.99` |
+| **Other** | `_percent`, `_secret` | `cpu_percent: 85` → `cpu: 85%` |
+
+## Language Documentation
+
+- **[Rust](rust/)** — Full API reference and examples
+- **[Go](go/)** — Full API reference and examples
+- **[Python](python/)** — Full API reference and examples
+- **[TypeScript](typescript/)** — Full API reference and examples
 
 ## License
 

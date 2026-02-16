@@ -9,12 +9,18 @@
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
   ],
   "changes": [
-    "Add project scripts (test.sh, update.sh, upgrade.sh) enabling convenient testing and dependency management across all four language implementations (Rust/Go/Python/TypeScript) from a single unified command at the repository root"
+    "Unify secret redaction across all 4 languages to redact ALL scalar types (numbers, booleans, null) to ***, not just strings, with containers recursively traversed \u2014 prevents accidental leakage of numeric secrets like API key IDs or token counts",
+    "Fix collision handling to revert BOTH the display key AND formatted value to raw when two keys strip to the same name, preventing ambiguous output where two different fields appear identical",
+    "Integrate extractCurrencyCode into production code path across Go/Python/TypeScript, supporting dynamic currency suffixes like _usd_cents and _eur_cents with both lowercase and UPPERCASE variants",
+    "Remove explicit JSON output sorting from Python and TypeScript, aligning with spec that JSON format preserves original key order for machine consumption",
+    "Add native Go int/int64 type support to suffix processing, enabling Go users to pass natural integer values without requiring float64 or json.Number conversion",
+    "Add 68 comprehensive Go output formatter tests and fix all 4 language README function signatures to exactly match actual code types",
+    "Lower minimum version requirements (Go 1.21, TypeScript 5.0) and clean up stale fixture files from old implementation"
   ],
   "license": "MIT",
   "references": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_87263352e8ea8cefaf28c3a9d89e33583d31318413b2bbcc24e069686248c26a",
+      "uri": "cmn://cmn.dev/spore/blake3_cf0f6d4d87eb2ce19244a3bbd401f630808b037b1fd36b33321f6580f7234c76",
       "relation": "spawned_from"
     }
   ],
