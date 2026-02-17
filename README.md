@@ -22,38 +22,38 @@ go get github.com/cmnspore/agent-first-data/go  # Go
 
 ## Quick Example
 
-Input JSON:
+A backup tool invoked from the CLI — flags, env vars, and config all use the same suffixes:
+
+```bash
+API_KEY_SECRET=sk-1234 cloudback --timeout-s 30 --max-file-size-bytes 10737418240 /data/backup.tar.gz
+```
+
+The tool reads env vars (`UPPER_SNAKE_CASE`), flags (`--kebab-case`), and config (`snake_case`) — all with AFD suffixes. It emits a startup message. Three output formats, same data:
+
+**JSON** (secrets redacted, original keys, for machines):
 ```json
-{
-  "created_at_epoch_ms": 1738886400000,
-  "file_size_bytes": 5242880,
-  "cache_ttl_s": 3600,
-  "api_key_secret": "sk-1234567890abcdef",
-  "user_name": "alice",
-  "count": 42
-}
+{"code":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
 ```
 
-**JSON** (single-line, secrets redacted, original keys):
-```
-{"api_key_secret":"***","cache_ttl_s":3600,"count":42,"created_at_epoch_ms":1738886400000,"file_size_bytes":5242880,"user_name":"alice"}
-```
-
-**YAML** (keys stripped, values formatted):
+**YAML** (suffixes stripped from keys, values formatted, for humans):
 ```yaml
 ---
-api_key: "***"
-cache_ttl: "3600s"
-count: 42
-created_at: "2025-02-07T00:00:00.000Z"
-file_size: "5.0MB"
-user_name: "alice"
+code: "startup"
+args:
+  input_path: "/data/backup.tar.gz"
+config:
+  max_file_size: "10.0GB"
+  timeout: "30s"
+env:
+  API_KEY: "***"
 ```
 
-**Plain** (single-line logfmt, keys stripped):
+**Plain** (single-line logfmt, keys stripped, for log scanning):
 ```
-api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_size=5.0MB user_name=alice
+args.input_path=/data/backup.tar.gz code=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
 ```
+
+`--timeout-s` → `timeout_s` → `timeout: 30s`. `API_KEY_SECRET` → `API_KEY: "***"`. Same suffixes flow through env vars, CLI flags, JSON, and formatted output — the suffix is the schema.
 
 ## API (9 functions, same across all languages)
 
