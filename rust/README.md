@@ -10,6 +10,44 @@ The field name is the schema. Agents read `latency_ms` and know milliseconds, `a
 cargo add agent-first-data
 ```
 
+## Quick Example
+
+A backup tool invoked from the CLI — flags, env vars, and config all use the same suffixes:
+
+```bash
+API_KEY_SECRET=sk-1234 cloudback --timeout-s 30 --max-file-size-bytes 10737418240 /data/backup.tar.gz
+```
+
+The tool reads env vars, flags, and config — all with AFD suffixes — and emits a startup message:
+
+```rust
+use agent_first_data::*;
+use serde_json::json;
+
+let startup = build_json_startup(
+    json!({"timeout_s": 30, "max_file_size_bytes": 10737418240u64}),
+    json!({"input_path": "/data/backup.tar.gz"}),
+    json!({"API_KEY_SECRET": std::env::var("API_KEY_SECRET").ok()}),
+);
+```
+
+Three output formats, same data:
+
+```
+JSON:  {"code":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
+YAML:  code: "startup"
+       args:
+         input_path: "/data/backup.tar.gz"
+       config:
+         max_file_size: "10.0GB"
+         timeout: "30s"
+       env:
+         API_KEY: "***"
+Plain: args.input_path=/data/backup.tar.gz code=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
+```
+
+`--timeout-s` → `timeout_s` → `timeout: 30s`. `API_KEY_SECRET` → `API_KEY: "***"`. The suffix is the schema.
+
 ## API Reference
 
 Total: **9 public APIs** + optional **AFD tracing** (4 protocol builders + 3 output functions + 1 internal + 1 utility)

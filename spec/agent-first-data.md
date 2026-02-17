@@ -36,14 +36,15 @@ Agent-First Data has three parts:
 
 # Part 1: Naming Convention
 
-Applies to all structured data: JSON, YAML, TOML, environment variables, config files, database columns, API responses, log fields.
+Applies to all structured data: JSON, YAML, TOML, CLI arguments, environment variables, config files, database columns, API responses, log fields.
 
 ## Design rules
 
-1. If a numeric value has a unit, encode the unit in the field name suffix.
-2. If a value is sensitive, end the field name with `_secret`.
-3. If the meaning is obvious from the name alone, no suffix is needed.
-4. Never rely on external metadata, companion fields, or documentation to convey what a field contains.
+1. **Name conveys meaning.** A reader should understand the field's purpose from the name alone, without seeing surrounding context or documentation. `data` could be anything — `request_body`, `search_results`, `cached_response` say exactly what it contains.
+2. **Unit in suffix.** If a numeric value has a unit, encode the unit in the field name suffix.
+3. **Secrets marked.** If a value is sensitive, end the field name with `_secret`.
+4. **Obvious needs no suffix.** If the meaning is obvious from the name alone, no suffix is needed.
+5. **Self-contained.** Never rely on external metadata, companion fields, or documentation to convey what a field contains.
 
 ## Suffixes
 
@@ -152,6 +153,45 @@ Fields whose meaning is obvious from the name alone:
 - Counts: `proof_count`, `relay_count`
 - Booleans: `search_enabled`, `forward_pulse`
 - Identifiers: `method`, `domain`, `model`, `backend`
+
+### CLI arguments
+
+Same suffixes, kebab-case. An agent reading `--help` output understands units and sensitivity without documentation:
+
+```
+--timeout-ms 5000          # milliseconds
+--cache-ttl-s 3600         # seconds
+--max-size-bytes 1048576   # bytes
+--api-key-secret sk-xxx    # redact from logs and process listings
+--buffer-size 10M          # human-readable config input (parse_size)
+--port 8080                # no suffix needed — meaning obvious
+--verbose                  # boolean flag — no suffix needed
+```
+
+**Long flags only.** Do not define single-letter short flags (`-s`, `-d`, `-l`). Short flags are ambiguous — `-s` could be `--synapse`, `--synopsis`, or `--source`. Agents parsing `--help` output cannot reliably interpret single-letter aliases. Always use the full `--kebab-case` form. The only exception is `-o` for `--output` and built-in flags like `-h`/`-V` from the argument parser.
+
+**Kebab → snake mapping.** CLI flags map 1:1 to JSON field names by replacing hyphens with underscores. When a CLI tool emits a `startup` message (Part 3), the `args` field uses the snake_case form:
+
+```bash
+myapp --cache-ttl-s 3600 --api-key-secret sk-xxx --max-size-bytes 1048576
+```
+
+```json
+{"code": "startup", "args": {"cache_ttl_s": 3600, "api_key_secret": "***", "max_size_bytes": 1048576}}
+```
+
+```yaml
+---
+code: "startup"
+args:
+  api_key: "***"
+  cache_ttl: "3600s"
+  max_size: "1.0MB"
+```
+
+The flag name, the JSON field name, and the formatted output all tell the same story. No mapping table, no `--help` prose explaining "timeout is in milliseconds" — the suffix is the documentation.
+
+**Secret flags** (`--api-key-secret`, `--database-url-secret`) are automatically redacted in startup messages, logs, and YAML/Plain output. Tools should also consider redacting them from `/proc` process listings where possible.
 
 ### Environment variables
 
@@ -616,7 +656,17 @@ All contexts can use the protocol structure from Part 3. Only `code` (required) 
 
 A complete example showing all three parts working together. A backup tool that uploads files to cloud storage.
 
+## CLI Invocation
+
+```bash
+cloudback --api-key-secret sk-1234567890abcdef --timeout-s 30 --max-file-size-bytes 10737418240 /data/backup.tar.gz
+```
+
+Flag names use AFD suffixes in kebab-case. An agent reading `--help` knows `--timeout-s` is seconds and `--api-key-secret` should be redacted — no documentation needed.
+
 ## Raw JSON (before output processing)
+
+The tool converts CLI flags from kebab-case to snake_case and emits a `startup` message:
 
 ```json
 {
@@ -721,7 +771,7 @@ code=ok result.checksum=sha256:abc123... result.size=10.0MB result.uploaded_at=2
 
 ## What This Demonstrates
 
-1. **Part 1 (Naming)**: Every field is self-describing — `api_key_secret` → redact, `timeout_s` → seconds, `max_file_size_bytes` → bytes, `uploaded_at_epoch_ms` → timestamp
+1. **Part 1 (Naming)**: Every field is self-describing — from CLI flags (`--timeout-s`, `--api-key-secret`) to JSON fields (`timeout_s`, `uploaded_at_epoch_ms`). Same suffixes, same semantics, kebab↔snake mapping
 
 2. **Part 2 (Output Processing)**: Three formats for different needs
    - JSON: single-line, original keys, raw values, for programs and logs
@@ -731,4 +781,4 @@ code=ok result.checksum=sha256:abc123... result.size=10.0MB result.uploaded_at=2
 
 3. **Part 3 (Protocol)**: Consistent structure across all output — `code` identifies message type, `trace` provides execution context, other fields flexible
 
-**Key insight**: An agent reading JSON output understands everything without documentation. `duration_ms: 15300` is 15.3 seconds. `uploaded_bytes: 3221225472` is 3.0GB. A human reading YAML/Plain output sees the same data with clean keys and formatted values: `duration: 15.3s`, `uploaded: 3.0GB`.
+**Key insight**: The same naming convention flows from CLI flag (`--timeout-s 30`) to JSON field (`timeout_s: 30`) to formatted output (`timeout: 30s`). An agent reading `--help`, JSON output, or YAML all gets the same self-describing semantics — no documentation needed at any layer.
