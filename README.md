@@ -9,7 +9,7 @@ Agent-First Data (AFD) is a convention for self-describing structured data:
 3. **Protocol** — Optional structured templates (`ok`, `error`, `startup`) with `trace` for execution context
 4. **Logging** — AFD-compliant structured logging with span support (per-language integration)
 
-See the full [specification](spec/agent-first-data.md).
+See the full [specification](spec/agent-first-data.md) and the [Claude Code skill](skills/agent-first-data.md) for AI-assisted development.
 
 ## Installation
 
