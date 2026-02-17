@@ -1,6 +1,6 @@
 {
   "name": "agent-first-data",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Agent-First Data (AFD) — suffix-driven output formatting and protocol templates for AI agents",
   "license": "MIT",
   "repository": {

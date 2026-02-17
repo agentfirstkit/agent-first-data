@@ -9,12 +9,13 @@
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
   ],
   "changes": [
-    "Rewrite all README Quick Examples to start from CLI invocation with environment variables (API_KEY_SECRET=sk-1234 cloudback --timeout-s 30 ...), demonstrating the full three-layer AFD flow: env vars (UPPER_SNAKE_CASE) \u2192 CLI flags (--kebab-case) \u2192 JSON (snake_case) \u2192 formatted output, with _SECRET auto-redaction at every layer"
+    "Add Repository section to all four language READMEs directing users to spec/ for the full AFD specification and skills/ for the Claude Code skill, and explaining that tests require the full repository due to shared cross-language fixtures",
+    "Update root README to reference the Claude Code skill alongside the specification, ensuring both resources are discoverable from the main entry point"
   ],
   "license": "MIT",
   "references": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_0be99f6056543c762d2d0847308150721bc342b55a8d70f8bf9f3cb368dd0cb5",
+      "uri": "cmn://cmn.dev/spore/blake3_86a5d02fa6a566f0d7195eaa76a73bc640cd037b0858b2f19addc83f7858345a",
       "relation": "spawned_from"
     }
   ],

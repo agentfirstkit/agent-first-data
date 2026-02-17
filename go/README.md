@@ -423,6 +423,21 @@ All formats automatically redact `_secret` fields.
 - **Currency**: `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents`
 - **Other**: `_percent`, `_secret` (auto-redacted in all formats)
 
+## Repository
+
+This package is part of the [agent-first-data](https://github.com/cmnspore/agent-first-data) repository, which also contains:
+
+- **`spec/`** — Full AFD specification with suffix definitions, protocol format rules, and cross-language test fixtures
+- **`skills/`** — Claude Code skill for AI agents working with AFD conventions
+
+To run tests, clone the full repository (tests use shared cross-language fixtures from `spec/fixtures/`):
+
+```bash
+git clone https://github.com/cmnspore/agent-first-data
+cd agent-first-data/go
+go test ./...
+```
+
 ## License
 
 MIT
