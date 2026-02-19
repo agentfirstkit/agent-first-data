@@ -1,5 +1,5 @@
 /**
- * Tests for AFD output formatting — driven by shared spec/fixtures.
+ * Tests for AFDATA output formatting — driven by shared spec/fixtures.
  */
 
 import { describe, it } from "node:test";
@@ -8,7 +8,6 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  buildJsonStartup,
   buildJsonOk,
   buildJsonError,
   buildJson,
@@ -48,7 +47,6 @@ describe("protocol fixtures", () => {
         case "ok_trace": result = buildJsonOk(args.result, args.trace); break;
         case "error": result = buildJsonError(args.message); break;
         case "error_trace": result = buildJsonError(args.message, args.trace); break;
-        case "startup": result = buildJsonStartup(args.config, args.args, args.env); break;
         case "status": result = buildJson(args.code, args.fields); break;
         default: throw new Error(`unknown type: ${tc.type}`);
       }

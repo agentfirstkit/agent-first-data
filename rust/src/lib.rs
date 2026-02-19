@@ -1,20 +1,15 @@
-//! Agent-First Data (AFD) output formatting and protocol templates.
+//! Agent-First Data (AFDATA) output formatting and protocol templates.
 //!
-//! 9 public APIs: 4 protocol builders + 3 output formatters + 1 redaction + 1 utility.
+//! 8 public APIs: 3 protocol builders + 3 output formatters + 1 redaction + 1 utility.
 
 #[cfg(feature = "tracing")]
-pub mod afd_tracing;
+pub mod afdata_tracing;
 
 use serde_json::Value;
 
 // ═══════════════════════════════════════════
 // Public API: Protocol Builders
 // ═══════════════════════════════════════════
-
-/// Build `{code: "startup", config: ..., args: ..., env: ...}`.
-pub fn build_json_startup(config: Value, args: Value, env: Value) -> Value {
-    serde_json::json!({"code": "startup", "config": config, "args": args, "env": env})
-}
 
 /// Build `{code: "ok", result: ..., trace?: ...}`.
 pub fn build_json_ok(result: Value, trace: Option<Value>) -> Value {

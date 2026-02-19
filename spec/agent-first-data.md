@@ -12,7 +12,7 @@ Agent-First Data has three parts:
 2. **[Output Processing](#part-2-output-processing)** (required) — suffix-driven formatting and automatic secret protection
 3. **[Protocol Template](#part-3-protocol-template-recommended-optional)** (optional) — structured format with `code` (required) and `trace` (recommended)
 
-**Parts 1 and 2 are the core.** Part 3 is optional — a recommended structure that works well with Parts 1 and 2, but you can use AFD naming with any JSON structure (REST APIs, GraphQL, databases, etc.).
+**Parts 1 and 2 are the core.** Part 3 is optional — a recommended structure that works well with Parts 1 and 2, but you can use AFDATA naming with any JSON structure (REST APIs, GraphQL, databases, etc.).
 
 **Jump to:**
 - [Quick Reference: All Suffixes](#quick-reference-all-suffixes)
@@ -170,19 +170,20 @@ Same suffixes, kebab-case. An agent reading `--help` output understands units an
 
 **Long flags only.** Do not define single-letter short flags (`-s`, `-d`, `-l`). Short flags are ambiguous — `-s` could be `--synapse`, `--synopsis`, or `--source`. Agents parsing `--help` output cannot reliably interpret single-letter aliases. Always use the full `--kebab-case` form. The only exception is `-o` for `--output` and built-in flags like `-h`/`-V` from the argument parser.
 
-**Kebab → snake mapping.** CLI flags map 1:1 to JSON field names by replacing hyphens with underscores. When a CLI tool emits a `startup` message (Part 3), the `args` field uses the snake_case form:
+**Kebab → snake mapping.** CLI flags map 1:1 to JSON field names by replacing hyphens with underscores. When a CLI tool emits a startup log event (Part 3), the `args` field uses the snake_case form:
 
 ```bash
 myapp --cache-ttl-s 3600 --api-key-secret sk-xxx --max-size-bytes 1048576
 ```
 
 ```json
-{"code": "startup", "args": {"cache_ttl_s": 3600, "api_key_secret": "***", "max_size_bytes": 1048576}}
+{"code": "log", "event": "startup", "args": {"cache_ttl_s": 3600, "api_key_secret": "***", "max_size_bytes": 1048576}}
 ```
 
 ```yaml
 ---
-code: "startup"
+code: "log"
+event: "startup"
 args:
   api_key: "***"
   cache_ttl: "3600s"
@@ -279,7 +280,7 @@ struct Event {
 }
 ```
 
-**Queries**: Column aliases in views or query results should also follow AFD naming:
+**Queries**: Column aliases in views or query results should also follow AFDATA naming:
 
 ```sql
 SELECT
@@ -336,6 +337,8 @@ CLI tools should support multiple output formats:
 
 ```
 --output json|yaml|plain
+--log startup,request,progress,retry,redirect
+--verbose
 ```
 
 Default is tool-defined. Interactive CLIs default to `yaml`, scripting/logging contexts to `json`.
@@ -355,7 +358,8 @@ Each JSON line becomes a YAML document, separated by `---`. Strings always quote
 
 ```yaml
 ---
-code: "startup"
+code: "log"
+event: "startup"
 config:
   api_key: "***"
   dns_ttl: "3600s"
@@ -381,7 +385,7 @@ Single-line [logfmt](https://brandur.org/logfmt) style. **Suffixes stripped from
 - Null values are empty: `RUST_LOG=`
 
 ```
-args.config_path=config.yml code=startup config.api_key=*** config.dns_ttl=3600s
+args.config_path=config.yml code=log event=startup config.api_key=*** config.dns_ttl=3600s
 code=ok result.hash=abc123 result.size=446.1KB trace.cost=2056msats trace.duration=1.28s
 ```
 
@@ -446,7 +450,7 @@ In plain logfmt, nested keys are flattened to dot notation before sorting. Sort 
 
 JSON output is unordered per the JSON specification. YAML and plain sort for deterministic, cross-language-consistent output.
 
-## Using AFD Without Part 3
+## Using AFDATA Without Part 3
 
 Parts 1 and 2 (naming + output processing) work with any JSON structure — no protocol template needed:
 
@@ -456,7 +460,7 @@ Parts 1 and 2 (naming + output processing) work with any JSON structure — no p
 
 Plain: `api_key=*** balance=50000000msats created_at=2025-02-07T00:00:00.000Z user_id=123`
 
-This works with REST APIs, GraphQL, database results, config files — anywhere you have structured data. Just use AFD naming and let output processing handle the rest.
+This works with REST APIs, GraphQL, database results, config files — anywhere you have structured data. Just use AFDATA naming and let output processing handle the rest.
 
 ---
 
@@ -467,7 +471,7 @@ A recommended structure for program output. This part is **optional** — adopt 
 ## Core Fields
 
 **Required:**
-- `code` — identifies the message type (`"startup"`, `"ok"`, `"error"`, or tool-defined)
+- `code` — identifies the message type (`"log"`, `"ok"`, `"error"`, or tool-defined)
 
 **Recommended:**
 - `trace` — execution context (duration, source, resource usage)
@@ -480,12 +484,12 @@ Programs emit JSONL to stdout — one JSON object per line. Every line has a `co
 
 | `code` | Meaning |
 |:-------|:--------|
-| `"startup"` | Program startup state |
+| `"log"` | Diagnostic event (`event` field identifies startup/request/progress/retry/redirect) |
 | `"ok"` | Success result |
 | `"error"` | Generic error (prefer specific codes) |
 | tool-defined | Status / errors / progress |
 
-Three values are reserved: `startup`, `ok`, `error`. All other values are tool-defined.
+Three values are reserved: `log`, `ok`, `error`. All other values are tool-defined.
 
 **Error codes:** Use specific codes instead of generic `"error"`:
 - `"not_found"`, `"unauthorized"`, `"validation_error"`, `"rate_limit"`, `"internal_error"`, etc.
@@ -496,17 +500,20 @@ Three values are reserved: `startup`, `ok`, `error`. All other values are tool-d
 
 Not all phases are required. A simple CLI tool may emit only a result line. A long-running service may never emit a result.
 
-### Startup
+### Startup Diagnostic Event
 
-`code: "startup"`. Optional. Emitted once at the beginning if the program has configuration.
+`code: "log", event: "startup"`. Optional. Emitted once at the beginning if diagnostic logging is enabled.
 
 ```json
-{"code": "startup", "config": {"api_key_secret": "***", "dns_ttl_s": 3600}, "args": {"config_path": "config.yml"}, "env": {"RUST_LOG": null, "DATABASE_URL_SECRET": "***"}}
+{"code": "log", "event": "startup", "version": "0.1.0", "argv": ["tool", "--log", "startup"], "config": {"api_key_secret": "***", "dns_ttl_s": 3600}, "args": {"config_path": "config.yml"}, "env": {"RUST_LOG": null, "DATABASE_URL_SECRET": "***"}}
 ```
 
-- `config` — loaded configuration
-- `args` — parsed CLI arguments
-- `env` — environment variables the program reads (`null` if unset)
+Startup payload fields are tool-defined. Common fields:
+- `version` — tool version string
+- `argv` — raw CLI argv array
+- `config` — resolved configuration (recommended)
+- `args` — parsed CLI arguments (optional)
+- `env` — environment variables the program reads (`null` if unset, optional)
 
 ### Status
 
@@ -594,7 +601,7 @@ Missing `trace` makes debugging harder. Agents can't analyze performance, cost, 
 ### Agent consumption
 
 1. Read `code` on every line.
-2. `"startup"` → understand configuration.
+2. `{"code":"log","event":"startup",...}` → understand configuration.
 3. `"ok"` or `"error"` → operation complete.
 4. Anything else → status/progress, tool-specific.
 
@@ -634,7 +641,7 @@ Same structure, raw JSON:
 JSONL stream, raw JSON per line:
 
 ```json
-{"code": "startup", "config": {"model": "gpt-4", "max_tokens": 1024}, "args": {}, "env": {}}
+{"code": "log", "event": "startup", "config": {"model": "gpt-4", "max_tokens": 1024}, "args": {}, "env": {}}
 {"code": "progress", "current": 1, "total": 5, "message": "processing", "trace": {"duration_ms": 500}}
 {"code": "ok", "result": {"answer": "..."}, "trace": {"tokens_input": 512, "duration_ms": 1280}}
 ```
@@ -662,15 +669,16 @@ A complete example showing all three parts working together. A backup tool that 
 cloudback --api-key-secret sk-1234567890abcdef --timeout-s 30 --max-file-size-bytes 10737418240 /data/backup.tar.gz
 ```
 
-Flag names use AFD suffixes in kebab-case. An agent reading `--help` knows `--timeout-s` is seconds and `--api-key-secret` should be redacted — no documentation needed.
+Flag names use AFDATA suffixes in kebab-case. An agent reading `--help` knows `--timeout-s` is seconds and `--api-key-secret` should be redacted — no documentation needed.
 
 ## Raw JSON (before output processing)
 
-The tool converts CLI flags from kebab-case to snake_case and emits a `startup` message:
+The tool converts CLI flags from kebab-case to snake_case and emits a startup diagnostic event when enabled:
 
 ```json
 {
-  "code": "startup",
+  "code": "log",
+  "event": "startup",
   "config": {
     "api_key_secret": "sk-1234567890abcdef",
     "endpoint": "https://storage.example.com",
@@ -693,13 +701,14 @@ Field names encode semantics:
 
 **JSON** (raw, for machines):
 ```json
-{"code":"startup","config":{"api_key_secret":"***","endpoint":"https://storage.example.com","timeout_s":30,"max_file_size_bytes":10737418240},"args":{"input_path":"/data/backup.tar.gz","compression_level":9}}
+{"code":"log","event":"startup","config":{"api_key_secret":"***","endpoint":"https://storage.example.com","timeout_s":30,"max_file_size_bytes":10737418240},"args":{"input_path":"/data/backup.tar.gz","compression_level":9}}
 ```
 
 **YAML** (structured, keys stripped, for human inspection):
 ```yaml
 ---
-code: "startup"
+code: "log"
+event: "startup"
 args:
   compression_level: 9
   input_path: "/data/backup.tar.gz"
@@ -712,7 +721,7 @@ config:
 
 **Plain** (single-line logfmt, keys stripped, for compact scanning):
 ```
-args.compression_level=9 args.input_path=/data/backup.tar.gz code=startup config.api_key=*** config.endpoint=https://storage.example.com config.max_file_size=10.0GB config.timeout=30s
+args.compression_level=9 args.input_path=/data/backup.tar.gz code=log event=startup config.api_key=*** config.endpoint=https://storage.example.com config.max_file_size=10.0GB config.timeout=30s
 ```
 
 Note:

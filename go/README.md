@@ -1,6 +1,6 @@
 # agent-first-data
 
-**Agent-First Data (AFD)** — Suffix-driven output formatting and protocol templates for AI agents.
+**Agent-First Data (AFDATA)** — Suffix-driven output formatting and protocol templates for AI agents.
 
 The field name is the schema. Agents read `latency_ms` and know milliseconds, `api_key_secret` and know to redact, no external schema needed.
 
@@ -18,23 +18,38 @@ A backup tool invoked from the CLI — flags, env vars, and config all use the s
 API_KEY_SECRET=sk-1234 cloudback --timeout-s 30 --max-file-size-bytes 10737418240 /data/backup.tar.gz
 ```
 
-The tool reads env vars, flags, and config — all with AFD suffixes — and emits a startup message:
+For CLI diagnostics, enable log categories explicitly:
+
+```bash
+--log startup,request,progress,retry,redirect
+--verbose   # shorthand for all categories
+```
+
+Without these flags, startup diagnostics should stay off by default.
+
+The tool reads env vars, flags, and config — all with AFDATA suffixes — and can emit a startup diagnostic event:
 
 ```go
-import afd "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/cmnspore/agent-first-data/go"
 
-startup := afd.BuildJsonStartup(
-    map[string]any{"timeout_s": 30, "max_file_size_bytes": 10737418240},
-    map[string]any{"input_path": "/data/backup.tar.gz"},
-    map[string]any{"API_KEY_SECRET": os.Getenv("API_KEY_SECRET")},
+startup := afdata.BuildJson(
+    "log",
+    map[string]any{
+        "event":  "startup",
+        "config": map[string]any{"timeout_s": 30, "max_file_size_bytes": 10737418240},
+        "args":   map[string]any{"input_path": "/data/backup.tar.gz"},
+        "env":    map[string]any{"API_KEY_SECRET": os.Getenv("API_KEY_SECRET")},
+    },
+    nil,
 )
 ```
 
 Three output formats, same data:
 
 ```
-JSON:  {"code":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
-YAML:  code: "startup"
+JSON:  {"code":"log","event":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
+YAML:  code: "log"
+       event: "startup"
        args:
          input_path: "/data/backup.tar.gz"
        config:
@@ -42,23 +57,20 @@ YAML:  code: "startup"
          timeout: "30s"
        env:
          API_KEY: "***"
-Plain: args.input_path=/data/backup.tar.gz code=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
+Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
 ```
 
 `--timeout-s` → `timeout_s` → `timeout: 30s`. `API_KEY_SECRET` → `API_KEY: "***"`. The suffix is the schema.
 
 ## API Reference
 
-Total: **9 public APIs** + **AFD logging** (4 protocol builders + 3 output functions + 1 internal + 1 utility)
+Total: **8 public APIs** + **AFDATA logging** (3 protocol builders + 3 output functions + 1 internal + 1 utility)
 
 ### Protocol Builders (returns map[string]any)
 
-Build AFD protocol structures. Return JSON-serializable objects for API responses.
+Build AFDATA protocol structures. Return JSON-serializable objects for API responses.
 
 ```go
-// Startup (configuration)
-BuildJsonStartup(config, args, env any) map[string]any
-
 // Success (result)
 BuildJsonOk(result any, trace any) map[string]any
 
@@ -73,26 +85,31 @@ BuildJson(code string, fields any, trace any) map[string]any
 
 **Example:**
 ```go
-import afd "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/cmnspore/agent-first-data/go"
 
 // Startup
-startup := afd.BuildJsonStartup(
-    map[string]any{"api_key_secret": "sk-123", "timeout_s": 30},
-    map[string]any{"config_path": "config.yml"},
-    map[string]any{"RUST_LOG": "info"},
+startup := afdata.BuildJson(
+    "log",
+    map[string]any{
+        "event":  "startup",
+        "config": map[string]any{"api_key_secret": "sk-123", "timeout_s": 30},
+        "args":   map[string]any{"config_path": "config.yml"},
+        "env":    map[string]any{"RUST_LOG": "info"},
+    },
+    nil,
 )
 
 // Success (always include trace)
-response := afd.BuildJsonOk(
+response := afdata.BuildJsonOk(
     map[string]any{"user_id": 123},
     map[string]any{"duration_ms": 150, "source": "db"},
 )
 
 // Error
-err := afd.BuildJsonError("user not found", map[string]any{"duration_ms": 5})
+err := afdata.BuildJsonError("user not found", map[string]any{"duration_ms": 5})
 
 // Specific error code
-notFound := afd.BuildJson(
+notFound := afdata.BuildJson(
     "not_found",
     map[string]any{"resource": "user", "id": 123},
     map[string]any{"duration_ms": 8},
@@ -111,7 +128,7 @@ OutputPlain(value any) string  // Single-line logfmt, keys stripped, values form
 
 **Example:**
 ```go
-import afd "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/cmnspore/agent-first-data/go"
 
 data := map[string]any{
     "user_id":              123,
@@ -121,11 +138,11 @@ data := map[string]any{
 }
 
 // JSON (secrets redacted, original keys, raw values)
-fmt.Println(afd.OutputJson(data))
+fmt.Println(afdata.OutputJson(data))
 // {"api_key_secret":"***","created_at_epoch_ms":1738886400000,"file_size_bytes":5242880,"user_id":123}
 
 // YAML (keys stripped, values formatted, secrets redacted)
-fmt.Println(afd.OutputYaml(data))
+fmt.Println(afdata.OutputYaml(data))
 // ---
 // api_key: "***"
 // created_at: "2025-02-07T00:00:00.000Z"
@@ -133,7 +150,7 @@ fmt.Println(afd.OutputYaml(data))
 // user_id: 123
 
 // Plain logfmt (keys stripped, values formatted, secrets redacted)
-fmt.Println(afd.OutputPlain(data))
+fmt.Println(afdata.OutputPlain(data))
 // api_key=*** created_at=2025-02-07T00:00:00.000Z file_size=5.0MB user_id=123
 ```
 
@@ -153,11 +170,11 @@ ParseSize(s string) (uint64, bool)  // Parse "10M" → bytes
 
 **Example:**
 ```go
-import afd "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/cmnspore/agent-first-data/go"
 
-size, _ := afd.ParseSize("10M")   // 10485760
-size, _ = afd.ParseSize("1.5K")   // 1536
-size, _ = afd.ParseSize("512")    // 512
+size, _ := afdata.ParseSize("10M")   // 10485760
+size, _ = afdata.ParseSize("1.5K")   // 1536
+size, _ = afdata.ParseSize("512")    // 512
 ```
 
 ## Usage Examples
@@ -165,10 +182,10 @@ size, _ = afd.ParseSize("512")    // 512
 ### Example 1: REST API
 
 ```go
-import afd "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/cmnspore/agent-first-data/go"
 
 func getUserHandler(w http.ResponseWriter, r *http.Request) {
-    response := afd.BuildJsonOk(
+    response := afdata.BuildJsonOk(
         map[string]any{"user_id": 123, "name": "alice"},
         map[string]any{"duration_ms": 150, "source": "db"},
     )
@@ -180,18 +197,24 @@ func getUserHandler(w http.ResponseWriter, r *http.Request) {
 ### Example 2: CLI Tool (Complete Lifecycle)
 
 ```go
-import afd "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/cmnspore/agent-first-data/go"
 
 func main() {
     // 1. Startup
-    startup := afd.BuildJsonStartup(
-        map[string]any{"api_key_secret": "sk-sensitive-key", "timeout_s": 30},
-        map[string]any{"input_path": "data.json"},
-        map[string]any{"RUST_LOG": "info"},
+    startup := afdata.BuildJson(
+        "log",
+        map[string]any{
+            "event":  "startup",
+            "config": map[string]any{"api_key_secret": "sk-sensitive-key", "timeout_s": 30},
+            "args":   map[string]any{"input_path": "data.json"},
+            "env":    map[string]any{"RUST_LOG": "info"},
+        },
+        nil,
     )
-    fmt.Println(afd.OutputYaml(startup))
+    fmt.Println(afdata.OutputYaml(startup))
     // ---
-    // code: "startup"
+    // code: "log"
+    // event: "startup"
     // args:
     //   input_path: "data.json"
     // config:
@@ -201,16 +224,16 @@ func main() {
     //   RUST_LOG: "info"
 
     // 2. Progress
-    progress := afd.BuildJson(
+    progress := afdata.BuildJson(
         "progress",
         map[string]any{"current": 3, "total": 10, "message": "processing"},
         map[string]any{"duration_ms": 1500},
     )
-    fmt.Println(afd.OutputPlain(progress))
+    fmt.Println(afdata.OutputPlain(progress))
     // code=progress current=3 message=processing total=10 trace.duration=1.5s
 
     // 3. Result
-    result := afd.BuildJsonOk(
+    result := afdata.BuildJsonOk(
         map[string]any{
             "records_processed":    10,
             "file_size_bytes":      5242880,
@@ -218,7 +241,7 @@ func main() {
         },
         map[string]any{"duration_ms": 3500, "source": "file"},
     )
-    fmt.Println(afd.OutputYaml(result))
+    fmt.Println(afdata.OutputYaml(result))
     // ---
     // code: "ok"
     // result:
@@ -234,16 +257,16 @@ func main() {
 ### Example 3: JSONL Output
 
 ```go
-import afd "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/cmnspore/agent-first-data/go"
 
 func processRequest() {
-    result := afd.BuildJsonOk(
+    result := afdata.BuildJsonOk(
         map[string]any{"status": "success"},
         map[string]any{"duration_ms": 250, "api_key_secret": "sk-123"},
     )
 
     // Print JSONL to stdout (secrets redacted, one JSON object per line)
-    fmt.Println(afd.OutputJson(result))
+    fmt.Println(afdata.OutputJson(result))
     // {"code":"ok","result":{"status":"success"},"trace":{"api_key_secret":"***","duration_ms":250}}
 }
 ```
@@ -251,7 +274,7 @@ func processRequest() {
 ## Complete Suffix Example
 
 ```go
-import afd "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/cmnspore/agent-first-data/go"
 
 data := map[string]any{
     "created_at_epoch_ms":   int64(1738886400000),
@@ -267,7 +290,7 @@ data := map[string]any{
 }
 
 // YAML output (keys stripped, values formatted, secrets redacted)
-fmt.Println(afd.OutputYaml(data))
+fmt.Println(afdata.OutputYaml(data))
 // ---
 // api_key: "***"
 // cache_ttl: "3600s"
@@ -281,49 +304,49 @@ fmt.Println(afd.OutputYaml(data))
 // user_name: "alice"
 
 // Plain logfmt output (same transformations, single line)
-fmt.Println(afd.OutputPlain(data))
+fmt.Println(afdata.OutputPlain(data))
 // api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_size=5.0MB payment=50000000msats price=$99.99 request_timeout=5.0s success_rate=95.5% user_name=alice
 ```
 
-## AFD Logging
+## AFDATA Logging
 
-AFD-compliant structured logging via Go's `log/slog`. Every log line is formatted using the library's own `OutputJson`/`OutputPlain`/`OutputYaml` functions. Span fields are carried via `WithAttrs` / context, automatically flattened into each log line.
+AFDATA-compliant structured logging via Go's `log/slog`. Every log line is formatted using the library's own `OutputJson`/`OutputPlain`/`OutputYaml` functions. Span fields are carried via `WithAttrs` / context, automatically flattened into each log line.
 
 ### API
 
 ```go
-import afd "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/cmnspore/agent-first-data/go"
 
-// Convenience initializers — set up the default slog logger with AFD output to stdout
-afd.InitJson()    // Single-line JSONL (secrets redacted, original keys)
-afd.InitPlain()   // Single-line logfmt (keys stripped, values formatted)
-afd.InitYaml()    // Multi-line YAML (keys stripped, values formatted)
+// Convenience initializers — set up the default slog logger with AFDATA output to stdout
+afdata.InitJson()    // Single-line JSONL (secrets redacted, original keys)
+afdata.InitPlain()   // Single-line logfmt (keys stripped, values formatted)
+afdata.InitYaml()    // Multi-line YAML (keys stripped, values formatted)
 
 // Low-level — create a handler for custom logger stacks
-afd.NewAfdHandler(w io.Writer, format LogFormat) *AfdHandler  // implements slog.Handler
-afd.FormatJson | afd.FormatPlain | afd.FormatYaml
+afdata.NewAfdataHandler(w io.Writer, format LogFormat) *AfdataHandler  // implements slog.Handler
+afdata.FormatJson | afdata.FormatPlain | afdata.FormatYaml
 
 // Context-based spans for concurrent code
-afd.WithSpan(ctx context.Context, fields map[string]any) context.Context
-afd.LoggerFromContext(ctx context.Context) *slog.Logger
+afdata.WithSpan(ctx context.Context, fields map[string]any) context.Context
+afdata.LoggerFromContext(ctx context.Context) *slog.Logger
 
 // Global span (non-concurrent, uses slog.SetDefault)
-afd.Span(fields map[string]any, fn func())
+afdata.Span(fields map[string]any, fn func())
 ```
 
 ### Setup
 
 ```go
-import afd "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/cmnspore/agent-first-data/go"
 
 // JSON output for production (one JSONL line per event, secrets redacted)
-afd.InitJson()
+afdata.InitJson()
 
 // Plain logfmt for development (keys stripped, values formatted)
-afd.InitPlain()
+afdata.InitPlain()
 
 // YAML for detailed inspection (multi-line, keys stripped, values formatted)
-afd.InitYaml()
+afdata.InitYaml()
 ```
 
 ### Log Output
@@ -362,10 +385,10 @@ reqLogger.Warn("Not found", "path", "/users/42")
 For concurrent code (goroutines), use context-based spans:
 
 ```go
-ctx := afd.WithSpan(ctx, map[string]any{"request_id": uuid})
+ctx := afdata.WithSpan(ctx, map[string]any{"request_id": uuid})
 
 // In handler or goroutine
-logger := afd.LoggerFromContext(ctx)
+logger := afdata.LoggerFromContext(ctx)
 logger.Info("Handling request", "method", "GET")
 // {"timestamp_epoch_ms":...,"message":"Handling request","request_id":"abc-123","method":"GET","code":"info"}
 ```
@@ -375,8 +398,8 @@ logger.Info("Handling request", "method", "GET")
 The `code` field defaults to the log level. Override with an explicit field:
 
 ```go
-slog.Info("Server ready", "code", "startup")
-// {"timestamp_epoch_ms":...,"message":"Server ready","code":"startup"}
+slog.Info("Server ready", "code", "log", "event", "startup")
+// {"timestamp_epoch_ms":...,"message":"Server ready","code":"log","event":"startup"}
 ```
 
 ### Output Fields
@@ -393,7 +416,7 @@ Every log line contains:
 
 ### Log Output Formats
 
-All three formats use the library's own output functions, so AFD suffix processing applies to log fields too:
+All three formats use the library's own output functions, so AFDATA suffix processing applies to log fields too:
 
 | Format | Function | Keys | Values | Use case |
 |:-------|:---------|:-----|:-------|:---------|
@@ -427,8 +450,8 @@ All formats automatically redact `_secret` fields.
 
 This package is part of the [agent-first-data](https://github.com/cmnspore/agent-first-data) repository, which also contains:
 
-- **`spec/`** — Full AFD specification with suffix definitions, protocol format rules, and cross-language test fixtures
-- **`skills/`** — Claude Code skill for AI agents working with AFD conventions
+- **`spec/`** — Full AFDATA specification with suffix definitions, protocol format rules, and cross-language test fixtures
+- **`skills/`** — AI coding agent skill for working with AFDATA conventions
 
 To run tests, clone the full repository (tests use shared cross-language fixtures from `spec/fixtures/`):
 

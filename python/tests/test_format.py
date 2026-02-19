@@ -1,10 +1,9 @@
-"""Tests for AFD output formatting — driven by shared spec/fixtures."""
+"""Tests for AFDATA output formatting — driven by shared spec/fixtures."""
 
 import json
 import os
 
 from agent_first_data import (
-    build_json_startup,
     build_json_ok,
     build_json_error,
     build_json,
@@ -52,8 +51,6 @@ def test_protocol_fixtures():
             result = build_json_error(args["message"])
         elif typ == "error_trace":
             result = build_json_error(args["message"], args["trace"])
-        elif typ == "startup":
-            result = build_json_startup(args["config"], args["args"], args["env"])
         elif typ == "status":
             result = build_json(args["code"], args.get("fields"))
         else:

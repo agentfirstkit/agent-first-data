@@ -1,4 +1,4 @@
-package afd
+package afdata
 
 import (
 	"encoding/json"
@@ -71,8 +71,6 @@ func TestProtocolFixtures(t *testing.T) {
 				result = BuildJsonError(args["message"].(string), nil)
 			case "error_trace":
 				result = BuildJsonError(args["message"].(string), args["trace"])
-			case "startup":
-				result = BuildJsonStartup(args["config"], args["args"], args["env"])
 			case "status":
 				result = BuildJson(args["code"].(string), args["fields"], nil)
 			default:

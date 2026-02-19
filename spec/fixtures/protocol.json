@@ -24,12 +24,6 @@
     "expected": {"code": "error", "error": "fail", "trace": {"duration_ms": 3}}
   },
   {
-    "name": "startup",
-    "type": "startup",
-    "args": {"config": {"model": "x"}, "args": {"path": "a"}, "env": {"LOG": null}},
-    "expected": {"code": "startup", "config": {"model": "x"}, "args": {"path": "a"}, "env": {"LOG": null}}
-  },
-  {
     "name": "status",
     "type": "status",
     "args": {"code": "progress", "fields": {"current": 3, "total": 10}},

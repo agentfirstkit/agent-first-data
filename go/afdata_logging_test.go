@@ -1,4 +1,4 @@
-package afd
+package afdata
 
 import (
 	"bytes"
@@ -18,9 +18,9 @@ func parseJSONLine(t *testing.T, buf *bytes.Buffer) map[string]any {
 	return m
 }
 
-func TestAfdHandlerBasicFields(t *testing.T) {
+func TestAfdataHandlerBasicFields(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(NewAfdHandler(&buf, FormatJson))
+	logger := slog.New(NewAfdataHandler(&buf, FormatJson))
 
 	logger.Info("hello world")
 	m := parseJSONLine(t, &buf)
@@ -36,7 +36,7 @@ func TestAfdHandlerBasicFields(t *testing.T) {
 	}
 }
 
-func TestAfdHandlerLevelCodes(t *testing.T) {
+func TestAfdataHandlerLevelCodes(t *testing.T) {
 	tests := []struct {
 		level slog.Level
 		code  string
@@ -49,7 +49,7 @@ func TestAfdHandlerLevelCodes(t *testing.T) {
 
 	for _, tt := range tests {
 		var buf bytes.Buffer
-		logger := slog.New(NewAfdHandler(&buf, FormatJson))
+		logger := slog.New(NewAfdataHandler(&buf, FormatJson))
 		logger.Log(context.Background(), tt.level, "test")
 		m := parseJSONLine(t, &buf)
 		if m["code"] != tt.code {
@@ -58,9 +58,9 @@ func TestAfdHandlerLevelCodes(t *testing.T) {
 	}
 }
 
-func TestAfdHandlerCodeOverride(t *testing.T) {
+func TestAfdataHandlerCodeOverride(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(NewAfdHandler(&buf, FormatJson))
+	logger := slog.New(NewAfdataHandler(&buf, FormatJson))
 
 	logger.Info("ready", "code", "startup")
 	m := parseJSONLine(t, &buf)
@@ -70,9 +70,9 @@ func TestAfdHandlerCodeOverride(t *testing.T) {
 	}
 }
 
-func TestAfdHandlerWithAttrsSpan(t *testing.T) {
+func TestAfdataHandlerWithAttrsSpan(t *testing.T) {
 	var buf bytes.Buffer
-	handler := NewAfdHandler(&buf, FormatJson)
+	handler := NewAfdataHandler(&buf, FormatJson)
 
 	// Simulate a span by creating a child handler with attrs
 	child := handler.WithAttrs([]slog.Attr{slog.String("request_id", "abc-123")})
@@ -92,9 +92,9 @@ func TestAfdHandlerWithAttrsSpan(t *testing.T) {
 	}
 }
 
-func TestAfdHandlerEventOverridesSpan(t *testing.T) {
+func TestAfdataHandlerEventOverridesSpan(t *testing.T) {
 	var buf bytes.Buffer
-	handler := NewAfdHandler(&buf, FormatJson)
+	handler := NewAfdataHandler(&buf, FormatJson)
 
 	child := handler.WithAttrs([]slog.Attr{slog.String("source", "parent")})
 	logger := slog.New(child)
@@ -109,7 +109,7 @@ func TestAfdHandlerEventOverridesSpan(t *testing.T) {
 
 func TestWithSpanContext(t *testing.T) {
 	var buf bytes.Buffer
-	handler := NewAfdHandler(&buf, FormatJson)
+	handler := NewAfdataHandler(&buf, FormatJson)
 	slog.SetDefault(slog.New(handler))
 
 	ctx := context.Background()
@@ -126,7 +126,7 @@ func TestWithSpanContext(t *testing.T) {
 
 func TestNestedSpanContext(t *testing.T) {
 	var buf bytes.Buffer
-	handler := NewAfdHandler(&buf, FormatJson)
+	handler := NewAfdataHandler(&buf, FormatJson)
 	slog.SetDefault(slog.New(handler))
 
 	ctx := context.Background()
@@ -145,9 +145,9 @@ func TestNestedSpanContext(t *testing.T) {
 	}
 }
 
-func TestAfdHandlerPlainFormat(t *testing.T) {
+func TestAfdataHandlerPlainFormat(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(NewAfdHandler(&buf, FormatPlain))
+	logger := slog.New(NewAfdataHandler(&buf, FormatPlain))
 
 	logger.Info("hello")
 	line := buf.String()
@@ -168,9 +168,9 @@ func TestAfdHandlerPlainFormat(t *testing.T) {
 	}
 }
 
-func TestAfdHandlerYamlFormat(t *testing.T) {
+func TestAfdataHandlerYamlFormat(t *testing.T) {
 	var buf bytes.Buffer
-	logger := slog.New(NewAfdHandler(&buf, FormatYaml))
+	logger := slog.New(NewAfdataHandler(&buf, FormatYaml))
 
 	logger.Info("hello")
 	line := buf.String()

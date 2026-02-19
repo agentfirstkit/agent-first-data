@@ -1,4 +1,4 @@
-"""AFD-compliant structured logging.
+"""AFDATA-compliant structured logging.
 
 Outputs log events using agent-first-data formatting functions:
 - JSON: single-line JSONL via output_json (secrets redacted, original keys)
@@ -8,7 +8,7 @@ Outputs log events using agent-first-data formatting functions:
 Span fields are carried via contextvars (async-safe).
 
 Usage:
-    from agent_first_data.afd_logging import init_json, init_plain, init_yaml, span
+    from agent_first_data.afdata_logging import init_json, init_plain, init_yaml, span
     import logging
 
     init_json("INFO")   # or init_plain("INFO") or init_yaml("DEBUG")
@@ -25,7 +25,7 @@ from typing import Any
 
 from agent_first_data.format import output_json, output_plain, output_yaml
 
-_span_fields: ContextVar[dict[str, Any]] = ContextVar("afd_span", default={})
+_span_fields: ContextVar[dict[str, Any]] = ContextVar("afdata_span", default={})
 
 _LEVEL_TO_CODE = {
     "CRITICAL": "error",
@@ -38,8 +38,8 @@ _LEVEL_TO_CODE = {
 }
 
 
-class AfdHandler(logging.Handler):
-    """Logging handler that outputs AFD-compliant log lines to stdout.
+class AfdataHandler(logging.Handler):
+    """Logging handler that outputs AFDATA-compliant log lines to stdout.
 
     Formats output using the library's own output_json/output_plain/output_yaml.
     """
@@ -64,7 +64,7 @@ class AfdHandler(logging.Handler):
 
         # Event fields (passed via extra= in logging calls)
         has_code = False
-        extra = getattr(record, "_afd_fields", None)
+        extra = getattr(record, "_afdata_fields", None)
         if extra:
             for k, v in extra.items():
                 if k == "code":
@@ -88,11 +88,11 @@ class AfdHandler(logging.Handler):
 
 
 # Keep old name as alias for backwards compat
-AfdJsonHandler = AfdHandler
+AfdataJsonHandler = AfdataHandler
 
 
-class _AfdLoggerAdapter(logging.LoggerAdapter):
-    """Logger adapter that passes extra fields to AfdHandler."""
+class _AfdataLoggerAdapter(logging.LoggerAdapter):
+    """Logger adapter that passes extra fields to AfdataHandler."""
 
     def process(self, msg: str, kwargs: Any) -> tuple[str, Any]:
         extra = kwargs.get("extra", {})
@@ -100,29 +100,29 @@ class _AfdLoggerAdapter(logging.LoggerAdapter):
             merged = {**self.extra, **extra}
         else:
             merged = extra
-        kwargs["extra"] = {"_afd_fields": merged}
+        kwargs["extra"] = {"_afdata_fields": merged}
         return msg, kwargs
 
 
 def _init_with_format(format: str, level: str = "INFO") -> None:
-    handler = AfdHandler(format=format)
+    handler = AfdataHandler(format=format)
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
 
 def init_json(level: str = "INFO") -> None:
-    """Initialize the root logger with AFD JSON output to stdout."""
+    """Initialize the root logger with AFDATA JSON output to stdout."""
     _init_with_format("json", level)
 
 
 def init_plain(level: str = "INFO") -> None:
-    """Initialize the root logger with AFD plain/logfmt output to stdout."""
+    """Initialize the root logger with AFDATA plain/logfmt output to stdout."""
     _init_with_format("plain", level)
 
 
 def init_yaml(level: str = "INFO") -> None:
-    """Initialize the root logger with AFD YAML output to stdout."""
+    """Initialize the root logger with AFDATA YAML output to stdout."""
     _init_with_format("yaml", level)
 
 
@@ -133,7 +133,7 @@ def get_logger(name: str, **fields: Any) -> logging.LoggerAdapter:
     Use for per-module or per-component fields.
     """
     base = logging.getLogger(name)
-    return _AfdLoggerAdapter(base, fields)
+    return _AfdataLoggerAdapter(base, fields)
 
 
 class span:
