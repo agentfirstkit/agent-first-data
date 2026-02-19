@@ -1,7 +1,7 @@
 /**
- * AFD output formatting and protocol templates.
+ * AFDATA output formatting and protocol templates.
  *
- * 9 public APIs: 4 protocol builders + 3 output formatters + 1 redaction + 1 utility.
+ * 8 public APIs: 3 protocol builders + 3 output formatters + 1 redaction + 1 utility.
  */
 
 export type JsonValue =
@@ -15,11 +15,6 @@ export type JsonValue =
 // ═══════════════════════════════════════════
 // Public API: Protocol Builders
 // ═══════════════════════════════════════════
-
-/** Build {code: "startup", config, args, env}. */
-export function buildJsonStartup(config: JsonValue, args: JsonValue, env: JsonValue): JsonValue {
-  return { code: "startup", config, args, env };
-}
 
 /** Build {code: "ok", result, trace?}. */
 export function buildJsonOk(result: JsonValue, trace?: JsonValue): JsonValue {

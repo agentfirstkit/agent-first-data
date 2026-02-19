@@ -1,8 +1,8 @@
-// Package afd implements Agent-First Data (AFD) output formatting
+// Package afdata implements Agent-First Data (AFDATA) output formatting
 // and protocol templates.
 //
-// 9 public APIs: 4 protocol builders + 3 output formatters + 1 redaction + 1 utility.
-package afd
+// 8 public APIs: 3 protocol builders + 3 output formatters + 1 redaction + 1 utility.
+package afdata
 
 import (
 	"encoding/json"
@@ -19,11 +19,6 @@ import (
 // ═══════════════════════════════════════════
 // Public API: Protocol Builders
 // ═══════════════════════════════════════════
-
-// BuildJsonStartup builds {code: "startup", config, args, env}.
-func BuildJsonStartup(config, args, env any) map[string]any {
-	return map[string]any{"code": "startup", "config": config, "args": args, "env": env}
-}
 
 // BuildJsonOk builds {code: "ok", result, trace?}.
 func BuildJsonOk(result any, trace any) map[string]any {

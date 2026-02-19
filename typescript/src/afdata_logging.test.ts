@@ -1,10 +1,10 @@
 /**
- * Tests for AFD logging module.
+ * Tests for AFDATA logging module.
  */
 
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { log, span, initJson, initPlain, initYaml } from "./afd_logging.ts";
+import { log, span, initJson, initPlain, initYaml } from "./afdata_logging.ts";
 
 // Capture stdout writes
 let captured: string[] = [];
@@ -28,7 +28,7 @@ function lastLine(): Record<string, unknown> {
   return JSON.parse(lines[lines.length - 1]);
 }
 
-describe("afd_logging", () => {
+describe("afdata_logging", () => {
   beforeEach(() => startCapture());
   afterEach(() => stopCapture());
 
@@ -71,8 +71,10 @@ describe("afd_logging", () => {
     });
 
     it("allows code override", () => {
-      log.info("ready", { code: "startup" });
-      assert.equal(lastLine()["code"], "startup");
+      log.info("ready", { code: "log", event: "startup" });
+      const m = lastLine();
+      assert.equal(m["code"], "log");
+      assert.equal(m["event"], "startup");
     });
   });
 

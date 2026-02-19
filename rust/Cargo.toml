@@ -1,8 +1,8 @@
 [package]
 name = "agent-first-data"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2021"
-description = "Agent-First Data (AFD) — suffix-driven output formatting and protocol templates for AI agents"
+description = "Agent-First Data (AFDATA) — suffix-driven output formatting and protocol templates for AI agents"
 license = "MIT"
 repository = "https://github.com/cmnspore/agent-first-data"
 readme = "README.md"

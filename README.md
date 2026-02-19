@@ -2,14 +2,14 @@
 
 **The field name is the schema.** Agents read `latency_ms` and know milliseconds, `api_key_secret` and know to redact — no external schema needed.
 
-Agent-First Data (AFD) is a convention for self-describing structured data:
+Agent-First Data (AFDATA) is a convention for self-describing structured data:
 
 1. **Naming** — Encode units and semantics in field name suffixes (`_ms`, `_bytes`, `_secret`, ...)
 2. **Output** — Three formats (JSON/YAML/Plain) with automatic key stripping, value formatting, and secret redaction
-3. **Protocol** — Optional structured templates (`ok`, `error`, `startup`) with `trace` for execution context
-4. **Logging** — AFD-compliant structured logging with span support (per-language integration)
+3. **Protocol** — Optional structured templates (`ok`, `error`, `log`) with `trace` for execution context
+4. **Logging** — AFDATA-compliant structured logging with span support (per-language integration)
 
-See the full [specification](spec/agent-first-data.md) and the [Claude Code skill](skills/agent-first-data.md) for AI-assisted development.
+See the full [specification](spec/agent-first-data.md) and the [agent skill](skills/agent-first-data.md) for AI-assisted development.
 
 ## Installation
 
@@ -25,20 +25,21 @@ go get github.com/cmnspore/agent-first-data/go  # Go
 A backup tool invoked from the CLI — flags, env vars, and config all use the same suffixes:
 
 ```bash
-API_KEY_SECRET=sk-1234 cloudback --timeout-s 30 --max-file-size-bytes 10737418240 /data/backup.tar.gz
+API_KEY_SECRET=sk-1234 cloudback --timeout-s 30 --max-file-size-bytes 10737418240 --log startup /data/backup.tar.gz
 ```
 
-The tool reads env vars (`UPPER_SNAKE_CASE`), flags (`--kebab-case`), and config (`snake_case`) — all with AFD suffixes. It emits a startup message. Three output formats, same data:
+The tool reads env vars (`UPPER_SNAKE_CASE`), flags (`--kebab-case`), and config (`snake_case`) — all with AFDATA suffixes. When `startup` logging is enabled, it emits a startup log event. Three output formats, same data:
 
 **JSON** (secrets redacted, original keys, for machines):
 ```json
-{"code":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
+{"code":"log","event":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
 ```
 
 **YAML** (suffixes stripped from keys, values formatted, for humans):
 ```yaml
 ---
-code: "startup"
+code: "log"
+event: "startup"
 args:
   input_path: "/data/backup.tar.gz"
 config:
@@ -50,16 +51,22 @@ env:
 
 **Plain** (single-line logfmt, keys stripped, for log scanning):
 ```
-args.input_path=/data/backup.tar.gz code=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
+args.input_path=/data/backup.tar.gz code=log event=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
 ```
 
 `--timeout-s` → `timeout_s` → `timeout: 30s`. `API_KEY_SECRET` → `API_KEY: "***"`. Same suffixes flow through env vars, CLI flags, JSON, and formatted output — the suffix is the schema.
 
-## API (9 functions, same across all languages)
+CLI logging flags:
+
+```bash
+--log startup,request,progress,retry,redirect
+--verbose   # shorthand for all log categories
+```
+
+## API (8 functions, same across all languages)
 
 | Function | Returns | Description |
 |:---------|:--------|:------------|
-| `build_json_startup` | JSON | `{code: "startup", config, args, env}` |
 | `build_json_ok` | JSON | `{code: "ok", result, trace?}` |
 | `build_json_error` | JSON | `{code: "error", error, trace?}` |
 | `build_json` | JSON | `{code: "<custom>", ...fields, trace?}` |
@@ -69,9 +76,9 @@ args.input_path=/data/backup.tar.gz code=startup config.max_file_size=10.0GB con
 | `internal_redact_secrets` | void | Redact `_secret` fields in-place |
 | `parse_size` | int | Parse `"10M"` → bytes |
 
-## AFD Logging
+## AFDATA Logging
 
-AFD-compliant structured logging. Log output is formatted using the library's own `output_json`/`output_plain`/`output_yaml` functions — same suffix processing, key stripping, and secret redaction as the core output API. Span fields are automatically flattened into each event line, solving concurrent request interleaving.
+AFDATA-compliant structured logging. Log output is formatted using the library's own `output_json`/`output_plain`/`output_yaml` functions — same suffix processing, key stripping, and secret redaction as the core output API. Span fields are automatically flattened into each event line, solving concurrent request interleaving.
 
 Each language integrates with its native logging ecosystem:
 
@@ -94,8 +101,8 @@ code=info message=Processing request_id=abc-123 timestamp_epoch_ms=1739000000000
 
 **Rust:**
 ```rust
-use agent_first_data::afd_tracing;
-afd_tracing::init_json(EnvFilter::new("info"));   // or init_plain / init_yaml
+use agent_first_data::afdata_tracing;
+afdata_tracing::init_json(EnvFilter::new("info"));   // or init_plain / init_yaml
 
 let span = info_span!("request", request_id = %uuid);
 let _guard = span.enter();
@@ -104,10 +111,10 @@ info!("Processing");
 
 **Go:**
 ```go
-afd.InitJson()   // or InitPlain / InitYaml
+afdata.InitJson()   // or InitPlain / InitYaml
 
-ctx := afd.WithSpan(ctx, map[string]any{"request_id": uuid})
-afd.LoggerFromContext(ctx).Info("Processing")
+ctx := afdata.WithSpan(ctx, map[string]any{"request_id": uuid})
+afdata.LoggerFromContext(ctx).Info("Processing")
 ```
 
 **Python:**
@@ -140,10 +147,10 @@ await span({ request_id: uuid }, async () => {
 
 ## Language Documentation
 
-- **[Rust](rust/)** — Full API reference, examples, and AFD tracing
-- **[Go](go/)** — Full API reference, examples, and AFD logging
-- **[Python](python/)** — Full API reference, examples, and AFD logging
-- **[TypeScript](typescript/)** — Full API reference, examples, and AFD logging
+- **[Rust](rust/)** — Full API reference, examples, and AFDATA tracing
+- **[Go](go/)** — Full API reference, examples, and AFDATA logging
+- **[Python](python/)** — Full API reference, examples, and AFDATA logging
+- **[TypeScript](typescript/)** — Full API reference, examples, and AFDATA logging
 
 ## License
 

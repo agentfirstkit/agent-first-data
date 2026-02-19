@@ -48,11 +48,6 @@ fn test_protocol_fixtures() {
                 args["message"].as_str().expect("missing message"),
                 Some(args["trace"].clone()),
             ),
-            "startup" => build_json_startup(
-                args["config"].clone(),
-                args["args"].clone(),
-                args["env"].clone(),
-            ),
             "status" => {
                 let code = args["code"].as_str().expect("missing code");
                 let fields = args["fields"].clone();
@@ -120,28 +115,6 @@ fn test_helper_fixtures() {
 // ═══════════════════════════════════════════
 // Protocol builders
 // ═══════════════════════════════════════════
-
-#[test]
-fn build_startup_basic() {
-    let v = build_json_startup(
-        json!({"timeout_s": 30}),
-        json!({"path": "config.yml"}),
-        json!({"RUST_LOG": "info"}),
-    );
-    assert_eq!(v["code"], "startup");
-    assert_eq!(v["config"]["timeout_s"], 30);
-    assert_eq!(v["args"]["path"], "config.yml");
-    assert_eq!(v["env"]["RUST_LOG"], "info");
-}
-
-#[test]
-fn build_startup_empty_objects() {
-    let v = build_json_startup(json!({}), json!({}), json!({}));
-    assert_eq!(v["code"], "startup");
-    assert!(v["config"].is_object());
-    assert!(v["args"].is_object());
-    assert!(v["env"].is_object());
-}
 
 #[test]
 fn build_ok_with_trace() {
@@ -1140,10 +1113,14 @@ fn readme_json_output() {
 
 #[test]
 fn readme_cli_startup_yaml() {
-    let startup_val = build_json_startup(
-        json!({"api_key_secret": "sk-sensitive-key", "timeout_s": 30}),
-        json!({"input_path": "data.json"}),
-        json!({"RUST_LOG": "info"}),
+    let startup_val = build_json(
+        "startup",
+        json!({
+            "config": {"api_key_secret": "sk-sensitive-key", "timeout_s": 30},
+            "args": {"input_path": "data.json"},
+            "env": {"RUST_LOG": "info"}
+        }),
+        None,
     );
     let out = output_yaml(&startup_val);
     assert!(out.contains("code: \"startup\""));

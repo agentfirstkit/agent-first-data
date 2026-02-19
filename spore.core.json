@@ -9,13 +9,14 @@
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
   ],
   "changes": [
-    "Add Repository section to all four language READMEs directing users to spec/ for the full AFD specification and skills/ for the Claude Code skill, and explaining that tests require the full repository due to shared cross-language fixtures",
-    "Update root README to reference the Claude Code skill alongside the specification, ensuring both resources are discoverable from the main entry point"
+    "Rename internal module abbreviation from AFD to AFDATA across all four language implementations (Rust, Go, Python, TypeScript), updating module names, file names, package declarations, and inline documentation to use the full AFDATA identifier for consistency with the library name",
+    "Replace the startup reserved protocol code with a generalized log code carrying an event field, so startup state is now emitted as {\"code\": \"log\", \"event\": \"startup\", ...} \u2014 enabling the log code to carry any diagnostic event type (startup, request, progress, retry, redirect) rather than requiring a dedicated reserved code per event",
+    "Remove build_json_startup() from the public API across all implementations now that startup is a log event \u2014 callers build startup lines using the standard log helpers with event: startup, reducing API surface and aligning implementation with the unified log protocol"
   ],
   "license": "MIT",
   "references": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_86a5d02fa6a566f0d7195eaa76a73bc640cd037b0858b2f19addc83f7858345a",
+      "uri": "cmn://cmn.dev/spore/blake3_5964f09fc2b8a9c8035cd823f431d6a7bcb81d2480f9ddee74beca0b2859020c",
       "relation": "spawned_from"
     }
   ],

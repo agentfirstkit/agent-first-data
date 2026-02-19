@@ -1,4 +1,4 @@
-//! AFD-compliant tracing layer.
+//! AFDATA-compliant tracing layer.
 //!
 //! Outputs log events using agent-first-data formatting functions:
 //! - JSON: single-line JSONL via `output_json` (secrets redacted, original keys)
@@ -10,12 +10,12 @@
 //!
 //! # Usage
 //! ```ignore
-//! use agent_first_data::afd_tracing;
+//! use agent_first_data::afdata_tracing;
 //! use tracing_subscriber::EnvFilter;
 //!
-//! afd_tracing::init_json(EnvFilter::new("info"));
-//! afd_tracing::init_plain(EnvFilter::new("info"));
-//! afd_tracing::init_yaml(EnvFilter::new("debug"));
+//! afdata_tracing::init_json(EnvFilter::new("info"));
+//! afdata_tracing::init_plain(EnvFilter::new("info"));
+//! afdata_tracing::init_yaml(EnvFilter::new("debug"));
 //! ```
 
 use std::io::{self, Write};
@@ -27,7 +27,7 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
-/// Output format for the AFD tracing layer.
+/// Output format for the AFDATA tracing layer.
 #[derive(Clone, Copy)]
 pub enum LogFormat {
     Json,
@@ -35,22 +35,22 @@ pub enum LogFormat {
     Yaml,
 }
 
-/// A tracing Layer that outputs AFD-compliant log lines to stdout.
-pub struct AfdLayer {
+/// A tracing Layer that outputs AFDATA-compliant log lines to stdout.
+pub struct AfdataLayer {
     format: LogFormat,
 }
 
-/// Initialize tracing with AFD JSON output (single-line JSONL).
+/// Initialize tracing with AFDATA JSON output (single-line JSONL).
 pub fn init_json(filter: tracing_subscriber::EnvFilter) {
     init_with_format(filter, LogFormat::Json);
 }
 
-/// Initialize tracing with AFD plain/logfmt output (keys stripped, values formatted).
+/// Initialize tracing with AFDATA plain/logfmt output (keys stripped, values formatted).
 pub fn init_plain(filter: tracing_subscriber::EnvFilter) {
     init_with_format(filter, LogFormat::Plain);
 }
 
-/// Initialize tracing with AFD YAML output (multi-line, keys stripped, values formatted).
+/// Initialize tracing with AFDATA YAML output (multi-line, keys stripped, values formatted).
 pub fn init_yaml(filter: tracing_subscriber::EnvFilter) {
     init_with_format(filter, LogFormat::Yaml);
 }
@@ -61,14 +61,14 @@ fn init_with_format(filter: tracing_subscriber::EnvFilter, format: LogFormat) {
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(AfdLayer { format })
+        .with(AfdataLayer { format })
         .init();
 }
 
 /// Stored in span extensions to carry structured fields.
 struct SpanFields(Vec<(String, serde_json::Value)>);
 
-impl<S> Layer<S> for AfdLayer
+impl<S> Layer<S> for AfdataLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
@@ -102,7 +102,7 @@ where
         let mut visitor = JsonVisitor::new();
         event.record(&mut visitor);
 
-        // Build output object with AFD field names
+        // Build output object with AFDATA field names
         let mut map = serde_json::Map::with_capacity(4 + visitor.fields.len());
 
         // Default code from level; can be overridden by explicit code = "..." in the macro

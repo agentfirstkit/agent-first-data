@@ -1,6 +1,6 @@
 # agent-first-data
 
-**Agent-First Data (AFD)** — Suffix-driven output formatting and protocol templates for AI agents.
+**Agent-First Data (AFDATA)** — Suffix-driven output formatting and protocol templates for AI agents.
 
 The field name is the schema. Agents read `latency_ms` and know milliseconds, `api_key_secret` and know to redact, no external schema needed.
 
@@ -18,24 +18,39 @@ A backup tool invoked from the CLI — flags, env vars, and config all use the s
 API_KEY_SECRET=sk-1234 cloudback --timeout-s 30 --max-file-size-bytes 10737418240 /data/backup.tar.gz
 ```
 
-The tool reads env vars, flags, and config — all with AFD suffixes — and emits a startup message:
+For CLI diagnostics, enable log categories explicitly:
+
+```bash
+--log startup,request,progress,retry,redirect
+--verbose   # shorthand for all categories
+```
+
+Without these flags, startup diagnostics should stay off by default.
+
+The tool reads env vars, flags, and config — all with AFDATA suffixes — and can emit a startup diagnostic event:
 
 ```rust
 use agent_first_data::*;
 use serde_json::json;
 
-let startup = build_json_startup(
-    json!({"timeout_s": 30, "max_file_size_bytes": 10737418240u64}),
-    json!({"input_path": "/data/backup.tar.gz"}),
-    json!({"API_KEY_SECRET": std::env::var("API_KEY_SECRET").ok()}),
+let startup = build_json(
+    "log",
+    json!({
+        "event": "startup",
+        "config": {"timeout_s": 30, "max_file_size_bytes": 10737418240u64},
+        "args": {"input_path": "/data/backup.tar.gz"},
+        "env": {"API_KEY_SECRET": std::env::var("API_KEY_SECRET").ok()}
+    }),
+    None,
 );
 ```
 
 Three output formats, same data:
 
 ```
-JSON:  {"code":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
-YAML:  code: "startup"
+JSON:  {"code":"log","event":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
+YAML:  code: "log"
+       event: "startup"
        args:
          input_path: "/data/backup.tar.gz"
        config:
@@ -43,23 +58,20 @@ YAML:  code: "startup"
          timeout: "30s"
        env:
          API_KEY: "***"
-Plain: args.input_path=/data/backup.tar.gz code=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
+Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
 ```
 
 `--timeout-s` → `timeout_s` → `timeout: 30s`. `API_KEY_SECRET` → `API_KEY: "***"`. The suffix is the schema.
 
 ## API Reference
 
-Total: **9 public APIs** + optional **AFD tracing** (4 protocol builders + 3 output functions + 1 internal + 1 utility)
+Total: **8 public APIs** + optional **AFDATA tracing** (3 protocol builders + 3 output functions + 1 internal + 1 utility)
 
 ### Protocol Builders (returns JSON Value)
 
-Build AFD protocol structures. Return `serde_json::Value` objects for API responses.
+Build AFDATA protocol structures. Return `serde_json::Value` objects for API responses.
 
 ```rust
-// Startup (configuration)
-build_json_startup(config: Value, args: Value, env: Value) -> Value
-
 // Success (result)
 build_json_ok(result: Value, trace: Option<Value>) -> Value
 
@@ -78,10 +90,15 @@ use agent_first_data::*;
 use serde_json::json;
 
 // Startup
-let startup = build_json_startup(
-    json!({"api_key_secret": "sk-123", "timeout_s": 30}),
-    json!({"config_path": "config.yml"}),
-    json!({"RUST_LOG": "info"})
+let startup = build_json(
+    "log",
+    json!({
+        "event": "startup",
+        "config": {"api_key_secret": "sk-123", "timeout_s": 30},
+        "args": {"config_path": "config.yml"},
+        "env": {"RUST_LOG": "info"}
+    }),
+    None,
 );
 
 // Success (always include trace)
@@ -193,14 +210,20 @@ use serde_json::json;
 
 fn main() {
     // 1. Startup
-    let startup = build_json_startup(
-        json!({"api_key_secret": "sk-sensitive-key", "timeout_s": 30}),
-        json!({"input_path": "data.json"}),
-        json!({"RUST_LOG": "info"})
+    let startup = build_json(
+        "log",
+        json!({
+            "event": "startup",
+            "config": {"api_key_secret": "sk-sensitive-key", "timeout_s": 30},
+            "args": {"input_path": "data.json"},
+            "env": {"RUST_LOG": "info"}
+        }),
+        None,
     );
     println!("{}", output_yaml(&startup));
     // ---
-    // code: "startup"
+    // code: "log"
+    // event: "startup"
     // args:
     //   input_path: "data.json"
     // config:
@@ -296,9 +319,9 @@ println!("{}", output_plain(&data));
 // api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_size=5.0MB payment=50000000msats price=$99.99 request_timeout=5.0s success_rate=95.5% user_name=alice
 ```
 
-## AFD Tracing (optional feature)
+## AFDATA Tracing (optional feature)
 
-AFD-compliant structured logging via the `tracing` ecosystem. Enable with:
+AFDATA-compliant structured logging via the `tracing` ecosystem. Enable with:
 
 ```bash
 cargo add agent-first-data --features tracing
@@ -309,33 +332,33 @@ Every log line is formatted using the library's own `output_json`/`output_plain`
 ### API
 
 ```rust
-use agent_first_data::afd_tracing;
+use agent_first_data::afdata_tracing;
 use tracing_subscriber::EnvFilter;
 
-// Convenience initializers — set up the default tracing subscriber with AFD output
-afd_tracing::init_json(filter: EnvFilter)   // Single-line JSONL (secrets redacted, original keys)
-afd_tracing::init_plain(filter: EnvFilter)  // Single-line logfmt (keys stripped, values formatted)
-afd_tracing::init_yaml(filter: EnvFilter)   // Multi-line YAML (keys stripped, values formatted)
+// Convenience initializers — set up the default tracing subscriber with AFDATA output
+afdata_tracing::init_json(filter: EnvFilter)   // Single-line JSONL (secrets redacted, original keys)
+afdata_tracing::init_plain(filter: EnvFilter)  // Single-line logfmt (keys stripped, values formatted)
+afdata_tracing::init_yaml(filter: EnvFilter)   // Multi-line YAML (keys stripped, values formatted)
 
 // Low-level — create a tracing Layer for custom subscriber stacks
-AfdLayer { format: LogFormat }  // implements tracing_subscriber::Layer
+AfdataLayer { format: LogFormat }  // implements tracing_subscriber::Layer
 LogFormat::Json | LogFormat::Plain | LogFormat::Yaml
 ```
 
 ### Setup
 
 ```rust
-use agent_first_data::afd_tracing;
+use agent_first_data::afdata_tracing;
 use tracing_subscriber::EnvFilter;
 
 // JSON output for production (one JSONL line per event, secrets redacted)
-afd_tracing::init_json(EnvFilter::new("info"));
+afdata_tracing::init_json(EnvFilter::new("info"));
 
 // Plain logfmt for development (keys stripped, values formatted)
-afd_tracing::init_plain(EnvFilter::new("debug"));
+afdata_tracing::init_plain(EnvFilter::new("debug"));
 
 // YAML for detailed inspection (multi-line, keys stripped, values formatted)
-afd_tracing::init_yaml(EnvFilter::new("debug"));
+afdata_tracing::init_yaml(EnvFilter::new("debug"));
 ```
 
 ### Log Output
@@ -379,8 +402,8 @@ warn!(error = "not found", "Failed");
 The `code` field defaults to the log level (trace/debug/info/warn/error). Override with an explicit `code` field:
 
 ```rust
-info!(code = "startup", "Server ready");
-// {"timestamp_epoch_ms":...,"message":"Server ready","target":"myapp","code":"startup"}
+info!(code = "log", event = "startup", "Server ready");
+// {"timestamp_epoch_ms":...,"message":"Server ready","target":"myapp","code":"log","event":"startup"}
 ```
 
 ### Output Fields
@@ -398,7 +421,7 @@ Every log line contains:
 
 ### Log Output Formats
 
-All three formats use the library's own output functions, so AFD suffix processing applies to log fields too:
+All three formats use the library's own output functions, so AFDATA suffix processing applies to log fields too:
 
 | Format | Function | Keys | Values | Use case |
 |:-------|:---------|:-----|:-------|:---------|
@@ -432,8 +455,8 @@ All formats automatically redact `_secret` fields.
 
 This package is part of the [agent-first-data](https://github.com/cmnspore/agent-first-data) repository, which also contains:
 
-- **`spec/`** — Full AFD specification with suffix definitions, protocol format rules, and cross-language test fixtures
-- **`skills/`** — Claude Code skill for AI agents working with AFD conventions
+- **`spec/`** — Full AFDATA specification with suffix definitions, protocol format rules, and cross-language test fixtures
+- **`skills/`** — AI coding agent skill for working with AFDATA conventions
 
 To run tests, clone the full repository (tests use shared cross-language fixtures from `spec/fixtures/`):
 

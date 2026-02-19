@@ -1,4 +1,4 @@
-package afd
+package afdata
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"sync"
 )
 
-// LogFormat controls the output format of the AFD handler.
+// LogFormat controls the output format of the AFDATA handler.
 type LogFormat int
 
 const (
@@ -21,45 +21,45 @@ const (
 	FormatYaml
 )
 
-// AfdHandler implements slog.Handler, outputting AFD-compliant log lines.
+// AfdataHandler implements slog.Handler, outputting AFDATA-compliant log lines.
 //
 // Each log line contains: timestamp_epoch_ms, message, code, plus
 // any span-level (WithAttrs) and event-level fields.
 // Output is formatted via the library's own OutputJson/OutputPlain/OutputYaml.
-type AfdHandler struct {
+type AfdataHandler struct {
 	out    io.Writer
 	mu     *sync.Mutex
 	attrs  []slog.Attr
 	format LogFormat
 }
 
-// NewAfdHandler creates a new AFD handler writing to w with the given format.
-func NewAfdHandler(w io.Writer, format LogFormat) *AfdHandler {
-	return &AfdHandler{out: w, mu: &sync.Mutex{}, format: format}
+// NewAfdataHandler creates a new AFDATA handler writing to w with the given format.
+func NewAfdataHandler(w io.Writer, format LogFormat) *AfdataHandler {
+	return &AfdataHandler{out: w, mu: &sync.Mutex{}, format: format}
 }
 
-// InitJson sets up the default slog logger with AFD JSON output to stdout.
+// InitJson sets up the default slog logger with AFDATA JSON output to stdout.
 func InitJson() {
-	slog.SetDefault(slog.New(NewAfdHandler(os.Stdout, FormatJson)))
+	slog.SetDefault(slog.New(NewAfdataHandler(os.Stdout, FormatJson)))
 }
 
-// InitPlain sets up the default slog logger with AFD plain/logfmt output to stdout.
+// InitPlain sets up the default slog logger with AFDATA plain/logfmt output to stdout.
 func InitPlain() {
-	slog.SetDefault(slog.New(NewAfdHandler(os.Stdout, FormatPlain)))
+	slog.SetDefault(slog.New(NewAfdataHandler(os.Stdout, FormatPlain)))
 }
 
-// InitYaml sets up the default slog logger with AFD YAML output to stdout.
+// InitYaml sets up the default slog logger with AFDATA YAML output to stdout.
 func InitYaml() {
-	slog.SetDefault(slog.New(NewAfdHandler(os.Stdout, FormatYaml)))
+	slog.SetDefault(slog.New(NewAfdataHandler(os.Stdout, FormatYaml)))
 }
 
 // Enabled returns true for all levels (filtering is done at the slog level).
-func (h *AfdHandler) Enabled(_ context.Context, _ slog.Level) bool {
+func (h *AfdataHandler) Enabled(_ context.Context, _ slog.Level) bool {
 	return true
 }
 
-// Handle outputs a single AFD-compliant log line.
-func (h *AfdHandler) Handle(_ context.Context, r slog.Record) error {
+// Handle outputs a single AFDATA-compliant log line.
+func (h *AfdataHandler) Handle(_ context.Context, r slog.Record) error {
 	m := make(map[string]any, 4+len(h.attrs)+r.NumAttrs())
 
 	m["timestamp_epoch_ms"] = r.Time.UnixMilli()
@@ -104,15 +104,15 @@ func (h *AfdHandler) Handle(_ context.Context, r slog.Record) error {
 }
 
 // WithAttrs returns a new handler with additional span-level fields.
-func (h *AfdHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+func (h *AfdataHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	combined := make([]slog.Attr, len(h.attrs), len(h.attrs)+len(attrs))
 	copy(combined, h.attrs)
 	combined = append(combined, attrs...)
-	return &AfdHandler{out: h.out, mu: h.mu, attrs: combined, format: h.format}
+	return &AfdataHandler{out: h.out, mu: h.mu, attrs: combined, format: h.format}
 }
 
-// WithGroup returns the handler unchanged (groups are not used in AFD output).
-func (h *AfdHandler) WithGroup(_ string) slog.Handler {
+// WithGroup returns the handler unchanged (groups are not used in AFDATA output).
+func (h *AfdataHandler) WithGroup(_ string) slog.Handler {
 	return h
 }
 
@@ -193,8 +193,8 @@ func LoggerFromContext(ctx context.Context) *slog.Logger {
 	return slog.Default()
 }
 
-// ensure AfdHandler implements slog.Handler at compile time
-var _ slog.Handler = (*AfdHandler)(nil)
+// ensure AfdataHandler implements slog.Handler at compile time
+var _ slog.Handler = (*AfdataHandler)(nil)
 
 // ensure json is imported (used by OutputJson fallback)
 var _ = json.Marshal

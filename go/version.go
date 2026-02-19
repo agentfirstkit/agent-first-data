@@ -1,3 +1,3 @@
-package afd
+package afdata
 
-const Version = "0.2.4"
+const Version = "0.3.0"

@@ -1,5 +1,5 @@
 /**
- * AFD-compliant structured logging.
+ * AFDATA-compliant structured logging.
  *
  * Outputs log events using agent-first-data formatting functions:
  * - JSON: single-line JSONL via outputJson (secrets redacted, original keys)
@@ -9,7 +9,7 @@
  * Span fields are carried via AsyncLocalStorage (async-safe).
  *
  * Usage:
- *   import { log, span, initJson, initPlain, initYaml } from "agent-first-data/afd_logging";
+ *   import { log, span, initJson, initPlain, initYaml } from "agent-first-data/afdata_logging";
  *   initJson();  // or initPlain() or initYaml()
  *   log.info("Server started");
  *   await span({ request_id: "abc" }, async () => {
@@ -83,7 +83,7 @@ function emit(level: Level, message: string, fields?: Record<string, unknown>): 
 }
 
 /**
- * AFD logger. Each method outputs a single log line to stdout.
+ * AFDATA logger. Each method outputs a single log line to stdout.
  * Format is controlled by initJson/initPlain/initYaml (default: JSON).
  */
 export const log = {

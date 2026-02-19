@@ -1,6 +1,6 @@
-"""AFD output formatting and protocol templates.
+"""AFDATA output formatting and protocol templates.
 
-9 public APIs: 4 protocol builders + 3 output formatters + 1 redaction + 1 utility.
+8 public APIs: 3 protocol builders + 3 output formatters + 1 redaction + 1 utility.
 """
 
 from __future__ import annotations
@@ -14,11 +14,6 @@ from typing import Any
 # ═══════════════════════════════════════════
 # Public API: Protocol Builders
 # ═══════════════════════════════════════════
-
-
-def build_json_startup(config: Any, args: Any, env: Any) -> dict:
-    """Build {code: "startup", config, args, env}."""
-    return {"code": "startup", "config": config, "args": args, "env": env}
 
 
 def build_json_ok(result: Any, trace: Any = None) -> dict:

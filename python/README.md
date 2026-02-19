@@ -1,6 +1,6 @@
 # agent-first-data
 
-**Agent-First Data (AFD)** — Suffix-driven output formatting and protocol templates for AI agents.
+**Agent-First Data (AFDATA)** — Suffix-driven output formatting and protocol templates for AI agents.
 
 The field name is the schema. Agents read `latency_ms` and know milliseconds, `api_key_secret` and know to redact, no external schema needed.
 
@@ -18,24 +18,39 @@ A backup tool invoked from the CLI — flags, env vars, and config all use the s
 API_KEY_SECRET=sk-1234 cloudback --timeout-s 30 --max-file-size-bytes 10737418240 /data/backup.tar.gz
 ```
 
-The tool reads env vars, flags, and config — all with AFD suffixes — and emits a startup message:
+For CLI diagnostics, enable log categories explicitly:
+
+```bash
+--log startup,request,progress,retry,redirect
+--verbose   # shorthand for all categories
+```
+
+Without these flags, startup diagnostics should stay off by default.
+
+The tool reads env vars, flags, and config — all with AFDATA suffixes — and can emit a startup diagnostic event:
 
 ```python
 from agent_first_data import *
 import os
 
-startup = build_json_startup(
-    {"timeout_s": 30, "max_file_size_bytes": 10737418240},
-    {"input_path": "/data/backup.tar.gz"},
-    {"API_KEY_SECRET": os.environ.get("API_KEY_SECRET")},
+startup = build_json(
+    "log",
+    {
+        "event": "startup",
+        "config": {"timeout_s": 30, "max_file_size_bytes": 10737418240},
+        "args": {"input_path": "/data/backup.tar.gz"},
+        "env": {"API_KEY_SECRET": os.environ.get("API_KEY_SECRET")},
+    },
+    trace=None,
 )
 ```
 
 Three output formats, same data:
 
 ```
-JSON:  {"code":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
-YAML:  code: "startup"
+JSON:  {"code":"log","event":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
+YAML:  code: "log"
+       event: "startup"
        args:
          input_path: "/data/backup.tar.gz"
        config:
@@ -43,23 +58,20 @@ YAML:  code: "startup"
          timeout: "30s"
        env:
          API_KEY: "***"
-Plain: args.input_path=/data/backup.tar.gz code=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
+Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
 ```
 
 `--timeout-s` → `timeout_s` → `timeout: 30s`. `API_KEY_SECRET` → `API_KEY: "***"`. The suffix is the schema.
 
 ## API Reference
 
-Total: **9 public APIs** + **AFD logging** (4 protocol builders + 3 output functions + 1 internal + 1 utility)
+Total: **8 public APIs** + **AFDATA logging** (3 protocol builders + 3 output functions + 1 internal + 1 utility)
 
 ### Protocol Builders (returns dict)
 
-Build AFD protocol structures. Return dict objects for API responses.
+Build AFDATA protocol structures. Return dict objects for API responses.
 
 ```python
-# Startup (configuration)
-build_json_startup(config: Any, args: Any, env: Any) -> dict
-
 # Success (result)
 build_json_ok(result: Any, trace: Any = None) -> dict
 
@@ -77,10 +89,15 @@ build_json(code: str, fields: Any, trace: Any = None) -> dict
 from agent_first_data import *
 
 # Startup
-startup = build_json_startup(
-    {"api_key_secret": "sk-123", "timeout_s": 30},
-    {"config_path": "config.yml"},
-    {"RUST_LOG": "info"},
+startup = build_json(
+    "log",
+    {
+        "event": "startup",
+        "config": {"api_key_secret": "sk-123", "timeout_s": 30},
+        "args": {"config_path": "config.yml"},
+        "env": {"RUST_LOG": "info"},
+    },
+    trace=None,
 )
 
 # Success (always include trace)
@@ -187,14 +204,20 @@ async def get_user(user_id: int):
 from agent_first_data import *
 
 # 1. Startup
-startup = build_json_startup(
-    {"api_key_secret": "sk-sensitive-key", "timeout_s": 30},
-    {"input_path": "data.json"},
-    {"RUST_LOG": "info"},
+startup = build_json(
+    "log",
+    {
+        "event": "startup",
+        "config": {"api_key_secret": "sk-sensitive-key", "timeout_s": 30},
+        "args": {"input_path": "data.json"},
+        "env": {"RUST_LOG": "info"},
+    },
+    trace=None,
 )
 print(output_yaml(startup))
 # ---
-# code: "startup"
+# code: "log"
+# event: "startup"
 # args:
 #   input_path: "data.json"
 # config:
@@ -285,23 +308,23 @@ print(output_plain(data))
 # api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_size=5.0MB payment=50000000msats price=$99.99 request_timeout=5.0s success_rate=95.5% user_name=alice
 ```
 
-## AFD Logging
+## AFDATA Logging
 
-AFD-compliant structured logging via Python's `logging` module. Every log line is formatted using the library's own `output_json`/`output_plain`/`output_yaml` functions. Span fields are carried via `contextvars` (async-safe), automatically flattened into each log line.
+AFDATA-compliant structured logging via Python's `logging` module. Every log line is formatted using the library's own `output_json`/`output_plain`/`output_yaml` functions. Span fields are carried via `contextvars` (async-safe), automatically flattened into each log line.
 
 ### API
 
 ```python
 from agent_first_data import init_logging_json, init_logging_plain, init_logging_yaml
-from agent_first_data.afd_logging import AfdHandler, get_logger, span
+from agent_first_data.afdata_logging import AfdataHandler, get_logger, span
 
-# Convenience initializers — set up the root logger with AFD output to stdout
+# Convenience initializers — set up the root logger with AFDATA output to stdout
 init_logging_json(level="INFO")    # Single-line JSONL (secrets redacted, original keys)
 init_logging_plain(level="INFO")   # Single-line logfmt (keys stripped, values formatted)
 init_logging_yaml(level="INFO")    # Multi-line YAML (keys stripped, values formatted)
 
 # Low-level — create a handler for custom logger stacks
-AfdHandler(format="json")  # format: "json" | "plain" | "yaml"
+AfdataHandler(format="json")  # format: "json" | "plain" | "yaml"
 
 # Logger with default fields (returns logging.LoggerAdapter)
 get_logger(name, **fields)
@@ -382,8 +405,8 @@ The `code` field defaults to the log level. Override with an explicit field:
 from agent_first_data import get_logger
 
 logger = get_logger("myapp")
-logger.info("Server ready", extra={"code": "startup"})
-# {"timestamp_epoch_ms":...,"message":"Server ready","target":"myapp","code":"startup"}
+logger.info("Server ready", extra={"code": "log", "event": "startup"})
+# {"timestamp_epoch_ms":...,"message":"Server ready","target":"myapp","code":"log","event":"startup"}
 ```
 
 ### Output Fields
@@ -401,7 +424,7 @@ Every log line contains:
 
 ### Log Output Formats
 
-All three formats use the library's own output functions, so AFD suffix processing applies to log fields too:
+All three formats use the library's own output functions, so AFDATA suffix processing applies to log fields too:
 
 | Format | Function | Keys | Values | Use case |
 |:-------|:---------|:-----|:-------|:---------|
@@ -435,8 +458,8 @@ All formats automatically redact `_secret` fields.
 
 This package is part of the [agent-first-data](https://github.com/cmnspore/agent-first-data) repository, which also contains:
 
-- **`spec/`** — Full AFD specification with suffix definitions, protocol format rules, and cross-language test fixtures
-- **`skills/`** — Claude Code skill for AI agents working with AFD conventions
+- **`spec/`** — Full AFDATA specification with suffix definitions, protocol format rules, and cross-language test fixtures
+- **`skills/`** — AI coding agent skill for working with AFDATA conventions
 
 To run tests, clone the full repository (tests use shared cross-language fixtures from `spec/fixtures/`):
 

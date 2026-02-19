@@ -1,4 +1,4 @@
-"""Tests for AFD logging module."""
+"""Tests for AFDATA logging module."""
 
 import json
 import logging
@@ -6,7 +6,7 @@ import sys
 from io import StringIO
 from unittest.mock import patch
 
-from agent_first_data.afd_logging import AfdHandler, AfdJsonHandler, init_json, init_plain, init_yaml, span, get_logger
+from agent_first_data.afdata_logging import AfdataHandler, AfdataJsonHandler, init_json, init_plain, init_yaml, span, get_logger
 
 
 def capture_log(fn):
@@ -20,9 +20,9 @@ def capture_log(fn):
 
 
 def make_logger(name="test"):
-    """Create a fresh logger with AfdJsonHandler."""
+    """Create a fresh logger with AfdataJsonHandler."""
     logger = logging.getLogger(name)
-    logger.handlers = [AfdJsonHandler()]
+    logger.handlers = [AfdataJsonHandler()]
     logger.setLevel(logging.DEBUG)
     return logger
 
@@ -108,15 +108,16 @@ class TestCodeOverride:
         logger = make_logger("test_code")
         adapter = get_logger("test_code")
 
-        m = capture_log(lambda: adapter.info("ready", extra={"code": "startup"}))
-        assert m["code"] == "startup"
+        m = capture_log(lambda: adapter.info("ready", extra={"code": "log", "event": "startup"}))
+        assert m["code"] == "log"
+        assert m["event"] == "startup"
 
 
 class TestGetLogger:
     def test_default_fields(self):
-        # Ensure root logger has AfdJsonHandler
+        # Ensure root logger has AfdataJsonHandler
         root = logging.getLogger()
-        root.handlers = [AfdJsonHandler()]
+        root.handlers = [AfdataJsonHandler()]
         root.setLevel(logging.DEBUG)
 
         adapter = get_logger("test_adapter", component="myservice")
@@ -137,7 +138,7 @@ def capture_raw(fn):
 class TestPlainFormat:
     def test_plain_output(self):
         logger = logging.getLogger("test_plain")
-        logger.handlers = [AfdHandler(format="plain")]
+        logger.handlers = [AfdataHandler(format="plain")]
         logger.setLevel(logging.DEBUG)
 
         output = capture_raw(lambda: logger.info("hello"))
@@ -157,7 +158,7 @@ class TestPlainFormat:
 class TestYamlFormat:
     def test_yaml_output(self):
         logger = logging.getLogger("test_yaml")
-        logger.handlers = [AfdHandler(format="yaml")]
+        logger.handlers = [AfdataHandler(format="yaml")]
         logger.setLevel(logging.DEBUG)
 
         output = capture_raw(lambda: logger.info("hello"))

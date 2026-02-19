@@ -1,7 +1,7 @@
 {
   "name": "agent-first-data",
-  "version": "0.2.4",
-  "description": "Agent-First Data (AFD) — suffix-driven output formatting and protocol templates for AI agents",
+  "version": "0.3.0",
+  "description": "Agent-First Data (AFDATA) — suffix-driven output formatting and protocol templates for AI agents",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -15,9 +15,9 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
-    "./afd_logging": {
-      "import": "./dist/afd_logging.js",
-      "types": "./dist/afd_logging.d.ts"
+    "./afdata_logging": {
+      "import": "./dist/afdata_logging.js",
+      "types": "./dist/afdata_logging.d.ts"
     }
   },
   "files": [

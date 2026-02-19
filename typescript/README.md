@@ -1,6 +1,6 @@
 # agent-first-data
 
-**Agent-First Data (AFD)** — Suffix-driven output formatting and protocol templates for AI agents.
+**Agent-First Data (AFDATA)** — Suffix-driven output formatting and protocol templates for AI agents.
 
 The field name is the schema. Agents read `latency_ms` and know milliseconds, `api_key_secret` and know to redact, no external schema needed.
 
@@ -18,23 +18,37 @@ A backup tool invoked from the CLI — flags, env vars, and config all use the s
 API_KEY_SECRET=sk-1234 cloudback --timeout-s 30 --max-file-size-bytes 10737418240 /data/backup.tar.gz
 ```
 
-The tool reads env vars, flags, and config — all with AFD suffixes — and emits a startup message:
+For CLI diagnostics, enable log categories explicitly:
+
+```bash
+--log startup,request,progress,retry,redirect
+--verbose   # shorthand for all categories
+```
+
+Without these flags, startup diagnostics should stay off by default.
+
+The tool reads env vars, flags, and config — all with AFDATA suffixes — and can emit a startup diagnostic event:
 
 ```typescript
-import { buildJsonStartup, outputJson, outputYaml, outputPlain } from "agent-first-data";
+import { buildJson, outputJson, outputYaml, outputPlain } from "agent-first-data";
 
-const startup = buildJsonStartup(
-  { timeout_s: 30, max_file_size_bytes: 10737418240 },
-  { input_path: "/data/backup.tar.gz" },
-  { API_KEY_SECRET: process.env.API_KEY_SECRET ?? null },
+const startup = buildJson(
+  "log",
+  {
+    event: "startup",
+    config: { timeout_s: 30, max_file_size_bytes: 10737418240 },
+    args: { input_path: "/data/backup.tar.gz" },
+    env: { API_KEY_SECRET: process.env.API_KEY_SECRET ?? null },
+  },
 );
 ```
 
 Three output formats, same data:
 
 ```
-JSON:  {"code":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
-YAML:  code: "startup"
+JSON:  {"code":"log","event":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
+YAML:  code: "log"
+       event: "startup"
        args:
          input_path: "/data/backup.tar.gz"
        config:
@@ -42,24 +56,21 @@ YAML:  code: "startup"
          timeout: "30s"
        env:
          API_KEY: "***"
-Plain: args.input_path=/data/backup.tar.gz code=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
+Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
 ```
 
 `--timeout-s` → `timeout_s` → `timeout: 30s`. `API_KEY_SECRET` → `API_KEY: "***"`. The suffix is the schema.
 
 ## API Reference
 
-Total: **9 public APIs** + **AFD logging** (4 protocol builders + 3 output functions + 1 internal + 1 utility)
+Total: **8 public APIs** + **AFDATA logging** (3 protocol builders + 3 output functions + 1 internal + 1 utility)
 
 ### Protocol Builders (returns JsonValue)
 
-Build AFD protocol structures. Return JSON-serializable objects for API responses.
+Build AFDATA protocol structures. Return JSON-serializable objects for API responses.
 
 ```typescript
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
-
-// Startup (configuration)
-buildJsonStartup(config: JsonValue, args: JsonValue, env: JsonValue): JsonValue
 
 // Success (result)
 buildJsonOk(result: JsonValue, trace?: JsonValue): JsonValue
@@ -75,13 +86,17 @@ buildJson(code: string, fields: JsonValue, trace?: JsonValue): JsonValue
 
 **Example:**
 ```typescript
-import { buildJsonStartup, buildJsonOk, buildJsonError, buildJson } from "agent-first-data";
+import { buildJsonOk, buildJsonError, buildJson } from "agent-first-data";
 
 // Startup
-const startup = buildJsonStartup(
-  { api_key_secret: "sk-123", timeout_s: 30 },
-  { config_path: "config.yml" },
-  { RUST_LOG: "info" },
+const startup = buildJson(
+  "log",
+  {
+    event: "startup",
+    config: { api_key_secret: "sk-123", timeout_s: 30 },
+    args: { config_path: "config.yml" },
+    env: { RUST_LOG: "info" },
+  },
 );
 
 // Success (always include trace)
@@ -185,17 +200,22 @@ app.get("/users/:id", (req, res) => {
 ### Example 2: CLI Tool (Complete Lifecycle)
 
 ```typescript
-import { buildJsonStartup, buildJsonOk, buildJson, outputYaml, outputPlain } from "agent-first-data";
+import { buildJsonOk, buildJson, outputYaml, outputPlain } from "agent-first-data";
 
 // 1. Startup
-const startup = buildJsonStartup(
-  { api_key_secret: "sk-sensitive-key", timeout_s: 30 },
-  { input_path: "data.json" },
-  { RUST_LOG: "info" },
+const startup = buildJson(
+  "log",
+  {
+    event: "startup",
+    config: { api_key_secret: "sk-sensitive-key", timeout_s: 30 },
+    args: { input_path: "data.json" },
+    env: { RUST_LOG: "info" },
+  },
 );
 console.log(outputYaml(startup));
 // ---
-// code: "startup"
+// code: "log"
+// event: "startup"
 // args:
 //   input_path: "data.json"
 // config:
@@ -286,9 +306,9 @@ console.log(outputPlain(data));
 // api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_size=5.0MB payment=50000000msats price=$99.99 request_timeout=5.0s success_rate=95.5% user_name=alice
 ```
 
-## AFD Logging
+## AFDATA Logging
 
-AFD-compliant structured logging. Every log line is formatted using the library's own `outputJson`/`outputPlain`/`outputYaml` functions. Span fields are carried via `AsyncLocalStorage` (async-safe), automatically flattened into each log line. Zero dependencies beyond Node.js built-ins.
+AFDATA-compliant structured logging. Every log line is formatted using the library's own `outputJson`/`outputPlain`/`outputYaml` functions. Span fields are carried via `AsyncLocalStorage` (async-safe), automatically flattened into each log line. Zero dependencies beyond Node.js built-ins.
 
 ### API
 
@@ -367,8 +387,8 @@ await span({ request_id: "abc-123" }, async () => {
 The `code` field defaults to the log level. Override with an explicit field:
 
 ```typescript
-log.info("Server ready", { code: "startup" });
-// {"timestamp_epoch_ms":...,"message":"Server ready","code":"startup"}
+log.info("Server ready", { code: "log", event: "startup" });
+// {"timestamp_epoch_ms":...,"message":"Server ready","code":"log","event":"startup"}
 ```
 
 ### Output Fields
@@ -385,7 +405,7 @@ Every log line contains:
 
 ### Log Output Formats
 
-All three formats use the library's own output functions, so AFD suffix processing applies to log fields too:
+All three formats use the library's own output functions, so AFDATA suffix processing applies to log fields too:
 
 | Format | Function | Keys | Values | Use case |
 |:-------|:---------|:-----|:-------|:---------|
@@ -419,8 +439,8 @@ All formats automatically redact `_secret` fields.
 
 This package is part of the [agent-first-data](https://github.com/cmnspore/agent-first-data) repository, which also contains:
 
-- **`spec/`** — Full AFD specification with suffix definitions, protocol format rules, and cross-language test fixtures
-- **`skills/`** — Claude Code skill for AI agents working with AFD conventions
+- **`spec/`** — Full AFDATA specification with suffix definitions, protocol format rules, and cross-language test fixtures
+- **`skills/`** — AI coding agent skill for working with AFDATA conventions
 
 To run tests, clone the full repository (tests use shared cross-language fixtures from `spec/fixtures/`):
 

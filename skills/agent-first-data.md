@@ -7,6 +7,9 @@ allowed-tools: Bash, Read, Edit, Write, Glob, Grep
 
 # Agent-First Data
 
+This skill content is tool-agnostic. It can be used by any AI coding agent workflow.
+The frontmatter keys at the top are metadata for skill runners and do not change the AFDATA conventions.
+
 Three parts:
 
 1. **Naming** — encode units and semantics in field names so agents parse structured data without external schemas
@@ -184,7 +187,7 @@ Every output line carries a `code` field:
 
 | `code` | When |
 |:-------|:-----|
-| `"startup"` | Program start — config, args, env |
+| `"log"` | Diagnostic event (`event` field identifies startup/request/progress/retry/redirect) |
 | tool-defined | Status/progress (`"request"`, `"progress"`, `"sync"`, etc.) |
 | `"ok"` | Success result |
 | `"error"` | Error result |
@@ -192,13 +195,14 @@ Every output line carries a `code` field:
 ### Templates
 
 ```json
-{"code": "startup", "config": {...}, "args": {...}, "env": {...}}
+{"code": "log", "event": "startup", "version": "0.1.0", "argv": ["tool", "--log", "startup"], "config": {...}, "args": {...}, "env": {...}}
 {"code": "ok", "result": {...}, "trace": {"duration_ms": 12, "source": "redb"}}
 {"code": "error", "error": "message", "trace": {"duration_ms": 3}}
 {"code": "not_found", "resource": "user", "id": 123, "trace": {"duration_ms": 8}}
 ```
 
 Always include `trace` for execution context: duration, token counts, cost, data source.
+Startup payload fields are tool-defined; `config` is recommended, while `version`/`argv`/`args`/`env` are optional.
 
 ### Same structure, any transport
 
@@ -215,11 +219,10 @@ All use `code` / `result` / `error` / `trace`.
 
 ## Using the Library
 
-9 public APIs (same across all languages):
+8 public APIs (same across all languages):
 
 | Function | What it does |
 |:---------|:-------------|
-| `build_json_startup` | Build `{code: "startup", config, args, env}` |
 | `build_json_ok` | Build `{code: "ok", result, trace?}` |
 | `build_json_error` | Build `{code: "error", error, trace?}` |
 | `build_json` | Build `{code: "<custom>", ...fields, trace?}` |
@@ -232,32 +235,31 @@ All use `code` / `result` / `error` / `trace`.
 ### Rust
 
 ```rust
-use agent_first_data::{build_json_startup, build_json_ok, build_json_error, build_json, output_json, output_yaml, output_plain, internal_redact_secrets, parse_size};
+use agent_first_data::{build_json_ok, build_json_error, build_json, output_json, output_yaml, output_plain, internal_redact_secrets, parse_size};
 ```
 
 ### Python
 
 ```python
-from agent_first_data import build_json_startup, build_json_ok, build_json_error, build_json, output_json, output_yaml, output_plain, internal_redact_secrets, parse_size
+from agent_first_data import build_json_ok, build_json_error, build_json, output_json, output_yaml, output_plain, internal_redact_secrets, parse_size
 ```
 
 ### TypeScript
 
 ```typescript
-import { buildJsonStartup, buildJsonOk, buildJsonError, buildJson, outputJson, outputYaml, outputPlain, internalRedactSecrets, parseSize } from "agent-first-data";
+import { buildJsonOk, buildJsonError, buildJson, outputJson, outputYaml, outputPlain, internalRedactSecrets, parseSize } from "agent-first-data";
 ```
 
 ### Go
 
 ```go
-import afd "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/cmnspore/agent-first-data/go"
 
-afd.BuildJsonStartup(config, args, env)
-afd.OutputPlain(value)
-afd.ParseSize("10M")
+afdata.OutputPlain(value)
+afdata.ParseSize("10M")
 ```
 
-## AFD Logging
+## AFDATA Logging
 
 Structured logging that outputs via the library's own `output_json`/`output_plain`/`output_yaml`. Each language integrates with its native logging ecosystem. All three formats apply the same suffix processing, key stripping, and secret redaction as the core output API.
 
@@ -265,9 +267,9 @@ Structured logging that outputs via the library's own `output_json`/`output_plai
 
 | Format | Rust | Go | Python | TypeScript |
 |:-------|:-----|:---|:-------|:-----------|
-| **JSON** | `afd_tracing::init_json(filter)` | `afd.InitJson()` | `init_logging_json("INFO")` | `initJson()` |
-| **Plain** | `afd_tracing::init_plain(filter)` | `afd.InitPlain()` | `init_logging_plain("INFO")` | `initPlain()` |
-| **YAML** | `afd_tracing::init_yaml(filter)` | `afd.InitYaml()` | `init_logging_yaml("INFO")` | `initYaml()` |
+| **JSON** | `afdata_tracing::init_json(filter)` | `afdata.InitJson()` | `init_logging_json("INFO")` | `initJson()` |
+| **Plain** | `afdata_tracing::init_plain(filter)` | `afdata.InitPlain()` | `init_logging_plain("INFO")` | `initPlain()` |
+| **YAML** | `afdata_tracing::init_yaml(filter)` | `afdata.InitYaml()` | `init_logging_yaml("INFO")` | `initYaml()` |
 
 Rust requires `cargo add agent-first-data --features tracing`.
 
@@ -281,8 +283,8 @@ let _guard = span.enter();
 
 ```go
 // Go — context-based
-ctx := afd.WithSpan(ctx, map[string]any{"request_id": uuid})
-logger := afd.LoggerFromContext(ctx)
+ctx := afdata.WithSpan(ctx, map[string]any{"request_id": uuid})
+logger := afdata.LoggerFromContext(ctx)
 ```
 
 ```python
@@ -304,10 +306,12 @@ Every log line contains: `timestamp_epoch_ms`, `message`, `code` (defaults to lo
 
 ## CLI Flags
 
-CLI tools that use AFD should support an output format flag:
+CLI tools that use AFDATA should support output and logging flags:
 
 ```
 --output json|yaml|plain    # default is tool-defined (interactive → yaml, scripting/logging → json)
+--log startup,request,progress,retry,redirect
+--verbose                   # shorthand for all log categories
 ```
 
 - Protocol output (`build_json_*` + `output_*`) follows `--output`
@@ -326,5 +330,5 @@ When reviewing code that produces structured output:
 6. No unit-less ambiguous fields (`timeout: 30` — 30 what?)
 7. Config size values use `_size` suffix (`buffer_size: "10M"`, not `buffer: "10M"`)
 8. Environment variables follow `UPPER_SNAKE_CASE` with the same suffixes
-9. Logging uses AFD init functions (`init_json`/`init_plain`/`init_yaml`) — not raw `println!`/`fmt.Println`/`console.log` for structured output
-10. Database columns use AFD suffixes on generic types (`duration_ms INTEGER`, not `duration INTEGER`); native types like `TIMESTAMPTZ` don't need suffixes
+9. Logging uses AFDATA init functions (`init_json`/`init_plain`/`init_yaml`) — not raw `println!`/`fmt.Println`/`console.log` for structured output
+10. Database columns use AFDATA suffixes on generic types (`duration_ms INTEGER`, not `duration INTEGER`); native types like `TIMESTAMPTZ` don't need suffixes
