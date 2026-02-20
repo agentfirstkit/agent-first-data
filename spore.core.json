@@ -2,13 +2,17 @@
   "id": "agent-first-data",
   "name": "Agent-First Data",
   "domain": "cmn.dev",
-  "synopsis": "The field name is the schema — agents read latency_ms and know milliseconds, api_key_secret and know to redact, no external schema needed",
+  "synopsis": "The field name is the schema \u2014 agents read latency_ms and know milliseconds, api_key_secret and know to redact, no external schema needed",
   "intent": [
-    "Encode all semantic information in the field name itself so agents parse structured data without external schemas, documentation, or type systems — _ms/_s/_epoch_ms for time, _msats/_sats/_usd_cents for currency, _bytes for size, _secret for auto-redaction",
-    "Define a JSONL output protocol where every line carries a code field (startup for config state, tool-defined for status/progress, ok/error for results) plus a trace object for execution context (duration, token counts, cost, data source) — same structure whether the transport is CLI stdout, REST API response, MCP tool result, or SSE stream",
-    "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms → RFC 3339, _bytes → human-readable, _secret → ***, _ms ≥ 1000 → seconds)"
+    "Encode all semantic information in the field name itself so agents parse structured data without external schemas, documentation, or type systems \u2014 _ms/_s/_epoch_ms for time, _msats/_sats/_usd_cents for currency, _bytes for size, _secret for auto-redaction",
+    "Define a JSONL output protocol where every line carries a code field (startup for config state, tool-defined for status/progress, ok/error for results) plus a trace object for execution context (duration, token counts, cost, data source) \u2014 same structure whether the transport is CLI stdout, REST API response, MCP tool result, or SSE stream",
+    "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
   ],
-  "changes": [],
+  "changes": [
+    "Add CLI helpers across all four languages (OutputFormat, cli_parse_output, cli_parse_log_filters, cli_output, build_cli_error) enabling tools built on AFDATA to parse --output and --log flags with consistent behavior and shared error format",
+    "Add minimal CLI example programs in all four languages (Rust/Go/Python/TypeScript) with embedded formal tests that integrate with each language's test runner, demonstrating the canonical pattern for building agent-first CLI tools",
+    "Update all README documentation and the agent skill to document the new CLI helpers API, canonical usage patterns, and add a review checklist item for correct flag parsing with cli_parse_output/cli_parse_log_filters"
+  ],
   "license": "MIT",
   "references": [
     {

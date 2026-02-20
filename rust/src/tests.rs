@@ -1042,6 +1042,102 @@ fn redact_non_string_redacted() {
 }
 
 // ═══════════════════════════════════════════
+// CLI helpers
+// ═══════════════════════════════════════════
+
+#[test]
+fn cli_parse_output_all_formats() {
+    assert!(matches!(cli_parse_output("json"), Ok(OutputFormat::Json)));
+    assert!(matches!(cli_parse_output("yaml"), Ok(OutputFormat::Yaml)));
+    assert!(matches!(cli_parse_output("plain"), Ok(OutputFormat::Plain)));
+}
+
+#[test]
+fn cli_parse_output_rejects_unknown() {
+    assert!(cli_parse_output("xml").is_err());
+    assert!(cli_parse_output("JSON").is_err());
+    assert!(cli_parse_output("").is_err());
+}
+
+#[test]
+fn cli_parse_output_error_message_contains_value() {
+    let e = cli_parse_output("toml").unwrap_err();
+    assert!(e.contains("toml"));
+    assert!(e.contains("json"));
+}
+
+#[test]
+fn cli_parse_log_filters_trims_and_lowercases() {
+    let f = cli_parse_log_filters(&["  Query  ", "ERROR"]);
+    assert_eq!(f, vec!["query", "error"]);
+}
+
+#[test]
+fn cli_parse_log_filters_deduplicates() {
+    let f = cli_parse_log_filters(&["query", "error", "Query", "query"]);
+    assert_eq!(f, vec!["query", "error"]);
+}
+
+#[test]
+fn cli_parse_log_filters_removes_empty() {
+    let f = cli_parse_log_filters(&["", "query", "  "]);
+    assert_eq!(f, vec!["query"]);
+}
+
+#[test]
+fn cli_parse_log_filters_empty_slice() {
+    let f = cli_parse_log_filters::<String>(&[]);
+    assert!(f.is_empty());
+}
+
+#[test]
+fn cli_parse_log_filters_preserves_order() {
+    let f = cli_parse_log_filters(&["startup", "request", "retry"]);
+    assert_eq!(f, vec!["startup", "request", "retry"]);
+}
+
+#[test]
+fn build_cli_error_required_fields() {
+    let v = build_cli_error("missing --sql");
+    assert_eq!(v["code"], "error");
+    assert_eq!(v["error_code"], "invalid_request");
+    assert_eq!(v["error"], "missing --sql");
+    assert_eq!(v["retryable"], false);
+    assert_eq!(v["trace"]["duration_ms"], 0);
+}
+
+#[test]
+fn build_cli_error_is_valid_json() {
+    let v = build_cli_error("oops");
+    assert!(serde_json::to_string(&v).is_ok());
+}
+
+#[test]
+fn cli_output_dispatches_json() {
+    let v = json!({"code": "ok", "size_bytes": 1024});
+    let out = cli_output(&v, OutputFormat::Json);
+    assert!(out.contains("size_bytes"));   // json: raw keys, no suffix processing
+    assert!(!out.contains('\n'));
+}
+
+#[test]
+fn cli_output_dispatches_yaml() {
+    let v = json!({"code": "ok", "size_bytes": 1024});
+    let out = cli_output(&v, OutputFormat::Yaml);
+    assert!(out.starts_with("---"));
+    assert!(out.contains("size:"));        // yaml: suffix stripped
+}
+
+#[test]
+fn cli_output_dispatches_plain() {
+    let v = json!({"code": "ok", "size_bytes": 1024});
+    let out = cli_output(&v, OutputFormat::Plain);
+    assert!(!out.contains('\n'));
+    assert!(out.contains("code=ok"));
+    assert!(out.contains("size=1.0KB"));   // plain: suffix processed
+}
+
+// ═══════════════════════════════════════════
 // Complete integration: README examples
 // ═══════════════════════════════════════════
 

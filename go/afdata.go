@@ -1,7 +1,8 @@
 // Package afdata implements Agent-First Data (AFDATA) output formatting
 // and protocol templates.
 //
-// 8 public APIs: 3 protocol builders + 3 output formatters + 1 redaction + 1 utility.
+// 12 public APIs and 1 type: 3 protocol builders + 3 output formatters +
+// 1 redaction + 1 utility + 4 CLI helpers + OutputFormat.
 package afdata
 
 import (

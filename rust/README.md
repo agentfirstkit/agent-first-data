@@ -65,7 +65,7 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **8 public APIs** + optional **AFDATA tracing** (3 protocol builders + 3 output functions + 1 internal + 1 utility)
+Total: **12 public APIs and 1 type** + optional **AFDATA tracing** (3 protocol builders + 3 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat`)
 
 ### Protocol Builders (returns JSON Value)
 
@@ -183,6 +183,45 @@ assert_eq!(parse_size("1.5K"), Some(1536));
 assert_eq!(parse_size("512"), Some(512));
 ```
 
+### CLI Helpers (for tools built on AFDATA)
+
+Shared helpers that prevent flag-parsing drift between CLI tools. Use these instead of reimplementing `--output` and `--log` handling in each tool.
+
+```rust
+pub enum OutputFormat { Json, Yaml, Plain }
+
+cli_parse_output(s: &str) -> Result<OutputFormat, String>          // Parse --output flag; Err on unknown
+cli_parse_log_filters<S: AsRef<str>>(entries: &[S]) -> Vec<String> // Normalize --log: trim, lowercase, dedup, remove empty
+cli_output(value: &Value, format: OutputFormat) -> String          // Dispatch to output_json/yaml/plain
+build_cli_error(message: &str) -> Value                            // {code:"error", error_code:"invalid_request", retryable:false, trace:{duration_ms:0}}
+```
+
+**Canonical pattern** — parse all flags before doing work, emit JSONL errors to stdout:
+
+```rust
+use agent_first_data::*;
+use clap::Parser;
+
+let cli = Cli::try_parse().unwrap_or_else(|e| {
+    if matches!(e.kind(), clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion) {
+        e.exit();
+    }
+    println!("{}", output_json(&build_cli_error(&e.to_string())));
+    std::process::exit(2);
+});
+
+let format = cli_parse_output(&cli.output).unwrap_or_else(|e| {
+    println!("{}", output_json(&build_cli_error(&e)));
+    std::process::exit(2);
+});
+
+let log = cli_parse_log_filters(&cli.log);
+// ... do work ...
+println!("{}", cli_output(&result, format));
+```
+
+See `examples/agent_cli.rs` for the complete working example (`cargo test --examples`).
+
 ## Usage Examples
 
 ### Example 1: REST API
@@ -276,6 +315,7 @@ fn process_request() {
     );
 
     // Print JSONL to stdout (secrets redacted, one JSON object per line)
+    // Channel policy: machine-readable protocol/log events must not use stderr.
     println!("{}", output_json(&result));
     // {"code":"ok","result":{"status":"success"},"trace":{"api_key_secret":"***","duration_ms":250}}
 }

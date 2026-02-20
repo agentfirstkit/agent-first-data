@@ -63,7 +63,7 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **8 public APIs** + **AFDATA logging** (3 protocol builders + 3 output functions + 1 internal + 1 utility)
+Total: **12 public APIs and 1 type** + **AFDATA logging** (3 protocol builders + 3 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat`)
 
 ### Protocol Builders (returns JsonValue)
 
@@ -177,6 +177,42 @@ parseSize("1.5K"); // 1536
 parseSize("512");  // 512
 ```
 
+### CLI Helpers (for tools built on AFDATA)
+
+Shared helpers that prevent flag-parsing drift between CLI tools. Use these instead of reimplementing `--output` and `--log` handling in each tool.
+
+```typescript
+type OutputFormat = "json" | "yaml" | "plain"
+
+cliParseOutput(s: string): OutputFormat             // Parse --output flag; throws on unknown
+cliParseLogFilters(entries: string[]): string[]     // Normalize --log: trim, lowercase, dedup, remove empty
+cliOutput(value: JsonValue, format: OutputFormat): string  // Dispatch to outputJson/Yaml/Plain
+buildCliError(message: string): JsonValue           // {code:"error", error_code:"invalid_request", retryable:false, trace:{duration_ms:0}}
+```
+
+**Canonical pattern** — parse all flags before doing work, emit JSONL errors to stdout:
+
+```typescript
+import {
+  type OutputFormat, cliParseOutput, cliParseLogFilters,
+  cliOutput, buildCliError, outputJson,
+} from "agent-first-data";
+
+let fmt: OutputFormat;
+try {
+  fmt = cliParseOutput(outputArg);
+} catch (e) {
+  console.log(outputJson(buildCliError((e as Error).message)));
+  process.exit(2);
+}
+
+const log = cliParseLogFilters(logArg ? logArg.split(",") : []);
+// ... do work ...
+console.log(cliOutput(result, fmt));
+```
+
+See `examples/agent_cli.ts` for the complete working example (`npx tsx --test examples/agent_cli.ts`).
+
 ## Usage Examples
 
 ### Example 1: REST API
@@ -265,6 +301,7 @@ const result = buildJsonOk(
 );
 
 // Print JSONL to stdout (secrets redacted, one JSON object per line)
+// Channel policy: machine-readable protocol/log events must not use stderr.
 console.log(outputJson(result));
 // {"code":"ok","result":{"status":"success"},"trace":{"api_key_secret":"***","duration_ms":250}}
 ```

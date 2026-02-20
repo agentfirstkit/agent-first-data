@@ -4,3 +4,4 @@
 
 export { buildJsonOk, buildJsonError, buildJson, outputJson, outputYaml, outputPlain, internalRedactSecrets, parseSize } from "./format.js";
 export { log, span, initJson, initPlain, initYaml } from "./afdata_logging.js";
+export { type OutputFormat, cliParseOutput, cliParseLogFilters, cliOutput, buildCliError } from "./cli.js";

@@ -1,6 +1,12 @@
 //! Agent-First Data (AFDATA) output formatting and protocol templates.
 //!
-//! 8 public APIs: 3 protocol builders + 3 output formatters + 1 redaction + 1 utility.
+//! 12 public APIs and 1 type:
+//! - 3 protocol builders: [`build_json_ok`], [`build_json_error`], [`build_json`]
+//! - 3 output formatters: [`output_json`], [`output_yaml`], [`output_plain`]
+//! - 1 redaction utility: [`internal_redact_secrets`]
+//! - 1 parse utility: [`parse_size`]
+//! - 4 CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`], [`cli_output`], [`build_cli_error`]
+//! - 1 type: [`OutputFormat`]
 
 #[cfg(feature = "tracing")]
 pub mod afdata_tracing;
@@ -120,6 +126,97 @@ pub fn parse_size(s: &str) -> Option<u64> {
         return None;
     }
     Some(result as u64)
+}
+
+// ═══════════════════════════════════════════
+// Public API: CLI Helpers
+// ═══════════════════════════════════════════
+
+/// Output format for CLI and pipe/MCP modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputFormat {
+    Json,
+    Yaml,
+    Plain,
+}
+
+/// Parse `--output` flag value into [`OutputFormat`].
+///
+/// Returns `Err` with a message suitable for passing to [`build_cli_error`] on unknown values.
+///
+/// ```
+/// use agent_first_data::{cli_parse_output, OutputFormat};
+/// assert!(matches!(cli_parse_output("json"), Ok(OutputFormat::Json)));
+/// assert!(cli_parse_output("xml").is_err());
+/// ```
+pub fn cli_parse_output(s: &str) -> Result<OutputFormat, String> {
+    match s {
+        "json" => Ok(OutputFormat::Json),
+        "yaml" => Ok(OutputFormat::Yaml),
+        "plain" => Ok(OutputFormat::Plain),
+        _ => Err(format!(
+            "invalid --output format '{s}': expected json, yaml, or plain"
+        )),
+    }
+}
+
+/// Normalize `--log` flag entries: trim, lowercase, deduplicate, remove empty.
+///
+/// Accepts pre-split entries as produced by clap's `value_delimiter = ','`.
+///
+/// ```
+/// use agent_first_data::cli_parse_log_filters;
+/// let f = cli_parse_log_filters(&["Query", " error ", "query"]);
+/// assert_eq!(f, vec!["query", "error"]);
+/// ```
+pub fn cli_parse_log_filters<S: AsRef<str>>(entries: &[S]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries {
+        let s = entry.as_ref().trim().to_ascii_lowercase();
+        if !s.is_empty() && !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Dispatch output formatting by [`OutputFormat`].
+///
+/// Equivalent to calling [`output_json`], [`output_yaml`], or [`output_plain`] directly.
+///
+/// ```
+/// use agent_first_data::{cli_output, OutputFormat};
+/// let v = serde_json::json!({"code": "ok"});
+/// let s = cli_output(&v, OutputFormat::Plain);
+/// assert!(s.contains("code=ok"));
+/// ```
+pub fn cli_output(value: &Value, format: OutputFormat) -> String {
+    match format {
+        OutputFormat::Json => output_json(value),
+        OutputFormat::Yaml => output_yaml(value),
+        OutputFormat::Plain => output_plain(value),
+    }
+}
+
+/// Build a standard CLI parse error value.
+///
+/// Use when `Cli::try_parse()` fails or a flag value is invalid.
+/// Print with [`output_json`] and exit with code 2.
+///
+/// ```
+/// let err = agent_first_data::build_cli_error("--output: invalid value 'xml'");
+/// assert_eq!(err["code"], "error");
+/// assert_eq!(err["error_code"], "invalid_request");
+/// assert_eq!(err["retryable"], false);
+/// ```
+pub fn build_cli_error(message: &str) -> Value {
+    serde_json::json!({
+        "code": "error",
+        "error_code": "invalid_request",
+        "error": message,
+        "retryable": false,
+        "trace": {"duration_ms": 0}
+    })
 }
 
 // ═══════════════════════════════════════════
