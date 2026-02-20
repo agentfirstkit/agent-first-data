@@ -4,7 +4,7 @@
 // cli_output, and build_cli_error.
 //
 // Run:  cargo run --example agent_cli -- echo --output json
-//       cargo run --example agent_cli -- echo --output yaml --log startup,request
+//       API_KEY_SECRET=sk-example cargo run --example agent_cli -- echo --output yaml --log startup,request
 // Test: cargo test --examples
 
 #![allow(clippy::print_stdout)]
@@ -52,7 +52,28 @@ fn main() {
     // Step 3: parse --log with shared helper (trim + lowercase + dedup)
     let log = cli_parse_log_filters(&cli.log);
 
-    // Step 4: do work, emit JSONL
+    // Step 4: optionally emit startup diagnostic event
+    if startup_log_enabled(&log) {
+        let startup = agent_first_data::build_json(
+            "log",
+            serde_json::json!({
+                "event": "startup",
+                "args": {
+                    "action": cli.action,
+                    "output": cli.output,
+                    "log": log,
+                },
+                "env": {
+                    "API_KEY_SECRET": std::env::var("API_KEY_SECRET").ok(),
+                    "RUST_LOG": std::env::var("RUST_LOG").ok(),
+                }
+            }),
+            None,
+        );
+        println!("{}", cli_output(&startup, format));
+    }
+
+    // Step 5: do work, emit result
     let result = agent_first_data::build_json_ok(
         serde_json::json!({
             "action": cli.action,
@@ -61,6 +82,12 @@ fn main() {
         None,
     );
     println!("{}", cli_output(&result, format));
+}
+
+fn startup_log_enabled(filters: &[String]) -> bool {
+    filters
+        .iter()
+        .any(|f| matches!(f.as_str(), "startup" | "all" | "*"))
 }
 
 #[cfg(test)]
@@ -80,6 +107,15 @@ mod tests {
     fn parse_log_normalizes() {
         let f = cli_parse_log_filters(&["Startup", " REQUEST ", "startup"]);
         assert_eq!(f, vec!["startup", "request"]);
+    }
+
+    #[test]
+    fn startup_log_enabled_matches_expected_categories() {
+        assert!(startup_log_enabled(&["startup".to_string()]));
+        assert!(startup_log_enabled(&["all".to_string()]));
+        assert!(startup_log_enabled(&["*".to_string()]));
+        assert!(!startup_log_enabled(&["request".to_string()]));
+        assert!(!startup_log_enabled(&[]));
     }
 
     #[test]

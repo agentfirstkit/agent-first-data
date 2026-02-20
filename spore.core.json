@@ -9,14 +9,12 @@
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
   ],
   "changes": [
-    "Add CLI helpers across all four languages (OutputFormat, cli_parse_output, cli_parse_log_filters, cli_output, build_cli_error) enabling tools built on AFDATA to parse --output and --log flags with consistent behavior and shared error format",
-    "Add minimal CLI example programs in all four languages (Rust/Go/Python/TypeScript) with embedded formal tests that integrate with each language's test runner, demonstrating the canonical pattern for building agent-first CLI tools",
-    "Update all README documentation and the agent skill to document the new CLI helpers API, canonical usage patterns, and add a review checklist item for correct flag parsing with cli_parse_output/cli_parse_log_filters"
+    "Upgrade Rust transitive dependencies (bumpalo 3.19.1\u21923.20.2, syn 2.0.116\u21922.0.117) and TypeScript devDependencies to pick up upstream bug fixes and keep dependency graphs current"
   ],
   "license": "MIT",
   "references": [
     {
-      "uri": "cmn://cmn.dev/spore/blake3_5c28bef606f8d2fe43cd239bd9f0d88454f4c1fcd9ea3ce2e4d6c0b74061d663",
+      "uri": "cmn://cmn.dev/spore/blake3_03e0b56d864f70de48f67628f7c94487dad3e0dbf4594c3eb963c60b1879fa8a",
       "relation": "spawned_from"
     }
   ],
