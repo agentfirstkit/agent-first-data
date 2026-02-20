@@ -192,6 +192,15 @@ Every output line carries a `code` field:
 | `"ok"` | Success result |
 | `"error"` | Error result |
 
+Channel policy:
+- `stdout` is the only protocol/log stream for machine-readable events
+- runtime protocol events MUST NOT be emitted on `stderr`
+- `stderr` is reserved for unrecoverable pre-protocol startup failures only
+
+Recommended enforcement:
+- Rust: enable clippy `print_stderr = "deny"` and disallow `std::eprintln` / `std::io::stderr`
+- Go/Python/TypeScript: add source-policy tests that fail if runtime sources reference stderr APIs
+
 ### Templates
 
 ```json
@@ -213,16 +222,16 @@ Startup payload fields are tool-defined; `config` is recommended, while `version
 | MCP tool | JSON |
 | SSE stream | JSONL |
 
-All use `code` / `result` / `error` / `trace`.
+All use `code` / `result` / `error` / `trace`. Do not split protocol events across `stdout` and `stderr`.
 
 ---
 
 ## Using the Library
 
-8 public APIs (same across all languages):
+12 public APIs and 1 type (same across all languages):
 
-| Function | What it does |
-|:---------|:-------------|
+| Function / Type | What it does |
+|:----------------|:-------------|
 | `build_json_ok` | Build `{code: "ok", result, trace?}` |
 | `build_json_error` | Build `{code: "error", error, trace?}` |
 | `build_json` | Build `{code: "<custom>", ...fields, trace?}` |
@@ -231,23 +240,31 @@ All use `code` / `result` / `error` / `trace`.
 | `output_plain` | Single-line logfmt, keys stripped, values formatted |
 | `internal_redact_secrets` | Redact `_secret` fields in-place |
 | `parse_size` | Parse `"10M"` → bytes |
+| `OutputFormat` | `"json"` / `"yaml"` / `"plain"` enum/type |
+| `cli_parse_output` | Parse `--output` flag; error on unknown value |
+| `cli_parse_log_filters` | Normalize `--log` entries: trim, lowercase, dedup, remove empty |
+| `cli_output` | Dispatch to `output_json` / `output_yaml` / `output_plain` |
+| `build_cli_error` | `{code:"error", error_code:"invalid_request", retryable:false, trace:{duration_ms:0}}` |
 
 ### Rust
 
 ```rust
 use agent_first_data::{build_json_ok, build_json_error, build_json, output_json, output_yaml, output_plain, internal_redact_secrets, parse_size};
+use agent_first_data::{OutputFormat, cli_parse_output, cli_parse_log_filters, cli_output, build_cli_error};
 ```
 
 ### Python
 
 ```python
 from agent_first_data import build_json_ok, build_json_error, build_json, output_json, output_yaml, output_plain, internal_redact_secrets, parse_size
+from agent_first_data import OutputFormat, cli_parse_output, cli_parse_log_filters, cli_output, build_cli_error
 ```
 
 ### TypeScript
 
 ```typescript
 import { buildJsonOk, buildJsonError, buildJson, outputJson, outputYaml, outputPlain, internalRedactSecrets, parseSize } from "agent-first-data";
+import { type OutputFormat, cliParseOutput, cliParseLogFilters, cliOutput, buildCliError } from "agent-first-data";
 ```
 
 ### Go
@@ -257,7 +274,21 @@ import afdata "github.com/cmnspore/agent-first-data/go"
 
 afdata.OutputPlain(value)
 afdata.ParseSize("10M")
+afdata.CliParseOutput("json")
+afdata.BuildCliError("--output: invalid value 'xml'")
 ```
+
+### CLI Helpers Pattern
+
+When building a CLI tool on AFDATA, always use the CLI helpers to parse `--output` and `--log` flags. This ensures consistent behavior and error format across all tools:
+
+```
+--output json|yaml|plain    → cli_parse_output
+--log startup,request,...   → cli_parse_log_filters (trim, lowercase, dedup, remove empty)
+parse errors                → build_cli_error + output_json + exit 2
+```
+
+Key rule: use `try_parse()` / `try_parse_from()` (not `parse()`) in Rust/clap so that parse errors go to stdout as JSONL, not stderr as plain text.
 
 ## AFDATA Logging
 
@@ -332,3 +363,4 @@ When reviewing code that produces structured output:
 8. Environment variables follow `UPPER_SNAKE_CASE` with the same suffixes
 9. Logging uses AFDATA init functions (`init_json`/`init_plain`/`init_yaml`) — not raw `println!`/`fmt.Println`/`console.log` for structured output
 10. Database columns use AFDATA suffixes on generic types (`duration_ms INTEGER`, not `duration INTEGER`); native types like `TIMESTAMPTZ` don't need suffixes
+11. CLI flag parsing uses `cli_parse_output`/`cli_parse_log_filters`/`build_cli_error` — not custom reimplementations; uses `try_parse()` not `parse()` in Rust so clap errors go to stdout as JSONL

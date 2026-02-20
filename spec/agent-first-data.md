@@ -482,6 +482,15 @@ A recommended structure for program output. This part is **optional** — adopt 
 
 Programs emit JSONL to stdout — one JSON object per line. Every line has a `code` field identifying its type:
 
+Channel policy:
+- `stdout` is the only protocol/log stream for machine-readable events
+- runtime protocol events MUST NOT be emitted on `stderr`
+- `stderr` may be used only for unrecoverable pre-protocol startup failures where structured output cannot be produced
+
+Recommended enforcement:
+- Rust: clippy `print_stderr = "deny"` plus disallow `std::eprintln` / `std::io::stderr`
+- Go/Python/TypeScript: source-policy tests or lint rules that fail on stderr API usage in runtime code
+
 | `code` | Meaning |
 |:-------|:--------|
 | `"log"` | Diagnostic event (`event` field identifies startup/request/progress/retry/redirect) |
@@ -655,7 +664,7 @@ JSONL stream, raw JSON per line:
 | **MCP tool** | JSON (raw Value) | ❌ None needed |
 | **SSE stream** | JSONL (raw JSON) | ❌ None needed |
 
-All contexts can use the protocol structure from Part 3. Only `code` (required) and `trace` (recommended) are standardized. Other fields can be flat or nested — both styles work. CLI/logs apply output formatting and secret protection from Part 2. APIs return raw JSON Values.
+All contexts can use the protocol structure from Part 3. Only `code` (required) and `trace` (recommended) are standardized. Other fields can be flat or nested — both styles work. CLI/logs apply output formatting and secret protection from Part 2. APIs return raw JSON Values. For CLI/log protocol transport, use `stdout` only; do not split protocol events across `stdout` and `stderr`.
 
 ---
 

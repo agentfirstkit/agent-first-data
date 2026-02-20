@@ -21,6 +21,14 @@ from agent_first_data.afdata_logging import (
     span,
 )
 
+from agent_first_data.cli import (
+    OutputFormat,
+    cli_parse_output,
+    cli_parse_log_filters,
+    cli_output,
+    build_cli_error,
+)
+
 __all__ = [
     "build_json_ok",
     "build_json_error",
@@ -37,4 +45,9 @@ __all__ = [
     "init_logging_yaml",
     "get_logger",
     "span",
+    "OutputFormat",
+    "cli_parse_output",
+    "cli_parse_log_filters",
+    "cli_output",
+    "build_cli_error",
 ]

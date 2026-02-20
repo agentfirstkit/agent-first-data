@@ -8,6 +8,7 @@ Agent-First Data (AFDATA) is a convention for self-describing structured data:
 2. **Output** — Three formats (JSON/YAML/Plain) with automatic key stripping, value formatting, and secret redaction
 3. **Protocol** — Optional structured templates (`ok`, `error`, `log`) with `trace` for execution context
 4. **Logging** — AFDATA-compliant structured logging with span support (per-language integration)
+5. **Channel discipline** — machine-readable protocol/log events use `stdout` only; `stderr` is not a protocol channel
 
 See the full [specification](spec/agent-first-data.md) and the [agent skill](skills/agent-first-data.md) for AI-assisted development.
 
@@ -63,10 +64,10 @@ CLI logging flags:
 --verbose   # shorthand for all log categories
 ```
 
-## API (8 functions, same across all languages)
+## API (12 functions + 1 type, same across all languages)
 
-| Function | Returns | Description |
-|:---------|:--------|:------------|
+| Function / Type | Returns | Description |
+|:----------------|:--------|:------------|
 | `build_json_ok` | JSON | `{code: "ok", result, trace?}` |
 | `build_json_error` | JSON | `{code: "error", error, trace?}` |
 | `build_json` | JSON | `{code: "<custom>", ...fields, trace?}` |
@@ -75,6 +76,11 @@ CLI logging flags:
 | `output_plain` | String | Single-line logfmt, keys stripped, values formatted |
 | `internal_redact_secrets` | void | Redact `_secret` fields in-place |
 | `parse_size` | int | Parse `"10M"` → bytes |
+| `OutputFormat` | type | `"json"` / `"yaml"` / `"plain"` enum/type |
+| `cli_parse_output` | OutputFormat | Parse `--output` flag; error on unknown value |
+| `cli_parse_log_filters` | String[] | Normalize `--log` entries: trim, lowercase, dedup, remove empty |
+| `cli_output` | String | Dispatch to `output_json` / `output_yaml` / `output_plain` |
+| `build_cli_error` | JSON | `{code:"error", error_code:"invalid_request", retryable:false, trace:{duration_ms:0}}` |
 
 ## AFDATA Logging
 

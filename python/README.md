@@ -65,7 +65,7 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **8 public APIs** + **AFDATA logging** (3 protocol builders + 3 output functions + 1 internal + 1 utility)
+Total: **12 public APIs and 1 type** + **AFDATA logging** (3 protocol builders + 3 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat`)
 
 ### Protocol Builders (returns dict)
 
@@ -178,6 +178,41 @@ assert parse_size("1.5K") == 1536
 assert parse_size("512") == 512
 ```
 
+### CLI Helpers (for tools built on AFDATA)
+
+Shared helpers that prevent flag-parsing drift between CLI tools. Use these instead of reimplementing `--output` and `--log` handling in each tool.
+
+```python
+class OutputFormat(enum.Enum):  # JSON="json", YAML="yaml", PLAIN="plain"
+
+cli_parse_output(s: str) -> OutputFormat         # Parse --output flag; raises ValueError on unknown
+cli_parse_log_filters(entries: list[str]) -> list[str]  # Normalize --log: trim, lowercase, dedup, remove empty
+cli_output(value: Any, format: OutputFormat) -> str     # Dispatch to output_json/yaml/plain
+build_cli_error(message: str) -> dict            # {code:"error", error_code:"invalid_request", retryable:False, trace:{duration_ms:0}}
+```
+
+**Canonical pattern** — parse all flags before doing work, emit JSONL errors to stdout:
+
+```python
+import sys
+from agent_first_data import (
+    OutputFormat, cli_parse_output, cli_parse_log_filters,
+    cli_output, build_cli_error, output_json,
+)
+
+try:
+    fmt = cli_parse_output(args.output)
+except ValueError as e:
+    print(output_json(build_cli_error(str(e))))
+    sys.exit(2)
+
+log = cli_parse_log_filters(args.log.split(",") if args.log else [])
+# ... do work ...
+print(cli_output(result, fmt))
+```
+
+See `examples/agent_cli.py` for the complete working example (`pytest examples/agent_cli.py`).
+
 ## Usage Examples
 
 ### Example 1: REST API
@@ -267,6 +302,7 @@ result = build_json_ok(
 )
 
 # Print JSONL to stdout (secrets redacted, one JSON object per line)
+# Channel policy: machine-readable protocol/log events must not use stderr.
 print(output_json(result))
 # {"code":"ok","result":{"status":"success"},"trace":{"api_key_secret":"***","duration_ms":250}}
 ```
