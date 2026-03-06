@@ -12,7 +12,11 @@ import {
   buildJsonError,
   buildJson,
   internalRedactSecrets,
+  RedactionPolicy,
+  outputJson,
+  outputJsonWith,
   outputPlain,
+  type JsonValue,
   parseSize,
 } from "./format.ts";
 
@@ -103,4 +107,56 @@ describe("helper fixtures", () => {
       }
     }
   }
+});
+
+describe("parseSize safety", () => {
+  it("returns null for unsafe integers", () => {
+    assert.equal(parseSize("9007199254740993"), null);
+    assert.equal(parseSize("9007199254740992"), null);
+    assert.equal(parseSize("8796093022208K"), null);
+  });
+});
+
+describe("json safety", () => {
+  it("serializes Error fields as readable strings", () => {
+    const out = outputJson({ error: new Error("timeout") } as unknown as JsonValue);
+    const parsed = JSON.parse(out) as Record<string, unknown>;
+    assert.equal(parsed["error"], "timeout");
+  });
+
+  it("handles bigint and circular references without leaking secrets", () => {
+    const meta: Record<string, unknown> = { api_key_secret: "sk-live-123", amount: 1n };
+    meta["self"] = meta;
+
+    const out = outputJson({ meta } as unknown as JsonValue);
+    assert.ok(!out.includes("sk-live-123"), `secret leaked in output: ${out}`);
+
+    const parsed = JSON.parse(out) as Record<string, unknown>;
+    const parsedMeta = parsed["meta"] as Record<string, unknown>;
+    assert.equal(parsedMeta["api_key_secret"], "***");
+    assert.equal(parsedMeta["amount"], "<unsupported:bigint>");
+    assert.equal(parsedMeta["self"], "<unsupported:circular>");
+  });
+
+  it("outputJsonWith RedactionTraceOnly keeps result secrets", () => {
+    const out = outputJsonWith({
+      code: "ok",
+      result: { api_key_secret: "sk-live-123" },
+      trace: { request_secret: "top-secret" },
+    } as unknown as JsonValue, RedactionPolicy.RedactionTraceOnly);
+    const parsed = JSON.parse(out) as Record<string, unknown>;
+    const parsedResult = parsed["result"] as Record<string, unknown>;
+    const parsedTrace = parsed["trace"] as Record<string, unknown>;
+    assert.equal(parsedTrace["request_secret"], "***");
+    assert.equal(parsedResult["api_key_secret"], "sk-live-123");
+  });
+
+  it("outputJsonWith RedactionNone keeps all secrets", () => {
+    const out = outputJsonWith(
+      { api_key_secret: "sk-live-123" } as unknown as JsonValue,
+      RedactionPolicy.RedactionNone,
+    );
+    const parsed = JSON.parse(out) as Record<string, unknown>;
+    assert.equal(parsed["api_key_secret"], "sk-live-123");
+  });
 });

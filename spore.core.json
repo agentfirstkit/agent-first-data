@@ -1,18 +1,25 @@
 {
   "id": "agent-first-data",
+  "version": "0.5.0",
   "name": "Agent-First Data",
   "domain": "cmn.dev",
   "synopsis": "The field name is the schema \u2014 agents read latency_ms and know milliseconds, api_key_secret and know to redact, no external schema needed",
   "intent": [
     "Encode all semantic information in the field name itself so agents parse structured data without external schemas, documentation, or type systems \u2014 _ms/_s/_epoch_ms for time, _msats/_sats/_usd_cents for currency, _bytes for size, _secret for auto-redaction",
-    "Define a JSONL output protocol where every line carries a code field (startup for config state, tool-defined for status/progress, ok/error for results) plus a trace object for execution context (duration, token counts, cost, data source) \u2014 same structure whether the transport is CLI stdout, REST API response, MCP tool result, or SSE stream",
+    "Define a JSONL output protocol where every line carries a code field (startup for config state, tool-defined for status/progress, ok/error for results) plus a trace object for execution context (duration, token counts, cost, data source) \u2014 same structure whether the transport is CLI stdout, HTTP response body, MCP tool result, or SSE stream",
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms \u2192 RFC 3339, _bytes \u2192 human-readable, _secret \u2192 ***, _ms \u2265 1000 \u2192 seconds)"
   ],
   "changes": [
-    "Update Rust dependencies (chrono 0.4.44, wasm-bindgen 0.2.113, js-sys 0.3.90) and TypeScript @types/node to latest patch versions"
+    "Add outputJsonWith formatter and RedactionPolicy enum across all four language SDKs (Rust/Go/Python/TypeScript), enabling callers to scope _secret redaction to specific payload sections such as trace-only or disable it entirely, rather than always redacting all fields globally \u2014 supports use cases where raw result payloads must be logged without modification while still protecting execution context secrets in the trace field",
+    "Update spec and all README documentation to use transport-neutral language, replacing 'API responses' framing with 'transport payloads' and 'raw JSON serialization path' vs 'CLI/log path' distinction, clarifying that any serialization context can choose an explicit output policy rather than assuming secure channels bypass redaction concerns"
   ],
   "license": "MIT",
-  "references": [],
+  "bonds": [
+    {
+      "uri": "cmn://cmn.dev/b3.EhpPQaJ5pGbSQ6Prj4BCXEFmtd267sSdFoxZjtQUMscX",
+      "relation": "spawned_from"
+    }
+  ],
   "tree": {
     "algorithm": "blob_tree_blake3_nfc",
     "excludes": [

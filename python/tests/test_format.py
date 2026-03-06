@@ -7,7 +7,10 @@ from agent_first_data import (
     build_json_ok,
     build_json_error,
     build_json,
+    RedactionPolicy,
     internal_redact_secrets,
+    output_json,
+    output_json_with,
 )
 from agent_first_data.format import (
     _format_bytes_human,
@@ -83,3 +86,52 @@ def test_helper_fixtures():
             elif name == "parse_size":
                 got = parse_size(inp)
                 assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
+
+
+def test_output_json_exception_field_is_readable():
+    out = output_json({"error": Exception("timeout")})
+    parsed = json.loads(out)
+    assert parsed["error"] == "timeout"
+
+
+def test_output_json_unsupported_value_does_not_leak_secret():
+    class SecretRepr:
+        def __repr__(self) -> str:
+            return "Secret(sk-live-123)"
+
+    out = output_json({"meta": SecretRepr(), "api_key_secret": "sk-live-123"})
+    assert "sk-live-123" not in out
+    parsed = json.loads(out)
+    assert parsed["api_key_secret"] == "***"
+    assert parsed["meta"].startswith("<unsupported:")
+
+
+def test_output_json_circular_reference():
+    v = {}
+    v["self"] = v
+    out = output_json(v)
+    parsed = json.loads(out)
+    assert parsed["self"] == "<unsupported:circular>"
+
+
+def test_output_json_with_trace_only_redacts_only_trace():
+    out = output_json_with(
+        {
+            "code": "ok",
+            "result": {"api_key_secret": "sk-live-123"},
+            "trace": {"request_secret": "top-secret"},
+        },
+        RedactionPolicy.RedactionTraceOnly,
+    )
+    parsed = json.loads(out)
+    assert parsed["trace"]["request_secret"] == "***"
+    assert parsed["result"]["api_key_secret"] == "sk-live-123"
+
+
+def test_output_json_with_none_keeps_secrets():
+    out = output_json_with(
+        {"api_key_secret": "sk-live-123"},
+        RedactionPolicy.RedactionNone,
+    )
+    parsed = json.loads(out)
+    assert parsed["api_key_secret"] == "sk-live-123"

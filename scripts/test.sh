@@ -10,6 +10,7 @@ echo ""
 echo "[1/4] Rust (policy + tests)"
 (cd "$ROOTPATH/rust" && cargo clippy --lib -- -D warnings)
 (cd "$ROOTPATH/rust" && cargo test)
+(cd "$ROOTPATH/rust" && cargo test --features tracing)
 (cd "$ROOTPATH/rust" && cargo test --examples)
 
 echo ""

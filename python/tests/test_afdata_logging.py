@@ -112,6 +112,12 @@ class TestCodeOverride:
         assert m["code"] == "log"
         assert m["event"] == "startup"
 
+    def test_exception_field_is_readable(self):
+        logger = make_logger("test_exc")
+        adapter = get_logger("test_exc")
+        m = capture_log(lambda: adapter.error("request failed", extra={"error": Exception("timeout")}))
+        assert m["error"] == "timeout"
+
 
 class TestGetLogger:
     def test_default_fields(self):

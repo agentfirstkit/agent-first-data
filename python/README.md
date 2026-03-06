@@ -65,11 +65,11 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **12 public APIs and 1 type** + **AFDATA logging** (3 protocol builders + 3 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat`)
+Total: **13 public APIs and 2 types** + **AFDATA logging** (3 protocol builders + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
 
 ### Protocol Builders (returns dict)
 
-Build AFDATA protocol structures. Return dict objects for API responses.
+Build AFDATA protocol structures. Return dict objects for transport payloads.
 
 ```python
 # Success (result)
@@ -82,7 +82,7 @@ build_json_error(message: str, trace: Any = None) -> dict
 build_json(code: str, fields: Any, trace: Any = None) -> dict
 ```
 
-**Use case:** API responses (frameworks like FastAPI automatically serialize)
+**Use case:** structured protocol payloads (frameworks automatically serialize)
 
 **Example:**
 ```python
@@ -119,12 +119,19 @@ not_found = build_json(
 
 ### CLI/Log Output (returns str)
 
-Format values for CLI output and logs. **All formats redact `_secret` fields.** YAML and Plain also strip suffixes from keys and format values for human readability.
+Format values for CLI output and logs. `output_json` uses full `_secret` redaction by default. `output_json_with` supports explicit scoped policies. YAML and Plain always redact `_secret` and apply human-readable formatting.
 
 ```python
 output_json(value: Any) -> str   # Single-line JSON, original keys, for programs/logs
+output_json_with(value: Any, redaction_policy: RedactionPolicy) -> str
 output_yaml(value: Any) -> str   # Multi-line YAML, keys stripped, values formatted
 output_plain(value: Any) -> str  # Single-line logfmt, keys stripped, values formatted
+```
+
+```python
+class RedactionPolicy(enum.Enum):
+    RedactionTraceOnly = "RedactionTraceOnly"
+    RedactionNone = "RedactionNone"
 ```
 
 **Example:**

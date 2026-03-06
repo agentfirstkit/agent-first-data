@@ -210,6 +210,87 @@ func TestOutputJsonNestedSecretsRedacted(t *testing.T) {
 	assertContains(t, got, `"duration_ms":150`)
 }
 
+func TestOutputJsonWithTraceOnlyRedactsTraceOnly(t *testing.T) {
+	got := OutputJsonWith(map[string]any{
+		"code":   "ok",
+		"result": map[string]any{"api_key_secret": "sk-live-123"},
+		"trace":  map[string]any{"request_secret": "top-secret"},
+	}, RedactionTraceOnly)
+	assertContains(t, got, `"request_secret":"***"`)
+	assertContains(t, got, `"api_key_secret":"sk-live-123"`)
+}
+
+func TestOutputJsonWithNoneKeepsSecrets(t *testing.T) {
+	got := OutputJsonWith(map[string]any{
+		"api_key_secret": "sk-live-123",
+	}, RedactionNone)
+	assertContains(t, got, `"api_key_secret":"sk-live-123"`)
+	assertNotContains(t, got, `"***"`)
+}
+
+func TestOutputJsonUnsupportedValueDoesNotCollapseToNull(t *testing.T) {
+	got := OutputJson(map[string]any{
+		"message": "bad",
+		"code":    "info",
+		"meta": map[string]any{
+			"api_key_secret": "sk-live-123",
+			"bad":            func() {},
+		},
+	})
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("failed to parse OutputJson: %v (%s)", err, got)
+	}
+	if parsed["message"] != "bad" {
+		t.Errorf("message = %v, want bad", parsed["message"])
+	}
+	if parsed["code"] != "info" {
+		t.Errorf("code = %v, want info", parsed["code"])
+	}
+	meta, ok := parsed["meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("meta should be object, got %T (%v)", parsed["meta"], parsed["meta"])
+	}
+	if meta["api_key_secret"] != "***" {
+		t.Errorf("api_key_secret = %v, want ***", meta["api_key_secret"])
+	}
+	if _, ok := meta["bad"]; !ok {
+		t.Error("expected meta.bad to be present")
+	}
+}
+
+func TestOutputJsonStructWithUnsupportedFieldDoesNotLeakSecrets(t *testing.T) {
+	type badMeta struct {
+		APIKeySecret string `json:"api_key_secret"`
+		Fn           func() `json:"fn"`
+	}
+
+	got := OutputJson(map[string]any{
+		"meta": badMeta{
+			APIKeySecret: "sk-live-123",
+			Fn:           func() {},
+		},
+	})
+
+	assertNotContains(t, got, "sk-live-123")
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("failed to parse OutputJson: %v (%s)", err, got)
+	}
+	meta, ok := parsed["meta"].(string)
+	if !ok {
+		t.Fatalf("expected meta to be string, got %T (%v)", parsed["meta"], parsed["meta"])
+	}
+	if !strings.HasPrefix(meta, "<unsupported:") {
+		t.Errorf("meta = %q, want prefix <unsupported:", meta)
+	}
+	if _, ok := parsed["meta"]; !ok {
+		t.Fatal("expected meta key in output")
+	}
+}
+
 // --- Output YAML tests ---
 
 func TestOutputYamlStartsWithSeparator(t *testing.T) {

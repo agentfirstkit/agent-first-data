@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"testing"
 )
@@ -16,6 +17,15 @@ func parseJSONLine(t *testing.T, buf *bytes.Buffer) map[string]any {
 	}
 	buf.Reset()
 	return m
+}
+
+func setDefaultLoggerForTest(t *testing.T, logger *slog.Logger) {
+	t.Helper()
+	prev := slog.Default()
+	slog.SetDefault(logger)
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+	})
 }
 
 func TestAfdataHandlerBasicFields(t *testing.T) {
@@ -49,12 +59,39 @@ func TestAfdataHandlerLevelCodes(t *testing.T) {
 
 	for _, tt := range tests {
 		var buf bytes.Buffer
-		logger := slog.New(NewAfdataHandler(&buf, FormatJson))
+		logger := slog.New(NewAfdataHandlerWithLevel(&buf, FormatJson, slog.LevelDebug))
 		logger.Log(context.Background(), tt.level, "test")
 		m := parseJSONLine(t, &buf)
 		if m["code"] != tt.code {
 			t.Errorf("level %v: code = %v, want %v", tt.level, m["code"], tt.code)
 		}
+	}
+}
+
+func TestAfdataHandlerDefaultLevelIsInfo(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(NewAfdataHandler(&buf, FormatJson))
+
+	logger.Debug("debug should be filtered")
+	if buf.Len() != 0 {
+		t.Fatalf("debug log should be filtered by default, got: %s", buf.String())
+	}
+
+	logger.Info("info should pass")
+	m := parseJSONLine(t, &buf)
+	if m["code"] != "info" {
+		t.Errorf("code = %v, want info", m["code"])
+	}
+}
+
+func TestAfdataHandlerCustomLevelAllowsDebug(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(NewAfdataHandlerWithLevel(&buf, FormatJson, slog.LevelDebug))
+
+	logger.Debug("debug should pass")
+	m := parseJSONLine(t, &buf)
+	if m["code"] != "debug" {
+		t.Errorf("code = %v, want debug", m["code"])
 	}
 }
 
@@ -107,10 +144,63 @@ func TestAfdataHandlerEventOverridesSpan(t *testing.T) {
 	}
 }
 
+func TestAfdataHandlerAnyMapSecretsAreRedacted(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(NewAfdataHandler(&buf, FormatJson))
+
+	logger.Info("event", "meta", map[string]any{"api_key_secret": "sk-live-123"})
+	m := parseJSONLine(t, &buf)
+
+	meta, ok := m["meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("meta should be object, got %T (%v)", m["meta"], m["meta"])
+	}
+	if meta["api_key_secret"] != "***" {
+		t.Errorf("api_key_secret = %v, want ***", meta["api_key_secret"])
+	}
+}
+
+func TestAfdataHandlerUnsupportedAnyDoesNotEmitNullLine(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(NewAfdataHandler(&buf, FormatJson))
+
+	logger.Info("bad", "meta", map[string]any{
+		"api_key_secret": "sk-live-123",
+		"bad":            func() {},
+	})
+	m := parseJSONLine(t, &buf)
+
+	if m["message"] != "bad" {
+		t.Errorf("message = %v, want bad", m["message"])
+	}
+	meta, ok := m["meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("meta should be object, got %T (%v)", m["meta"], m["meta"])
+	}
+	if meta["api_key_secret"] != "***" {
+		t.Errorf("api_key_secret = %v, want ***", meta["api_key_secret"])
+	}
+	if _, ok := meta["bad"]; !ok {
+		t.Error("expected meta.bad to be present")
+	}
+}
+
+func TestAfdataHandlerErrorFieldIsReadableString(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(NewAfdataHandler(&buf, FormatJson))
+
+	logger.Info("request failed", "error", errors.New("timeout"))
+	m := parseJSONLine(t, &buf)
+
+	if m["error"] != "timeout" {
+		t.Errorf("error = %v, want timeout", m["error"])
+	}
+}
+
 func TestWithSpanContext(t *testing.T) {
 	var buf bytes.Buffer
 	handler := NewAfdataHandler(&buf, FormatJson)
-	slog.SetDefault(slog.New(handler))
+	setDefaultLoggerForTest(t, slog.New(handler))
 
 	ctx := context.Background()
 	ctx = WithSpan(ctx, map[string]any{"request_id": "ctx-456"})
@@ -127,7 +217,7 @@ func TestWithSpanContext(t *testing.T) {
 func TestNestedSpanContext(t *testing.T) {
 	var buf bytes.Buffer
 	handler := NewAfdataHandler(&buf, FormatJson)
-	slog.SetDefault(slog.New(handler))
+	setDefaultLoggerForTest(t, slog.New(handler))
 
 	ctx := context.Background()
 	ctx = WithSpan(ctx, map[string]any{"request_id": "outer"})

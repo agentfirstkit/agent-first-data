@@ -1,8 +1,8 @@
 // Package afdata implements Agent-First Data (AFDATA) output formatting
 // and protocol templates.
 //
-// 12 public APIs and 1 type: 3 protocol builders + 3 output formatters +
-// 1 redaction + 1 utility + 4 CLI helpers + OutputFormat.
+// 13 public APIs and 2 types: 3 protocol builders + 4 output formatters +
+// 1 redaction + 1 utility + 4 CLI helpers + OutputFormat + RedactionPolicy.
 package afdata
 
 import (
@@ -58,14 +58,38 @@ func BuildJson(code string, fields any, trace any) map[string]any {
 // Public API: Output Formatters
 // ═══════════════════════════════════════════
 
+// RedactionPolicy controls scoped redaction behavior for OutputJsonWith.
+type RedactionPolicy string
+
+const (
+	RedactionTraceOnly RedactionPolicy = "RedactionTraceOnly"
+	RedactionNone      RedactionPolicy = "RedactionNone"
+)
+
 // OutputJson formats as single-line JSON. Secrets redacted, original keys, raw values.
 func OutputJson(value any) string {
-	// Deep copy via JSON round-trip
-	b, _ := json.Marshal(value)
-	var v any
-	json.Unmarshal(b, &v)
+	v := sanitizeForJSON(value)
 	redactSecrets(v)
-	out, _ := json.Marshal(v)
+	return marshalOutputJSON(v)
+}
+
+// OutputJsonWith formats as single-line JSON with explicit redaction policy.
+func OutputJsonWith(value any, redactionPolicy RedactionPolicy) string {
+	v := sanitizeForJSON(value)
+	applyRedactionPolicy(v, redactionPolicy)
+	return marshalOutputJSON(v)
+}
+
+func marshalOutputJSON(value any) string {
+	out, err := json.Marshal(value)
+	if err != nil {
+		// Last-resort fallback: preserve JSONL contract even for pathological inputs.
+		fallback, _ := json.Marshal(map[string]any{
+			"error":  "output_json_failed",
+			"detail": err.Error(),
+		})
+		return string(fallback)
+	}
 	return string(out)
 }
 
@@ -175,6 +199,22 @@ func redactSecrets(value any) {
 		for _, item := range v {
 			redactSecrets(item)
 		}
+	}
+}
+
+func applyRedactionPolicy(value any, redactionPolicy RedactionPolicy) {
+	switch redactionPolicy {
+	case RedactionTraceOnly:
+		if obj, ok := value.(map[string]any); ok {
+			if trace, exists := obj["trace"]; exists {
+				redactSecrets(trace)
+			}
+		}
+	case RedactionNone:
+		// Explicitly disabled.
+	default:
+		// Safety fallback for unknown policy values.
+		redactSecrets(value)
 	}
 }
 
@@ -708,6 +748,31 @@ func normalize(value any) any {
 		return value
 	}
 	return result
+}
+
+// sanitizeForJSON converts values into JSON-safe data while preserving map/array structure.
+func sanitizeForJSON(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, item := range v {
+			out[k] = sanitizeForJSON(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = sanitizeForJSON(item)
+		}
+		return out
+	}
+
+	normalized := normalize(value)
+	if _, err := json.Marshal(normalized); err == nil {
+		return normalized
+	}
+	// Never stringify raw value content here; it may contain secrets.
+	return fmt.Sprintf("<unsupported:%T>", value)
 }
 
 // jcsLess compares two strings by UTF-16 code unit order per RFC 8785.

@@ -1,6 +1,6 @@
 ---
 name: agent-first-data
-description: Apply Agent-First Data naming and output conventions when writing structured data, configs, logs, API responses, or CLI output in any language.
+description: Apply Agent-First Data naming and output conventions when writing structured data, configs, logs, transport payloads, or CLI output in any language.
 disable-model-invocation: true
 allowed-tools: Bash, Read, Edit, Write, Glob, Grep
 ---
@@ -228,7 +228,7 @@ All use `code` / `result` / `error` / `trace`. Do not split protocol events acro
 
 ## Using the Library
 
-12 public APIs and 1 type (same across all languages):
+13 public APIs and 2 types (same across all languages):
 
 | Function / Type | What it does |
 |:----------------|:-------------|
@@ -236,11 +236,13 @@ All use `code` / `result` / `error` / `trace`. Do not split protocol events acro
 | `build_json_error` | Build `{code: "error", error, trace?}` |
 | `build_json` | Build `{code: "<custom>", ...fields, trace?}` |
 | `output_json` | Single-line JSON, secrets redacted, original keys |
+| `output_json_with` | Single-line JSON with explicit redaction policy |
 | `output_yaml` | Multi-line YAML, keys stripped, values formatted |
 | `output_plain` | Single-line logfmt, keys stripped, values formatted |
 | `internal_redact_secrets` | Redact `_secret` fields in-place |
 | `parse_size` | Parse `"10M"` → bytes |
 | `OutputFormat` | `"json"` / `"yaml"` / `"plain"` enum/type |
+| `RedactionPolicy` | `RedactionTraceOnly` / `RedactionNone` enum/type |
 | `cli_parse_output` | Parse `--output` flag; error on unknown value |
 | `cli_parse_log_filters` | Normalize `--log` entries: trim, lowercase, dedup, remove empty |
 | `cli_output` | Dispatch to `output_json` / `output_yaml` / `output_plain` |
@@ -356,7 +358,7 @@ When reviewing code that produces structured output:
 1. Every numeric field with a unit has the correct suffix (`_ms`, `_bytes`, `_sats`, `_percent`, etc.)
 2. Timestamps use `_epoch_ms` / `_epoch_s` / `_rfc3339` — never bare `timestamp: 1707868800`
 3. Sensitive values end in `_secret` and are redacted in all output paths
-4. API responses / CLI output use `code` / `result` / `error` / `trace` structure
+4. Transport payloads / CLI output use `code` / `result` / `error` / `trace` structure
 5. Config files use the same suffixes as output
 6. No unit-less ambiguous fields (`timeout: 30` — 30 what?)
 7. Config size values use `_size` suffix (`buffer_size: "10M"`, not `buffer: "10M"`)

@@ -63,11 +63,11 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **12 public APIs and 1 type** + **AFDATA logging** (3 protocol builders + 3 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat`)
+Total: **13 public APIs and 2 types** + **AFDATA logging** (3 protocol builders + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
 
 ### Protocol Builders (returns JsonValue)
 
-Build AFDATA protocol structures. Return JSON-serializable objects for API responses.
+Build AFDATA protocol structures. Return JSON-serializable objects for transport payloads.
 
 ```typescript
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
@@ -82,7 +82,7 @@ buildJsonError(message: string, trace?: JsonValue): JsonValue
 buildJson(code: string, fields: JsonValue, trace?: JsonValue): JsonValue
 ```
 
-**Use case:** API responses (frameworks like Express automatically serialize)
+**Use case:** structured protocol payloads (frameworks automatically serialize)
 
 **Example:**
 ```typescript
@@ -118,12 +118,20 @@ const notFound = buildJson(
 
 ### CLI/Log Output (returns string)
 
-Format values for CLI output and logs. **All formats redact `_secret` fields.** YAML and Plain also strip suffixes from keys and format values for human readability.
+Format values for CLI output and logs. `outputJson` uses full `_secret` redaction by default. `outputJsonWith` supports explicit scoped policies. YAML and Plain always redact `_secret` and apply human-readable formatting.
 
 ```typescript
 outputJson(value: JsonValue): string   // Single-line JSON, original keys, for programs/logs
+outputJsonWith(value: JsonValue, redactionPolicy: RedactionPolicy): string
 outputYaml(value: JsonValue): string   // Multi-line YAML, keys stripped, values formatted
 outputPlain(value: JsonValue): string  // Single-line logfmt, keys stripped, values formatted
+```
+
+```typescript
+enum RedactionPolicy {
+  RedactionTraceOnly = "RedactionTraceOnly",
+  RedactionNone = "RedactionNone",
+}
 ```
 
 **Example:**
@@ -167,6 +175,8 @@ Most users don't need this. Output functions automatically protect secrets.
 ```typescript
 parseSize(s: string): number | null  // Parse "10M" → bytes
 ```
+
+Returns `null` for invalid input and for values that cannot be represented as a safe JavaScript integer.
 
 **Example:**
 ```typescript

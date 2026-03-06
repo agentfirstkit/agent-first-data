@@ -1,6 +1,6 @@
 {
   "name": "agent-first-data",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Agent-First Data (AFDATA) — suffix-driven output formatting and protocol templates for AI agents",
   "license": "MIT",
   "repository": {
@@ -26,10 +26,11 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "node --test src/*.test.ts --experimental-strip-types"
+    "test": "tsx --test src/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^25.2.3",
+    "tsx": "^4.20.6",
     "typescript": "^5.0"
   }
 }
