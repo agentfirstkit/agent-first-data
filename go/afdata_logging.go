@@ -31,31 +31,52 @@ type AfdataHandler struct {
 	mu     *sync.Mutex
 	attrs  []slog.Attr
 	format LogFormat
+	level  slog.Level
 }
 
 // NewAfdataHandler creates a new AFDATA handler writing to w with the given format.
 func NewAfdataHandler(w io.Writer, format LogFormat) *AfdataHandler {
-	return &AfdataHandler{out: w, mu: &sync.Mutex{}, format: format}
+	return NewAfdataHandlerWithLevel(w, format, slog.LevelInfo)
+}
+
+// NewAfdataHandlerWithLevel creates a new AFDATA handler with a minimum enabled level.
+func NewAfdataHandlerWithLevel(w io.Writer, format LogFormat, level slog.Level) *AfdataHandler {
+	return &AfdataHandler{out: w, mu: &sync.Mutex{}, format: format, level: level}
 }
 
 // InitJson sets up the default slog logger with AFDATA JSON output to stdout.
 func InitJson() {
-	slog.SetDefault(slog.New(NewAfdataHandler(os.Stdout, FormatJson)))
+	InitJsonLevel(slog.LevelInfo)
+}
+
+// InitJsonLevel sets up the default slog logger with AFDATA JSON output and minimum level.
+func InitJsonLevel(level slog.Level) {
+	slog.SetDefault(slog.New(NewAfdataHandlerWithLevel(os.Stdout, FormatJson, level)))
 }
 
 // InitPlain sets up the default slog logger with AFDATA plain/logfmt output to stdout.
 func InitPlain() {
-	slog.SetDefault(slog.New(NewAfdataHandler(os.Stdout, FormatPlain)))
+	InitPlainLevel(slog.LevelInfo)
+}
+
+// InitPlainLevel sets up the default slog logger with AFDATA plain output and minimum level.
+func InitPlainLevel(level slog.Level) {
+	slog.SetDefault(slog.New(NewAfdataHandlerWithLevel(os.Stdout, FormatPlain, level)))
 }
 
 // InitYaml sets up the default slog logger with AFDATA YAML output to stdout.
 func InitYaml() {
-	slog.SetDefault(slog.New(NewAfdataHandler(os.Stdout, FormatYaml)))
+	InitYamlLevel(slog.LevelInfo)
 }
 
-// Enabled returns true for all levels (filtering is done at the slog level).
-func (h *AfdataHandler) Enabled(_ context.Context, _ slog.Level) bool {
-	return true
+// InitYamlLevel sets up the default slog logger with AFDATA YAML output and minimum level.
+func InitYamlLevel(level slog.Level) {
+	slog.SetDefault(slog.New(NewAfdataHandlerWithLevel(os.Stdout, FormatYaml, level)))
+}
+
+// Enabled returns whether the level is enabled for this handler.
+func (h *AfdataHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= h.level
 }
 
 // Handle outputs a single AFDATA-compliant log line.
@@ -108,7 +129,7 @@ func (h *AfdataHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	combined := make([]slog.Attr, len(h.attrs), len(h.attrs)+len(attrs))
 	copy(combined, h.attrs)
 	combined = append(combined, attrs...)
-	return &AfdataHandler{out: h.out, mu: h.mu, attrs: combined, format: h.format}
+	return &AfdataHandler{out: h.out, mu: h.mu, attrs: combined, format: h.format, level: h.level}
 }
 
 // WithGroup returns the handler unchanged (groups are not used in AFDATA output).
@@ -154,12 +175,22 @@ func attrValue(v slog.Value) any {
 			m[a.Key] = attrValue(a.Value)
 		}
 		return m
+	case slog.KindLogValuer:
+		return attrValue(v.Resolve())
+	case slog.KindAny:
+		if err, ok := v.Any().(error); ok {
+			return err.Error()
+		}
+		return sanitizeForJSON(v.Any())
 	default:
-		return v.String()
+		return sanitizeForJSON(v.Any())
 	}
 }
 
 // Span runs fn with a logger that carries the given fields.
+//
+// Deprecated: Span temporarily mutates slog.Default and is not suited for
+// concurrent request handling. Prefer WithSpan + LoggerFromContext.
 func Span(fields map[string]any, fn func()) {
 	parent := slog.Default()
 	attrs := make([]slog.Attr, 0, len(fields))

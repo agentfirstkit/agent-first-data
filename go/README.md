@@ -64,11 +64,11 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **12 public APIs and 1 type** + **AFDATA logging** (3 protocol builders + 3 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat`)
+Total: **13 public APIs and 2 types** + **AFDATA logging** (3 protocol builders + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
 
 ### Protocol Builders (returns map[string]any)
 
-Build AFDATA protocol structures. Return JSON-serializable objects for API responses.
+Build AFDATA protocol structures. Return JSON-serializable objects for transport payloads.
 
 ```go
 // Success (result)
@@ -81,7 +81,7 @@ BuildJsonError(message string, trace any) map[string]any
 BuildJson(code string, fields any, trace any) map[string]any
 ```
 
-**Use case:** API responses (frameworks like net/http or gin serialize to JSON)
+**Use case:** structured protocol payloads (frameworks serialize to JSON)
 
 **Example:**
 ```go
@@ -118,12 +118,21 @@ notFound := afdata.BuildJson(
 
 ### CLI/Log Output (returns string)
 
-Format values for CLI output and logs. **All formats redact `_secret` fields.** YAML and Plain also strip suffixes from keys and format values for human readability.
+Format values for CLI output and logs. `OutputJson` uses full `_secret` redaction by default. `OutputJsonWith` supports explicit scoped policies. YAML and Plain always redact `_secret` and apply human-readable formatting.
 
 ```go
 OutputJson(value any) string   // Single-line JSON, original keys, for programs/logs
+OutputJsonWith(value any, redactionPolicy RedactionPolicy) string
 OutputYaml(value any) string   // Multi-line YAML, keys stripped, values formatted
 OutputPlain(value any) string  // Single-line logfmt, keys stripped, values formatted
+```
+
+```go
+type RedactionPolicy string
+const (
+    RedactionTraceOnly RedactionPolicy = "RedactionTraceOnly"
+    RedactionNone      RedactionPolicy = "RedactionNone"
+)
 ```
 
 **Example:**
@@ -193,7 +202,10 @@ BuildCliError(message string) map[string]any      // {code:"error", error_code:"
 **Canonical pattern** — parse all flags before doing work, emit JSONL errors to stdout:
 
 ```go
-import afdata "github.com/cmnspore/agent-first-data/go"
+import (
+    "log/slog"
+    afdata "github.com/cmnspore/agent-first-data/go"
+)
 
 format, err := afdata.CliParseOutput(outputFlag)
 if err != nil {
@@ -213,7 +225,10 @@ See `examples/agent_cli/` for the complete working example (`go test ./...`).
 ### Example 1: REST API
 
 ```go
-import afdata "github.com/cmnspore/agent-first-data/go"
+import (
+    "log/slog"
+    afdata "github.com/cmnspore/agent-first-data/go"
+)
 
 func getUserHandler(w http.ResponseWriter, r *http.Request) {
     response := afdata.BuildJsonOk(
@@ -347,29 +362,42 @@ AFDATA-compliant structured logging via Go's `log/slog`. Every log line is forma
 ### API
 
 ```go
-import afdata "github.com/cmnspore/agent-first-data/go"
+import (
+    "log/slog"
+    afdata "github.com/cmnspore/agent-first-data/go"
+)
 
 // Convenience initializers — set up the default slog logger with AFDATA output to stdout
+// Default minimum level is INFO.
 afdata.InitJson()    // Single-line JSONL (secrets redacted, original keys)
 afdata.InitPlain()   // Single-line logfmt (keys stripped, values formatted)
 afdata.InitYaml()    // Multi-line YAML (keys stripped, values formatted)
 
+// Optional level-aware initializers
+afdata.InitJsonLevel(slog.LevelDebug)
+afdata.InitPlainLevel(slog.LevelInfo)
+afdata.InitYamlLevel(slog.LevelWarn)
+
 // Low-level — create a handler for custom logger stacks
 afdata.NewAfdataHandler(w io.Writer, format LogFormat) *AfdataHandler  // implements slog.Handler
+afdata.NewAfdataHandlerWithLevel(w io.Writer, format LogFormat, level slog.Level) *AfdataHandler
 afdata.FormatJson | afdata.FormatPlain | afdata.FormatYaml
 
 // Context-based spans for concurrent code
 afdata.WithSpan(ctx context.Context, fields map[string]any) context.Context
 afdata.LoggerFromContext(ctx context.Context) *slog.Logger
 
-// Global span (non-concurrent, uses slog.SetDefault)
+// Deprecated global span helper (mutates slog.Default)
 afdata.Span(fields map[string]any, fn func())
 ```
 
 ### Setup
 
 ```go
-import afdata "github.com/cmnspore/agent-first-data/go"
+import (
+    "log/slog"
+    afdata "github.com/cmnspore/agent-first-data/go"
+)
 
 // JSON output for production (one JSONL line per event, secrets redacted)
 afdata.InitJson()
@@ -379,6 +407,9 @@ afdata.InitPlain()
 
 // YAML for detailed inspection (multi-line, keys stripped, values formatted)
 afdata.InitYaml()
+
+// Enable debug logs when needed:
+afdata.InitJsonLevel(slog.LevelDebug)
 ```
 
 ### Log Output
@@ -412,7 +443,7 @@ reqLogger.Warn("Not found", "path", "/users/42")
 // {"timestamp_epoch_ms":...,"message":"Not found","request_id":"abc-123","path":"/users/42","code":"warn"}
 ```
 
-### Context-Based Spans
+### Context-Based Spans (Recommended)
 
 For concurrent code (goroutines), use context-based spans:
 
@@ -424,6 +455,8 @@ logger := afdata.LoggerFromContext(ctx)
 logger.Info("Handling request", "method", "GET")
 // {"timestamp_epoch_ms":...,"message":"Handling request","request_id":"abc-123","method":"GET","code":"info"}
 ```
+
+`afdata.Span(fields, fn)` is kept for compatibility but mutates `slog.Default`; prefer `WithSpan` + `LoggerFromContext` in concurrent code.
 
 ### Custom Code Override
 

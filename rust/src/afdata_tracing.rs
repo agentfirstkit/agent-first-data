@@ -59,10 +59,10 @@ fn init_with_format(filter: tracing_subscriber::EnvFilter, format: LogFormat) {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    tracing_subscriber::registry()
+    let _ = tracing_subscriber::registry()
         .with(filter)
         .with(AfdataLayer { format })
-        .init();
+        .try_init();
 }
 
 /// Stored in span extensions to carry structured fields.
@@ -192,8 +192,11 @@ impl Visit for JsonVisitor {
         if field.name() == "message" {
             self.message = Some(val);
         } else {
-            self.fields
-                .push((field.name().to_string(), serde_json::Value::String(val)));
+            let safe_val = sanitize_debug_field(field.name(), val);
+            self.fields.push((
+                field.name().to_string(),
+                serde_json::Value::String(safe_val),
+            ));
         }
     }
 
@@ -237,5 +240,43 @@ impl Visit for JsonVisitor {
     fn record_bool(&mut self, field: &Field, value: bool) {
         self.fields
             .push((field.name().to_string(), serde_json::Value::Bool(value)));
+    }
+}
+
+fn sanitize_debug_field(field_name: &str, raw_value: String) -> String {
+    if field_name.ends_with("_secret")
+        || field_name.ends_with("_SECRET")
+        || raw_value.contains("_secret")
+        || raw_value.contains("_SECRET")
+    {
+        "***".to_string()
+    } else {
+        raw_value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_debug_field;
+
+    #[test]
+    fn sanitize_debug_field_redacts_secret_key() {
+        let got = sanitize_debug_field("api_key_secret", "\"sk-live-123\"".to_string());
+        assert_eq!(got, "***");
+    }
+
+    #[test]
+    fn sanitize_debug_field_redacts_nested_secret_marker() {
+        let got = sanitize_debug_field(
+            "meta",
+            "Object {\"api_key_secret\": String(\"sk-live-123\")}".to_string(),
+        );
+        assert_eq!(got, "***");
+    }
+
+    #[test]
+    fn sanitize_debug_field_keeps_safe_debug_values() {
+        let got = sanitize_debug_field("attempt", "3".to_string());
+        assert_eq!(got, "3");
     }
 }

@@ -1,13 +1,14 @@
 """AFDATA output formatting and protocol templates.
 
-8 public APIs: 3 protocol builders + 3 output formatters + 1 redaction + 1 utility.
+9 public APIs and 1 type: 3 protocol builders + 4 output formatters + 1 redaction + 1 utility + RedactionPolicy.
 """
 
 from __future__ import annotations
 
-import copy
 import json
+import math
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 
 
@@ -45,16 +46,28 @@ def build_json(code: str, fields: Any, trace: Any = None) -> dict:
 # Public API: Output Formatters
 # ═══════════════════════════════════════════
 
+class RedactionPolicy(str, Enum):
+    RedactionTraceOnly = "RedactionTraceOnly"
+    RedactionNone = "RedactionNone"
+
 
 def output_json(value: Any) -> str:
     """Format as single-line JSON. Secrets redacted, original keys, raw values."""
-    v = copy.deepcopy(value)
+    v = _sanitize_for_json(value)
     _redact_secrets(v)
+    return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+
+
+def output_json_with(value: Any, redaction_policy: RedactionPolicy) -> str:
+    """Format as single-line JSON with explicit redaction policy."""
+    v = _sanitize_for_json(value)
+    _apply_redaction_policy(v, redaction_policy)
     return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
 
 
 def output_yaml(value: Any) -> str:
     """Format as multi-line YAML. Keys stripped, values formatted, secrets redacted."""
+    value = _sanitize_for_json(value)
     lines = ["---"]
     _render_yaml_processed(value, 0, lines)
     return "\n".join(lines)
@@ -62,6 +75,7 @@ def output_yaml(value: Any) -> str:
 
 def output_plain(value: Any) -> str:
     """Format as single-line logfmt. Keys stripped, values formatted, secrets redacted."""
+    value = _sanitize_for_json(value)
     pairs: list[tuple[str, str]] = []
     _collect_plain_pairs(value, "", pairs)
     pairs.sort(key=lambda p: p[0].encode("utf-16-be"))
@@ -81,6 +95,17 @@ def output_plain(value: Any) -> str:
 
 def internal_redact_secrets(value: Any) -> None:
     """Redact _secret fields in-place."""
+    _redact_secrets(value)
+
+
+def _apply_redaction_policy(value: Any, redaction_policy: RedactionPolicy) -> None:
+    if redaction_policy == RedactionPolicy.RedactionTraceOnly:
+        if isinstance(value, dict) and "trace" in value:
+            _redact_secrets(value["trace"])
+        return
+    if redaction_policy == RedactionPolicy.RedactionNone:
+        return
+    # Safety fallback for unknown values.
     _redact_secrets(value)
 
 
@@ -124,6 +149,43 @@ def parse_size(s: str) -> int | None:
 # ═══════════════════════════════════════════
 # Secret Redaction
 # ═══════════════════════════════════════════
+
+
+def _sanitize_for_json(value: Any, stack: set[int] | None = None) -> Any:
+    if stack is None:
+        stack = set()
+
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        return "<unsupported:float>"
+    if isinstance(value, BaseException):
+        return str(value)
+
+    if isinstance(value, dict):
+        obj_id = id(value)
+        if obj_id in stack:
+            return "<unsupported:circular>"
+        stack.add(obj_id)
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            key = k if isinstance(k, str) else str(k)
+            out[key] = _sanitize_for_json(v, stack)
+        stack.remove(obj_id)
+        return out
+
+    if isinstance(value, (list, tuple)):
+        obj_id = id(value)
+        if obj_id in stack:
+            return "<unsupported:circular>"
+        stack.add(obj_id)
+        out = [_sanitize_for_json(item, stack) for item in value]
+        stack.remove(obj_id)
+        return out
+
+    return f"<unsupported:{type(value).__name__}>"
 
 
 def _redact_secrets(value: Any) -> None:

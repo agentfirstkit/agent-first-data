@@ -65,11 +65,11 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **12 public APIs and 1 type** + optional **AFDATA tracing** (3 protocol builders + 3 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat`)
+Total: **13 public APIs and 2 types** + optional **AFDATA tracing** (3 protocol builders + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
 
 ### Protocol Builders (returns JSON Value)
 
-Build AFDATA protocol structures. Return `serde_json::Value` objects for API responses.
+Build AFDATA protocol structures. Return `serde_json::Value` objects for transport payloads.
 
 ```rust
 // Success (result)
@@ -82,7 +82,7 @@ build_json_error(message: &str, trace: Option<Value>) -> Value
 build_json(code: &str, fields: Value, trace: Option<Value>) -> Value
 ```
 
-**Use case:** API responses (frameworks like axum automatically serialize)
+**Use case:** structured protocol payloads (frameworks can serialize directly)
 
 **Example:**
 ```rust
@@ -123,10 +123,11 @@ let not_found = build_json(
 
 ### CLI/Log Output (returns String)
 
-Format values for CLI output and logs. **All formats redact `_secret` fields.** YAML and Plain also strip suffixes from keys and format values for human readability.
+Format values for CLI output and logs. `output_json` uses full `_secret` redaction by default. `output_json_with` supports explicit scoped policies. YAML and Plain always redact `_secret` and apply human-readable formatting.
 
 ```rust
 output_json(value: &Value) -> String   // Single-line JSON, original keys, for programs/logs
+output_json_with(value: &Value, redaction_policy: RedactionPolicy) -> String
 output_yaml(value: &Value) -> String   // Multi-line YAML, keys stripped, values formatted
 output_plain(value: &Value) -> String  // Single-line logfmt, keys stripped, values formatted
 ```

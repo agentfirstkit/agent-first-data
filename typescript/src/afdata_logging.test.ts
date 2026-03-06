@@ -76,6 +76,18 @@ describe("afdata_logging", () => {
       assert.equal(m["code"], "log");
       assert.equal(m["event"], "startup");
     });
+
+    it("serializes Error fields as readable strings", () => {
+      log.error("request failed", { error: new Error("timeout") });
+      const m = lastLine();
+      assert.equal(m["error"], "timeout");
+    });
+
+    it("handles bigint fields without throwing", () => {
+      log.info("bigint event", { amount: 1n });
+      const m = lastLine();
+      assert.equal(m["amount"], "<unsupported:bigint>");
+    });
   });
 
   describe("span", () => {

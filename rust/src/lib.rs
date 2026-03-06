@@ -1,12 +1,12 @@
 //! Agent-First Data (AFDATA) output formatting and protocol templates.
 //!
-//! 12 public APIs and 1 type:
+//! 13 public APIs and 2 types:
 //! - 3 protocol builders: [`build_json_ok`], [`build_json_error`], [`build_json`]
-//! - 3 output formatters: [`output_json`], [`output_yaml`], [`output_plain`]
+//! - 4 output formatters: [`output_json`], [`output_json_with`], [`output_yaml`], [`output_plain`]
 //! - 1 redaction utility: [`internal_redact_secrets`]
 //! - 1 parse utility: [`parse_size`]
 //! - 4 CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`], [`cli_output`], [`build_cli_error`]
-//! - 1 type: [`OutputFormat`]
+//! - 2 types: [`OutputFormat`], [`RedactionPolicy`]
 
 #[cfg(feature = "tracing")]
 pub mod afdata_tracing;
@@ -50,11 +50,38 @@ pub fn build_json(code: &str, fields: Value, trace: Option<Value>) -> Value {
 // Public API: Output Formatters
 // ═══════════════════════════════════════════
 
-/// Format as single-line JSON. Secrets redacted, original keys, raw values.
+/// Redaction policy for [`output_json_with`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RedactionPolicy {
+    /// Redact only inside top-level `trace`.
+    RedactionTraceOnly,
+    /// Do not redact any fields.
+    RedactionNone,
+}
+
+/// Format as single-line JSON with full `_secret` redaction.
 pub fn output_json(value: &Value) -> String {
     let mut v = value.clone();
     redact_secrets(&mut v);
-    serde_json::to_string(&v).unwrap_or_default()
+    serialize_json_output(&v)
+}
+
+/// Format as single-line JSON with configurable redaction policy.
+pub fn output_json_with(value: &Value, redaction_policy: RedactionPolicy) -> String {
+    let mut v = value.clone();
+    apply_redaction_policy(&mut v, redaction_policy);
+    serialize_json_output(&v)
+}
+
+fn serialize_json_output(value: &Value) -> String {
+    match serde_json::to_string(value) {
+        Ok(s) => s,
+        Err(err) => serde_json::json!({
+            "error": "output_json_failed",
+            "detail": err.to_string(),
+        })
+        .to_string(),
+    }
 }
 
 /// Format as multi-line YAML. Keys stripped, values formatted, secrets redacted.
@@ -253,6 +280,19 @@ fn redact_secrets(value: &mut Value) {
     }
 }
 
+fn apply_redaction_policy(value: &mut Value, redaction_policy: RedactionPolicy) {
+    match redaction_policy {
+        RedactionPolicy::RedactionTraceOnly => {
+            if let Value::Object(map) = value {
+                if let Some(trace) = map.get_mut("trace") {
+                    redact_secrets(trace);
+                }
+            }
+        }
+        RedactionPolicy::RedactionNone => {}
+    }
+}
+
 // ═══════════════════════════════════════════
 // Suffix Processing
 // ═══════════════════════════════════════════
@@ -262,7 +302,10 @@ fn strip_suffix_ci(key: &str, suffix_lower: &str) -> Option<String> {
     if let Some(s) = key.strip_suffix(suffix_lower) {
         return Some(s.to_string());
     }
-    let suffix_upper: String = suffix_lower.chars().map(|c| c.to_ascii_uppercase()).collect();
+    let suffix_upper: String = suffix_lower
+        .chars()
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
     if let Some(s) = key.strip_suffix(&suffix_upper) {
         return Some(s.to_string());
     }
@@ -288,7 +331,9 @@ fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
         return value.as_i64().map(|ms| (stripped, format_rfc3339_ms(ms)));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_epoch_s") {
-        return value.as_i64().map(|s| (stripped, format_rfc3339_ms(s * 1000)));
+        return value
+            .as_i64()
+            .map(|s| (stripped, format_rfc3339_ms(s * 1000)));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_epoch_ns") {
         return value
@@ -418,9 +463,7 @@ fn process_object_fields<'a>(
     let mut result: Vec<(String, &'a Value, Option<String>)> = entries
         .into_iter()
         .map(|(stripped, original, value, formatted)| {
-            if counts.get(&stripped).copied().unwrap_or(0) > 1
-                && original != stripped.as_str()
-            {
+            if counts.get(&stripped).copied().unwrap_or(0) > 1 && original != stripped.as_str() {
                 (original.to_string(), value, None)
             } else {
                 (stripped, value, formatted)
@@ -563,22 +606,13 @@ fn render_yaml_processed(value: &Value, indent: usize, lines: &mut Vec<String>) 
                                         lines.push(format!("{}  -", prefix));
                                         render_yaml_processed(item, indent + 2, lines);
                                     } else {
-                                        lines.push(format!(
-                                            "{}  - {}",
-                                            prefix,
-                                            yaml_scalar(item)
-                                        ));
+                                        lines.push(format!("{}  - {}", prefix, yaml_scalar(item)));
                                     }
                                 }
                             }
                         }
                         _ => {
-                            lines.push(format!(
-                                "{}{}: {}",
-                                prefix,
-                                display_key,
-                                yaml_scalar(v)
-                            ));
+                            lines.push(format!("{}{}: {}", prefix, display_key, yaml_scalar(v)));
                         }
                     }
                 }

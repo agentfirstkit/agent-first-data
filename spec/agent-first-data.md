@@ -36,7 +36,7 @@ Agent-First Data has three parts:
 
 # Part 1: Naming Convention
 
-Applies to all structured data: JSON, YAML, TOML, CLI arguments, environment variables, config files, database columns, API responses, log fields.
+Applies to all structured data: JSON, YAML, TOML, CLI arguments, environment variables, config files, database columns, HTTP payload fields, log fields.
 
 ## Design rules
 
@@ -142,7 +142,7 @@ Stablecoins follow the same `_{code}_cents` pattern: `deposit_usdt_cents: 1000`,
 |:-------|:---------|:--------|
 | `_secret` | redact entire value to `***` | `api_key_secret: "sk-or-v1-abc..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields to `***`. API responses return raw values — no redaction needed over secure channels. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields to `***`. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time.
 
 ### No suffix needed
 
@@ -296,19 +296,19 @@ FROM requests;
 
 Transform JSON values for CLI/log output with suffix-driven formatting and automatic secret protection. This applies to any JSON data, regardless of structure.
 
-## Two Usage Contexts
+## Two Output Paths
 
-### Context 1: API Responses
+### Path 1: Raw JSON Serialization
 
-Return JSON values directly. Web frameworks handle serialization.
+Return JSON values directly (for example via framework serializer or `serde_json::to_string`).
 
-**No output processing.** API responses are transmitted over secure channels (HTTPS). Return raw JSON:
+**No output processing.** Values are serialized as-is:
 
 ```json
 {"user_id": 123, "api_key_secret": "sk-1234567890abcdef", "balance_msats": 50000}
 ```
 
-### Context 2: CLI / Logs
+### Path 2: CLI / Logs
 
 Format JSON values for terminal/log display.
 
@@ -345,7 +345,7 @@ Default is tool-defined. Interactive CLIs default to `yaml`, scripting/logging c
 
 JSON is the canonical format. YAML and plain are derived from it.
 
-**All CLI output formats automatically redact `_secret` fields.** Any field ending in `_secret` (case-insensitive) is replaced with `***` before display. API responses bypass Part 2 and return raw values (see [Two Usage Contexts](#two-usage-contexts)).
+**All CLI output formats automatically redact `_secret` fields.** Any field ending in `_secret` (case-insensitive) is replaced with `***` before display.
 
 **Format characteristics:**
 - **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
@@ -614,9 +614,11 @@ Missing `trace` makes debugging harder. Agents can't analyze performance, cost, 
 3. `"ok"` or `"error"` → operation complete.
 4. Anything else → status/progress, tool-specific.
 
-## Usage in APIs
+## Usage in HTTP Services
 
-The protocol structure can be used in REST APIs. APIs return raw JSON — no output formatting, no secret redaction.
+The protocol structure can be used in REST APIs. Choose output path explicitly:
+- raw JSON serialization for untouched payloads
+- formatter output (`json|yaml|plain`) when redaction/formatting is required
 
 ### REST API Examples
 
@@ -660,11 +662,11 @@ JSONL stream, raw JSON per line:
 | Context | Output | Secret Protection |
 |:--------|:-------|:------------------|
 | **CLI / Logs** | JSONL (json/yaml/plain formats) | ✅ Automatic |
-| **REST API** | JSON body (raw Value) | ❌ None needed |
-| **MCP tool** | JSON (raw Value) | ❌ None needed |
-| **SSE stream** | JSONL (raw JSON) | ❌ None needed |
+| **HTTP body (raw path)** | JSON body (raw Value) | ❌ None by formatter |
+| **MCP tool (raw path)** | JSON (raw Value) | ❌ None by formatter |
+| **SSE stream (raw path)** | JSONL (raw JSON) | ❌ None by formatter |
 
-All contexts can use the protocol structure from Part 3. Only `code` (required) and `trace` (recommended) are standardized. Other fields can be flat or nested — both styles work. CLI/logs apply output formatting and secret protection from Part 2. APIs return raw JSON Values. For CLI/log protocol transport, use `stdout` only; do not split protocol events across `stdout` and `stderr`.
+All contexts can use the protocol structure from Part 3. Only `code` (required) and `trace` (recommended) are standardized. Other fields can be flat or nested — both styles work. CLI/logs apply output formatting and secret protection from Part 2. Raw-path serializers return JSON values unchanged. For CLI/log protocol transport, use `stdout` only; do not split protocol events across `stdout` and `stderr`.
 
 ---
 

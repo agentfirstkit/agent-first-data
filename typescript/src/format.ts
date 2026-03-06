@@ -1,7 +1,7 @@
 /**
  * AFDATA output formatting and protocol templates.
  *
- * 8 public APIs: 3 protocol builders + 3 output formatters + 1 redaction + 1 utility.
+ * 9 public APIs and 1 type: 3 protocol builders + 4 output formatters + 1 redaction + 1 utility + RedactionPolicy.
  */
 
 export type JsonValue =
@@ -42,15 +42,28 @@ export function buildJson(code: string, fields: JsonValue, trace?: JsonValue): J
 // Public API: Output Formatters
 // ═══════════════════════════════════════════
 
+export enum RedactionPolicy {
+  RedactionTraceOnly = "RedactionTraceOnly",
+  RedactionNone = "RedactionNone",
+}
+
 /** Format as single-line JSON. Secrets redacted, original keys, raw values. */
 export function outputJson(value: JsonValue): string {
-  const v = JSON.parse(JSON.stringify(value));
+  const v = sanitizeForJson(value);
   redactSecrets(v);
+  return JSON.stringify(v);
+}
+
+/** Format as single-line JSON with explicit redaction policy. */
+export function outputJsonWith(value: JsonValue, redactionPolicy: RedactionPolicy): string {
+  const v = sanitizeForJson(value);
+  applyRedactionPolicy(v, redactionPolicy);
   return JSON.stringify(v);
 }
 
 /** Format as multi-line YAML. Keys stripped, values formatted, secrets redacted. */
 export function outputYaml(value: JsonValue): string {
+  value = sanitizeForJson(value);
   const lines = ["---"];
   renderYamlProcessed(value, 0, lines);
   return lines.join("\n");
@@ -58,6 +71,7 @@ export function outputYaml(value: JsonValue): string {
 
 /** Format as single-line logfmt. Keys stripped, values formatted, secrets redacted. */
 export function outputPlain(value: JsonValue): string {
+  value = sanitizeForJson(value);
   const pairs: [string, string][] = [];
   collectPlainPairs(value, "", pairs);
   pairs.sort(([a], [b]) => jcsCompare(a, b));
@@ -101,7 +115,9 @@ export function parseSize(s: string): number | null {
   if (!numStr) return null;
   const n = Number(numStr);
   if (isNaN(n) || n < 0 || !isFinite(n)) return null;
-  return Math.trunc(n * mult);
+  const result = Math.trunc(n * mult);
+  if (!Number.isSafeInteger(result)) return null;
+  return result;
 }
 
 // ═══════════════════════════════════════════
@@ -126,6 +142,22 @@ function redactSecrets(value: JsonValue): void {
     for (const item of value) {
       redactSecrets(item);
     }
+  }
+}
+
+function applyRedactionPolicy(value: JsonValue, redactionPolicy: RedactionPolicy): void {
+  switch (redactionPolicy) {
+    case RedactionPolicy.RedactionTraceOnly:
+      if (isObject(value) && value.trace !== undefined) {
+        redactSecrets(value.trace);
+      }
+      break;
+    case RedactionPolicy.RedactionNone:
+      break;
+    default:
+      // Safety fallback for unknown values.
+      redactSecrets(value);
+      break;
   }
 }
 
@@ -463,7 +495,47 @@ function plainScalar(value: JsonValue): string {
 // Utilities
 // ═══════════════════════════════════════════
 
-function isObject(value: JsonValue): value is { [key: string]: JsonValue } {
+function sanitizeForJson(value: unknown, stack = new WeakSet<object>()): JsonValue {
+  if (value === null) return null;
+  const t = typeof value;
+  if (t === "string") return value as string;
+  if (t === "boolean") return value as boolean;
+  if (t === "number") {
+    const n = value as number;
+    return Number.isFinite(n) ? n : "<unsupported:number>";
+  }
+  if (t === "bigint") return "<unsupported:bigint>";
+  if (t === "undefined") return "<unsupported:undefined>";
+  if (t === "function") return "<unsupported:function>";
+  if (t === "symbol") return "<unsupported:symbol>";
+
+  if (value instanceof Error) return value.message;
+  if (value instanceof Date) return value.toISOString();
+
+  if (Array.isArray(value)) {
+    if (stack.has(value)) return "<unsupported:circular>";
+    stack.add(value);
+    const out = value.map((item) => sanitizeForJson(item, stack));
+    stack.delete(value);
+    return out;
+  }
+
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (stack.has(obj)) return "<unsupported:circular>";
+    stack.add(obj);
+    const out: { [key: string]: JsonValue } = {};
+    for (const [k, v] of Object.entries(obj)) {
+      out[k] = sanitizeForJson(v, stack);
+    }
+    stack.delete(obj);
+    return out;
+  }
+
+  return "<unsupported:unknown>";
+}
+
+function isObject(value: unknown): value is { [key: string]: JsonValue } {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 

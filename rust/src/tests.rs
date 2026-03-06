@@ -5,10 +5,9 @@ const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../spec/fixture
 
 fn load_fixture(name: &str) -> Value {
     let path = format!("{}/{}", FIXTURES_DIR, name);
-    let data = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
-    serde_json::from_str(&data)
-        .unwrap_or_else(|e| panic!("failed to parse {}: {}", path, e))
+    let data =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
+    serde_json::from_str(&data).unwrap_or_else(|e| panic!("failed to parse {}: {}", path, e))
 }
 
 // ═══════════════════════════════════════════
@@ -36,14 +35,8 @@ fn test_protocol_fixtures() {
         let args = &case["args"];
         let result = match typ {
             "ok" => build_json_ok(args["result"].clone(), None),
-            "ok_trace" => build_json_ok(
-                args["result"].clone(),
-                Some(args["trace"].clone()),
-            ),
-            "error" => build_json_error(
-                args["message"].as_str().expect("missing message"),
-                None,
-            ),
+            "ok_trace" => build_json_ok(args["result"].clone(), Some(args["trace"].clone())),
+            "error" => build_json_error(args["message"].as_str().expect("missing message"), None),
             "error_trace" => build_json_error(
                 args["message"].as_str().expect("missing message"),
                 Some(args["trace"].clone()),
@@ -59,10 +52,16 @@ fn test_protocol_fixtures() {
             assert_eq!(&result, expected, "[protocol/{name}]");
         }
         if let Some(expected_contains) = case.get("expected_contains") {
-            let ec = expected_contains.as_object().expect("expected_contains must be object");
+            let ec = expected_contains
+                .as_object()
+                .expect("expected_contains must be object");
             let ro = result.as_object().expect("result must be object");
             for (k, v) in ec {
-                assert_eq!(ro.get(k).unwrap_or(&Value::Null), v, "[protocol/{name}] key {k}");
+                assert_eq!(
+                    ro.get(k).unwrap_or(&Value::Null),
+                    v,
+                    "[protocol/{name}] key {k}"
+                );
             }
         }
     }
@@ -80,7 +79,11 @@ fn test_helper_fixtures() {
                     let arr = tc.as_array().expect("case must be [input, expected]");
                     let input = arr[0].as_i64().expect("input must be i64");
                     let expected = arr[1].as_str().expect("expected must be string");
-                    assert_eq!(format_bytes_human(input), expected, "[helpers/format_bytes_human({input})]");
+                    assert_eq!(
+                        format_bytes_human(input),
+                        expected,
+                        "[helpers/format_bytes_human({input})]"
+                    );
                 }
             }
             "format_with_commas" => {
@@ -88,23 +91,43 @@ fn test_helper_fixtures() {
                     let arr = tc.as_array().expect("case must be [input, expected]");
                     let input = arr[0].as_u64().expect("input must be u64");
                     let expected = arr[1].as_str().expect("expected must be string");
-                    assert_eq!(format_with_commas(input), expected, "[helpers/format_with_commas({input})]");
+                    assert_eq!(
+                        format_with_commas(input),
+                        expected,
+                        "[helpers/format_with_commas({input})]"
+                    );
                 }
             }
             "extract_currency_code" => {
                 for tc in test_cases {
                     let arr = tc.as_array().expect("case must be [input, expected]");
                     let input = arr[0].as_str().expect("input must be string");
-                    let expected = if arr[1].is_null() { None } else { arr[1].as_str() };
-                    assert_eq!(extract_currency_code(input), expected, "[helpers/extract_currency_code({input})]");
+                    let expected = if arr[1].is_null() {
+                        None
+                    } else {
+                        arr[1].as_str()
+                    };
+                    assert_eq!(
+                        extract_currency_code(input),
+                        expected,
+                        "[helpers/extract_currency_code({input})]"
+                    );
                 }
             }
             "parse_size" => {
                 for tc in test_cases {
                     let arr = tc.as_array().expect("case must be [input, expected]");
                     let input = arr[0].as_str().expect("input must be string");
-                    let expected = if arr[1].is_null() { None } else { arr[1].as_u64() };
-                    assert_eq!(parse_size(input), expected, "[helpers/parse_size({input:?})]");
+                    let expected = if arr[1].is_null() {
+                        None
+                    } else {
+                        arr[1].as_u64()
+                    };
+                    assert_eq!(
+                        parse_size(input),
+                        expected,
+                        "[helpers/parse_size({input:?})]"
+                    );
                 }
             }
             other => panic!("unknown helper: {other}"),
@@ -118,10 +141,7 @@ fn test_helper_fixtures() {
 
 #[test]
 fn build_ok_with_trace() {
-    let v = build_json_ok(
-        json!({"count": 42}),
-        Some(json!({"duration_ms": 150})),
-    );
+    let v = build_json_ok(json!({"count": 42}), Some(json!({"duration_ms": 150})));
     assert_eq!(v["code"], "ok");
     assert_eq!(v["result"]["count"], 42);
     assert_eq!(v["trace"]["duration_ms"], 150);
@@ -247,6 +267,36 @@ fn json_non_string_secret_redacted() {
     let out = output_json(&json!({"count_secret": 42}));
     assert!(out.contains("\"***\""));
     assert!(!out.contains("42"));
+}
+
+#[test]
+fn json_with_trace_only_redacts_trace_only() {
+    let out = output_json_with(
+        &json!({
+            "code": "ok",
+            "result": {"api_key_secret": "sk-live-123"},
+            "trace": {"request_secret": "top-secret"}
+        }),
+        RedactionPolicy::RedactionTraceOnly,
+    );
+    assert!(out.contains("\"request_secret\":\"***\""));
+    assert!(out.contains("\"api_key_secret\":\"sk-live-123\""));
+}
+
+#[test]
+fn json_with_none_keeps_secret_values() {
+    let out = output_json_with(
+        &json!({"api_key_secret": "sk-live-123"}),
+        RedactionPolicy::RedactionNone,
+    );
+    assert!(out.contains("\"api_key_secret\":\"sk-live-123\""));
+    assert!(!out.contains("\"***\""));
+}
+
+#[test]
+fn json_default_output_redacts_secrets() {
+    let out = output_json(&json!({"api_key_secret": "sk-live-123"}));
+    assert!(out.contains("\"api_key_secret\":\"***\""));
 }
 
 // ═══════════════════════════════════════════
@@ -1116,7 +1166,7 @@ fn build_cli_error_is_valid_json() {
 fn cli_output_dispatches_json() {
     let v = json!({"code": "ok", "size_bytes": 1024});
     let out = cli_output(&v, OutputFormat::Json);
-    assert!(out.contains("size_bytes"));   // json: raw keys, no suffix processing
+    assert!(out.contains("size_bytes")); // json: raw keys, no suffix processing
     assert!(!out.contains('\n'));
 }
 
@@ -1125,7 +1175,7 @@ fn cli_output_dispatches_yaml() {
     let v = json!({"code": "ok", "size_bytes": 1024});
     let out = cli_output(&v, OutputFormat::Yaml);
     assert!(out.starts_with("---"));
-    assert!(out.contains("size:"));        // yaml: suffix stripped
+    assert!(out.contains("size:")); // yaml: suffix stripped
 }
 
 #[test]
@@ -1134,7 +1184,7 @@ fn cli_output_dispatches_plain() {
     let out = cli_output(&v, OutputFormat::Plain);
     assert!(!out.contains('\n'));
     assert!(out.contains("code=ok"));
-    assert!(out.contains("size=1.0KB"));   // plain: suffix processed
+    assert!(out.contains("size=1.0KB")); // plain: suffix processed
 }
 
 // ═══════════════════════════════════════════
