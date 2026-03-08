@@ -74,8 +74,8 @@ Build AFDATA protocol structures. Return JSON-serializable objects for transport
 // Success (result)
 BuildJsonOk(result any, trace any) map[string]any
 
-// Error (simple message)
-BuildJsonError(message string, trace any) map[string]any
+// Error (simple message, optional hint — empty string means no hint)
+BuildJsonError(message string, hint string, trace any) map[string]any
 
 // Generic (any code + fields)
 BuildJson(code string, fields any, trace any) map[string]any
@@ -106,7 +106,10 @@ response := afdata.BuildJsonOk(
 )
 
 // Error
-err := afdata.BuildJsonError("user not found", map[string]any{"duration_ms": 5})
+err := afdata.BuildJsonError("user not found", "", map[string]any{"duration_ms": 5})
+
+// Error with hint
+errHint := afdata.BuildJsonError("wallet not found", "list wallets with: afpay wallet list", map[string]any{"duration_ms": 5})
 
 // Specific error code
 notFound := afdata.BuildJson(
@@ -196,7 +199,7 @@ type OutputFormat string  // "json" | "yaml" | "plain"
 CliParseOutput(s string) (OutputFormat, error)    // Parse --output flag; error on unknown
 CliParseLogFilters(entries []string) []string     // Normalize --log: trim, lowercase, dedup, remove empty
 CliOutput(value any, format OutputFormat) string  // Dispatch to OutputJson/Yaml/Plain
-BuildCliError(message string) map[string]any      // {code:"error", error_code:"invalid_request", retryable:false, trace:{duration_ms:0}}
+BuildCliError(message string, hint string) map[string]any  // {code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}
 ```
 
 **Canonical pattern** — parse all flags before doing work, emit JSONL errors to stdout:
@@ -209,7 +212,7 @@ import (
 
 format, err := afdata.CliParseOutput(outputFlag)
 if err != nil {
-    fmt.Println(afdata.OutputJson(afdata.BuildCliError(err.Error())))
+    fmt.Println(afdata.OutputJson(afdata.BuildCliError(err.Error(), "")))
     os.Exit(2)
 }
 

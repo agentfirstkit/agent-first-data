@@ -25,12 +25,18 @@ pub fn build_json_ok(result: Value, trace: Option<Value>) -> Value {
     }
 }
 
-/// Build `{code: "error", error: message, trace?: ...}`.
-pub fn build_json_error(message: &str, trace: Option<Value>) -> Value {
-    match trace {
-        Some(t) => serde_json::json!({"code": "error", "error": message, "trace": t}),
-        None => serde_json::json!({"code": "error", "error": message}),
+/// Build `{code: "error", error: message, hint?: ..., trace?: ...}`.
+pub fn build_json_error(message: &str, hint: Option<&str>, trace: Option<Value>) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("code".to_string(), Value::String("error".to_string()));
+    obj.insert("error".to_string(), Value::String(message.to_string()));
+    if let Some(h) = hint {
+        obj.insert("hint".to_string(), Value::String(h.to_string()));
     }
+    if let Some(t) = trace {
+        obj.insert("trace".to_string(), t);
+    }
+    Value::Object(obj)
 }
 
 /// Build `{code: "<custom>", ...fields, trace?: ...}`.
@@ -231,19 +237,28 @@ pub fn cli_output(value: &Value, format: OutputFormat) -> String {
 /// Print with [`output_json`] and exit with code 2.
 ///
 /// ```
-/// let err = agent_first_data::build_cli_error("--output: invalid value 'xml'");
+/// let err = agent_first_data::build_cli_error("--output: invalid value 'xml'", None);
 /// assert_eq!(err["code"], "error");
 /// assert_eq!(err["error_code"], "invalid_request");
 /// assert_eq!(err["retryable"], false);
 /// ```
-pub fn build_cli_error(message: &str) -> Value {
-    serde_json::json!({
-        "code": "error",
-        "error_code": "invalid_request",
-        "error": message,
-        "retryable": false,
-        "trace": {"duration_ms": 0}
-    })
+pub fn build_cli_error(message: &str, hint: Option<&str>) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("code".to_string(), Value::String("error".to_string()));
+    obj.insert(
+        "error_code".to_string(),
+        Value::String("invalid_request".to_string()),
+    );
+    obj.insert("error".to_string(), Value::String(message.to_string()));
+    if let Some(h) = hint {
+        obj.insert("hint".to_string(), Value::String(h.to_string()));
+    }
+    obj.insert("retryable".to_string(), Value::Bool(false));
+    obj.insert(
+        "trace".to_string(),
+        serde_json::json!({"duration_ms": 0}),
+    );
+    Value::Object(obj)
 }
 
 // ═══════════════════════════════════════════

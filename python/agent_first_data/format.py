@@ -25,9 +25,11 @@ def build_json_ok(result: Any, trace: Any = None) -> dict:
     return m
 
 
-def build_json_error(message: str, trace: Any = None) -> dict:
-    """Build {code: "error", error: message, trace?}."""
+def build_json_error(message: str, hint: str | None = None, trace: Any = None) -> dict:
+    """Build {code: "error", error: message, hint?, trace?}."""
     m: dict = {"code": "error", "error": message}
+    if hint is not None:
+        m["hint"] = hint
     if trace is not None:
         m["trace"] = trace
     return m

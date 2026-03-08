@@ -561,6 +561,13 @@ Simple message:
 {"code": "error", "error": "config file not found", "trace": {"duration_ms": 3}}
 ```
 
+With actionable hint:
+```json
+{"code": "error", "error": "connection refused", "hint": "check --host/--port or PGHOST/PGPORT environment variables", "trace": {"duration_ms": 3}}
+```
+
+The `hint` field is optional. When present, it provides an actionable suggestion for the user or agent to resolve the error. Omit `hint` when no specific remediation is available.
+
 Nested error details:
 ```json
 {"code": "not_found", "error": {"resource": "user", "id": 123}, "trace": {"duration_ms": 8}}

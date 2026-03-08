@@ -68,9 +68,21 @@ func TestProtocolFixtures(t *testing.T) {
 			case "ok_trace":
 				result = BuildJsonOk(args["result"], args["trace"])
 			case "error":
-				result = BuildJsonError(args["message"].(string), nil)
+				result = BuildJsonError(args["message"].(string), "", nil)
 			case "error_trace":
-				result = BuildJsonError(args["message"].(string), args["trace"])
+				result = BuildJsonError(args["message"].(string), "", args["trace"])
+			case "error_hint":
+				hint := ""
+				if h, ok := args["hint"].(string); ok {
+					hint = h
+				}
+				result = BuildJsonError(args["message"].(string), hint, nil)
+			case "error_hint_trace":
+				hint := ""
+				if h, ok := args["hint"].(string); ok {
+					hint = h
+				}
+				result = BuildJsonError(args["message"].(string), hint, args["trace"])
 			case "status":
 				result = BuildJson(args["code"].(string), args["fields"], nil)
 			default:

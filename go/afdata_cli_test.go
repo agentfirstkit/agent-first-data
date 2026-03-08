@@ -99,7 +99,7 @@ func TestCliParseLogFilters_PreservesOrder(t *testing.T) {
 // ═══════════════════════════════════════════
 
 func TestBuildCliError_RequiredFields(t *testing.T) {
-	v := BuildCliError("missing --sql")
+	v := BuildCliError("missing --sql", "")
 	if v["code"] != "error" {
 		t.Errorf("code = %v", v["code"])
 	}
@@ -121,8 +121,22 @@ func TestBuildCliError_RequiredFields(t *testing.T) {
 	}
 }
 
+func TestBuildCliError_WithHint(t *testing.T) {
+	v := BuildCliError("bad flag", "try --help")
+	if v["hint"] != "try --help" {
+		t.Errorf("hint = %v, want 'try --help'", v["hint"])
+	}
+}
+
+func TestBuildCliError_WithoutHintHasNoHintKey(t *testing.T) {
+	v := BuildCliError("oops", "")
+	if _, ok := v["hint"]; ok {
+		t.Errorf("expected no hint key, got %v", v["hint"])
+	}
+}
+
 func TestBuildCliError_IsValidJson(t *testing.T) {
-	v := BuildCliError("oops")
+	v := BuildCliError("oops", "")
 	s := OutputJson(v)
 	if s == "" {
 		t.Error("OutputJson returned empty string")

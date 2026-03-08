@@ -30,9 +30,13 @@ func BuildJsonOk(result any, trace any) map[string]any {
 	return m
 }
 
-// BuildJsonError builds {code: "error", error: message, trace?}.
-func BuildJsonError(message string, trace any) map[string]any {
+// BuildJsonError builds {code: "error", error: message, hint?, trace?}.
+// Pass empty string for hint to omit it.
+func BuildJsonError(message string, hint string, trace any) map[string]any {
 	m := map[string]any{"code": "error", "error": message}
+	if hint != "" {
+		m["hint"] = hint
+	}
 	if trace != nil {
 		m["trace"] = trace
 	}

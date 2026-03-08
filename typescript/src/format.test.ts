@@ -50,7 +50,9 @@ describe("protocol fixtures", () => {
         case "ok": result = buildJsonOk(args.result); break;
         case "ok_trace": result = buildJsonOk(args.result, args.trace); break;
         case "error": result = buildJsonError(args.message); break;
-        case "error_trace": result = buildJsonError(args.message, args.trace); break;
+        case "error_trace": result = buildJsonError(args.message, undefined, args.trace); break;
+        case "error_hint": result = buildJsonError(args.message, args.hint); break;
+        case "error_hint_trace": result = buildJsonError(args.message, args.hint, args.trace); break;
         case "status": result = buildJson(args.code, args.fields); break;
         default: throw new Error(`unknown type: ${tc.type}`);
       }

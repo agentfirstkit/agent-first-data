@@ -75,8 +75,8 @@ type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string
 // Success (result)
 buildJsonOk(result: JsonValue, trace?: JsonValue): JsonValue
 
-// Error (simple message)
-buildJsonError(message: string, trace?: JsonValue): JsonValue
+// Error (simple message, optional hint)
+buildJsonError(message: string, hint?: string, trace?: JsonValue): JsonValue
 
 // Generic (any code + fields)
 buildJson(code: string, fields: JsonValue, trace?: JsonValue): JsonValue
@@ -106,7 +106,10 @@ const response = buildJsonOk(
 );
 
 // Error
-const error = buildJsonError("user not found", { duration_ms: 5 });
+const error = buildJsonError("user not found", undefined, { duration_ms: 5 });
+
+// Error with hint
+const errorHint = buildJsonError("wallet not found", "list wallets with: afpay wallet list", { duration_ms: 5 });
 
 // Specific error code
 const notFound = buildJson(
@@ -197,7 +200,7 @@ type OutputFormat = "json" | "yaml" | "plain"
 cliParseOutput(s: string): OutputFormat             // Parse --output flag; throws on unknown
 cliParseLogFilters(entries: string[]): string[]     // Normalize --log: trim, lowercase, dedup, remove empty
 cliOutput(value: JsonValue, format: OutputFormat): string  // Dispatch to outputJson/Yaml/Plain
-buildCliError(message: string): JsonValue           // {code:"error", error_code:"invalid_request", retryable:false, trace:{duration_ms:0}}
+buildCliError(message: string, hint?: string): JsonValue  // {code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}
 ```
 
 **Canonical pattern** — parse all flags before doing work, emit JSONL errors to stdout:

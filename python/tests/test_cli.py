@@ -75,6 +75,16 @@ def test_build_cli_error_is_valid_json():
     assert parsed["code"] == "error"
 
 
+def test_build_cli_error_with_hint():
+    v = build_cli_error("bad flag", hint="try --help")
+    assert v["hint"] == "try --help"
+
+
+def test_build_cli_error_without_hint_has_no_hint_key():
+    v = build_cli_error("oops")
+    assert "hint" not in v
+
+
 # ── cli_output ────────────────────────────────────────────────────────────────
 
 def test_cli_output_dispatches_json():

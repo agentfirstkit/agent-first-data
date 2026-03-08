@@ -53,7 +53,11 @@ def test_protocol_fixtures():
         elif typ == "error":
             result = build_json_error(args["message"])
         elif typ == "error_trace":
-            result = build_json_error(args["message"], args["trace"])
+            result = build_json_error(args["message"], trace=args["trace"])
+        elif typ == "error_hint":
+            result = build_json_error(args["message"], hint=args.get("hint"))
+        elif typ == "error_hint_trace":
+            result = build_json_error(args["message"], hint=args.get("hint"), trace=args["trace"])
         elif typ == "status":
             result = build_json(args["code"], args.get("fields"))
         else:

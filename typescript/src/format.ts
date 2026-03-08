@@ -23,9 +23,10 @@ export function buildJsonOk(result: JsonValue, trace?: JsonValue): JsonValue {
   return m;
 }
 
-/** Build {code: "error", error: message, trace?}. */
-export function buildJsonError(message: string, trace?: JsonValue): JsonValue {
+/** Build {code: "error", error: message, hint?, trace?}. */
+export function buildJsonError(message: string, hint?: string, trace?: JsonValue): JsonValue {
   const m: Record<string, JsonValue> = { code: "error", error: message };
+  if (hint !== undefined) m.hint = hint;
   if (trace !== undefined) m.trace = trace;
   return m;
 }
