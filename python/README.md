@@ -75,8 +75,8 @@ Build AFDATA protocol structures. Return dict objects for transport payloads.
 # Success (result)
 build_json_ok(result: Any, trace: Any = None) -> dict
 
-# Error (simple message)
-build_json_error(message: str, trace: Any = None) -> dict
+# Error (simple message, optional hint)
+build_json_error(message: str, hint: str = None, trace: Any = None) -> dict
 
 # Generic (any code + fields)
 build_json(code: str, fields: Any, trace: Any = None) -> dict
@@ -108,6 +108,9 @@ response = build_json_ok(
 
 # Error
 err = build_json_error("user not found", trace={"duration_ms": 5})
+
+# Error with hint
+err_hint = build_json_error("wallet not found", hint="list wallets with: afpay wallet list", trace={"duration_ms": 5})
 
 # Specific error code
 not_found = build_json(
@@ -195,7 +198,7 @@ class OutputFormat(enum.Enum):  # JSON="json", YAML="yaml", PLAIN="plain"
 cli_parse_output(s: str) -> OutputFormat         # Parse --output flag; raises ValueError on unknown
 cli_parse_log_filters(entries: list[str]) -> list[str]  # Normalize --log: trim, lowercase, dedup, remove empty
 cli_output(value: Any, format: OutputFormat) -> str     # Dispatch to output_json/yaml/plain
-build_cli_error(message: str) -> dict            # {code:"error", error_code:"invalid_request", retryable:False, trace:{duration_ms:0}}
+build_cli_error(message: str, hint: str = None) -> dict  # {code:"error", error_code:"invalid_request", hint?, retryable:False, trace:{duration_ms:0}}
 ```
 
 **Canonical pattern** — parse all flags before doing work, emit JSONL errors to stdout:

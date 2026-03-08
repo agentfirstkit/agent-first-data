@@ -72,12 +72,17 @@ func CliOutput(value any, format OutputFormat) string {
 // BuildCliError builds a standard CLI parse error value.
 // Use when flag parsing fails or a flag value is invalid.
 // Print with OutputJson and exit with code 2.
-func BuildCliError(message string) map[string]any {
-	return map[string]any{
+// Pass empty string for hint to omit it.
+func BuildCliError(message string, hint string) map[string]any {
+	m := map[string]any{
 		"code":       "error",
 		"error_code": "invalid_request",
 		"error":      message,
 		"retryable":  false,
 		"trace":      map[string]any{"duration_ms": 0},
 	}
+	if hint != "" {
+		m["hint"] = hint
+	}
+	return m
 }

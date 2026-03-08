@@ -22,12 +22,42 @@ func TestParseLogNormalizes(t *testing.T) {
 }
 
 func TestBuildCliErrorStructure(t *testing.T) {
-	v := afdata.BuildCliError("bad flag")
+	v := afdata.BuildCliError("bad flag", "")
 	if v["code"] != "error" {
 		t.Errorf("code = %v", v["code"])
 	}
 	if v["retryable"] != false {
 		t.Errorf("retryable = %v", v["retryable"])
+	}
+}
+
+func TestBuildCliErrorWithHint(t *testing.T) {
+	v := afdata.BuildCliError("unknown action: foo", "valid actions: echo, ping")
+	if v["code"] != "error" {
+		t.Errorf("code = %v", v["code"])
+	}
+	if v["hint"] != "valid actions: echo, ping" {
+		t.Errorf("hint = %v", v["hint"])
+	}
+}
+
+func TestBuildJsonErrorWithHint(t *testing.T) {
+	v := afdata.BuildJsonError("not configured", "set PING_HOST", nil)
+	if v["code"] != "error" {
+		t.Errorf("code = %v", v["code"])
+	}
+	if v["error"] != "not configured" {
+		t.Errorf("error = %v", v["error"])
+	}
+	if v["hint"] != "set PING_HOST" {
+		t.Errorf("hint = %v", v["hint"])
+	}
+}
+
+func TestBuildJsonErrorWithoutHint(t *testing.T) {
+	v := afdata.BuildJsonError("something failed", "", nil)
+	if _, ok := v["hint"]; ok {
+		t.Errorf("hint should not be present, got %v", v["hint"])
 	}
 }
 
@@ -42,7 +72,7 @@ func TestCliOutputAllFormats(t *testing.T) {
 }
 
 func TestErrorRoundTripIsValidJsonl(t *testing.T) {
-	v := afdata.BuildCliError("oops")
+	v := afdata.BuildCliError("oops", "")
 	s := afdata.OutputJson(v)
 	if len(s) == 0 {
 		t.Error("empty json")

@@ -2,9 +2,11 @@
  * Minimal agent-first CLI — canonical pattern for tools built on agent-first-data.
  *
  * Demonstrates the correct use of: cliParseOutput, cliParseLogFilters,
- * cliOutput, and buildCliError.
+ * cliOutput, buildCliError, --dry-run, and error hints.
  *
  * Run:  npx tsx examples/agent_cli.ts echo --output json
+ *       npx tsx examples/agent_cli.ts echo --dry-run --output yaml
+ *       npx tsx examples/agent_cli.ts ping --output json
  *       npx tsx examples/agent_cli.ts echo --output yaml --log startup,request
  * Test: npx tsx --test examples/agent_cli.ts
  */
@@ -14,17 +16,23 @@ import assert from "node:assert/strict";
 import {
   type OutputFormat,
   buildCliError,
+  buildJson,
+  buildJsonError,
+  buildJsonOk,
   cliOutput,
   cliParseLogFilters,
   cliParseOutput,
   outputJson,
 } from "../src/index.js";
 
+const VALID_ACTIONS = ["echo", "ping"];
+
 function main(): void {
   const args = process.argv.slice(2);
   const outputIdx = args.indexOf("--output");
   const logIdx = args.indexOf("--log");
-  const action = args.find((a) => !a.startsWith("--")) ?? "echo";
+  const dryRun = args.includes("--dry-run");
+  const action = args.find((a) => !a.startsWith("--") && args[args.indexOf(a) - 1] !== "--output" && args[args.indexOf(a) - 1] !== "--log") ?? "echo";
   const outputArg = outputIdx !== -1 ? args[outputIdx + 1] : "json";
   const logArg = logIdx !== -1 ? args[logIdx + 1] : "";
 
@@ -40,8 +48,27 @@ function main(): void {
   // Step 2: parse --log with shared helper (trim + lowercase + dedup)
   const log = cliParseLogFilters(logArg ? logArg.split(",") : []);
 
-  // Step 3: do work, emit JSONL
-  const result = { code: "ok", action, log };
+  // Step 3: validate action — demonstrate buildCliError with hint
+  if (!VALID_ACTIONS.includes(action)) {
+    console.log(outputJson(buildCliError(`unknown action: ${action}`, `valid actions: ${VALID_ACTIONS.join(", ")}`)));
+    process.exit(2);
+  }
+
+  // Step 4: --dry-run → preview without executing
+  if (dryRun) {
+    const preview = buildJson("dry_run", { action, log }, { duration_ms: 0 });
+    console.log(cliOutput(preview, fmt));
+    return;
+  }
+
+  // Step 5: do work — demonstrate buildJsonError with hint on failure
+  if (action === "ping") {
+    const err = buildJsonError("ping target not configured", "set PING_HOST or pass --host", { duration_ms: 0 });
+    console.log(cliOutput(err, fmt));
+    process.exit(1);
+  }
+
+  const result = buildJsonOk({ action, log });
   console.log(cliOutput(result, fmt));
 }
 
@@ -68,6 +95,24 @@ describe("agent_cli example", () => {
     assert.equal(v["error_code"], "invalid_request");
     assert.equal(v["retryable"], false);
     assert.equal((v["trace"] as Record<string, unknown>)["duration_ms"], 0);
+  });
+
+  it("build cli error with hint", () => {
+    const v = buildCliError("unknown action: foo", "valid actions: echo, ping") as Record<string, unknown>;
+    assert.equal(v["code"], "error");
+    assert.equal(v["hint"], "valid actions: echo, ping");
+  });
+
+  it("build json error with hint", () => {
+    const v = buildJsonError("not configured", "set PING_HOST") as Record<string, unknown>;
+    assert.equal(v["code"], "error");
+    assert.equal(v["error"], "not configured");
+    assert.equal(v["hint"], "set PING_HOST");
+  });
+
+  it("build json error without hint has no hint key", () => {
+    const v = buildJsonError("something failed") as Record<string, unknown>;
+    assert.equal(v["hint"], undefined);
   });
 
   it("cli output all formats", () => {

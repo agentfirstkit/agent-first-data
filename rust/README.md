@@ -75,8 +75,8 @@ Build AFDATA protocol structures. Return `serde_json::Value` objects for transpo
 // Success (result)
 build_json_ok(result: Value, trace: Option<Value>) -> Value
 
-// Error (simple message)
-build_json_error(message: &str, trace: Option<Value>) -> Value
+// Error (simple message, optional hint)
+build_json_error(message: &str, hint: Option<&str>, trace: Option<Value>) -> Value
 
 // Generic (any code + fields)
 build_json(code: &str, fields: Value, trace: Option<Value>) -> Value
@@ -110,6 +110,14 @@ let response = build_json_ok(
 // Error
 let error = build_json_error(
     "user not found",
+    None,
+    Some(json!({"duration_ms": 5}))
+);
+
+// Error with hint
+let error_hint = build_json_error(
+    "wallet not found",
+    Some("list wallets with: afpay wallet list"),
     Some(json!({"duration_ms": 5}))
 );
 
@@ -194,7 +202,7 @@ pub enum OutputFormat { Json, Yaml, Plain }
 cli_parse_output(s: &str) -> Result<OutputFormat, String>          // Parse --output flag; Err on unknown
 cli_parse_log_filters<S: AsRef<str>>(entries: &[S]) -> Vec<String> // Normalize --log: trim, lowercase, dedup, remove empty
 cli_output(value: &Value, format: OutputFormat) -> String          // Dispatch to output_json/yaml/plain
-build_cli_error(message: &str) -> Value                            // {code:"error", error_code:"invalid_request", retryable:false, trace:{duration_ms:0}}
+build_cli_error(message: &str, hint: Option<&str>) -> Value         // {code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}
 ```
 
 **Canonical pattern** — parse all flags before doing work, emit JSONL errors to stdout:
@@ -207,12 +215,12 @@ let cli = Cli::try_parse().unwrap_or_else(|e| {
     if matches!(e.kind(), clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion) {
         e.exit();
     }
-    println!("{}", output_json(&build_cli_error(&e.to_string())));
+    println!("{}", output_json(&build_cli_error(&e.to_string(), None)));
     std::process::exit(2);
 });
 
 let format = cli_parse_output(&cli.output).unwrap_or_else(|e| {
-    println!("{}", output_json(&build_cli_error(&e)));
+    println!("{}", output_json(&build_cli_error(&e, None)));
     std::process::exit(2);
 });
 

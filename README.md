@@ -69,7 +69,7 @@ CLI logging flags:
 | Function / Type | Returns | Description |
 |:----------------|:--------|:------------|
 | `build_json_ok` | JSON | `{code: "ok", result, trace?}` |
-| `build_json_error` | JSON | `{code: "error", error, trace?}` |
+| `build_json_error` | JSON | `{code: "error", error, hint?, trace?}` |
 | `build_json` | JSON | `{code: "<custom>", ...fields, trace?}` |
 | `output_json` | String | Single-line JSON, secrets redacted |
 | `output_yaml` | String | Multi-line YAML, keys stripped, values formatted |
@@ -80,7 +80,7 @@ CLI logging flags:
 | `cli_parse_output` | OutputFormat | Parse `--output` flag; error on unknown value |
 | `cli_parse_log_filters` | String[] | Normalize `--log` entries: trim, lowercase, dedup, remove empty |
 | `cli_output` | String | Dispatch to `output_json` / `output_yaml` / `output_plain` |
-| `build_cli_error` | JSON | `{code:"error", error_code:"invalid_request", retryable:false, trace:{duration_ms:0}}` |
+| `build_cli_error` | JSON | `{code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}` |
 
 ## AFDATA Logging
 

@@ -63,12 +63,14 @@ export function cliOutput(value: JsonValue, format: OutputFormat): string {
  * console.log(outputJson(err));
  * process.exit(2);
  */
-export function buildCliError(message: string): JsonValue {
-  return {
+export function buildCliError(message: string, hint?: string): JsonValue {
+  const m: Record<string, JsonValue> = {
     code: "error",
     error_code: "invalid_request",
     error: message,
     retryable: false,
     trace: { duration_ms: 0 },
   };
+  if (hint !== undefined) m.hint = hint;
+  return m;
 }

@@ -84,6 +84,17 @@ describe("buildCliError", () => {
     assert.equal(parsed.code, "error");
     assert.ok(!line.includes("\n"));
   });
+
+  it("includes hint when provided", () => {
+    const v = buildCliError("bad flag", "try --help") as Record<string, unknown>;
+    assert.equal(v["hint"], "try --help");
+  });
+
+  it("omits hint key when not provided", () => {
+    const v = buildCliError("oops") as Record<string, unknown>;
+    assert.equal(v["hint"], undefined);
+    assert.ok(!("hint" in v));
+  });
 });
 
 // ── cliOutput ─────────────────────────────────────────────────────────────────

@@ -24,6 +24,18 @@
     "expected": {"code": "error", "error": "fail", "trace": {"duration_ms": 3}}
   },
   {
+    "name": "error_hint",
+    "type": "error_hint",
+    "args": {"message": "connection timeout", "hint": "increase --timeout-s"},
+    "expected": {"code": "error", "error": "connection timeout", "hint": "increase --timeout-s"}
+  },
+  {
+    "name": "error_hint_trace",
+    "type": "error_hint_trace",
+    "args": {"message": "too slow", "hint": "increase --timeout-s", "trace": {"duration_ms": 30000}},
+    "expected": {"code": "error", "error": "too slow", "hint": "increase --timeout-s", "trace": {"duration_ms": 30000}}
+  },
+  {
     "name": "status",
     "type": "status",
     "args": {"code": "progress", "fields": {"current": 3, "total": 10}},

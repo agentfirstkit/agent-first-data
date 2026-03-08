@@ -69,7 +69,7 @@ def cli_output(value: Any, format: OutputFormat) -> str:
     return output_json(value)
 
 
-def build_cli_error(message: str) -> dict:
+def build_cli_error(message: str, hint: str | None = None) -> dict:
     """Build a standard CLI parse error value.
 
     Use when argument parsing fails or a flag value is invalid.
@@ -83,10 +83,13 @@ def build_cli_error(message: str) -> dict:
     >>> v["retryable"]
     False
     """
-    return {
+    m: dict = {
         "code": "error",
         "error_code": "invalid_request",
         "error": message,
         "retryable": False,
         "trace": {"duration_ms": 0},
     }
+    if hint is not None:
+        m["hint"] = hint
+    return m

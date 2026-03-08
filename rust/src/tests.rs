@@ -36,9 +36,20 @@ fn test_protocol_fixtures() {
         let result = match typ {
             "ok" => build_json_ok(args["result"].clone(), None),
             "ok_trace" => build_json_ok(args["result"].clone(), Some(args["trace"].clone())),
-            "error" => build_json_error(args["message"].as_str().expect("missing message"), None),
+            "error" => build_json_error(args["message"].as_str().expect("missing message"), None, None),
             "error_trace" => build_json_error(
                 args["message"].as_str().expect("missing message"),
+                None,
+                Some(args["trace"].clone()),
+            ),
+            "error_hint" => build_json_error(
+                args["message"].as_str().expect("missing message"),
+                args["hint"].as_str(),
+                None,
+            ),
+            "error_hint_trace" => build_json_error(
+                args["message"].as_str().expect("missing message"),
+                args["hint"].as_str(),
                 Some(args["trace"].clone()),
             ),
             "status" => {
@@ -157,7 +168,7 @@ fn build_ok_without_trace() {
 
 #[test]
 fn build_error_with_trace() {
-    let v = build_json_error("not found", Some(json!({"duration_ms": 5})));
+    let v = build_json_error("not found", None, Some(json!({"duration_ms": 5})));
     assert_eq!(v["code"], "error");
     assert_eq!(v["error"], "not found");
     assert_eq!(v["trace"]["duration_ms"], 5);
@@ -165,7 +176,7 @@ fn build_error_with_trace() {
 
 #[test]
 fn build_error_without_trace() {
-    let v = build_json_error("fail", None);
+    let v = build_json_error("fail", None, None);
     assert_eq!(v["code"], "error");
     assert_eq!(v["error"], "fail");
     assert!(v.get("trace").is_none() || v["trace"].is_null());
@@ -173,9 +184,33 @@ fn build_error_without_trace() {
 
 #[test]
 fn build_error_empty_message() {
-    let v = build_json_error("", None);
+    let v = build_json_error("", None, None);
     assert_eq!(v["code"], "error");
     assert_eq!(v["error"], "");
+}
+
+#[test]
+fn build_error_with_hint() {
+    let v = build_json_error("timeout", Some("increase --timeout-s"), None);
+    assert_eq!(v["code"], "error");
+    assert_eq!(v["error"], "timeout");
+    assert_eq!(v["hint"], "increase --timeout-s");
+    assert!(v.get("trace").is_none() || v["trace"].is_null());
+}
+
+#[test]
+fn build_error_with_hint_and_trace() {
+    let v = build_json_error("timeout", Some("increase --timeout-s"), Some(json!({"duration_ms": 5})));
+    assert_eq!(v["code"], "error");
+    assert_eq!(v["error"], "timeout");
+    assert_eq!(v["hint"], "increase --timeout-s");
+    assert_eq!(v["trace"]["duration_ms"], 5);
+}
+
+#[test]
+fn build_error_without_hint_has_no_hint_key() {
+    let v = build_json_error("fail", None, None);
+    assert!(v.get("hint").is_none());
 }
 
 #[test]
@@ -1148,7 +1183,7 @@ fn cli_parse_log_filters_preserves_order() {
 
 #[test]
 fn build_cli_error_required_fields() {
-    let v = build_cli_error("missing --sql");
+    let v = build_cli_error("missing --sql", None);
     assert_eq!(v["code"], "error");
     assert_eq!(v["error_code"], "invalid_request");
     assert_eq!(v["error"], "missing --sql");
@@ -1158,8 +1193,21 @@ fn build_cli_error_required_fields() {
 
 #[test]
 fn build_cli_error_is_valid_json() {
-    let v = build_cli_error("oops");
+    let v = build_cli_error("oops", None);
     assert!(serde_json::to_string(&v).is_ok());
+}
+
+#[test]
+fn build_cli_error_with_hint() {
+    let v = build_cli_error("bad flag", Some("try --help"));
+    assert_eq!(v["code"], "error");
+    assert_eq!(v["hint"], "try --help");
+}
+
+#[test]
+fn build_cli_error_without_hint_has_no_hint_key() {
+    let v = build_cli_error("oops", None);
+    assert!(v.get("hint").is_none());
 }
 
 #[test]
