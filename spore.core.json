@@ -1,8 +1,9 @@
 {
   "id": "agent-first-data",
-  "version": "0.6.0",
   "name": "Agent-First Data",
+  "version": "0.6.1",
   "domain": "cmn.dev",
+  "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
   "synopsis": "The field name is the schema — agents read latency_ms and know milliseconds, api_key_secret and know to redact, no external schema needed",
   "intent": [
     "Encode all semantic information in the field name itself so agents parse structured data without external schemas, documentation, or type systems — _ms/_s/_epoch_ms for time, _msats/_sats/_usd_cents for currency, _bytes for size, _secret for auto-redaction",
@@ -10,22 +11,21 @@
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms → RFC 3339, _bytes → human-readable, _secret → ***, _ms ≥ 1000 → seconds)"
   ],
   "mutations": [
-    "Add optional hint parameter to buildJsonError and buildCliError across all four languages (Rust, Go, Python, TypeScript) — when present, errors include an actionable hint field (e.g. 'check --host/--port or PGHOST/PGPORT environment variables') to help agents and users resolve the error without external documentation",
-    "Add --dry-run flag and error hint demonstrations to all four language examples, establishing the canonical pattern for CLI tools that preview operations before executing"
+    "Add hint messages to CLI error outputs in the example, giving agents actionable next-step suggestions (--help, valid output format values) when argument parsing fails"
   ],
   "license": "MIT",
   "bonds": [
     {
-      "uri": "cmn://cmn.dev/b3.EaeeVMWHo3J1SZp5Lktp3xDd1i6XciNxwFf58noFzqsy",
-      "relation": "spawned_from"
+      "relation": "spawned_from",
+      "uri": "cmn://cmn.dev/b3.DVpYHUTsVUA2MUdQUQMTaNV577QcRKnJyusqqtiKKzK8"
     }
   ],
   "tree": {
     "algorithm": "blob_tree_blake3_nfc",
-    "excludes": [
+    "exclude_names": [
       ".git"
     ],
-    "ignore_rules": [
+    "follow_rules": [
       ".gitignore"
     ]
   }
