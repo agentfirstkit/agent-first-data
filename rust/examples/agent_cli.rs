@@ -46,14 +46,23 @@ fn main() {
         }
         println!(
             "{}",
-            agent_first_data::output_json(&build_cli_error(&e.to_string(), None))
+            agent_first_data::output_json(&build_cli_error(
+                &e.to_string(),
+                Some("try: agent-cli --help"),
+            ))
         );
         std::process::exit(2);
     });
 
     // Step 2: parse --output with shared helper
     let format = cli_parse_output(&cli.output).unwrap_or_else(|e| {
-        println!("{}", agent_first_data::output_json(&build_cli_error(&e, None)));
+        println!(
+            "{}",
+            agent_first_data::output_json(&build_cli_error(
+                &e,
+                Some("valid values: json, yaml, plain"),
+            ))
+        );
         std::process::exit(2);
     });
 
