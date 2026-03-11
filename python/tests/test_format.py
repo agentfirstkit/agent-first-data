@@ -11,6 +11,8 @@ from agent_first_data import (
     internal_redact_secrets,
     output_json,
     output_json_with,
+    output_yaml,
+    output_plain,
 )
 from agent_first_data.format import (
     _format_bytes_human,
@@ -90,6 +92,21 @@ def test_helper_fixtures():
             elif name == "parse_size":
                 got = parse_size(inp)
                 assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
+
+
+def test_output_format_fixtures():
+    for case in _load("output_formats.json"):
+        name = case["name"]
+        inp = json.loads(json.dumps(case["input"]))
+
+        got_json = json.loads(output_json(inp))
+        assert got_json == case["expected_json"], f"[output/{name}] json mismatch: {got_json}"
+
+        got_yaml = output_yaml(inp)
+        assert got_yaml == case["expected_yaml"], f"[output/{name}] yaml mismatch: {got_yaml!r}"
+
+        got_plain = output_plain(inp)
+        assert got_plain == case["expected_plain"], f"[output/{name}] plain mismatch: {got_plain!r}"
 
 
 def test_output_json_exception_field_is_readable():

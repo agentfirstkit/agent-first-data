@@ -150,12 +150,16 @@ pub fn parse_size(s: &str) -> Option<u64> {
     if let Ok(n) = num_str.parse::<u64>() {
         return n.checked_mul(mult);
     }
+    // Integer overflow must not silently fall back to float parsing.
+    if !num_str.contains('.') && !num_str.contains('e') && !num_str.contains('E') {
+        return None;
+    }
     let f: f64 = num_str.parse().ok()?;
     if f < 0.0 || f.is_nan() || f.is_infinite() {
         return None;
     }
     let result = f * mult as f64;
-    if result > u64::MAX as f64 {
+    if result >= u64::MAX as f64 {
         return None;
     }
     Some(result as u64)

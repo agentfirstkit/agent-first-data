@@ -1,0 +1,73 @@
+[
+  {
+    "name": "basic_suffix_formatting_and_redaction",
+    "input": {
+      "api_key_secret": "sk-123",
+      "created_at_epoch_ms": 1738886400000,
+      "file_size_bytes": 5242880,
+      "latency_ms": 1280
+    },
+    "expected_json": {
+      "api_key_secret": "***",
+      "created_at_epoch_ms": 1738886400000,
+      "file_size_bytes": 5242880,
+      "latency_ms": 1280
+    },
+    "expected_yaml": "---\napi_key: \"***\"\ncreated_at: \"2025-02-07T00:00:00.000Z\"\nfile_size: \"5.0MB\"\nlatency: \"1.28s\"",
+    "expected_plain": "api_key=*** created_at=2025-02-07T00:00:00.000Z file_size=5.0MB latency=1.28s"
+  },
+  {
+    "name": "collision_reverts_to_original_keys_and_raw_values",
+    "input": {
+      "response_ms": 150,
+      "response_bytes": 1024
+    },
+    "expected_json": {
+      "response_ms": 150,
+      "response_bytes": 1024
+    },
+    "expected_yaml": "---\nresponse_bytes: 1024\nresponse_ms: 150",
+    "expected_plain": "response_bytes=1024 response_ms=150"
+  },
+  {
+    "name": "negative_epoch_and_bytes_formatting",
+    "input": {
+      "created_epoch_ns": -1,
+      "delta_bytes": -5242880
+    },
+    "expected_json": {
+      "created_epoch_ns": -1,
+      "delta_bytes": -5242880
+    },
+    "expected_yaml": "---\ncreated: \"1969-12-31T23:59:59.999Z\"\ndelta: \"-5.0MB\"",
+    "expected_plain": "created=1969-12-31T23:59:59.999Z delta=-5.0MB"
+  },
+  {
+    "name": "type_fallthrough_keeps_original_keys",
+    "input": {
+      "cpu_percent": true,
+      "size_bytes": "unknown",
+      "ttl_s": "auto"
+    },
+    "expected_json": {
+      "cpu_percent": true,
+      "size_bytes": "unknown",
+      "ttl_s": "auto"
+    },
+    "expected_yaml": "---\ncpu_percent: true\nsize_bytes: \"unknown\"\nttl_s: \"auto\"",
+    "expected_plain": "cpu_percent=true size_bytes=unknown ttl_s=auto"
+  },
+  {
+    "name": "uppercase_suffixes_are_supported",
+    "input": {
+      "API_KEY_SECRET": "sk-123",
+      "CACHE_TTL_S": 3600
+    },
+    "expected_json": {
+      "API_KEY_SECRET": "***",
+      "CACHE_TTL_S": 3600
+    },
+    "expected_yaml": "---\nAPI_KEY: \"***\"\nCACHE_TTL: \"3600s\"",
+    "expected_plain": "API_KEY=*** CACHE_TTL=3600s"
+  }
+]

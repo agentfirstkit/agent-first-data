@@ -179,6 +179,8 @@ Most users don't need this. Output functions automatically protect secrets.
 parse_size(s: str) -> int | None  # Parse "10M" → bytes
 ```
 
+Returns `None` for invalid, negative, or overflow input.
+
 **Example:**
 ```python
 from agent_first_data import *

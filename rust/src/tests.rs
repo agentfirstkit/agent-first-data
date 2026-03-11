@@ -146,6 +146,39 @@ fn test_helper_fixtures() {
     }
 }
 
+#[test]
+fn test_output_format_fixtures() {
+    let cases = load_fixture("output_formats.json");
+    for case in cases
+        .as_array()
+        .expect("output_formats.json must be an array")
+    {
+        let name = case["name"].as_str().expect("missing name");
+        let input = case["input"].clone();
+        let expected_json = case["expected_json"].clone();
+        let expected_yaml = case["expected_yaml"]
+            .as_str()
+            .expect("expected_yaml must be string");
+        let expected_plain = case["expected_plain"]
+            .as_str()
+            .expect("expected_plain must be string");
+
+        let json_out = output_json(&input);
+        let parsed_json: Value = serde_json::from_str(&json_out)
+            .unwrap_or_else(|e| panic!("[output/{name}] invalid json output: {e}"));
+        assert_eq!(parsed_json, expected_json, "[output/{name}] json mismatch");
+
+        let yaml_out = output_yaml(&input);
+        assert_eq!(yaml_out, expected_yaml, "[output/{name}] yaml mismatch");
+
+        let plain_out = output_plain(&input);
+        assert_eq!(
+            plain_out, expected_plain,
+            "[output/{name}] plain mismatch"
+        );
+    }
+}
+
 // ═══════════════════════════════════════════
 // Protocol builders
 // ═══════════════════════════════════════════

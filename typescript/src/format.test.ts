@@ -15,6 +15,7 @@ import {
   RedactionPolicy,
   outputJson,
   outputJsonWith,
+  outputYaml,
   outputPlain,
   type JsonValue,
   parseSize,
@@ -108,6 +109,23 @@ describe("helper fixtures", () => {
         });
       }
     }
+  }
+});
+
+describe("output format fixtures", () => {
+  for (const tc of load("output_formats.json")) {
+    it(tc.name, () => {
+      const input = tc.input as JsonValue;
+
+      const gotJson = JSON.parse(outputJson(input));
+      assert.deepEqual(gotJson, tc.expected_json, "json mismatch");
+
+      const gotYaml = outputYaml(input);
+      assert.equal(gotYaml, tc.expected_yaml, "yaml mismatch");
+
+      const gotPlain = outputPlain(input);
+      assert.equal(gotPlain, tc.expected_plain, "plain mismatch");
+    });
   }
 });
 

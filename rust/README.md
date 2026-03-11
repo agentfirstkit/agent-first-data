@@ -183,6 +183,8 @@ Most users don't need this. Output functions automatically protect secrets.
 parse_size(s: &str) -> Option<u64>  // Parse "10M" → bytes
 ```
 
+Returns `None` for invalid, negative, or overflow input.
+
 **Example:**
 ```rust
 use agent_first_data::*;

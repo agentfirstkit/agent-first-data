@@ -179,7 +179,7 @@ Most users don't need this. Output functions automatically protect secrets.
 parseSize(s: string): number | null  // Parse "10M" → bytes
 ```
 
-Returns `null` for invalid input and for values that cannot be represented as a safe JavaScript integer.
+Returns `null` for invalid, negative, overflow, or non-safe-integer values.
 
 **Example:**
 ```typescript

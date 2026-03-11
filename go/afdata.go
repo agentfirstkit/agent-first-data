@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -168,12 +169,16 @@ func ParseSize(s string) (uint64, bool) {
 		}
 		return lo, true
 	}
+	// Integer overflow must not silently fall back to float parsing.
+	if !strings.ContainsAny(numStr, ".eE") {
+		return 0, false
+	}
 	f, err := strconv.ParseFloat(numStr, 64)
 	if err != nil || f < 0 || math.IsNaN(f) || math.IsInf(f, 0) {
 		return 0, false
 	}
 	result := f * float64(mult)
-	if result > float64(math.MaxUint64) {
+	if result >= float64(math.MaxUint64) {
 		return 0, false
 	}
 	return uint64(result), true
@@ -756,17 +761,46 @@ func normalize(value any) any {
 
 // sanitizeForJSON converts values into JSON-safe data while preserving map/array structure.
 func sanitizeForJSON(value any) any {
+	return sanitizeForJSONWithVisited(value, map[visitKey]struct{}{})
+}
+
+type visitKey struct {
+	kind reflect.Kind
+	ptr  uintptr
+}
+
+func sanitizeForJSONWithVisited(value any, visited map[visitKey]struct{}) any {
 	switch v := value.(type) {
 	case map[string]any:
+		rv := reflect.ValueOf(v)
+		key := visitKey{kind: rv.Kind(), ptr: rv.Pointer()}
+		if key.ptr != 0 {
+			if _, seen := visited[key]; seen {
+				return "<unsupported:circular>"
+			}
+			visited[key] = struct{}{}
+			defer delete(visited, key)
+		}
+
 		out := make(map[string]any, len(v))
 		for k, item := range v {
-			out[k] = sanitizeForJSON(item)
+			out[k] = sanitizeForJSONWithVisited(item, visited)
 		}
 		return out
 	case []any:
+		if len(v) > 0 {
+			rv := reflect.ValueOf(v)
+			key := visitKey{kind: rv.Kind(), ptr: rv.Pointer()}
+			if _, seen := visited[key]; seen {
+				return "<unsupported:circular>"
+			}
+			visited[key] = struct{}{}
+			defer delete(visited, key)
+		}
+
 		out := make([]any, len(v))
 		for i, item := range v {
-			out[i] = sanitizeForJSON(item)
+			out[i] = sanitizeForJSONWithVisited(item, visited)
 		}
 		return out
 	}
