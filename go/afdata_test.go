@@ -179,6 +179,36 @@ func TestHelperFixtures(t *testing.T) {
 	}
 }
 
+func TestOutputFormatFixtures(t *testing.T) {
+	for _, tc := range loadFixture("output_formats.json") {
+		name := tc["name"].(string)
+		t.Run(name, func(t *testing.T) {
+			input := tc["input"]
+			expectedJSON := tc["expected_json"]
+			expectedYAML := tc["expected_yaml"].(string)
+			expectedPlain := tc["expected_plain"].(string)
+
+			jsonLine := OutputJson(input)
+			var gotJSON any
+			if err := json.Unmarshal([]byte(jsonLine), &gotJSON); err != nil {
+				t.Fatalf("invalid JSON output: %v (%s)", err, jsonLine)
+			}
+			gotJSONBytes, _ := json.Marshal(gotJSON)
+			expJSONBytes, _ := json.Marshal(expectedJSON)
+			if string(gotJSONBytes) != string(expJSONBytes) {
+				t.Errorf("json mismatch: got %s, want %s", gotJSONBytes, expJSONBytes)
+			}
+
+			if got := OutputYaml(input); got != expectedYAML {
+				t.Errorf("yaml mismatch: got %q, want %q", got, expectedYAML)
+			}
+			if got := OutputPlain(input); got != expectedPlain {
+				t.Errorf("plain mismatch: got %q, want %q", got, expectedPlain)
+			}
+		})
+	}
+}
+
 // --- Output JSON tests ---
 
 func TestOutputJsonSingleLine(t *testing.T) {
@@ -300,6 +330,42 @@ func TestOutputJsonStructWithUnsupportedFieldDoesNotLeakSecrets(t *testing.T) {
 	}
 	if _, ok := parsed["meta"]; !ok {
 		t.Fatal("expected meta key in output")
+	}
+}
+
+func TestOutputJsonCircularReferenceMapDoesNotCrash(t *testing.T) {
+	v := map[string]any{}
+	v["self"] = v
+
+	got := OutputJson(v)
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("failed to parse OutputJson: %v (%s)", err, got)
+	}
+	if parsed["self"] != "<unsupported:circular>" {
+		t.Errorf("self = %v, want <unsupported:circular>", parsed["self"])
+	}
+}
+
+func TestOutputJsonCircularReferenceStillRedactsSecrets(t *testing.T) {
+	v := map[string]any{
+		"api_key_secret": "sk-live-123",
+	}
+	v["self"] = v
+
+	got := OutputJson(v)
+	assertNotContains(t, got, "sk-live-123")
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("failed to parse OutputJson: %v (%s)", err, got)
+	}
+	if parsed["api_key_secret"] != "***" {
+		t.Errorf("api_key_secret = %v, want ***", parsed["api_key_secret"])
+	}
+	if parsed["self"] != "<unsupported:circular>" {
+		t.Errorf("self = %v, want <unsupported:circular>", parsed["self"])
 	}
 }
 

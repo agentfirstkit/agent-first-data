@@ -95,7 +95,7 @@ Programs parse `_size` at load time using `parse_size()` and convert to bytes fo
 | `G` | 1024³ | `"2G"` → 2147483648 |
 | `T` | 1024⁴ | `"1T"` → 1099511627776 |
 
-Case-insensitive. Supports decimals (`"1.5M"`). Returns null for invalid/negative input.
+Case-insensitive. Supports decimals (`"1.5M"`). Returns null for invalid, negative, or overflow/unrepresentable input.
 
 **Example config file:**
 
@@ -140,9 +140,9 @@ Stablecoins follow the same `_{code}_cents` pattern: `deposit_usdt_cents: 1000`,
 
 | Suffix | Handling | Example |
 |:-------|:---------|:--------|
-| `_secret` | redact entire value to `***` | `api_key_secret: "sk-or-v1-abc..."` |
+| `_secret` | redact scalar values to `***`; for object/array values, recursively redact nested secrets | `api_key_secret: "sk-or-v1-abc..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields to `***`. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Scalar `_secret` values become `***`; object/array `_secret` values are traversed and nested `_secret` fields are redacted. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time.
 
 ### No suffix needed
 
@@ -345,7 +345,7 @@ Default is tool-defined. Interactive CLIs default to `yaml`, scripting/logging c
 
 JSON is the canonical format. YAML and plain are derived from it.
 
-**All CLI output formats automatically redact `_secret` fields.** Any field ending in `_secret` (case-insensitive) is replaced with `***` before display.
+**All CLI output formats automatically redact `_secret` fields.** Matching recognizes `_secret` and `_SECRET` only. Scalar `_secret` values are replaced with `***`; object/array values are traversed and nested `_secret` fields are redacted.
 
 **Format characteristics:**
 - **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
@@ -497,6 +497,11 @@ Recommended enforcement:
 | `"ok"` | Success result |
 | `"error"` | Generic error (prefer specific codes) |
 | tool-defined | Status / errors / progress |
+
+Minimum logging envelope across language integrations:
+- Required fields: `timestamp_epoch_ms`, `message`, `code`
+- Optional common field: `target`
+- Additional tool/span fields are free-form and additive
 
 Three values are reserved: `log`, `ok`, `error`. All other values are tool-defined.
 

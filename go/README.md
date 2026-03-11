@@ -180,6 +180,8 @@ Most users don't need this. Output functions automatically protect secrets.
 ParseSize(s string) (uint64, bool)  // Parse "10M" → bytes
 ```
 
+Returns `(0, false)` for invalid, negative, or overflow input.
+
 **Example:**
 ```go
 import afdata "github.com/cmnspore/agent-first-data/go"

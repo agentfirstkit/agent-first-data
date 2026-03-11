@@ -118,6 +118,7 @@ def parse_size(s: str) -> int | None:
     Case-insensitive. Trims whitespace. Returns None for invalid input.
     """
     _multipliers = {"b": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
+    _max_u64 = (1 << 64) - 1
     s = s.strip()
     if not s:
         return None
@@ -136,14 +137,19 @@ def parse_size(s: str) -> int | None:
         n = int(num_str)
         if n < 0:
             return None
+        if n > _max_u64 // mult:
+            return None
         return n * mult
     except ValueError:
         pass
     try:
         f = float(num_str)
-        if f < 0 or f != f:  # NaN check
+        if f < 0 or not math.isfinite(f):
             return None
-        return int(f * mult)
+        result = f * mult
+        if not math.isfinite(result) or result > _max_u64:
+            return None
+        return int(result)
     except (ValueError, OverflowError):
         return None
 

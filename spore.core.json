@@ -1,7 +1,8 @@
 {
+  "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "domain": "cmn.dev",
   "key": "ed25519.7BmCWmBb2YeUWR7pmHvwAvi9wRm96VpZsJvZFSTfc2Uu",
   "synopsis": "The field name is the schema — agents read latency_ms and know milliseconds, api_key_secret and know to redact, no external schema needed",
@@ -11,13 +12,17 @@
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms → RFC 3339, _bytes → human-readable, _secret → ***, _ms ≥ 1000 → seconds)"
   ],
   "mutations": [
-    "Add hint messages to CLI error outputs in the example, giving agents actionable next-step suggestions (--help, valid output format values) when argument parsing fails"
+    "Add OutputJsonWith and RedactionPolicy API across all four languages, enabling callers to control whether _secret redaction applies to the full document or only to the trace field, supporting diagnostic and audit use cases where certain secrets must remain visible in results while trace is still protected",
+    "Fix stack overflow caused by circular references in Go's OutputJson/sanitizeForJSON, ensuring the JSON output contract is preserved even for self-referential data structures by replacing recursive traversal with explicit cycle detection via a visited pointer set",
+    "Unify parse_size overflow semantics across all four languages so values exceeding uint64 range consistently return invalid, including fixing a float boundary comparison error (> instead of >=) that allowed values exactly equal to 2^64 to slip through the guard and produce an integer overflow",
+    "Add cross-language golden conformance suite via a shared output_formats.json fixture covering JSON/YAML/Plain formatting across suffix processing, collision resolution, negative timestamps and bytes, type fallthrough keys, and uppercase suffix variants — all four languages now validate against the same expected outputs",
+    "Correct API surface documentation to 13 functions + 2 types, document _secret container traversal semantics, parse_size overflow behavior, and logging envelope required versus optional field guarantees across the spec and all four language READMEs"
   ],
   "license": "MIT",
   "bonds": [
     {
       "relation": "spawned_from",
-      "uri": "cmn://cmn.dev/b3.DVpYHUTsVUA2MUdQUQMTaNV577QcRKnJyusqqtiKKzK8"
+      "uri": "cmn://cmn.dev/b3.4Q6SQVbb9HLB8ffJpzuqECtq8TZZrBXzHtqoHgJXoNJ5"
     }
   ],
   "tree": {
