@@ -3,5 +3,5 @@ disallowed-macros = [
 ]
 
 disallowed-methods = [
-  { path = "std::io::stderr", reason = "AFDATA protocol/log events must use stdout only; stderr is reserved for unrecoverable pre-protocol startup failures." },
+  { path = "std::io::stderr", reason = "AFDATA protocol/log events must use stdout only; stderr is not a protocol channel." },
 ]

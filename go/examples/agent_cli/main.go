@@ -4,8 +4,9 @@
 // --dry-run, and error hints.
 //
 // Run: go run ./examples/agent_cli echo
-//      go run ./examples/agent_cli echo --dry-run
-//      go run ./examples/agent_cli ping
+//
+//	go run ./examples/agent_cli echo --dry-run
+//	go run ./examples/agent_cli ping
 package main
 
 import (

@@ -1,18 +1,11 @@
 [package]
 name = "agent-first-data"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 description = "Agent-First Data (AFDATA) — suffix-driven output formatting and protocol templates for AI agents"
 license = "MIT"
 repository = "https://github.com/cmnspore/agent-first-data"
 readme = "README.md"
-
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
-print_stdout = "deny"
-print_stderr = "deny"
 
 [features]
 default = []
@@ -26,3 +19,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"], o
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
