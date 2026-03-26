@@ -349,7 +349,7 @@ CLI tools that use AFDATA should support output and logging flags:
 
 - Protocol output (`build_json_*` + `output_*`) follows `--output`
 - Log format follows `--output` or a separate `--log-format` flag if independent control is needed
-- Document the default format and available options in `--help`
+- `--help` SHOULD expand all subcommands and their flags in a single output. `myapp sub --help` expands only that subcommand's tree. Agents read `--help` once and get the complete interface — no crawling subcommands one by one.
 
 ## Review Checklist
 

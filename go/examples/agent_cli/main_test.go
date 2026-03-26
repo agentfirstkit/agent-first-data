@@ -1,10 +1,34 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	afdata "github.com/cmnspore/agent-first-data/go"
 )
+
+func TestCompleteHelpContainsAllSubcommands(t *testing.T) {
+	help := formatCompleteHelp()
+	for _, want := range []string{"echo", "ping", "--output", "--dry-run", "--host"} {
+		if !containsStr(help, want) {
+			t.Errorf("root --help missing %q", want)
+		}
+	}
+}
+
+func TestSubcommandHelpScoped(t *testing.T) {
+	echoHelp := formatSubcommandHelp("echo")
+	if !containsStr(echoHelp, "--dry-run") {
+		t.Error("echo --help missing --dry-run")
+	}
+	if containsStr(echoHelp, "--host") {
+		t.Error("echo --help should NOT contain --host")
+	}
+}
+
+func containsStr(s, sub string) bool {
+	return len(s) > 0 && len(sub) > 0 && strings.Contains(s, sub)
+}
 
 func TestParseOutputAllVariants(t *testing.T) {
 	for _, s := range []string{"json", "yaml", "plain"} {

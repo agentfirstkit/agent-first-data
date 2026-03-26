@@ -36,7 +36,11 @@ fn test_protocol_fixtures() {
         let result = match typ {
             "ok" => build_json_ok(args["result"].clone(), None),
             "ok_trace" => build_json_ok(args["result"].clone(), Some(args["trace"].clone())),
-            "error" => build_json_error(args["message"].as_str().expect("missing message"), None, None),
+            "error" => build_json_error(
+                args["message"].as_str().expect("missing message"),
+                None,
+                None,
+            ),
             "error_trace" => build_json_error(
                 args["message"].as_str().expect("missing message"),
                 None,
@@ -172,10 +176,7 @@ fn test_output_format_fixtures() {
         assert_eq!(yaml_out, expected_yaml, "[output/{name}] yaml mismatch");
 
         let plain_out = output_plain(&input);
-        assert_eq!(
-            plain_out, expected_plain,
-            "[output/{name}] plain mismatch"
-        );
+        assert_eq!(plain_out, expected_plain, "[output/{name}] plain mismatch");
     }
 }
 
@@ -233,7 +234,11 @@ fn build_error_with_hint() {
 
 #[test]
 fn build_error_with_hint_and_trace() {
-    let v = build_json_error("timeout", Some("increase --timeout-s"), Some(json!({"duration_ms": 5})));
+    let v = build_json_error(
+        "timeout",
+        Some("increase --timeout-s"),
+        Some(json!({"duration_ms": 5})),
+    );
     assert_eq!(v["code"], "error");
     assert_eq!(v["error"], "timeout");
     assert_eq!(v["hint"], "increase --timeout-s");

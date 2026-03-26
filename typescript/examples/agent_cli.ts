@@ -1,10 +1,13 @@
 /**
  * Minimal agent-first CLI — canonical pattern for tools built on agent-first-data.
  *
- * Demonstrates the correct use of: cliParseOutput, cliParseLogFilters,
- * cliOutput, buildCliError, --dry-run, and error hints.
+ * Demonstrates: complete --help (all subcommands in one output),
+ * cliParseOutput, cliParseLogFilters, cliOutput, buildCliError,
+ * --dry-run, and error hints.
  *
- * Run:  npx tsx examples/agent_cli.ts echo --output json
+ * Run:  npx tsx examples/agent_cli.ts --help
+ *       npx tsx examples/agent_cli.ts echo --help
+ *       npx tsx examples/agent_cli.ts echo --output json
  *       npx tsx examples/agent_cli.ts echo --dry-run --output yaml
  *       npx tsx examples/agent_cli.ts ping --output json
  *       npx tsx examples/agent_cli.ts echo --output yaml --log startup,request
@@ -25,16 +28,72 @@ import {
   outputJson,
 } from "../src/index.js";
 
-const VALID_ACTIONS = ["echo", "ping"];
+interface Subcommand {
+  name: string;
+  about: string;
+  flags: string;
+}
+
+const SUBCOMMANDS: Subcommand[] = [
+  { name: "echo", about: "Echo back the input as structured output", flags: "  --dry-run    Preview without executing" },
+  { name: "ping", about: "Ping a remote target", flags: "  --host       Target host to ping" },
+];
+
+/** Format help for root command and all subcommands. */
+function formatCompleteHelp(): string {
+  const lines = [
+    "agent-cli — Minimal agent-first CLI example",
+    "",
+    "Usage: agent-cli [OPTIONS] <COMMAND>",
+    "",
+    "Options:",
+    "  --output <FORMAT>  Output format: json, yaml, plain (default: json)",
+    "  --log <FILTERS>    Log categories (comma-separated)",
+    "  --help             Show this help",
+    "",
+    "Commands:",
+  ];
+  for (const sc of SUBCOMMANDS) {
+    lines.push(`  ${sc.name.padEnd(8)} ${sc.about}`);
+  }
+  for (const sc of SUBCOMMANDS) {
+    lines.push("", "=".repeat(60), `agent-cli ${sc.name}`, "=".repeat(60));
+    lines.push(sc.about, "", "Flags:", sc.flags);
+  }
+  return lines.join("\n") + "\n";
+}
+
+/** Format help scoped to a single subcommand. */
+function formatSubcommandHelp(name: string): string {
+  const sc = SUBCOMMANDS.find((s) => s.name === name);
+  if (!sc) return "";
+  return `agent-cli ${sc.name} — ${sc.about}\n\nFlags:\n${sc.flags}\n`;
+}
 
 function main(): void {
   const args = process.argv.slice(2);
+  const showHelp = args.includes("--help") || args.includes("-h");
+  const argsWithoutHelp = args.filter((a) => a !== "--help" && a !== "-h");
+  const command = argsWithoutHelp.find((a) => !a.startsWith("--") && argsWithoutHelp[argsWithoutHelp.indexOf(a) - 1] !== "--output" && argsWithoutHelp[argsWithoutHelp.indexOf(a) - 1] !== "--log");
+
+  // Complete help: --help expands all subcommands in one output.
+  // Subcommand --help expands only that subcommand.
+  if (showHelp) {
+    if (command) {
+      process.stdout.write(formatSubcommandHelp(command));
+    } else {
+      process.stdout.write(formatCompleteHelp());
+    }
+    return;
+  }
+
   const outputIdx = args.indexOf("--output");
   const logIdx = args.indexOf("--log");
   const dryRun = args.includes("--dry-run");
-  const action = args.find((a) => !a.startsWith("--") && args[args.indexOf(a) - 1] !== "--output" && args[args.indexOf(a) - 1] !== "--log") ?? "echo";
+  const hostIdx = args.indexOf("--host");
   const outputArg = outputIdx !== -1 ? args[outputIdx + 1] : "json";
   const logArg = logIdx !== -1 ? args[logIdx + 1] : "";
+  const host = hostIdx !== -1 ? args[hostIdx + 1] : undefined;
 
   // Step 1: parse --output with shared helper
   let fmt: OutputFormat;
@@ -48,31 +107,58 @@ function main(): void {
   // Step 2: parse --log with shared helper (trim + lowercase + dedup)
   const log = cliParseLogFilters(logArg ? logArg.split(",") : []);
 
-  // Step 3: validate action — demonstrate buildCliError with hint
-  if (!VALID_ACTIONS.includes(action)) {
-    console.log(outputJson(buildCliError(`unknown action: ${action}`, `valid actions: ${VALID_ACTIONS.join(", ")}`)));
+  // Step 3: no subcommand → error with hint
+  if (!command) {
+    console.log(outputJson(buildCliError("no subcommand provided", "try: agent-cli --help")));
     process.exit(2);
   }
 
-  // Step 4: --dry-run → preview without executing
-  if (dryRun) {
-    const preview = buildJson("dry_run", { action, log }, { duration_ms: 0 });
-    console.log(cliOutput(preview, fmt));
-    return;
+  switch (command) {
+    case "echo": {
+      // Step 4: --dry-run → preview without executing
+      if (dryRun) {
+        const preview = buildJson("dry_run", { action: "echo", log }, { duration_ms: 0 });
+        console.log(cliOutput(preview, fmt));
+        return;
+      }
+      const result = buildJsonOk({ action: "echo", log });
+      console.log(cliOutput(result, fmt));
+      break;
+    }
+    case "ping": {
+      // Step 5: demonstrate buildJsonError with hint on failure
+      if (!host) {
+        const err = buildJsonError("ping target not configured", "set PING_HOST or pass --host", { duration_ms: 0 });
+        console.log(cliOutput(err, fmt));
+        process.exit(1);
+      }
+      break;
+    }
+    default: {
+      console.log(outputJson(buildCliError(`unknown command: ${command}`, "valid commands: echo, ping")));
+      process.exit(2);
+    }
   }
-
-  // Step 5: do work — demonstrate buildJsonError with hint on failure
-  if (action === "ping") {
-    const err = buildJsonError("ping target not configured", "set PING_HOST or pass --host", { duration_ms: 0 });
-    console.log(cliOutput(err, fmt));
-    process.exit(1);
-  }
-
-  const result = buildJsonOk({ action, log });
-  console.log(cliOutput(result, fmt));
 }
 
 // ── Tests (run via: npx tsx --test examples/agent_cli.ts) ────────────────────
+
+describe("complete help", () => {
+  it("root help contains all subcommands", () => {
+    const help = formatCompleteHelp();
+    assert.ok(help.includes("echo"), "root --help must include echo");
+    assert.ok(help.includes("ping"), "root --help must include ping");
+    assert.ok(help.includes("--output"), "root --help must include --output");
+    assert.ok(help.includes("--dry-run"), "root --help must include echo's --dry-run");
+    assert.ok(help.includes("--host"), "root --help must include ping's --host");
+  });
+
+  it("subcommand help scoped to subtree", () => {
+    const echoHelp = formatSubcommandHelp("echo");
+    assert.ok(echoHelp.includes("--dry-run"), "echo --help must include --dry-run");
+    assert.ok(!echoHelp.includes("--host"), "echo --help must NOT include ping's --host");
+  });
+});
 
 describe("agent_cli example", () => {
   it("parse output all variants", () => {

@@ -59,5 +59,37 @@ jobs:
           npm install
           npm install --no-save tsx
 
-      - name: Run tests
-        run: bash scripts/test.sh
+      - name: Rust (fmt + clippy)
+        run: |
+          cd rust && cargo fmt --all --check
+          cd rust && cargo clippy --lib -- -D warnings
+
+      - name: Go (fmt + compile)
+        run: |
+          cd go
+          unformatted="$(find . -name '*.go' -type f -print0 | xargs -0 gofmt -l)"
+          if [ -n "$unformatted" ]; then echo "Go files need formatting:" >&2; printf '%s\n' "$unformatted" >&2; exit 1; fi
+          go test -run '^$' ./...
+
+      - name: Python (syntax)
+        run: cd python && python3 -m compileall agent_first_data examples tests >/dev/null
+
+      - name: TypeScript (typecheck)
+        run: cd typescript && npx tsc --noEmit
+
+      - name: Rust (tests)
+        run: |
+          cd rust && cargo test
+          cd rust && cargo test --features tracing
+          cd rust && cargo test --examples
+
+      - name: Go (tests)
+        run: cd go && go test -v ./...
+
+      - name: Python (tests)
+        run: cd python && PYTHONPATH=. python3 -m pytest tests/ examples/agent_cli.py -v
+
+      - name: TypeScript (tests)
+        run: |
+          cd typescript && npx tsx --test src/*.test.ts
+          cd typescript && npx tsx --test examples/agent_cli.ts

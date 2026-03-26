@@ -258,10 +258,7 @@ pub fn build_cli_error(message: &str, hint: Option<&str>) -> Value {
         obj.insert("hint".to_string(), Value::String(h.to_string()));
     }
     obj.insert("retryable".to_string(), Value::Bool(false));
-    obj.insert(
-        "trace".to_string(),
-        serde_json::json!({"duration_ms": 0}),
-    );
+    obj.insert("trace".to_string(), serde_json::json!({"duration_ms": 0}));
     Value::Object(obj)
 }
 

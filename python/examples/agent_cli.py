@@ -1,9 +1,11 @@
 """Minimal agent-first CLI — canonical pattern for tools built on agent-first-data.
 
-Demonstrates the correct use of: cli_parse_output, cli_parse_log_filters,
-cli_output, build_cli_error, --dry-run, and error hints.
+Demonstrates: complete --help (all subcommands in one output), cli_parse_output,
+cli_parse_log_filters, cli_output, build_cli_error, --dry-run, and error hints.
 
-Run:  PYTHONPATH=. python3 examples/agent_cli.py echo --output json
+Run:  PYTHONPATH=. python3 examples/agent_cli.py --help
+      PYTHONPATH=. python3 examples/agent_cli.py echo --help
+      PYTHONPATH=. python3 examples/agent_cli.py echo --output json
       PYTHONPATH=. python3 examples/agent_cli.py echo --dry-run --output yaml
       PYTHONPATH=. python3 examples/agent_cli.py ping --output json
       PYTHONPATH=. python3 examples/agent_cli.py echo --output yaml --log startup,request
@@ -26,17 +28,61 @@ from agent_first_data import (
     output_json,
 )
 
-VALID_ACTIONS = ["echo", "ping"]
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="agent-cli",
+        description="Minimal agent-first CLI example",
+        add_help=False,  # we handle --help ourselves
+    )
+    parser.add_argument("--help", "-h", action="store_true", help="Show complete help")
+    parser.add_argument("--output", default="json", help="Output format: json, yaml, plain")
+    parser.add_argument("--log", default="", help="Log categories (comma-separated)")
+
+    subs = parser.add_subparsers(dest="command")
+
+    echo_p = subs.add_parser("echo", add_help=False, help="Echo back the input as structured output")
+    echo_p.add_argument("--help", "-h", action="store_true", help="Show help for echo")
+    echo_p.add_argument("--dry-run", action="store_true", help="Preview without executing")
+
+    ping_p = subs.add_parser("ping", add_help=False, help="Ping a remote target")
+    ping_p.add_argument("--help", "-h", action="store_true", help="Show help for ping")
+    ping_p.add_argument("--host", help="Target host to ping")
+
+    return parser
+
+
+def format_complete_help(parser: argparse.ArgumentParser) -> str:
+    """Format help for a parser and all its subcommands recursively."""
+    lines = [parser.format_help()]
+    # Walk subparsers
+    for action in parser._subparsers._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, sub in action.choices.items():
+                lines.append(f"\n{'=' * 60}")
+                lines.append(f"{parser.prog} {name}")
+                lines.append("=" * 60)
+                lines.append(sub.format_help())
+    return "\n".join(lines)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Minimal agent-first CLI example")
-    parser.add_argument("action", help="Action to perform (echo, ping)")
-    parser.add_argument("--output", default="json", help="Output format: json, yaml, plain")
-    parser.add_argument("--dry-run", action="store_true", help="Preview without executing")
-    parser.add_argument("--log", default="", help="Log categories (comma-separated)")
+    parser = build_parser()
+    args, _ = parser.parse_known_args()
 
-    args = parser.parse_args()
+    # Complete help: --help expands all subcommands in one output.
+    # Subcommand --help expands only that subcommand.
+    if args.help:
+        if args.command:
+            # Scoped to subcommand
+            for action in parser._subparsers._actions:
+                if isinstance(action, argparse._SubParsersAction):
+                    sub = action.choices.get(args.command)
+                    if sub:
+                        print(sub.format_help())
+                        return
+        print(format_complete_help(parser))
+        return
 
     # Step 1: parse --output with shared helper
     try:
@@ -48,30 +94,49 @@ def main() -> None:
     # Step 2: parse --log with shared helper (trim + lowercase + dedup)
     log = cli_parse_log_filters(args.log.split(",") if args.log else [])
 
-    # Step 3: validate action — demonstrate build_cli_error with hint
-    if args.action not in VALID_ACTIONS:
-        msg = f"unknown action: {args.action}"
-        hint = f"valid actions: {', '.join(VALID_ACTIONS)}"
-        print(output_json(build_cli_error(msg, hint=hint)))
+    # Step 3: no subcommand → error with hint
+    if not args.command:
+        print(output_json(build_cli_error("no subcommand provided", hint="try: agent-cli --help")))
         sys.exit(2)
 
-    # Step 4: --dry-run → preview without executing
-    if args.dry_run:
-        preview = build_json("dry_run", {"action": args.action, "log": log}, trace={"duration_ms": 0})
-        print(cli_output(preview, fmt))
-        return
+    if args.command == "echo":
+        # Step 4: --dry-run → preview without executing
+        if args.dry_run:
+            preview = build_json("dry_run", {"action": "echo", "log": log}, trace={"duration_ms": 0})
+            print(cli_output(preview, fmt))
+            return
 
-    # Step 5: do work — demonstrate build_json_error with hint on failure
-    if args.action == "ping":
-        err = build_json_error("ping target not configured", hint="set PING_HOST or pass --host", trace={"duration_ms": 0})
-        print(cli_output(err, fmt))
-        sys.exit(1)
+        result = build_json_ok({"action": "echo", "log": log})
+        print(cli_output(result, fmt))
 
-    result = build_json_ok({"action": args.action, "log": log})
-    print(cli_output(result, fmt))
+    elif args.command == "ping":
+        # Step 5: demonstrate build_json_error with hint on failure
+        if not args.host:
+            err = build_json_error("ping target not configured", hint="set PING_HOST or pass --host", trace={"duration_ms": 0})
+            print(cli_output(err, fmt))
+            sys.exit(1)
 
 
 # ── Tests (run via: pytest examples/agent_cli.py) ─────────────────────────────
+
+
+def test_complete_help_contains_all_subcommands():
+    parser = build_parser()
+    md = format_complete_help(parser)
+    assert "echo" in md, "root --help must include echo subcommand"
+    assert "ping" in md, "root --help must include ping subcommand"
+    assert "--output" in md, "root --help must include global flags"
+    assert "--dry-run" in md, "root --help must include echo's --dry-run"
+    assert "--host" in md, "root --help must include ping's --host"
+
+
+def test_subcommand_help_scoped():
+    parser = build_parser()
+    for action in parser._subparsers._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            echo_help = action.choices["echo"].format_help()
+            assert "--dry-run" in echo_help, "echo --help must include --dry-run"
+            assert "--host" not in echo_help, "echo --help must NOT include ping's --host"
 
 
 def test_parse_output_all_variants():

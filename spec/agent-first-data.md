@@ -194,6 +194,22 @@ The flag name, the JSON field name, and the formatted output all tell the same s
 
 **Secret flags** (`--api-key-secret`, `--database-url-secret`) are automatically redacted in startup messages, logs, and YAML/Plain output. Tools should also consider redacting them from `/proc` process listings where possible.
 
+**Complete help.** `--help` SHOULD expand all subcommands and their flags in a single output. An agent reads `myapp --help` once and gets the complete interface — no crawling subcommands one by one. For subcommands, `myapp sub --help` SHOULD expand only that subcommand and its descendants.
+
+The output format is not prescribed — plain text, Markdown, or any structured format that includes all subcommands. The requirement is completeness: one call, full picture. Tools using clap (Rust) can achieve this with `clap_markdown::help_markdown_command()`:
+
+```rust
+use clap::CommandFactory;
+
+fn complete_help(args: &[String]) -> String {
+    let root = MyCli::command();
+    let cmd = args.iter().fold(&root, |cmd, name| {
+        cmd.find_subcommand(name).unwrap_or(cmd)
+    });
+    clap_markdown::help_markdown_command(cmd)
+}
+```
+
 ### Environment variables
 
 Same suffixes, `UPPER_SNAKE_CASE`:
