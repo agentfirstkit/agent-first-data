@@ -60,9 +60,10 @@ jobs:
           npm install --no-save tsx
 
       - name: Rust (fmt + clippy)
+        working-directory: rust
         run: |
-          cd rust && cargo fmt --all --check
-          cd rust && cargo clippy --lib -- -D warnings
+          cargo fmt --all --check
+          cargo clippy --lib -- -D warnings
 
       - name: Go (fmt + compile)
         run: |
@@ -78,10 +79,11 @@ jobs:
         run: cd typescript && npx tsc --noEmit
 
       - name: Rust (tests)
+        working-directory: rust
         run: |
-          cd rust && cargo test
-          cd rust && cargo test --features tracing
-          cd rust && cargo test --examples
+          cargo test
+          cargo test --features tracing
+          cargo test --examples
 
       - name: Go (tests)
         run: cd go && go test -v ./...
@@ -90,6 +92,7 @@ jobs:
         run: cd python && PYTHONPATH=. python3 -m pytest tests/ examples/agent_cli.py -v
 
       - name: TypeScript (tests)
+        working-directory: typescript
         run: |
-          cd typescript && npx tsx --test src/*.test.ts
-          cd typescript && npx tsx --test examples/agent_cli.ts
+          npx tsx --test src/*.test.ts
+          npx tsx --test examples/agent_cli.ts
