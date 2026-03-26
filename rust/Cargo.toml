@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-data"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2021"
 description = "Agent-First Data (AFDATA) — suffix-driven output formatting and protocol templates for AI agents"
 license = "MIT"
@@ -10,12 +10,16 @@ readme = "README.md"
 [features]
 default = []
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
+cli-help = ["dep:clap"]
+cli-help-markdown = ["cli-help", "dep:clap-markdown"]
 
 [dependencies]
 serde_json = "1"
 chrono = "0.4"
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"], optional = true }
+clap = { version = "4", optional = true }
+clap-markdown = { version = "0.1.5", optional = true }
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }

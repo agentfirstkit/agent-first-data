@@ -1,21 +1,21 @@
 // Minimal agent-first CLI — canonical pattern for tools built on agent-first-data.
 //
-// Demonstrates: Markdown --help (all subcommands in one document), try_parse,
-// cli_parse_output, cli_parse_log_filters, cli_output, build_cli_error,
-// --dry-run, and error hints.
+// Demonstrates: recursive --help (all subcommands expanded), --help-markdown,
+// _secret flags, nested subcommands, cli_parse_output, cli_parse_log_filters,
+// cli_output, build_cli_error, and error hints.
 //
-// Run:  cargo run --example agent_cli -- --help
-//       cargo run --example agent_cli -- echo --help
-//       cargo run --example agent_cli -- echo --output json
-//       cargo run --example agent_cli -- echo --dry-run --output yaml
-//       cargo run --example agent_cli -- ping --output json
-//       API_KEY_SECRET=sk-example cargo run --example agent_cli -- echo --output yaml --log startup,request
-// Test: cargo test --examples
+// Run:  cargo run --example agent_cli --features cli-help,cli-help-markdown -- --help
+//       cargo run --example agent_cli --features cli-help,cli-help-markdown -- service --help
+//       cargo run --example agent_cli --features cli-help,cli-help-markdown -- service start --help
+//       cargo run --example agent_cli --features cli-help,cli-help-markdown -- --help-markdown
+//       cargo run --example agent_cli --features cli-help,cli-help-markdown -- ping --timeout-ms 5000
+// Test: cargo test --examples --features cli-help,cli-help-markdown
 
 #![allow(clippy::print_stdout)]
 
 use agent_first_data::{
-    build_cli_error, build_json_error, cli_output, cli_parse_log_filters, cli_parse_output,
+    build_cli_error, build_json_error, build_json_ok, cli_output, cli_parse_log_filters,
+    cli_parse_output,
 };
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -36,37 +36,90 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Echo back the input as structured output
-    Echo {
-        /// Preview the operation without executing
-        #[arg(long)]
-        dry_run: bool,
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+    /// Service operations
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
     },
     /// Ping a remote target
     Ping {
         /// Target host to ping
         #[arg(long)]
         host: Option<String>,
+        /// Ping timeout
+        #[arg(long, default_value = "5000")]
+        timeout_ms: u64,
     },
 }
 
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Show current configuration
+    Show,
+    /// Set a configuration value
+    Set {
+        /// Configuration key
+        #[arg(long)]
+        key: String,
+        /// Configuration value
+        #[arg(long)]
+        value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Start the service
+    Start {
+        /// Listen port
+        #[arg(long, default_value = "8080")]
+        port: u16,
+        /// API authentication key (redacted in logs)
+        #[arg(long)]
+        api_key_secret: Option<String>,
+    },
+    /// Stop the service
+    Stop,
+    /// Show service status
+    Status,
+}
+
 fn main() {
-    // Step 1: Intercept --help before clap's default handler.
-    // Output Markdown containing all subcommands in one document.
-    // For subcommands (e.g. `agent-cli echo --help`), scope to that subtree.
     let raw: Vec<String> = std::env::args().collect();
+
+    // Extract subcommand path (args before any --flags) for scoped help
+    let subcommand_path: Vec<&str> = raw[1..]
+        .iter()
+        .take_while(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
+
+    // --help → recursive plain-text help, all subcommands expanded
     if raw.iter().any(|a| a == "--help" || a == "-h") {
-        let root = Cli::command();
-        // Walk past the binary name and any subcommand names to find the target
-        let cmd = raw[1..]
-            .iter()
-            .filter(|a| *a != "--help" && *a != "-h")
-            .fold(&root, |cmd, name| cmd.find_subcommand(name).unwrap_or(cmd));
-        print!("{}", clap_markdown::help_markdown_command(cmd));
-        return;
+        let cmd = Cli::command();
+        print!(
+            "{}",
+            agent_first_data::cli_render_help(&cmd, &subcommand_path)
+        );
+        std::process::exit(0);
     }
 
-    // Step 2: try_parse — clap errors become JSONL to stdout, not stderr text
+    // --help-markdown → Markdown help for documentation generation
+    if raw.iter().any(|a| a == "--help-markdown") {
+        let cmd = Cli::command();
+        print!(
+            "{}",
+            agent_first_data::cli_render_help_markdown(&cmd, &subcommand_path)
+        );
+        std::process::exit(0);
+    }
+
+    // try_parse — clap errors become JSONL to stdout, not stderr text
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         if matches!(e.kind(), clap::error::ErrorKind::DisplayVersion) {
             e.exit();
@@ -81,7 +134,7 @@ fn main() {
         std::process::exit(2);
     });
 
-    // Step 3: parse --output with shared helper
+    // Parse --output and --log
     let format = cli_parse_output(&cli.output).unwrap_or_else(|e| {
         println!(
             "{}",
@@ -92,29 +145,7 @@ fn main() {
         );
         std::process::exit(2);
     });
-
-    // Step 4: parse --log with shared helper (trim + lowercase + dedup)
-    let log = cli_parse_log_filters(&cli.log);
-
-    // Step 5: optionally emit startup diagnostic event
-    if startup_log_enabled(&log) {
-        let startup = agent_first_data::build_json(
-            "log",
-            serde_json::json!({
-                "event": "startup",
-                "args": {
-                    "output": cli.output,
-                    "log": log,
-                },
-                "env": {
-                    "API_KEY_SECRET": std::env::var("API_KEY_SECRET").ok(),
-                    "RUST_LOG": std::env::var("RUST_LOG").ok(),
-                }
-            }),
-            None,
-        );
-        println!("{}", cli_output(&startup, format));
-    }
+    let _log = cli_parse_log_filters(&cli.log);
 
     match cli.command {
         None => {
@@ -127,43 +158,56 @@ fn main() {
             );
             std::process::exit(2);
         }
-        Some(Command::Echo { dry_run }) => {
-            // Step 6: --dry-run → preview without executing
-            if dry_run {
-                let preview = agent_first_data::build_json(
-                    "dry_run",
-                    serde_json::json!({"action": "echo", "log": log}),
-                    Some(serde_json::json!({"duration_ms": 0})),
-                );
-                println!("{}", cli_output(&preview, format));
-                return;
+        Some(Command::Config { action }) => match action {
+            ConfigAction::Show => {
+                let result = build_json_ok(serde_json::json!({"action": "config_show"}), None);
+                println!("{}", cli_output(&result, format));
             }
-
-            let result = agent_first_data::build_json_ok(
-                serde_json::json!({"action": "echo", "log": log}),
-                None,
-            );
-            println!("{}", cli_output(&result, format));
-        }
-        Some(Command::Ping { host }) => {
-            // Step 7: demonstrate build_json_error with hint on failure
+            ConfigAction::Set { key, value } => {
+                let result = build_json_ok(
+                    serde_json::json!({"action": "config_set", "key": key, "value": value}),
+                    None,
+                );
+                println!("{}", cli_output(&result, format));
+            }
+        },
+        Some(Command::Service { action }) => match action {
+            ServiceAction::Start {
+                port,
+                api_key_secret,
+            } => {
+                let result = build_json_ok(
+                    serde_json::json!({"action": "service_start", "port": port, "api_key_secret": api_key_secret}),
+                    None,
+                );
+                println!("{}", cli_output(&result, format));
+            }
+            ServiceAction::Stop => {
+                let result = build_json_ok(serde_json::json!({"action": "service_stop"}), None);
+                println!("{}", cli_output(&result, format));
+            }
+            ServiceAction::Status => {
+                let result = build_json_ok(serde_json::json!({"action": "service_status"}), None);
+                println!("{}", cli_output(&result, format));
+            }
+        },
+        Some(Command::Ping { host, timeout_ms }) => {
             if host.is_none() {
                 let err = build_json_error(
                     "ping target not configured",
-                    Some("set PING_HOST or pass --host"),
+                    Some("pass --host"),
                     Some(serde_json::json!({"duration_ms": 0})),
                 );
                 println!("{}", cli_output(&err, format));
                 std::process::exit(1);
             }
+            let result = build_json_ok(
+                serde_json::json!({"action": "ping", "host": host, "timeout_ms": timeout_ms}),
+                None,
+            );
+            println!("{}", cli_output(&result, format));
         }
     }
-}
-
-fn startup_log_enabled(filters: &[String]) -> bool {
-    filters
-        .iter()
-        .any(|f| matches!(f.as_str(), "startup" | "all" | "*"))
 }
 
 #[cfg(test)]
@@ -171,63 +215,159 @@ mod tests {
     use super::*;
     use agent_first_data::OutputFormat;
 
-    // ── Markdown help tests ──────────────────────────────────────────────
+    // ── Plain-text help tests ────────────────────────────────────────────
 
     #[test]
     fn help_root_contains_all_subcommands() {
-        let root = Cli::command();
-        let md = clap_markdown::help_markdown_command(&root);
+        let cmd = Cli::command();
+        let help = agent_first_data::cli_render_help(&cmd, &[]);
+        assert!(help.contains("config"), "must include config");
+        assert!(help.contains("service"), "must include service");
+        assert!(help.contains("ping"), "must include ping");
+        assert!(help.contains("--output"), "must include global --output");
+        assert!(help.contains("--log"), "must include global --log");
+    }
+
+    #[test]
+    fn help_root_contains_nested_commands() {
+        let cmd = Cli::command();
+        let help = agent_first_data::cli_render_help(&cmd, &[]);
+        // Must expand into nested subcommands
+        assert!(help.contains("config show"), "must include config show");
+        assert!(help.contains("config set"), "must include config set");
+        assert!(help.contains("service start"), "must include service start");
+        assert!(help.contains("service stop"), "must include service stop");
         assert!(
-            md.contains("echo"),
-            "root --help must include echo subcommand"
-        );
-        assert!(
-            md.contains("ping"),
-            "root --help must include ping subcommand"
-        );
-        assert!(
-            md.contains("--output"),
-            "root --help must include global flags"
-        );
-        assert!(
-            md.contains("--dry-run"),
-            "root --help must include echo's --dry-run"
-        );
-        assert!(
-            md.contains("--host"),
-            "root --help must include ping's --host"
+            help.contains("service status"),
+            "must include service status"
         );
     }
 
     #[test]
-    fn help_subcommand_scoped_to_subtree() {
-        let root = Cli::command();
-        let echo_cmd = root
-            .find_subcommand("echo")
-            .expect("echo subcommand exists");
-        let md = clap_markdown::help_markdown_command(echo_cmd);
+    fn help_root_contains_secret_flags() {
+        let cmd = Cli::command();
+        let help = agent_first_data::cli_render_help(&cmd, &[]);
         assert!(
-            md.contains("--dry-run"),
-            "echo --help must include --dry-run"
-        );
-        assert!(
-            !md.contains("--host"),
-            "echo --help must NOT include ping's --host"
+            help.contains("--api-key-secret"),
+            "must include secret flag"
         );
     }
 
     #[test]
-    fn help_output_is_markdown() {
-        let root = Cli::command();
-        let md = clap_markdown::help_markdown_command(&root);
-        // Markdown output should contain heading markers
+    fn help_root_contains_suffix_flags() {
+        let cmd = Cli::command();
+        let help = agent_first_data::cli_render_help(&cmd, &[]);
         assert!(
-            md.contains('#'),
-            "help output must be Markdown with headings"
+            help.contains("--timeout-ms"),
+            "must include timeout_ms flag"
         );
     }
 
-    // ── CLI helper tests ─────────────────────────────────────────────────
+    #[test]
+    fn help_subcommand_scoped() {
+        let cmd = Cli::command();
+        let help = agent_first_data::cli_render_help(&cmd, &["service"]);
+        assert!(help.contains("start"), "service help must include start");
+        assert!(help.contains("stop"), "service help must include stop");
+        assert!(help.contains("status"), "service help must include status");
+        assert!(
+            !help.contains("config show"),
+            "service help must NOT include config show"
+        );
+        assert!(
+            !help.contains("--timeout-ms"),
+            "service help must NOT include ping's --timeout-ms"
+        );
+    }
+
+    #[test]
+    fn help_nested_subcommand_scoped() {
+        let cmd = Cli::command();
+        let help = agent_first_data::cli_render_help(&cmd, &["service", "start"]);
+        assert!(
+            help.contains("--port"),
+            "service start help must include --port"
+        );
+        assert!(
+            help.contains("--api-key-secret"),
+            "service start help must include --api-key-secret"
+        );
+        assert!(
+            !help.contains("service stop"),
+            "service start help must NOT include stop"
+        );
+    }
+
+    #[test]
+    fn help_is_plain_text() {
+        let cmd = Cli::command();
+        let help = agent_first_data::cli_render_help(&cmd, &[]);
+        // Plain text must not contain markdown heading markers or bold markers
+        assert!(
+            !help.contains("\n# "),
+            "plain text must not have markdown headings"
+        );
+        assert!(
+            !help.contains("**"),
+            "plain text must not have markdown bold"
+        );
+    }
+
+    // ── Markdown help tests ──────────────────────────────────────────────
+
+    #[test]
+    fn help_markdown_root_contains_all() {
+        let cmd = Cli::command();
+        let md = agent_first_data::cli_render_help_markdown(&cmd, &[]);
+        assert!(md.contains("config"), "markdown must include config");
+        assert!(md.contains("service"), "markdown must include service");
+        assert!(md.contains("ping"), "markdown must include ping");
+        assert!(
+            md.contains("--api-key-secret"),
+            "markdown must include secret flag"
+        );
+        assert!(
+            md.contains("--timeout-ms"),
+            "markdown must include timeout flag"
+        );
+    }
+
+    #[test]
+    fn help_markdown_has_headings() {
+        let cmd = Cli::command();
+        let md = agent_first_data::cli_render_help_markdown(&cmd, &[]);
+        assert!(md.contains('#'), "markdown must have headings");
+    }
+
+    #[test]
+    fn help_markdown_no_footer() {
+        let cmd = Cli::command();
+        let md = agent_first_data::cli_render_help_markdown(&cmd, &[]);
+        assert!(
+            !md.contains("<hr/>"),
+            "markdown must not have clap-markdown footer"
+        );
+        assert!(
+            !md.contains("<small>"),
+            "markdown must not have clap-markdown footer"
+        );
+    }
+
+    #[test]
+    fn help_markdown_subcommand_scoped() {
+        let cmd = Cli::command();
+        let md = agent_first_data::cli_render_help_markdown(&cmd, &["service"]);
+        assert!(
+            md.contains("--api-key-secret"),
+            "service markdown must include secret flag"
+        );
+        assert!(
+            !md.contains("--timeout-ms"),
+            "service markdown must NOT include ping's --timeout-ms"
+        );
+    }
+
+    // ── CLI helper tests (unchanged) ─────────────────────────────────────
 
     #[test]
     fn parse_output_all_variants() {
@@ -241,15 +381,6 @@ mod tests {
     fn parse_log_normalizes() {
         let f = cli_parse_log_filters(&["Startup", " REQUEST ", "startup"]);
         assert_eq!(f, vec!["startup", "request"]);
-    }
-
-    #[test]
-    fn startup_log_enabled_matches_expected_categories() {
-        assert!(startup_log_enabled(&["startup".to_string()]));
-        assert!(startup_log_enabled(&["all".to_string()]));
-        assert!(startup_log_enabled(&["*".to_string()]));
-        assert!(!startup_log_enabled(&["request".to_string()]));
-        assert!(!startup_log_enabled(&[]));
     }
 
     #[test]
@@ -294,7 +425,6 @@ mod tests {
         assert!(plain_out.contains("code=ok"));
     }
 
-    // Verify the full pattern compiles: try_parse error → build_cli_error → output_json
     #[test]
     fn error_round_trip_is_valid_jsonl() {
         let err = build_cli_error("unknown flag: --foo", None);

@@ -1,12 +1,14 @@
 //! Agent-First Data (AFDATA) output formatting and protocol templates.
 //!
-//! 13 public APIs and 2 types:
+//! 13 public APIs and 2 types (+ 2 optional help renderers):
 //! - 3 protocol builders: [`build_json_ok`], [`build_json_error`], [`build_json`]
 //! - 4 output formatters: [`output_json`], [`output_json_with`], [`output_yaml`], [`output_plain`]
 //! - 1 redaction utility: [`internal_redact_secrets`]
 //! - 1 parse utility: [`parse_size`]
 //! - 4 CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`], [`cli_output`], [`build_cli_error`]
 //! - 2 types: [`OutputFormat`], [`RedactionPolicy`]
+//! - (feature `cli-help`): [`cli_render_help`] — recursive plain-text help for clap commands
+//! - (feature `cli-help-markdown`): [`cli_render_help_markdown`] — recursive Markdown help
 
 #[cfg(feature = "tracing")]
 pub mod afdata_tracing;
@@ -260,6 +262,85 @@ pub fn build_cli_error(message: &str, hint: Option<&str>) -> Value {
     obj.insert("retryable".to_string(), Value::Bool(false));
     obj.insert("trace".to_string(), serde_json::json!({"duration_ms": 0}));
     Value::Object(obj)
+}
+
+// ═══════════════════════════════════════════
+// Public API: CLI Help Rendering (optional)
+// ═══════════════════════════════════════════
+
+/// Render recursive plain-text help for a clap command tree.
+///
+/// Walks to the subcommand identified by `subcommand_path` (empty = root),
+/// then recursively expands all descendant subcommands into a single output.
+/// Agents read `--help` once and get the complete CLI interface.
+///
+/// Requires the `cli-help` feature.
+#[cfg(feature = "cli-help")]
+pub fn cli_render_help(cmd: &clap::Command, subcommand_path: &[&str]) -> String {
+    let target = walk_to_subcommand(cmd, subcommand_path);
+    let mut buf = String::new();
+    render_help_recursive(target, &[], &mut buf);
+    buf
+}
+
+/// Render recursive Markdown help for a clap command tree.
+///
+/// Same tree walk as [`cli_render_help`], but outputs Markdown suitable for
+/// documentation generation (`myapp --help-markdown > docs/cli.md`).
+///
+/// Requires the `cli-help-markdown` feature.
+#[cfg(feature = "cli-help-markdown")]
+pub fn cli_render_help_markdown(cmd: &clap::Command, subcommand_path: &[&str]) -> String {
+    let target = walk_to_subcommand(cmd, subcommand_path);
+    let md = clap_markdown::help_markdown_command(target);
+    // Strip the clap-markdown footer (<hr/> + <small>...</small>)
+    md.rfind("\n<hr/>")
+        .map_or(md.clone(), |pos| md[..pos].to_string())
+}
+
+#[cfg(feature = "cli-help")]
+fn walk_to_subcommand<'a>(cmd: &'a clap::Command, path: &[&str]) -> &'a clap::Command {
+    let mut current = cmd;
+    for name in path {
+        current = current.find_subcommand(name).unwrap_or(current);
+    }
+    current
+}
+
+#[cfg(feature = "cli-help")]
+fn render_help_recursive(cmd: &clap::Command, parent_path: &[&str], buf: &mut String) {
+    use std::fmt::Write;
+
+    // Build the full command path (e.g. "myapp service start")
+    let mut cmd_path = parent_path.to_vec();
+    cmd_path.push(cmd.get_name());
+    let path_str = cmd_path.join(" ");
+
+    // Separator between commands (skip for the first one)
+    if !buf.is_empty() {
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "{}", "═".repeat(60));
+    }
+
+    // Header: "myapp service start — description"
+    if let Some(about) = cmd.get_about() {
+        let _ = writeln!(buf, "{path_str} — {about}");
+    } else {
+        let _ = writeln!(buf, "{path_str}");
+    }
+    let _ = writeln!(buf);
+
+    // Render clap's built-in help for this command (usage, args, options)
+    let styled = cmd.clone().render_long_help();
+    let _ = write!(buf, "{styled}");
+
+    // Recurse into visible subcommands
+    for sub in cmd.get_subcommands() {
+        if sub.get_name() == "help" {
+            continue; // skip clap's auto-generated "help" subcommand
+        }
+        render_help_recursive(sub, &cmd_path, buf);
+    }
 }
 
 // ═══════════════════════════════════════════

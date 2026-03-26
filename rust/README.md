@@ -65,7 +65,7 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **13 public APIs and 2 types** + optional **AFDATA tracing** (3 protocol builders + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
+Total: **13 public APIs and 2 types** + optional **CLI help rendering** (2 functions) + optional **AFDATA tracing** (3 protocol builders + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
 
 ### Protocol Builders (returns JSON Value)
 
@@ -207,14 +207,30 @@ cli_output(value: &Value, format: OutputFormat) -> String          // Dispatch t
 build_cli_error(message: &str, hint: Option<&str>) -> Value         // {code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}
 ```
 
-**Canonical pattern** — parse all flags before doing work, emit JSONL errors to stdout:
+**Canonical pattern** — intercept `--help` for recursive output, parse flags, emit JSONL errors to stdout:
 
 ```rust
 use agent_first_data::*;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+
+let raw: Vec<String> = std::env::args().collect();
+let subcommand_path: Vec<&str> = raw[1..].iter()
+    .take_while(|a| !a.starts_with('-'))
+    .map(|s| s.as_str()).collect();
+
+// --help: recursive plain-text help, all subcommands expanded
+if raw.iter().any(|a| a == "--help" || a == "-h") {
+    print!("{}", cli_render_help(&Cli::command(), &subcommand_path));
+    std::process::exit(0);
+}
+// --help-markdown: Markdown for doc generation
+if raw.iter().any(|a| a == "--help-markdown") {
+    print!("{}", cli_render_help_markdown(&Cli::command(), &subcommand_path));
+    std::process::exit(0);
+}
 
 let cli = Cli::try_parse().unwrap_or_else(|e| {
-    if matches!(e.kind(), clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion) {
+    if matches!(e.kind(), clap::error::ErrorKind::DisplayVersion) {
         e.exit();
     }
     println!("{}", output_json(&build_cli_error(&e.to_string(), None)));
@@ -231,7 +247,28 @@ let log = cli_parse_log_filters(&cli.log);
 println!("{}", cli_output(&result, format));
 ```
 
-See `examples/agent_cli.rs` for the complete working example (`cargo test --examples`).
+See `examples/agent_cli.rs` for the complete working example (`cargo test --examples --features cli-help,cli-help-markdown`).
+
+### CLI Help Rendering (optional features)
+
+Recursive help rendering for CLIs with subcommands. Agents read `--help` once and get the complete interface — no crawling subcommands one by one.
+
+```bash
+cargo add agent-first-data --features cli-help          # plain-text recursive help
+cargo add agent-first-data --features cli-help-markdown  # + Markdown doc generation
+```
+
+```rust
+// Feature: cli-help
+cli_render_help(cmd: &clap::Command, subcommand_path: &[&str]) -> String
+
+// Feature: cli-help-markdown
+cli_render_help_markdown(cmd: &clap::Command, subcommand_path: &[&str]) -> String
+```
+
+**`cli_render_help`** recursively expands all subcommands into plain text. Pass an empty slice for root help, or `&["service", "start"]` to scope to a subcommand.
+
+**`cli_render_help_markdown`** produces Markdown with headings and anchor links, suitable for `myapp --help-markdown > docs/cli.md`. The `clap-markdown` footer is automatically stripped.
 
 ## Usage Examples
 

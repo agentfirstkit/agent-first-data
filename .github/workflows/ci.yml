@@ -81,9 +81,9 @@ jobs:
       - name: Rust (tests)
         working-directory: rust
         run: |
-          cargo test
-          cargo test --features tracing
-          cargo test --examples
+          cargo test --lib --tests
+          cargo test --lib --tests --features tracing
+          cargo test --examples --features cli-help,cli-help-markdown
 
       - name: Go (tests)
         run: cd go && go test -v ./...
