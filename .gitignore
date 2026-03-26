@@ -2,3 +2,10 @@
 .DS_Store
 # hypha spawn working directory
 .cmn
+# Dependencies and build outputs
+node_modules
+typescript/dist
+rust/target
+python/build
+python/dist
+python/*.egg-info
