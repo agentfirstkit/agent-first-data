@@ -10,6 +10,8 @@ from agent_first_data.format import (
     output_yaml,
     output_plain,
     internal_redact_secrets,
+    redacted_value,
+    redacted_value_with,
     parse_size,
 )
 
@@ -41,6 +43,8 @@ __all__ = [
     "output_yaml",
     "output_plain",
     "internal_redact_secrets",
+    "redacted_value",
+    "redacted_value_with",
     "parse_size",
     "AfdataHandler",
     "AfdataJsonHandler",

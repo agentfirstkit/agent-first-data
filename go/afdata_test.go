@@ -27,6 +27,12 @@ func loadFixture(name string) []map[string]any {
 	return result
 }
 
+type secretStringFunc func()
+
+func (secretStringFunc) String() string {
+	return "sk-live-123"
+}
+
 // --- Redact fixtures ---
 
 func TestRedactFixtures(t *testing.T) {
@@ -270,6 +276,39 @@ func TestOutputJsonWithNoneKeepsSecrets(t *testing.T) {
 	assertNotContains(t, got, `"***"`)
 }
 
+func TestRedactedValueReturnsSafeCopy(t *testing.T) {
+	input := map[string]any{
+		"api_key_secret": "sk-live-123",
+		"nested":         map[string]any{"token_secret": "tok"},
+	}
+	got := RedactedValue(input).(map[string]any)
+	nested := got["nested"].(map[string]any)
+	if got["api_key_secret"] != "***" {
+		t.Errorf("api_key_secret = %v, want ***", got["api_key_secret"])
+	}
+	if nested["token_secret"] != "***" {
+		t.Errorf("token_secret = %v, want ***", nested["token_secret"])
+	}
+	if input["api_key_secret"] != "sk-live-123" {
+		t.Error("RedactedValue mutated the input")
+	}
+}
+
+func TestRedactedValueWithStrictRedactsSecretSubtree(t *testing.T) {
+	input := map[string]any{
+		"db_secret": map[string]any{"password_secret": "real", "host": "localhost"},
+	}
+	defaultValue := RedactedValue(input).(map[string]any)
+	strictValue := RedactedValueWith(input, RedactionStrict).(map[string]any)
+	defaultSecret := defaultValue["db_secret"].(map[string]any)
+	if defaultSecret["password_secret"] != "***" || defaultSecret["host"] != "localhost" {
+		t.Fatalf("default redaction = %#v", defaultSecret)
+	}
+	if strictValue["db_secret"] != "***" {
+		t.Fatalf("strict db_secret = %#v, want ***", strictValue["db_secret"])
+	}
+}
+
 func TestOutputJsonUnsupportedValueDoesNotCollapseToNull(t *testing.T) {
 	got := OutputJson(map[string]any{
 		"message": "bad",
@@ -331,6 +370,43 @@ func TestOutputJsonStructWithUnsupportedFieldDoesNotLeakSecrets(t *testing.T) {
 	if _, ok := parsed["meta"]; !ok {
 		t.Fatal("expected meta key in output")
 	}
+}
+
+func TestOutputYamlUnsupportedStructDoesNotLeakSecrets(t *testing.T) {
+	type badMeta struct {
+		APIKeySecret string `json:"api_key_secret"`
+		Fn           func() `json:"fn"`
+	}
+
+	got := OutputYaml(map[string]any{
+		"meta": badMeta{APIKeySecret: "sk-live-123", Fn: func() {}},
+	})
+
+	assertContains(t, got, "<unsupported:")
+	assertNotContains(t, got, "sk-live-123")
+	assertNotContains(t, got, "0x")
+}
+
+func TestOutputPlainUnsupportedStructDoesNotLeakSecrets(t *testing.T) {
+	type badMeta struct {
+		APIKeySecret string `json:"api_key_secret"`
+		Fn           func() `json:"fn"`
+	}
+
+	got := OutputPlain(map[string]any{
+		"meta": badMeta{APIKeySecret: "sk-live-123", Fn: func() {}},
+	})
+
+	assertContains(t, got, "<unsupported:")
+	assertNotContains(t, got, "sk-live-123")
+	assertNotContains(t, got, "0x")
+}
+
+func TestOutputPlainUnsupportedStringerDoesNotLeakSecrets(t *testing.T) {
+	got := OutputPlain(map[string]any{"meta": secretStringFunc(func() {})})
+
+	assertContains(t, got, "<unsupported:")
+	assertNotContains(t, got, "sk-live-123")
 }
 
 func TestOutputJsonCircularReferenceMapDoesNotCrash(t *testing.T) {

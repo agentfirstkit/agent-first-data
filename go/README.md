@@ -7,7 +7,7 @@ The field name is the schema. Agents read `latency_ms` and know milliseconds, `a
 ## Installation
 
 ```bash
-go get github.com/cmnspore/agent-first-data/go
+go get github.com/agentfirstkit/agent-first-data/go
 ```
 
 ## Quick Example
@@ -30,7 +30,7 @@ Without these flags, startup diagnostics should stay off by default.
 The tool reads env vars, flags, and config — all with AFDATA suffixes — and can emit a startup diagnostic event:
 
 ```go
-import afdata "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/agentfirstkit/agent-first-data/go"
 
 startup := afdata.BuildJson(
     "log",
@@ -64,7 +64,7 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **13 public APIs and 2 types** + **AFDATA logging** (3 protocol builders + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
+Total: **15 public APIs and 2 types** + **AFDATA logging** (3 protocol builders + 2 redacted value helpers + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
 
 ### Protocol Builders (returns map[string]any)
 
@@ -81,11 +81,20 @@ BuildJsonError(message string, hint string, trace any) map[string]any
 BuildJson(code string, fields any, trace any) map[string]any
 ```
 
+### Redacted Values (returns any)
+
+Use these before raw HTTP/MCP/SSE serializers that do not call `OutputJson`.
+
+```go
+RedactedValue(value any) any
+RedactedValueWith(value any, redactionPolicy RedactionPolicy) any
+```
+
 **Use case:** structured protocol payloads (frameworks serialize to JSON)
 
 **Example:**
 ```go
-import afdata "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/agentfirstkit/agent-first-data/go"
 
 // Startup
 startup := afdata.BuildJson(
@@ -135,12 +144,13 @@ type RedactionPolicy string
 const (
     RedactionTraceOnly RedactionPolicy = "RedactionTraceOnly"
     RedactionNone      RedactionPolicy = "RedactionNone"
+    RedactionStrict    RedactionPolicy = "RedactionStrict"
 )
 ```
 
 **Example:**
 ```go
-import afdata "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/agentfirstkit/agent-first-data/go"
 
 data := map[string]any{
     "user_id":              123,
@@ -184,7 +194,7 @@ Returns `(0, false)` for invalid, negative, or overflow input.
 
 **Example:**
 ```go
-import afdata "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/agentfirstkit/agent-first-data/go"
 
 size, _ := afdata.ParseSize("10M")   // 10485760
 size, _ = afdata.ParseSize("1.5K")   // 1536
@@ -209,7 +219,7 @@ BuildCliError(message string, hint string) map[string]any  // {code:"error", err
 ```go
 import (
     "log/slog"
-    afdata "github.com/cmnspore/agent-first-data/go"
+    afdata "github.com/agentfirstkit/agent-first-data/go"
 )
 
 format, err := afdata.CliParseOutput(outputFlag)
@@ -232,7 +242,7 @@ See `examples/agent_cli/` for the complete working example (`go test ./...`).
 ```go
 import (
     "log/slog"
-    afdata "github.com/cmnspore/agent-first-data/go"
+    afdata "github.com/agentfirstkit/agent-first-data/go"
 )
 
 func getUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -248,7 +258,7 @@ func getUserHandler(w http.ResponseWriter, r *http.Request) {
 ### Example 2: CLI Tool (Complete Lifecycle)
 
 ```go
-import afdata "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/agentfirstkit/agent-first-data/go"
 
 func main() {
     // 1. Startup
@@ -308,7 +318,7 @@ func main() {
 ### Example 3: JSONL Output
 
 ```go
-import afdata "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/agentfirstkit/agent-first-data/go"
 
 func processRequest() {
     result := afdata.BuildJsonOk(
@@ -326,7 +336,7 @@ func processRequest() {
 ## Complete Suffix Example
 
 ```go
-import afdata "github.com/cmnspore/agent-first-data/go"
+import afdata "github.com/agentfirstkit/agent-first-data/go"
 
 data := map[string]any{
     "created_at_epoch_ms":   int64(1738886400000),
@@ -369,7 +379,7 @@ AFDATA-compliant structured logging via Go's `log/slog`. Every log line is forma
 ```go
 import (
     "log/slog"
-    afdata "github.com/cmnspore/agent-first-data/go"
+    afdata "github.com/agentfirstkit/agent-first-data/go"
 )
 
 // Convenience initializers — set up the default slog logger with AFDATA output to stdout
@@ -401,7 +411,7 @@ afdata.Span(fields map[string]any, fn func())
 ```go
 import (
     "log/slog"
-    afdata "github.com/cmnspore/agent-first-data/go"
+    afdata "github.com/agentfirstkit/agent-first-data/go"
 )
 
 // JSON output for production (one JSONL line per event, secrets redacted)
@@ -518,7 +528,7 @@ All formats automatically redact `_secret` fields.
 
 ## Repository
 
-This package is part of the [agent-first-data](https://github.com/cmnspore/agent-first-data) repository, which also contains:
+This package is part of the [agent-first-data](https://github.com/agentfirstkit/agent-first-data) repository, which also contains:
 
 - **`spec/`** — Full AFDATA specification with suffix definitions, protocol format rules, and cross-language test fixtures
 - **`skills/`** — AI coding agent skill for working with AFDATA conventions
@@ -526,7 +536,7 @@ This package is part of the [agent-first-data](https://github.com/cmnspore/agent
 To run tests, clone the full repository (tests use shared cross-language fixtures from `spec/fixtures/`):
 
 ```bash
-git clone https://github.com/cmnspore/agent-first-data
+git clone https://github.com/agentfirstkit/agent-first-data
 cd agent-first-data/go
 go test ./...
 ```

@@ -1,8 +1,9 @@
 // Package afdata implements Agent-First Data (AFDATA) output formatting
 // and protocol templates.
 //
-// 13 public APIs and 2 types: 3 protocol builders + 4 output formatters +
-// 1 redaction + 1 utility + 4 CLI helpers + OutputFormat + RedactionPolicy.
+// 15 public APIs and 2 types: 3 protocol builders + 2 redacted value helpers +
+// 4 output formatters + 1 redaction + 1 utility + 4 CLI helpers +
+// OutputFormat + RedactionPolicy.
 package afdata
 
 import (
@@ -69,20 +70,17 @@ type RedactionPolicy string
 const (
 	RedactionTraceOnly RedactionPolicy = "RedactionTraceOnly"
 	RedactionNone      RedactionPolicy = "RedactionNone"
+	RedactionStrict    RedactionPolicy = "RedactionStrict"
 )
 
 // OutputJson formats as single-line JSON. Secrets redacted, original keys, raw values.
 func OutputJson(value any) string {
-	v := sanitizeForJSON(value)
-	redactSecrets(v)
-	return marshalOutputJSON(v)
+	return marshalOutputJSON(RedactedValue(value))
 }
 
 // OutputJsonWith formats as single-line JSON with explicit redaction policy.
 func OutputJsonWith(value any, redactionPolicy RedactionPolicy) string {
-	v := sanitizeForJSON(value)
-	applyRedactionPolicy(v, redactionPolicy)
-	return marshalOutputJSON(v)
+	return marshalOutputJSON(RedactedValueWith(value, redactionPolicy))
 }
 
 func marshalOutputJSON(value any) string {
@@ -101,24 +99,20 @@ func marshalOutputJSON(value any) string {
 // OutputYaml formats as multi-line YAML. Keys stripped, values formatted, secrets redacted.
 func OutputYaml(value any) string {
 	lines := []string{"---"}
-	renderYamlProcessed(normalize(value), 0, &lines)
+	renderYamlProcessed(RedactedValue(value), 0, &lines)
 	return strings.Join(lines, "\n")
 }
 
 // OutputPlain formats as single-line logfmt. Keys stripped, values formatted, secrets redacted.
 func OutputPlain(value any) string {
 	var pairs [][2]string
-	collectPlainPairs(normalize(value), "", &pairs)
+	collectPlainPairs(RedactedValue(value), "", &pairs)
 	sort.Slice(pairs, func(i, j int) bool {
 		return jcsLess(pairs[i][0], pairs[j][0])
 	})
 	parts := make([]string, len(pairs))
 	for i, p := range pairs {
-		if strings.Contains(p[1], " ") {
-			parts[i] = fmt.Sprintf("%s=\"%s\"", p[0], p[1])
-		} else {
-			parts[i] = fmt.Sprintf("%s=%s", p[0], p[1])
-		}
+		parts[i] = fmt.Sprintf("%s=%s", p[0], quoteLogfmtValue(p[1]))
 	}
 	return strings.Join(parts, " ")
 }
@@ -130,6 +124,20 @@ func OutputPlain(value any) string {
 // InternalRedactSecrets redacts _secret fields in-place.
 func InternalRedactSecrets(value any) {
 	redactSecrets(value)
+}
+
+// RedactedValue returns a JSON-safe copy with default _secret redaction applied.
+func RedactedValue(value any) any {
+	v := sanitizeForJSON(value)
+	redactSecrets(v)
+	return v
+}
+
+// RedactedValueWith returns a JSON-safe copy with an explicit redaction policy applied.
+func RedactedValueWith(value any, redactionPolicy RedactionPolicy) any {
+	v := sanitizeForJSON(value)
+	applyRedactionPolicy(v, redactionPolicy)
+	return v
 }
 
 // ParseSize parses a human-readable size string into bytes.
@@ -211,6 +219,23 @@ func redactSecrets(value any) {
 	}
 }
 
+func redactSecretsStrict(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		for k := range v {
+			if strings.HasSuffix(k, "_secret") || strings.HasSuffix(k, "_SECRET") {
+				v[k] = "***"
+			} else {
+				redactSecretsStrict(v[k])
+			}
+		}
+	case []any:
+		for _, item := range v {
+			redactSecretsStrict(item)
+		}
+	}
+}
+
 func applyRedactionPolicy(value any, redactionPolicy RedactionPolicy) {
 	switch redactionPolicy {
 	case RedactionTraceOnly:
@@ -221,6 +246,8 @@ func applyRedactionPolicy(value any, redactionPolicy RedactionPolicy) {
 		}
 	case RedactionNone:
 		// Explicitly disabled.
+	case RedactionStrict:
+		redactSecretsStrict(value)
 	default:
 		// Safety fallback for unknown policy values.
 		redactSecrets(value)
@@ -630,7 +657,7 @@ func yamlScalar(value any) string {
 	case json.Number:
 		return v.String()
 	default:
-		return fmt.Sprintf(`"%v"`, value)
+		return fmt.Sprintf(`"<unsupported:%T>"`, value)
 	}
 }
 
@@ -692,8 +719,23 @@ func plainScalar(value any) string {
 	case json.Number:
 		return v.String()
 	default:
-		return fmt.Sprintf("%v", value)
+		return fmt.Sprintf("<unsupported:%T>", value)
 	}
+}
+
+func quoteLogfmtValue(value string) string {
+	if value == "" {
+		return ""
+	}
+	if !strings.ContainsAny(value, " \t\n\r=\\\"") {
+		return value
+	}
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	escaped = strings.ReplaceAll(escaped, "\n", `\n`)
+	escaped = strings.ReplaceAll(escaped, "\r", `\r`)
+	escaped = strings.ReplaceAll(escaped, "\t", `\t`)
+	return `"` + escaped + `"`
 }
 
 // ═══════════════════════════════════════════

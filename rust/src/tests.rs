@@ -367,6 +367,25 @@ fn json_with_none_keeps_secret_values() {
 }
 
 #[test]
+fn redacted_value_returns_safe_copy() {
+    let input = json!({"api_key_secret": "sk-live-123", "nested": {"token_secret": "tok"}});
+    let got = redacted_value(&input);
+    assert_eq!(got["api_key_secret"], "***");
+    assert_eq!(got["nested"]["token_secret"], "***");
+    assert_eq!(input["api_key_secret"], "sk-live-123");
+}
+
+#[test]
+fn redacted_value_with_strict_redacts_secret_subtree() {
+    let input = json!({"db_secret": {"password_secret": "real", "host": "localhost"}});
+    let default = redacted_value(&input);
+    let strict = redacted_value_with(&input, RedactionPolicy::RedactionStrict);
+    assert_eq!(default["db_secret"]["password_secret"], "***");
+    assert_eq!(default["db_secret"]["host"], "localhost");
+    assert_eq!(strict["db_secret"], "***");
+}
+
+#[test]
 fn json_default_output_redacts_secrets() {
     let out = output_json(&json!({"api_key_secret": "sk-live-123"}));
     assert!(out.contains("\"api_key_secret\":\"***\""));

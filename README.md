@@ -18,7 +18,7 @@ See the full [specification](spec/agent-first-data.md) and the [agent skill](ski
 cargo add agent-first-data        # Rust
 pip install agent-first-data       # Python
 npm install agent-first-data       # TypeScript
-go get github.com/cmnspore/agent-first-data/go  # Go
+go get github.com/agentfirstkit/agent-first-data/go  # Go
 ```
 
 ## Quick Example
@@ -64,13 +64,15 @@ CLI logging flags:
 --verbose   # shorthand for all log categories
 ```
 
-## API (13 functions + 2 types, same across all languages)
+## API (15 functions + 2 types, same across all languages)
 
 | Function / Type | Returns | Description |
 |:----------------|:--------|:------------|
 | `build_json_ok` | JSON | `{code: "ok", result, trace?}` |
 | `build_json_error` | JSON | `{code: "error", error, hint?, trace?}` |
 | `build_json` | JSON | `{code: "<custom>", ...fields, trace?}` |
+| `redacted_value` | JSON | JSON-safe copy with default `_secret` redaction, for raw HTTP/MCP/SSE serializers |
+| `redacted_value_with` | JSON | JSON-safe copy with explicit redaction policy |
 | `output_json` | String | Single-line JSON, secrets redacted |
 | `output_json_with` | String | Single-line JSON with explicit redaction policy |
 | `output_yaml` | String | Multi-line YAML, keys stripped, values formatted |
@@ -78,11 +80,13 @@ CLI logging flags:
 | `internal_redact_secrets` | void | Redact `_secret` fields in-place |
 | `parse_size` | int | Parse `"10M"` → bytes; invalid/overflow returns language-specific invalid result |
 | `OutputFormat` | type | `"json"` / `"yaml"` / `"plain"` enum/type |
-| `RedactionPolicy` | type | `RedactionTraceOnly` / `RedactionNone` |
+| `RedactionPolicy` | type | `RedactionTraceOnly` / `RedactionNone` / `RedactionStrict` |
 | `cli_parse_output` | OutputFormat | Parse `--output` flag; error on unknown value |
 | `cli_parse_log_filters` | String[] | Normalize `--log` entries: trim, lowercase, dedup, remove empty |
 | `cli_output` | String | Dispatch to `output_json` / `output_yaml` / `output_plain` |
 | `build_cli_error` | JSON | `{code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}` |
+
+AFDATA suffixes describe local field semantics; they are not a full schema language. Use JSON Schema, OpenAPI, database constraints, or typed APIs for required fields, enums, ranges, and object shapes. For raw JSON transports that do not call `output_json` (HTTP bodies, MCP tool returns, SSE events), call `redacted_value` first.
 
 ## AFDATA Logging
 

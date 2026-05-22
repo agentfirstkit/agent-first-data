@@ -12,6 +12,8 @@ export {
   outputYaml,
   outputPlain,
   internalRedactSecrets,
+  redactedValue,
+  redactedValueWith,
   parseSize,
 } from "./format.js";
 export { log, span, initJson, initPlain, initYaml } from "./afdata_logging.js";

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	afdata "github.com/cmnspore/agent-first-data/go"
+	afdata "github.com/agentfirstkit/agent-first-data/go"
 )
 
 func TestCompleteHelpContainsAllSubcommands(t *testing.T) {

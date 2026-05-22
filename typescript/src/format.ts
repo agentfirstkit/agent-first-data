@@ -1,7 +1,8 @@
 /**
  * AFDATA output formatting and protocol templates.
  *
- * 9 public APIs and 1 type: 3 protocol builders + 4 output formatters + 1 redaction + 1 utility + RedactionPolicy.
+ * 11 public APIs and 1 type: protocol builders, redacted value helpers,
+ * output formatters, redaction, parseSize, and RedactionPolicy.
  */
 
 export type JsonValue =
@@ -46,25 +47,22 @@ export function buildJson(code: string, fields: JsonValue, trace?: JsonValue): J
 export enum RedactionPolicy {
   RedactionTraceOnly = "RedactionTraceOnly",
   RedactionNone = "RedactionNone",
+  RedactionStrict = "RedactionStrict",
 }
 
 /** Format as single-line JSON. Secrets redacted, original keys, raw values. */
 export function outputJson(value: JsonValue): string {
-  const v = sanitizeForJson(value);
-  redactSecrets(v);
-  return JSON.stringify(v);
+  return JSON.stringify(redactedValue(value));
 }
 
 /** Format as single-line JSON with explicit redaction policy. */
 export function outputJsonWith(value: JsonValue, redactionPolicy: RedactionPolicy): string {
-  const v = sanitizeForJson(value);
-  applyRedactionPolicy(v, redactionPolicy);
-  return JSON.stringify(v);
+  return JSON.stringify(redactedValueWith(value, redactionPolicy));
 }
 
 /** Format as multi-line YAML. Keys stripped, values formatted, secrets redacted. */
 export function outputYaml(value: JsonValue): string {
-  value = sanitizeForJson(value);
+  value = redactedValue(value);
   const lines = ["---"];
   renderYamlProcessed(value, 0, lines);
   return lines.join("\n");
@@ -72,12 +70,12 @@ export function outputYaml(value: JsonValue): string {
 
 /** Format as single-line logfmt. Keys stripped, values formatted, secrets redacted. */
 export function outputPlain(value: JsonValue): string {
-  value = sanitizeForJson(value);
+  value = redactedValue(value);
   const pairs: [string, string][] = [];
   collectPlainPairs(value, "", pairs);
   pairs.sort(([a], [b]) => jcsCompare(a, b));
   return pairs
-    .map(([k, v]) => (v.includes(" ") ? `${k}="${v}"` : `${k}=${v}`))
+    .map(([k, v]) => `${k}=${quoteLogfmtValue(v)}`)
     .join(" ");
 }
 
@@ -88,6 +86,20 @@ export function outputPlain(value: JsonValue): string {
 /** Redact _secret fields in-place. */
 export function internalRedactSecrets(value: JsonValue): void {
   redactSecrets(value);
+}
+
+/** Return a JSON-safe copy with default _secret redaction applied. */
+export function redactedValue(value: unknown): JsonValue {
+  const v = sanitizeForJson(value);
+  redactSecrets(v);
+  return v;
+}
+
+/** Return a JSON-safe copy with an explicit redaction policy applied. */
+export function redactedValueWith(value: unknown, redactionPolicy: RedactionPolicy): JsonValue {
+  const v = sanitizeForJson(value);
+  applyRedactionPolicy(v, redactionPolicy);
+  return v;
 }
 
 /**
@@ -146,6 +158,22 @@ function redactSecrets(value: JsonValue): void {
   }
 }
 
+function redactSecretsStrict(value: JsonValue): void {
+  if (isObject(value)) {
+    for (const k of Object.keys(value)) {
+      if (k.endsWith("_secret") || k.endsWith("_SECRET")) {
+        value[k] = "***";
+      } else {
+        redactSecretsStrict(value[k]);
+      }
+    }
+  } else if (Array.isArray(value)) {
+    for (const item of value) {
+      redactSecretsStrict(item);
+    }
+  }
+}
+
 function applyRedactionPolicy(value: JsonValue, redactionPolicy: RedactionPolicy): void {
   switch (redactionPolicy) {
     case RedactionPolicy.RedactionTraceOnly:
@@ -154,6 +182,9 @@ function applyRedactionPolicy(value: JsonValue, redactionPolicy: RedactionPolicy
       }
       break;
     case RedactionPolicy.RedactionNone:
+      break;
+    case RedactionPolicy.RedactionStrict:
+      redactSecretsStrict(value);
       break;
     default:
       // Safety fallback for unknown values.
@@ -490,6 +521,18 @@ function plainScalar(value: JsonValue): string {
   if (typeof value === "boolean") return value.toString();
   if (typeof value === "number") return value.toString();
   return String(value);
+}
+
+function quoteLogfmtValue(value: string): string {
+  if (value === "") return "";
+  if (!/[\s="\\]/.test(value)) return value;
+  const escaped = value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+  return `"${escaped}"`;
 }
 
 // ═══════════════════════════════════════════

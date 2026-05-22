@@ -1,6 +1,6 @@
 [project]
 name = "agent-first-data"
-version = "0.7.4"
+version = "0.8.0"
 description = "Agent-First Data (AFDATA) — suffix-driven output formatting and protocol templates for AI agents"
 license = "MIT"
 readme = "README.md"
@@ -8,7 +8,7 @@ requires-python = ">=3.9"
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/cmnspore/agent-first-data"
+Repository = "https://github.com/agentfirstkit/agent-first-data"
 
 [build-system]
 requires = ["setuptools>=68"]

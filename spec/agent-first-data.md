@@ -32,6 +32,8 @@ Agent-First Data has three parts:
 
 **Secret protection:** All three formats automatically redact `_secret` fields.
 
+**Boundary:** AFDATA names communicate local field semantics. They do not replace schemas for required fields, enum values, numeric ranges, object shapes, or cross-field validation. Use JSON Schema, OpenAPI, database constraints, or typed APIs for those guarantees.
+
 ---
 
 # Part 1: Naming Convention
@@ -142,7 +144,7 @@ Stablecoins follow the same `_{code}_cents` pattern: `deposit_usdt_cents: 1000`,
 |:-------|:---------|:--------|
 | `_secret` | redact scalar values to `***`; for object/array values, recursively redact nested secrets | `api_key_secret: "sk-or-v1-abc..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Scalar `_secret` values become `***`; object/array `_secret` values are traversed and nested `_secret` fields are redacted. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Scalar `_secret` values become `***`; object/array `_secret` values are traversed and nested `_secret` fields are redacted. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time. `RedactionStrict` is available when the entire `_secret` subtree must be replaced with `***`.
 
 ### No suffix needed
 
@@ -382,7 +384,7 @@ trace:
 Single-line [logfmt](https://brandur.org/logfmt) style. **Suffixes stripped from keys.** **Secrets automatically redacted.**
 
 - Nested keys use dot notation: `trace.duration=1.28s`
-- Values containing spaces are quoted: `message="uploading chunks"`
+- Values containing whitespace, `=`, `"`, or `\` are quoted; `\`, `"`, newline, carriage return, and tab are escaped so each record stays one physical line
 - Arrays are comma-joined: `fields=email,age`
 - Null values are empty: `RUST_LOG=`
 
@@ -676,11 +678,11 @@ JSONL stream, raw JSON per line:
 | Context | Output | Secret Protection |
 |:--------|:-------|:------------------|
 | **CLI / Logs** | JSONL (json/yaml/plain formats) | ✅ Automatic |
-| **HTTP body (raw path)** | JSON body (raw Value) | ❌ None by formatter |
-| **MCP tool (raw path)** | JSON (raw Value) | ❌ None by formatter |
-| **SSE stream (raw path)** | JSONL (raw JSON) | ❌ None by formatter |
+| **HTTP body (raw path)** | JSON body (raw Value) | Use `redacted_value` before framework serialization |
+| **MCP tool (raw path)** | JSON (raw Value) | Use `redacted_value` before SDK serialization |
+| **SSE stream (raw path)** | JSONL (raw JSON) | Use `redacted_value` before emitting events |
 
-All contexts can use the protocol structure from Part 3. Only `code` (required) and `trace` (recommended) are standardized. Other fields can be flat or nested — both styles work. CLI/logs apply output formatting and secret protection from Part 2. Raw-path serializers return JSON values unchanged. For CLI/log protocol transport, use `stdout` only; do not split protocol events across `stdout` and `stderr`.
+All contexts can use the protocol structure from Part 3. Only `code` (required) and `trace` (recommended) are standardized. Other fields can be flat or nested — both styles work. CLI/logs apply output formatting and secret protection from Part 2. Raw-path serializers return JSON values unchanged unless the program explicitly calls `redacted_value`. For CLI/log protocol transport, use `stdout` only; do not split protocol events across `stdout` and `stderr`.
 
 ---
 

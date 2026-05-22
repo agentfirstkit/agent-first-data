@@ -1,7 +1,8 @@
 //! Agent-First Data (AFDATA) output formatting and protocol templates.
 //!
-//! 13 public APIs and 2 types (+ 2 optional help renderers):
+//! 15 public APIs and 2 types (+ 2 optional help renderers):
 //! - 3 protocol builders: [`build_json_ok`], [`build_json_error`], [`build_json`]
+//! - 2 redacted value helpers: [`redacted_value`], [`redacted_value_with`]
 //! - 4 output formatters: [`output_json`], [`output_json_with`], [`output_yaml`], [`output_plain`]
 //! - 1 redaction utility: [`internal_redact_secrets`]
 //! - 1 parse utility: [`parse_size`]
@@ -65,20 +66,18 @@ pub enum RedactionPolicy {
     RedactionTraceOnly,
     /// Do not redact any fields.
     RedactionNone,
+    /// Replace every `_secret` subtree with `"***"`.
+    RedactionStrict,
 }
 
 /// Format as single-line JSON with full `_secret` redaction.
 pub fn output_json(value: &Value) -> String {
-    let mut v = value.clone();
-    redact_secrets(&mut v);
-    serialize_json_output(&v)
+    serialize_json_output(&redacted_value(value))
 }
 
 /// Format as single-line JSON with configurable redaction policy.
 pub fn output_json_with(value: &Value, redaction_policy: RedactionPolicy) -> String {
-    let mut v = value.clone();
-    apply_redaction_policy(&mut v, redaction_policy);
-    serialize_json_output(&v)
+    serialize_json_output(&redacted_value_with(value, redaction_policy))
 }
 
 fn serialize_json_output(value: &Value) -> String {
@@ -95,24 +94,20 @@ fn serialize_json_output(value: &Value) -> String {
 /// Format as multi-line YAML. Keys stripped, values formatted, secrets redacted.
 pub fn output_yaml(value: &Value) -> String {
     let mut lines = vec!["---".to_string()];
-    render_yaml_processed(value, 0, &mut lines);
+    let v = redacted_value(value);
+    render_yaml_processed(&v, 0, &mut lines);
     lines.join("\n")
 }
 
 /// Format as single-line logfmt. Keys stripped, values formatted, secrets redacted.
 pub fn output_plain(value: &Value) -> String {
     let mut pairs: Vec<(String, String)> = Vec::new();
-    collect_plain_pairs(value, "", &mut pairs);
+    let v = redacted_value(value);
+    collect_plain_pairs(&v, "", &mut pairs);
     pairs.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
     pairs
         .into_iter()
-        .map(|(k, v)| {
-            if v.contains(' ') {
-                format!("{}=\"{}\"", k, v)
-            } else {
-                format!("{}={}", k, v)
-            }
-        })
+        .map(|(k, v)| format!("{}={}", k, quote_logfmt_value(&v)))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -124,6 +119,20 @@ pub fn output_plain(value: &Value) -> String {
 /// Redact `_secret` fields in-place.
 pub fn internal_redact_secrets(value: &mut Value) {
     redact_secrets(value);
+}
+
+/// Return a JSON value copy with default `_secret` redaction applied.
+pub fn redacted_value(value: &Value) -> Value {
+    let mut v = value.clone();
+    redact_secrets(&mut v);
+    v
+}
+
+/// Return a JSON value copy with an explicit redaction policy applied.
+pub fn redacted_value_with(value: &Value, redaction_policy: RedactionPolicy) -> Value {
+    let mut v = value.clone();
+    apply_redaction_policy(&mut v, redaction_policy);
+    v
 }
 
 /// Parse a human-readable size string into bytes.
@@ -279,7 +288,7 @@ pub fn build_cli_error(message: &str, hint: Option<&str>) -> Value {
 pub fn cli_render_help(cmd: &clap::Command, subcommand_path: &[&str]) -> String {
     let target = walk_to_subcommand(cmd, subcommand_path);
     let mut buf = String::new();
-    render_help_recursive(target, &[], &mut buf);
+    render_help_recursive(target, &[], &mut buf, true);
     buf
 }
 
@@ -308,7 +317,12 @@ fn walk_to_subcommand<'a>(cmd: &'a clap::Command, path: &[&str]) -> &'a clap::Co
 }
 
 #[cfg(feature = "cli-help")]
-fn render_help_recursive(cmd: &clap::Command, parent_path: &[&str], buf: &mut String) {
+fn render_help_recursive(
+    cmd: &clap::Command,
+    parent_path: &[&str],
+    buf: &mut String,
+    is_root: bool,
+) {
     use std::fmt::Write;
 
     // Build the full command path (e.g. "myapp service start")
@@ -332,14 +346,36 @@ fn render_help_recursive(cmd: &clap::Command, parent_path: &[&str], buf: &mut St
 
     // Render clap's built-in help for this command (usage, args, options)
     let styled = cmd.clone().render_long_help();
-    let _ = write!(buf, "{styled}");
+    let help_text = styled.to_string();
+
+    // In root command, insert --help-markdown after the "Print help" line
+    if is_root {
+        let mut found_help = false;
+        for line in help_text.lines() {
+            let _ = writeln!(buf, "{line}");
+            if line.trim_start().starts_with("-h, --help") {
+                found_help = true;
+            } else if found_help && line.contains("Print help") {
+                let _ = writeln!(buf, "      --help-markdown");
+                let _ = writeln!(
+                    buf,
+                    "          Output help as Markdown (for documentation generation)"
+                );
+                found_help = false;
+            } else {
+                found_help = false;
+            }
+        }
+    } else {
+        let _ = write!(buf, "{help_text}");
+    }
 
     // Recurse into visible subcommands
     for sub in cmd.get_subcommands() {
         if sub.get_name() == "help" {
             continue; // skip clap's auto-generated "help" subcommand
         }
-        render_help_recursive(sub, &cmd_path, buf);
+        render_help_recursive(sub, &cmd_path, buf, false);
     }
 }
 
@@ -377,6 +413,27 @@ fn redact_secrets(value: &mut Value) {
     }
 }
 
+fn redact_secrets_strict(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                if key.ends_with("_secret") || key.ends_with("_SECRET") {
+                    map.insert(key, Value::String("***".into()));
+                } else if let Some(v) = map.get_mut(&key) {
+                    redact_secrets_strict(v);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                redact_secrets_strict(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn apply_redaction_policy(value: &mut Value, redaction_policy: RedactionPolicy) {
     match redaction_policy {
         RedactionPolicy::RedactionTraceOnly => {
@@ -387,6 +444,7 @@ fn apply_redaction_policy(value: &mut Value, redaction_policy: RedactionPolicy) 
             }
         }
         RedactionPolicy::RedactionNone => {}
+        RedactionPolicy::RedactionStrict => redact_secrets_strict(value),
     }
 }
 
@@ -779,6 +837,25 @@ fn plain_scalar(value: &Value) -> String {
         Value::Number(n) => n.to_string(),
         other => other.to_string(),
     }
+}
+
+fn quote_logfmt_value(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    if !value
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '=' | '"' | '\\'))
+    {
+        return value.to_string();
+    }
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("\"{}\"", escaped)
 }
 
 #[cfg(test)]

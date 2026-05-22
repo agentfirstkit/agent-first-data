@@ -9,6 +9,8 @@ from agent_first_data import (
     build_json,
     RedactionPolicy,
     internal_redact_secrets,
+    redacted_value,
+    redacted_value_with,
     output_json,
     output_json_with,
     output_yaml,
@@ -156,3 +158,20 @@ def test_output_json_with_none_keeps_secrets():
     )
     parsed = json.loads(out)
     assert parsed["api_key_secret"] == "sk-live-123"
+
+
+def test_redacted_value_returns_safe_copy():
+    inp = {"api_key_secret": "sk-live-123", "nested": {"token_secret": "tok"}}
+    got = redacted_value(inp)
+    assert got["api_key_secret"] == "***"
+    assert got["nested"]["token_secret"] == "***"
+    assert inp["api_key_secret"] == "sk-live-123"
+
+
+def test_redacted_value_with_strict_redacts_secret_subtree():
+    inp = {"db_secret": {"password_secret": "real", "host": "localhost"}}
+    default = redacted_value(inp)
+    strict = redacted_value_with(inp, RedactionPolicy.RedactionStrict)
+    assert default["db_secret"]["password_secret"] == "***"
+    assert default["db_secret"]["host"] == "localhost"
+    assert strict["db_secret"] == "***"

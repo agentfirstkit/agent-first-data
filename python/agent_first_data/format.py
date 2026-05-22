@@ -1,6 +1,7 @@
 """AFDATA output formatting and protocol templates.
 
-9 public APIs and 1 type: 3 protocol builders + 4 output formatters + 1 redaction + 1 utility + RedactionPolicy.
+11 public APIs and 1 type: protocol builders, redacted value helpers,
+output formatters, redaction, parse_size, and RedactionPolicy.
 """
 
 from __future__ import annotations
@@ -51,25 +52,22 @@ def build_json(code: str, fields: Any, trace: Any = None) -> dict:
 class RedactionPolicy(str, Enum):
     RedactionTraceOnly = "RedactionTraceOnly"
     RedactionNone = "RedactionNone"
+    RedactionStrict = "RedactionStrict"
 
 
 def output_json(value: Any) -> str:
     """Format as single-line JSON. Secrets redacted, original keys, raw values."""
-    v = _sanitize_for_json(value)
-    _redact_secrets(v)
-    return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(redacted_value(value), ensure_ascii=False, separators=(",", ":"))
 
 
 def output_json_with(value: Any, redaction_policy: RedactionPolicy) -> str:
     """Format as single-line JSON with explicit redaction policy."""
-    v = _sanitize_for_json(value)
-    _apply_redaction_policy(v, redaction_policy)
-    return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(redacted_value_with(value, redaction_policy), ensure_ascii=False, separators=(",", ":"))
 
 
 def output_yaml(value: Any) -> str:
     """Format as multi-line YAML. Keys stripped, values formatted, secrets redacted."""
-    value = _sanitize_for_json(value)
+    value = redacted_value(value)
     lines = ["---"]
     _render_yaml_processed(value, 0, lines)
     return "\n".join(lines)
@@ -77,16 +75,13 @@ def output_yaml(value: Any) -> str:
 
 def output_plain(value: Any) -> str:
     """Format as single-line logfmt. Keys stripped, values formatted, secrets redacted."""
-    value = _sanitize_for_json(value)
+    value = redacted_value(value)
     pairs: list[tuple[str, str]] = []
     _collect_plain_pairs(value, "", pairs)
     pairs.sort(key=lambda p: p[0].encode("utf-16-be"))
     parts = []
     for k, v in pairs:
-        if " " in v:
-            parts.append(f'{k}="{v}"')
-        else:
-            parts.append(f"{k}={v}")
+        parts.append(f"{k}={_quote_logfmt_value(v)}")
     return " ".join(parts)
 
 
@@ -100,12 +95,29 @@ def internal_redact_secrets(value: Any) -> None:
     _redact_secrets(value)
 
 
+def redacted_value(value: Any) -> Any:
+    """Return a JSON-safe copy with default _secret redaction applied."""
+    v = _sanitize_for_json(value)
+    _redact_secrets(v)
+    return v
+
+
+def redacted_value_with(value: Any, redaction_policy: RedactionPolicy) -> Any:
+    """Return a JSON-safe copy with an explicit redaction policy applied."""
+    v = _sanitize_for_json(value)
+    _apply_redaction_policy(v, redaction_policy)
+    return v
+
+
 def _apply_redaction_policy(value: Any, redaction_policy: RedactionPolicy) -> None:
     if redaction_policy == RedactionPolicy.RedactionTraceOnly:
         if isinstance(value, dict) and "trace" in value:
             _redact_secrets(value["trace"])
         return
     if redaction_policy == RedactionPolicy.RedactionNone:
+        return
+    if redaction_policy == RedactionPolicy.RedactionStrict:
+        _redact_secrets_strict(value)
         return
     # Safety fallback for unknown values.
     _redact_secrets(value)
@@ -209,6 +221,18 @@ def _redact_secrets(value: Any) -> None:
     elif isinstance(value, list):
         for item in value:
             _redact_secrets(item)
+
+
+def _redact_secrets_strict(value: Any) -> None:
+    if isinstance(value, dict):
+        for k in list(value.keys()):
+            if k.endswith("_secret") or k.endswith("_SECRET"):
+                value[k] = "***"
+            else:
+                _redact_secrets_strict(value[k])
+    elif isinstance(value, list):
+        for item in value:
+            _redact_secrets_strict(item)
 
 
 # ═══════════════════════════════════════════
@@ -572,3 +596,19 @@ def _plain_scalar(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     return str(value)
+
+
+def _quote_logfmt_value(value: str) -> str:
+    if value == "":
+        return ""
+    needs_quote = any(c.isspace() or c in '="\\"' for c in value)
+    if not needs_quote:
+        return value
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'

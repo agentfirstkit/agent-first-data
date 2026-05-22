@@ -65,7 +65,7 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **13 public APIs and 2 types** + optional **CLI help rendering** (2 functions) + optional **AFDATA tracing** (3 protocol builders + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
+Total: **15 public APIs and 2 types** + optional **CLI help rendering** (2 functions) + optional **AFDATA tracing** (3 protocol builders + 2 redacted value helpers + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
 
 ### Protocol Builders (returns JSON Value)
 
@@ -80,6 +80,15 @@ build_json_error(message: &str, hint: Option<&str>, trace: Option<Value>) -> Val
 
 // Generic (any code + fields)
 build_json(code: &str, fields: Value, trace: Option<Value>) -> Value
+```
+
+### Redacted Values (returns Value)
+
+Use these before raw HTTP/MCP/SSE serializers that do not call `output_json`.
+
+```rust
+redacted_value(value: &Value) -> Value
+redacted_value_with(value: &Value, redaction_policy: RedactionPolicy) -> Value
 ```
 
 **Use case:** structured protocol payloads (frameworks can serialize directly)
@@ -541,7 +550,7 @@ All formats automatically redact `_secret` fields.
 
 ## Repository
 
-This package is part of the [agent-first-data](https://github.com/cmnspore/agent-first-data) repository, which also contains:
+This package is part of the [agent-first-data](https://github.com/agentfirstkit/agent-first-data) repository, which also contains:
 
 - **`spec/`** — Full AFDATA specification with suffix definitions, protocol format rules, and cross-language test fixtures
 - **`skills/`** — AI coding agent skill for working with AFDATA conventions
@@ -549,7 +558,7 @@ This package is part of the [agent-first-data](https://github.com/cmnspore/agent
 To run tests, clone the full repository (tests use shared cross-language fixtures from `spec/fixtures/`):
 
 ```bash
-git clone https://github.com/cmnspore/agent-first-data
+git clone https://github.com/agentfirstkit/agent-first-data
 cd agent-first-data/rust
 cargo test
 ```

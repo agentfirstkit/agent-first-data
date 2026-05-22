@@ -12,6 +12,8 @@ import {
   buildJsonError,
   buildJson,
   internalRedactSecrets,
+  redactedValue,
+  redactedValueWith,
   RedactionPolicy,
   outputJson,
   outputJsonWith,
@@ -178,5 +180,24 @@ describe("json safety", () => {
     );
     const parsed = JSON.parse(out) as Record<string, unknown>;
     assert.equal(parsed["api_key_secret"], "sk-live-123");
+  });
+
+  it("redactedValue returns a safe copy", () => {
+    const input = { api_key_secret: "sk-live-123", nested: { token_secret: "tok" } };
+    const got = redactedValue(input) as Record<string, unknown>;
+    const nested = got["nested"] as Record<string, unknown>;
+    assert.equal(got["api_key_secret"], "***");
+    assert.equal(nested["token_secret"], "***");
+    assert.equal(input.api_key_secret, "sk-live-123");
+  });
+
+  it("redactedValueWith RedactionStrict redacts secret subtrees", () => {
+    const input = { db_secret: { password_secret: "real", host: "localhost" } };
+    const defaultValue = redactedValue(input) as Record<string, unknown>;
+    const strictValue = redactedValueWith(input, RedactionPolicy.RedactionStrict) as Record<string, unknown>;
+    const defaultSecret = defaultValue["db_secret"] as Record<string, unknown>;
+    assert.equal(defaultSecret["password_secret"], "***");
+    assert.equal(defaultSecret["host"], "localhost");
+    assert.equal(strictValue["db_secret"], "***");
   });
 });

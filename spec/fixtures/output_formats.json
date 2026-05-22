@@ -69,5 +69,29 @@
     },
     "expected_yaml": "---\nAPI_KEY: \"***\"\nCACHE_TTL: \"3600s\"",
     "expected_plain": "API_KEY=*** CACHE_TTL=3600s"
+  },
+  {
+    "name": "secret_collision_never_leaks",
+    "input": {
+      "api_key": "public",
+      "api_key_secret": "sk-live-123"
+    },
+    "expected_json": {
+      "api_key": "public",
+      "api_key_secret": "***"
+    },
+    "expected_yaml": "---\napi_key: \"public\"\napi_key_secret: \"***\"",
+    "expected_plain": "api_key=public api_key_secret=***"
+  },
+  {
+    "name": "plain_escaping_special_chars",
+    "input": {
+      "message": "hello = \"world\" \\ path\nnext\trow"
+    },
+    "expected_json": {
+      "message": "hello = \"world\" \\ path\nnext\trow"
+    },
+    "expected_yaml": "---\nmessage: \"hello = \\\"world\\\" \\\\ path\\nnext\\trow\"",
+    "expected_plain": "message=\"hello = \\\"world\\\" \\\\ path\\nnext\\trow\""
   }
 ]

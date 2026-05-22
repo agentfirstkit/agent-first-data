@@ -17,7 +17,7 @@ import (
 	"os"
 	"strings"
 
-	afdata "github.com/cmnspore/agent-first-data/go"
+	afdata "github.com/agentfirstkit/agent-first-data/go"
 )
 
 type subcommand struct {
