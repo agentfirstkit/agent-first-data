@@ -144,7 +144,7 @@ Stablecoins follow the same `_{code}_cents` pattern: `deposit_usdt_cents: 1000`,
 |:-------|:---------|:--------|
 | `_secret` | redact scalar values to `***`; for object/array values, recursively redact nested secrets | `api_key_secret: "sk-or-v1-abc..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Scalar `_secret` values become `***`; object/array `_secret` values are traversed and nested `_secret` fields are redacted. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time. `RedactionStrict` is available when the entire `_secret` subtree must be replaced with `***`.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Scalar `_secret` values become `***`; object/array `_secret` values are traversed and nested `_secret` fields are redacted. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `RedactionOptions.secret_names` at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction, not YAML/Plain suffix stripping. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time. `RedactionStrict` is available when the entire `_secret` or listed secret subtree must be replaced with `***`.
 
 ### No suffix needed
 
@@ -349,7 +349,7 @@ Default is tool-defined. Interactive CLIs default to `yaml`, scripting/logging c
 
 JSON is the canonical format. YAML and plain are derived from it.
 
-**All CLI output formats automatically redact `_secret` fields.** Matching recognizes `_secret` and `_SECRET` only. Scalar `_secret` values are replaced with `***`; object/array values are traversed and nested `_secret` fields are redacted.
+**All CLI output formats automatically redact `_secret` fields.** Matching recognizes `_secret` and `_SECRET` only. Scalar `_secret` values are replaced with `***`; object/array values are traversed and nested `_secret` fields are redacted. Legacy field names can be protected by passing `RedactionOptions.secret_names` at serialization time; this opt-in list is exact field-name equality and does not affect suffix stripping.
 
 **Format characteristics:**
 - **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted

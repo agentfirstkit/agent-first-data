@@ -1,8 +1,8 @@
 /**
  * AFDATA output formatting and protocol templates.
  *
- * 11 public APIs and 1 type: protocol builders, redacted value helpers,
- * output formatters, redaction, parseSize, and RedactionPolicy.
+ * 16 public APIs and 2 types: protocol builders, redacted value helpers,
+ * output formatters, redaction, parseSize, RedactionPolicy, and RedactionOptions.
  */
 
 export type JsonValue =
@@ -50,6 +50,16 @@ export enum RedactionPolicy {
   RedactionStrict = "RedactionStrict",
 }
 
+export type RedactionOptions = {
+  /** Optional scoped policy. Omitted means default full redaction. */
+  policy?: RedactionPolicy;
+  /**
+   * Field names to treat as secrets in addition to _secret suffixes.
+   * Matching is exact field-name equality at any nesting level.
+   */
+  secretNames?: readonly string[];
+};
+
 /** Format as single-line JSON. Secrets redacted, original keys, raw values. */
 export function outputJson(value: JsonValue): string {
   return JSON.stringify(redactedValue(value));
@@ -60,6 +70,11 @@ export function outputJsonWith(value: JsonValue, redactionPolicy: RedactionPolic
   return JSON.stringify(redactedValueWith(value, redactionPolicy));
 }
 
+/** Format as single-line JSON with explicit redaction options. */
+export function outputJsonWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string {
+  return JSON.stringify(redactedValueWithOptions(value, redactionOptions));
+}
+
 /** Format as multi-line YAML. Keys stripped, values formatted, secrets redacted. */
 export function outputYaml(value: JsonValue): string {
   value = redactedValue(value);
@@ -68,9 +83,28 @@ export function outputYaml(value: JsonValue): string {
   return lines.join("\n");
 }
 
+/** Format as multi-line YAML with explicit redaction options. */
+export function outputYamlWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string {
+  value = redactedValueWithOptions(value, redactionOptions);
+  const lines = ["---"];
+  renderYamlProcessed(value, 0, lines);
+  return lines.join("\n");
+}
+
 /** Format as single-line logfmt. Keys stripped, values formatted, secrets redacted. */
 export function outputPlain(value: JsonValue): string {
   value = redactedValue(value);
+  const pairs: [string, string][] = [];
+  collectPlainPairs(value, "", pairs);
+  pairs.sort(([a], [b]) => jcsCompare(a, b));
+  return pairs
+    .map(([k, v]) => `${k}=${quoteLogfmtValue(v)}`)
+    .join(" ");
+}
+
+/** Format as single-line logfmt with explicit redaction options. */
+export function outputPlainWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string {
+  value = redactedValueWithOptions(value, redactionOptions);
   const pairs: [string, string][] = [];
   collectPlainPairs(value, "", pairs);
   pairs.sort(([a], [b]) => jcsCompare(a, b));
@@ -88,6 +122,11 @@ export function internalRedactSecrets(value: JsonValue): void {
   redactSecrets(value);
 }
 
+/** Redact secret fields in-place using explicit redaction options. */
+export function internalRedactSecretsWithOptions(value: JsonValue, redactionOptions: RedactionOptions): void {
+  applyRedactionOptions(value, redactionOptions);
+}
+
 /** Return a JSON-safe copy with default _secret redaction applied. */
 export function redactedValue(value: unknown): JsonValue {
   const v = sanitizeForJson(value);
@@ -99,6 +138,13 @@ export function redactedValue(value: unknown): JsonValue {
 export function redactedValueWith(value: unknown, redactionPolicy: RedactionPolicy): JsonValue {
   const v = sanitizeForJson(value);
   applyRedactionPolicy(v, redactionPolicy);
+  return v;
+}
+
+/** Return a JSON-safe copy with explicit redaction options applied. */
+export function redactedValueWithOptions(value: unknown, redactionOptions: RedactionOptions): JsonValue {
+  const v = sanitizeForJson(value);
+  applyRedactionOptions(v, redactionOptions);
   return v;
 }
 
@@ -137,58 +183,84 @@ export function parseSize(s: string): number | null {
 // Secret Redaction
 // ═══════════════════════════════════════════
 
-function redactSecrets(value: JsonValue): void {
+const EMPTY_SECRET_NAMES: ReadonlySet<string> = new Set<string>();
+
+function secretNameSet(redactionOptions: RedactionOptions): ReadonlySet<string> {
+  return new Set(redactionOptions.secretNames ?? []);
+}
+
+function keyHasSecretSuffix(key: string): boolean {
+  return key.endsWith("_secret") || key.endsWith("_SECRET");
+}
+
+function isSecretKey(key: string, secretNames: ReadonlySet<string>): boolean {
+  return keyHasSecretSuffix(key) || secretNames.has(key);
+}
+
+function redactSecrets(value: JsonValue, secretNames: ReadonlySet<string> = EMPTY_SECRET_NAMES): void {
   if (isObject(value)) {
     for (const k of Object.keys(value)) {
-      if (k.endsWith("_secret") || k.endsWith("_SECRET")) {
+      if (isSecretKey(k, secretNames)) {
         const v = value[k];
         if (isObject(v) || Array.isArray(v)) {
-          redactSecrets(v);
+          redactSecrets(v, secretNames);
         } else {
           value[k] = "***";
         }
       } else {
-        redactSecrets(value[k]);
+        redactSecrets(value[k], secretNames);
       }
     }
   } else if (Array.isArray(value)) {
     for (const item of value) {
-      redactSecrets(item);
+      redactSecrets(item, secretNames);
     }
   }
 }
 
-function redactSecretsStrict(value: JsonValue): void {
+function redactSecretsStrict(value: JsonValue, secretNames: ReadonlySet<string> = EMPTY_SECRET_NAMES): void {
   if (isObject(value)) {
     for (const k of Object.keys(value)) {
-      if (k.endsWith("_secret") || k.endsWith("_SECRET")) {
+      if (isSecretKey(k, secretNames)) {
         value[k] = "***";
       } else {
-        redactSecretsStrict(value[k]);
+        redactSecretsStrict(value[k], secretNames);
       }
     }
   } else if (Array.isArray(value)) {
     for (const item of value) {
-      redactSecretsStrict(item);
+      redactSecretsStrict(item, secretNames);
     }
   }
 }
 
 function applyRedactionPolicy(value: JsonValue, redactionPolicy: RedactionPolicy): void {
+  applyRedactionPolicyWithNames(value, redactionPolicy, EMPTY_SECRET_NAMES);
+}
+
+function applyRedactionOptions(value: JsonValue, redactionOptions: RedactionOptions): void {
+  applyRedactionPolicyWithNames(value, redactionOptions.policy, secretNameSet(redactionOptions));
+}
+
+function applyRedactionPolicyWithNames(
+  value: JsonValue,
+  redactionPolicy: RedactionPolicy | undefined,
+  secretNames: ReadonlySet<string>,
+): void {
   switch (redactionPolicy) {
     case RedactionPolicy.RedactionTraceOnly:
       if (isObject(value) && value.trace !== undefined) {
-        redactSecrets(value.trace);
+        redactSecrets(value.trace, secretNames);
       }
       break;
     case RedactionPolicy.RedactionNone:
       break;
     case RedactionPolicy.RedactionStrict:
-      redactSecretsStrict(value);
+      redactSecretsStrict(value, secretNames);
       break;
     default:
-      // Safety fallback for unknown values.
-      redactSecrets(value);
+      // Empty/unknown policy falls back to default full redaction.
+      redactSecrets(value, secretNames);
       break;
   }
 }

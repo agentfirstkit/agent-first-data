@@ -1,0 +1,46 @@
+[
+  {
+    "name": "legacy api_key scalar",
+    "input": {"api_key": "sk-123", "name": "test"},
+    "options": {"secret_names": ["api_key"]},
+    "expected": {"api_key": "***", "name": "test"},
+    "expected_yaml": "---\napi_key: \"***\"\nname: \"test\"",
+    "expected_plain": "api_key=*** name=test"
+  },
+  {
+    "name": "exact header names",
+    "input": {"headers": {"Authorization": "Bearer abc", "x-api-key": "sk-123", "content_type": "json"}},
+    "options": {"secret_names": ["Authorization", "x-api-key"]},
+    "expected": {"headers": {"Authorization": "***", "x-api-key": "***", "content_type": "json"}}
+  },
+  {
+    "name": "exact names are not normalized",
+    "input": {"api_key": "sk-1", "api-key": "sk-2", " API_KEY ": "sk-3", "Authorization": "Bearer abc"},
+    "options": {"secret_names": ["api_key", " API_KEY ", "authorization"]},
+    "expected": {"api_key": "***", "api-key": "sk-2", " API_KEY ": "***", "Authorization": "Bearer abc"}
+  },
+  {
+    "name": "no secret names by default",
+    "input": {"api_key": "sk-123", "api_key_secret": "sk-456"},
+    "options": {},
+    "expected": {"api_key": "sk-123", "api_key_secret": "***"}
+  },
+  {
+    "name": "trace only with secret names",
+    "input": {"result": {"api_key": "sk-result"}, "trace": {"api_key": "sk-trace", "request_secret": "top-secret"}},
+    "options": {"policy": "RedactionTraceOnly", "secret_names": ["api_key"]},
+    "expected": {"result": {"api_key": "sk-result"}, "trace": {"api_key": "***", "request_secret": "***"}}
+  },
+  {
+    "name": "none disables suffix and list",
+    "input": {"api_key": "sk-123", "api_key_secret": "sk-456"},
+    "options": {"policy": "RedactionNone", "secret_names": ["api_key"]},
+    "expected": {"api_key": "sk-123", "api_key_secret": "sk-456"}
+  },
+  {
+    "name": "strict redacts legacy subtree",
+    "input": {"db": {"api_key": {"nested": "real"}, "host": "localhost"}},
+    "options": {"policy": "RedactionStrict", "secret_names": ["api_key"]},
+    "expected": {"db": {"api_key": "***", "host": "localhost"}}
+  }
+]

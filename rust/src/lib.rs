@@ -1,13 +1,14 @@
 //! Agent-First Data (AFDATA) output formatting and protocol templates.
 //!
-//! 15 public APIs and 2 types (+ 2 optional help renderers):
+//! 20 public APIs and 3 types (+ 2 optional help renderers):
 //! - 3 protocol builders: [`build_json_ok`], [`build_json_error`], [`build_json`]
-//! - 2 redacted value helpers: [`redacted_value`], [`redacted_value_with`]
-//! - 4 output formatters: [`output_json`], [`output_json_with`], [`output_yaml`], [`output_plain`]
-//! - 1 redaction utility: [`internal_redact_secrets`]
+//! - 3 redacted value helpers: [`redacted_value`], [`redacted_value_with`], [`redacted_value_with_options`]
+//! - 7 output formatters: [`output_json`], [`output_json_with`], [`output_json_with_options`],
+//!   [`output_yaml`], [`output_yaml_with_options`], [`output_plain`], [`output_plain_with_options`]
+//! - 2 redaction utilities: [`internal_redact_secrets`], [`internal_redact_secrets_with_options`]
 //! - 1 parse utility: [`parse_size`]
 //! - 4 CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`], [`cli_output`], [`build_cli_error`]
-//! - 2 types: [`OutputFormat`], [`RedactionPolicy`]
+//! - 3 types: [`OutputFormat`], [`RedactionPolicy`], [`RedactionOptions`]
 //! - (feature `cli-help`): [`cli_render_help`] — recursive plain-text help for clap commands
 //! - (feature `cli-help-markdown`): [`cli_render_help_markdown`] — recursive Markdown help
 
@@ -15,6 +16,7 @@
 pub mod afdata_tracing;
 
 use serde_json::Value;
+use std::collections::HashSet;
 
 // ═══════════════════════════════════════════
 // Public API: Protocol Builders
@@ -70,6 +72,17 @@ pub enum RedactionPolicy {
     RedactionStrict,
 }
 
+/// Redaction options for legacy secret field names.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RedactionOptions {
+    /// Optional scoped policy. `None` means default full redaction.
+    pub policy: Option<RedactionPolicy>,
+    /// Field names to treat as secrets in addition to `_secret` suffixes.
+    ///
+    /// Matching is exact field-name equality at any nesting level.
+    pub secret_names: Vec<String>,
+}
+
 /// Format as single-line JSON with full `_secret` redaction.
 pub fn output_json(value: &Value) -> String {
     serialize_json_output(&redacted_value(value))
@@ -78,6 +91,11 @@ pub fn output_json(value: &Value) -> String {
 /// Format as single-line JSON with configurable redaction policy.
 pub fn output_json_with(value: &Value, redaction_policy: RedactionPolicy) -> String {
     serialize_json_output(&redacted_value_with(value, redaction_policy))
+}
+
+/// Format as single-line JSON with configurable redaction options.
+pub fn output_json_with_options(value: &Value, redaction_options: &RedactionOptions) -> String {
+    serialize_json_output(&redacted_value_with_options(value, redaction_options))
 }
 
 fn serialize_json_output(value: &Value) -> String {
@@ -99,10 +117,31 @@ pub fn output_yaml(value: &Value) -> String {
     lines.join("\n")
 }
 
+/// Format as multi-line YAML with configurable redaction options.
+pub fn output_yaml_with_options(value: &Value, redaction_options: &RedactionOptions) -> String {
+    let mut lines = vec!["---".to_string()];
+    let v = redacted_value_with_options(value, redaction_options);
+    render_yaml_processed(&v, 0, &mut lines);
+    lines.join("\n")
+}
+
 /// Format as single-line logfmt. Keys stripped, values formatted, secrets redacted.
 pub fn output_plain(value: &Value) -> String {
     let mut pairs: Vec<(String, String)> = Vec::new();
     let v = redacted_value(value);
+    collect_plain_pairs(&v, "", &mut pairs);
+    pairs.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
+    pairs
+        .into_iter()
+        .map(|(k, v)| format!("{}={}", k, quote_logfmt_value(&v)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Format as single-line logfmt with configurable redaction options.
+pub fn output_plain_with_options(value: &Value, redaction_options: &RedactionOptions) -> String {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let v = redacted_value_with_options(value, redaction_options);
     collect_plain_pairs(&v, "", &mut pairs);
     pairs.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
     pairs
@@ -121,6 +160,14 @@ pub fn internal_redact_secrets(value: &mut Value) {
     redact_secrets(value);
 }
 
+/// Redact secret fields in-place using configurable redaction options.
+pub fn internal_redact_secrets_with_options(
+    value: &mut Value,
+    redaction_options: &RedactionOptions,
+) {
+    apply_redaction_options(value, redaction_options);
+}
+
 /// Return a JSON value copy with default `_secret` redaction applied.
 pub fn redacted_value(value: &Value) -> Value {
     let mut v = value.clone();
@@ -132,6 +179,13 @@ pub fn redacted_value(value: &Value) -> Value {
 pub fn redacted_value_with(value: &Value, redaction_policy: RedactionPolicy) -> Value {
     let mut v = value.clone();
     apply_redaction_policy(&mut v, redaction_policy);
+    v
+}
+
+/// Return a JSON value copy with configurable redaction options applied.
+pub fn redacted_value_with_options(value: &Value, redaction_options: &RedactionOptions) -> Value {
+    let mut v = value.clone();
+    apply_redaction_options(&mut v, redaction_options);
     v
 }
 
@@ -383,12 +437,37 @@ fn render_help_recursive(
 // Secret Redaction
 // ═══════════════════════════════════════════
 
+#[derive(Default)]
+struct RedactionContext {
+    secret_names: HashSet<String>,
+}
+
+impl RedactionContext {
+    fn from_options(redaction_options: &RedactionOptions) -> Self {
+        let secret_names = redaction_options.secret_names.iter().cloned().collect();
+        Self { secret_names }
+    }
+
+    fn is_secret_key(&self, key: &str) -> bool {
+        key_has_secret_suffix(key) || self.secret_names.contains(key)
+    }
+}
+
+fn key_has_secret_suffix(key: &str) -> bool {
+    key.ends_with("_secret") || key.ends_with("_SECRET")
+}
+
 fn redact_secrets(value: &mut Value) {
+    let context = RedactionContext::default();
+    redact_secrets_with_context(value, &context);
+}
+
+fn redact_secrets_with_context(value: &mut Value, context: &RedactionContext) {
     match value {
         Value::Object(map) => {
             let keys: Vec<String> = map.keys().cloned().collect();
             for key in keys {
-                if key.ends_with("_secret") || key.ends_with("_SECRET") {
+                if context.is_secret_key(&key) {
                     match map.get(&key) {
                         Some(Value::Object(_)) | Some(Value::Array(_)) => {
                             // Traverse containers, don't replace
@@ -400,34 +479,34 @@ fn redact_secrets(value: &mut Value) {
                     }
                 }
                 if let Some(v) = map.get_mut(&key) {
-                    redact_secrets(v);
+                    redact_secrets_with_context(v, context);
                 }
             }
         }
         Value::Array(arr) => {
             for v in arr {
-                redact_secrets(v);
+                redact_secrets_with_context(v, context);
             }
         }
         _ => {}
     }
 }
 
-fn redact_secrets_strict(value: &mut Value) {
+fn redact_secrets_strict_with_context(value: &mut Value, context: &RedactionContext) {
     match value {
         Value::Object(map) => {
             let keys: Vec<String> = map.keys().cloned().collect();
             for key in keys {
-                if key.ends_with("_secret") || key.ends_with("_SECRET") {
+                if context.is_secret_key(&key) {
                     map.insert(key, Value::String("***".into()));
                 } else if let Some(v) = map.get_mut(&key) {
-                    redact_secrets_strict(v);
+                    redact_secrets_strict_with_context(v, context);
                 }
             }
         }
         Value::Array(arr) => {
             for v in arr {
-                redact_secrets_strict(v);
+                redact_secrets_strict_with_context(v, context);
             }
         }
         _ => {}
@@ -435,16 +514,33 @@ fn redact_secrets_strict(value: &mut Value) {
 }
 
 fn apply_redaction_policy(value: &mut Value, redaction_policy: RedactionPolicy) {
+    let context = RedactionContext::default();
+    apply_redaction_policy_with_context(value, Some(redaction_policy), &context);
+}
+
+fn apply_redaction_options(value: &mut Value, redaction_options: &RedactionOptions) {
+    let context = RedactionContext::from_options(redaction_options);
+    apply_redaction_policy_with_context(value, redaction_options.policy, &context);
+}
+
+fn apply_redaction_policy_with_context(
+    value: &mut Value,
+    redaction_policy: Option<RedactionPolicy>,
+    context: &RedactionContext,
+) {
     match redaction_policy {
-        RedactionPolicy::RedactionTraceOnly => {
+        Some(RedactionPolicy::RedactionTraceOnly) => {
             if let Value::Object(map) = value {
                 if let Some(trace) = map.get_mut("trace") {
-                    redact_secrets(trace);
+                    redact_secrets_with_context(trace, context);
                 }
             }
         }
-        RedactionPolicy::RedactionNone => {}
-        RedactionPolicy::RedactionStrict => redact_secrets_strict(value),
+        Some(RedactionPolicy::RedactionNone) => {}
+        Some(RedactionPolicy::RedactionStrict) => {
+            redact_secrets_strict_with_context(value, context)
+        }
+        None => redact_secrets_with_context(value, context),
     }
 }
 

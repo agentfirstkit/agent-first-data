@@ -1,16 +1,17 @@
 """AFDATA output formatting and protocol templates.
 
-11 public APIs and 1 type: protocol builders, redacted value helpers,
-output formatters, redaction, parse_size, and RedactionPolicy.
+16 public APIs and 2 types: protocol builders, redacted value helpers,
+output formatters, redaction, parse_size, RedactionPolicy, and RedactionOptions.
 """
 
 from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Sequence
 
 
 # ═══════════════════════════════════════════
@@ -55,6 +56,15 @@ class RedactionPolicy(str, Enum):
     RedactionStrict = "RedactionStrict"
 
 
+@dataclass(frozen=True)
+class RedactionOptions:
+    """Redaction options for legacy secret field names."""
+
+    policy: RedactionPolicy | None = None
+    # Exact field-name matches at any nesting level.
+    secret_names: Sequence[str] = ()
+
+
 def output_json(value: Any) -> str:
     """Format as single-line JSON. Secrets redacted, original keys, raw values."""
     return json.dumps(redacted_value(value), ensure_ascii=False, separators=(",", ":"))
@@ -65,6 +75,15 @@ def output_json_with(value: Any, redaction_policy: RedactionPolicy) -> str:
     return json.dumps(redacted_value_with(value, redaction_policy), ensure_ascii=False, separators=(",", ":"))
 
 
+def output_json_with_options(value: Any, redaction_options: RedactionOptions) -> str:
+    """Format as single-line JSON with explicit redaction options."""
+    return json.dumps(
+        redacted_value_with_options(value, redaction_options),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def output_yaml(value: Any) -> str:
     """Format as multi-line YAML. Keys stripped, values formatted, secrets redacted."""
     value = redacted_value(value)
@@ -73,9 +92,29 @@ def output_yaml(value: Any) -> str:
     return "\n".join(lines)
 
 
+def output_yaml_with_options(value: Any, redaction_options: RedactionOptions) -> str:
+    """Format as multi-line YAML with explicit redaction options."""
+    value = redacted_value_with_options(value, redaction_options)
+    lines = ["---"]
+    _render_yaml_processed(value, 0, lines)
+    return "\n".join(lines)
+
+
 def output_plain(value: Any) -> str:
     """Format as single-line logfmt. Keys stripped, values formatted, secrets redacted."""
     value = redacted_value(value)
+    pairs: list[tuple[str, str]] = []
+    _collect_plain_pairs(value, "", pairs)
+    pairs.sort(key=lambda p: p[0].encode("utf-16-be"))
+    parts = []
+    for k, v in pairs:
+        parts.append(f"{k}={_quote_logfmt_value(v)}")
+    return " ".join(parts)
+
+
+def output_plain_with_options(value: Any, redaction_options: RedactionOptions) -> str:
+    """Format as single-line logfmt with explicit redaction options."""
+    value = redacted_value_with_options(value, redaction_options)
     pairs: list[tuple[str, str]] = []
     _collect_plain_pairs(value, "", pairs)
     pairs.sort(key=lambda p: p[0].encode("utf-16-be"))
@@ -95,6 +134,11 @@ def internal_redact_secrets(value: Any) -> None:
     _redact_secrets(value)
 
 
+def internal_redact_secrets_with_options(value: Any, redaction_options: RedactionOptions) -> None:
+    """Redact secret fields in-place using explicit redaction options."""
+    _apply_redaction_options(value, redaction_options)
+
+
 def redacted_value(value: Any) -> Any:
     """Return a JSON-safe copy with default _secret redaction applied."""
     v = _sanitize_for_json(value)
@@ -109,18 +153,38 @@ def redacted_value_with(value: Any, redaction_policy: RedactionPolicy) -> Any:
     return v
 
 
+def redacted_value_with_options(value: Any, redaction_options: RedactionOptions) -> Any:
+    """Return a JSON-safe copy with explicit redaction options applied."""
+    v = _sanitize_for_json(value)
+    _apply_redaction_options(v, redaction_options)
+    return v
+
+
 def _apply_redaction_policy(value: Any, redaction_policy: RedactionPolicy) -> None:
+    _apply_redaction_policy_with_names(value, redaction_policy, frozenset())
+
+
+def _apply_redaction_options(value: Any, redaction_options: RedactionOptions) -> None:
+    secret_names = _secret_name_set(redaction_options.secret_names)
+    _apply_redaction_policy_with_names(value, redaction_options.policy, secret_names)
+
+
+def _apply_redaction_policy_with_names(
+    value: Any,
+    redaction_policy: RedactionPolicy | None,
+    secret_names: frozenset[str],
+) -> None:
     if redaction_policy == RedactionPolicy.RedactionTraceOnly:
         if isinstance(value, dict) and "trace" in value:
-            _redact_secrets(value["trace"])
+            _redact_secrets(value["trace"], secret_names)
         return
     if redaction_policy == RedactionPolicy.RedactionNone:
         return
     if redaction_policy == RedactionPolicy.RedactionStrict:
-        _redact_secrets_strict(value)
+        _redact_secrets_strict(value, secret_names)
         return
-    # Safety fallback for unknown values.
-    _redact_secrets(value)
+    # Empty/unknown policy falls back to default full redaction.
+    _redact_secrets(value, secret_names)
 
 
 def parse_size(s: str) -> int | None:
@@ -208,31 +272,43 @@ def _sanitize_for_json(value: Any, stack: set[int] | None = None) -> Any:
     return f"<unsupported:{type(value).__name__}>"
 
 
-def _redact_secrets(value: Any) -> None:
+def _secret_name_set(secret_names: Sequence[str]) -> frozenset[str]:
+    return frozenset(secret_names)
+
+
+def _key_has_secret_suffix(key: str) -> bool:
+    return key.endswith("_secret") or key.endswith("_SECRET")
+
+
+def _is_secret_key(key: str, secret_names: frozenset[str]) -> bool:
+    return _key_has_secret_suffix(key) or key in secret_names
+
+
+def _redact_secrets(value: Any, secret_names: frozenset[str] = frozenset()) -> None:
     if isinstance(value, dict):
         for k in list(value.keys()):
-            if k.endswith("_secret") or k.endswith("_SECRET"):
+            if _is_secret_key(k, secret_names):
                 if isinstance(value[k], (dict, list)):
-                    _redact_secrets(value[k])
+                    _redact_secrets(value[k], secret_names)
                 else:
                     value[k] = "***"
             else:
-                _redact_secrets(value[k])
+                _redact_secrets(value[k], secret_names)
     elif isinstance(value, list):
         for item in value:
-            _redact_secrets(item)
+            _redact_secrets(item, secret_names)
 
 
-def _redact_secrets_strict(value: Any) -> None:
+def _redact_secrets_strict(value: Any, secret_names: frozenset[str] = frozenset()) -> None:
     if isinstance(value, dict):
         for k in list(value.keys()):
-            if k.endswith("_secret") or k.endswith("_SECRET"):
+            if _is_secret_key(k, secret_names):
                 value[k] = "***"
             else:
-                _redact_secrets_strict(value[k])
+                _redact_secrets_strict(value[k], secret_names)
     elif isinstance(value, list):
         for item in value:
-            _redact_secrets_strict(item)
+            _redact_secrets_strict(item, secret_names)
 
 
 # ═══════════════════════════════════════════

@@ -1,172 +1,58 @@
 # Agent-First Data
 
-**The field name is the schema.** Agents read `latency_ms` and know milliseconds, `api_key_secret` and know to redact — no external schema needed.
+A naming convention that lets AI agents understand your data without being told what it means.
 
-Agent-First Data (AFDATA) is a convention for self-describing structured data:
+## The problem: data doesn't say what it means
 
-1. **Naming** — Encode units and semantics in field name suffixes (`_ms`, `_bytes`, `_secret`, ...)
-2. **Output** — Three formats (JSON/YAML/Plain) with automatic key stripping, value formatting, and secret redaction
-3. **Protocol** — Optional structured templates (`ok`, `error`, `log`) with `trace` for execution context
-4. **Logging** — AFDATA-compliant structured logging with span support (per-language integration)
-5. **Channel discipline** — machine-readable protocol/log events use `stdout` only; `stderr` is not a protocol channel
+An agent reads `{"timeout": 5000}` from a tool. Seconds or milliseconds? It guesses — and a 5-second timeout silently becomes 83 minutes. The same trap is everywhere: `{"price": 1200}` gets charged as $1,200 instead of $12.00; `{"created": 1738886400}` is treated as an ID instead of a date.
 
-See the full [specification](spec/agent-first-data.md) and the [agent skill](skills/agent-first-data.md) for AI-assisted development.
+It reads `{"api_key": "sk-live-abc123"}` and writes that line straight into a log file, because nothing marked the value as a secret.
 
-## Installation
+Then it moves to the next tool, which calls the same value `elapsed` instead of `duration` — so what the agent learned about one tool tells it nothing about the next.
 
-```bash
-cargo add agent-first-data        # Rust
-pip install agent-first-data       # Python
-npm install agent-first-data       # TypeScript
-go get github.com/agentfirstkit/agent-first-data/go  # Go
-```
+None of this is carelessness. The data never says what it means, so the meaning has to live somewhere else — documentation, a schema, a prompt. That copy goes stale, gets lost, or was never written.
 
-## Quick Example
+## What it does: put the meaning into the field name
 
-A backup tool invoked from the CLI — flags, env vars, and config all use the same suffixes:
+Agent-First Data puts the meaning into the field name itself. Call the field `timeout_ms` and there is nothing left to guess — the name says milliseconds. Call it `api_key_secret` and any tool that follows the convention hides it automatically.
 
-```bash
-API_KEY_SECRET=sk-1234 cloudback --timeout-s 30 --max-file-size-bytes 10737418240 --log startup /data/backup.tar.gz
-```
+It is a convention, not a framework — a small set of name endings, plus a tiny library in four languages that reads and formats them.
 
-The tool reads env vars (`UPPER_SNAKE_CASE`), flags (`--kebab-case`), and config (`snake_case`) — all with AFDATA suffixes. When `startup` logging is enabled, it emits a startup log event. Three output formats, same data:
+- **Names carry meaning.** Endings like `_ms`, `_bytes`, `_secret`, `_usd_cents`, and `_percent` put units and intent directly into the field name.
+- **One set of data, three ways to show it.** The same fields render as JSON for machines, YAML for people, or a single log line for scanning — units formatted, secrets removed.
+- **Secrets stay secret.** Anything ending in `_secret` is hidden automatically, in output and in logs. Legacy names like `api_key` can be protected by passing an explicit secret-name list.
+- **Logging agents can read.** Structured logs that follow the same rules, with request-scoped fields.
+- **The same in four languages.** One identical API across Rust, Go, Python, and TypeScript.
 
-**JSON** (secrets redacted, original keys, for machines):
-```json
-{"code":"log","event":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
-```
+## Where to use it: CLI flags, config files, logs, and API responses
 
-**YAML** (suffixes stripped from keys, values formatted, for humans):
-```yaml
----
-code: "log"
-event: "startup"
-args:
-  input_path: "/data/backup.tar.gz"
-config:
-  max_file_size: "10.0GB"
-  timeout: "30s"
-env:
-  API_KEY: "***"
-```
+- **Building a CLI tool an agent will call** — your output is understood correctly the first time, with no extra schema to ship.
+- **Writing a config file** — keys like `timeout_s` or `db_password_secret` make settings self-explanatory to whoever edits them, and secrets stay hidden when the config is printed back.
+- **Adding logs to a service** — the same lines stay readable for a person and parseable for an agent.
+- **Designing an API response or event payload** — units and sensitivity travel *with* the data, across every boundary it crosses.
+- **Auditing for leaked secrets** — one naming rule (`_secret`) makes redaction automatic instead of case-by-case.
 
-**Plain** (single-line logfmt, keys stripped, for log scanning):
-```
-args.input_path=/data/backup.tar.gz code=log event=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
-```
+## Adopt it: hand the convention to your coding agent
 
-`--timeout-s` → `timeout_s` → `timeout: 30s`. `API_KEY_SECRET` → `API_KEY: "***"`. Same suffixes flow through env vars, CLI flags, JSON, and formatted output — the suffix is the schema.
+Agent-First Data is a convention, not a dependency you wire in by hand — and adopting a convention is exactly the kind of work you now hand to an agent. There's even an [Agent Skill](skills/agent-first-data.md) for exactly that — the convention in a form an agent reads and applies directly. Paste this to your coding agent:
 
-CLI logging flags:
+> Learn the Agent-First Data convention: read https://agentfirstkit.com/agent-first-data/docs/overview and https://agentfirstkit.com/agent-first-data/docs/agent-skill. Then look at the codebase we're working in and tell me whether adopting the convention would help it — and if so, how: which fields and config keys to rename, and where the output and logging helpers fit.
+
+The library, if you want it:
 
 ```bash
---log startup,request,progress,retry,redirect
---verbose   # shorthand for all log categories
+cargo add agent-first-data       # Rust
+pip install agent-first-data     # Python
+npm install agent-first-data     # TypeScript
+go get github.com/agentfirstkit/agent-first-data/go   # Go
 ```
 
-## API (15 functions + 2 types, same across all languages)
+## Docs
 
-| Function / Type | Returns | Description |
-|:----------------|:--------|:------------|
-| `build_json_ok` | JSON | `{code: "ok", result, trace?}` |
-| `build_json_error` | JSON | `{code: "error", error, hint?, trace?}` |
-| `build_json` | JSON | `{code: "<custom>", ...fields, trace?}` |
-| `redacted_value` | JSON | JSON-safe copy with default `_secret` redaction, for raw HTTP/MCP/SSE serializers |
-| `redacted_value_with` | JSON | JSON-safe copy with explicit redaction policy |
-| `output_json` | String | Single-line JSON, secrets redacted |
-| `output_json_with` | String | Single-line JSON with explicit redaction policy |
-| `output_yaml` | String | Multi-line YAML, keys stripped, values formatted |
-| `output_plain` | String | Single-line logfmt, keys stripped, values formatted |
-| `internal_redact_secrets` | void | Redact `_secret` fields in-place |
-| `parse_size` | int | Parse `"10M"` → bytes; invalid/overflow returns language-specific invalid result |
-| `OutputFormat` | type | `"json"` / `"yaml"` / `"plain"` enum/type |
-| `RedactionPolicy` | type | `RedactionTraceOnly` / `RedactionNone` / `RedactionStrict` |
-| `cli_parse_output` | OutputFormat | Parse `--output` flag; error on unknown value |
-| `cli_parse_log_filters` | String[] | Normalize `--log` entries: trim, lowercase, dedup, remove empty |
-| `cli_output` | String | Dispatch to `output_json` / `output_yaml` / `output_plain` |
-| `build_cli_error` | JSON | `{code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}` |
-
-AFDATA suffixes describe local field semantics; they are not a full schema language. Use JSON Schema, OpenAPI, database constraints, or typed APIs for required fields, enums, ranges, and object shapes. For raw JSON transports that do not call `output_json` (HTTP bodies, MCP tool returns, SSE events), call `redacted_value` first.
-
-## AFDATA Logging
-
-AFDATA-compliant structured logging. Log output is formatted using the library's own `output_json`/`output_plain`/`output_yaml` functions — same suffix processing, key stripping, and secret redaction as the core output API. Span fields are automatically flattened into each event line, solving concurrent request interleaving.
-
-Each language integrates with its native logging ecosystem:
-
-| Language | Integration | Span Mechanism | Output Formats |
-|:---------|:------------|:---------------|:---------------|
-| **Rust** | `tracing` Layer (feature `"tracing"`) | tracing spans | `init_json` / `init_plain` / `init_yaml` |
-| **Go** | `log/slog` Handler | `WithAttrs` / `WithSpan(ctx)` | `InitJson` / `InitPlain` / `InitYaml` |
-| **Python** | `logging` Handler | `contextvars` | `init_logging_json` / `init_logging_plain` / `init_logging_yaml` |
-| **TypeScript** | Built-in logger | `AsyncLocalStorage` | `initJson` / `initPlain` / `initYaml` |
-
-Minimum envelope contract across languages:
-- Required fields: `timestamp_epoch_ms`, `message`, `code`
-- Optional fields: `target` and tool-specific structured fields
-
-**JSON output** (production — secrets redacted, original keys):
-```json
-{"timestamp_epoch_ms":1739000000000,"message":"Processing","request_id":"abc-123","code":"info"}
-```
-
-**Plain output** (development — keys stripped, values formatted):
-```
-code=info message=Processing request_id=abc-123 timestamp_epoch_ms=1739000000000
-```
-
-**Rust:**
-```rust
-use agent_first_data::afdata_tracing;
-afdata_tracing::init_json(EnvFilter::new("info"));   // or init_plain / init_yaml
-
-let span = info_span!("request", request_id = %uuid);
-let _guard = span.enter();
-info!("Processing");
-```
-
-**Go:**
-```go
-afdata.InitJson()   // or InitPlain / InitYaml
-
-ctx := afdata.WithSpan(ctx, map[string]any{"request_id": uuid})
-afdata.LoggerFromContext(ctx).Info("Processing")
-```
-
-**Python:**
-```python
-from agent_first_data import init_logging_json, span  # or init_logging_plain / init_logging_yaml
-
-init_logging_json("INFO")
-with span(request_id=uuid):
-    logger.info("Processing")
-```
-
-**TypeScript:**
-```typescript
-import { log, span, initJson } from "agent-first-data";  // or initPlain / initYaml
-
-await span({ request_id: uuid }, async () => {
-  log.info("Processing");
-});
-```
-
-## Supported Suffixes
-
-| Category | Suffixes | Example |
-|:---------|:---------|:--------|
-| **Duration** | `_ns`, `_us`, `_ms`, `_s`, `_minutes`, `_hours`, `_days` | `latency_ms: 1280` → `latency: 1.28s` |
-| **Timestamps** | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` | `created_at_epoch_ms: 1738886400000` → `created_at: 2025-02-07T00:00:00.000Z` |
-| **Size** | `_bytes` (output), `_size` (config input) | `file_size_bytes: 5242880` → `file_size: 5.0MB` |
-| **Currency** | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` | `price_usd_cents: 999` → `price: $9.99` |
-| **Other** | `_percent`, `_secret` | `cpu_percent: 85` → `cpu: 85%` |
-
-## Language Documentation
-
-- **[Rust](rust/)** — Full API reference, examples, and AFDATA tracing
-- **[Go](go/)** — Full API reference, examples, and AFDATA logging
-- **[Python](python/)** — Full API reference, examples, and AFDATA logging
-- **[TypeScript](typescript/)** — Full API reference, examples, and AFDATA logging
+- [Overview](docs/overview.md) — the full guide: examples, the complete API, every supported suffix, and logging
+- [Specification](spec/agent-first-data.md) — the formal convention
+- [Agent Skill](skills/agent-first-data.md) — for AI-assisted development
+- Per-language API reference: [Rust](rust) · [Go](go) · [Python](python) · [TypeScript](typescript)
 
 ## License
 

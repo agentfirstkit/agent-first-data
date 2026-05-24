@@ -27,6 +27,29 @@ func loadFixture(name string) []map[string]any {
 	return result
 }
 
+func redactionOptionsFromCase(tc map[string]any) RedactionOptions {
+	opts, _ := tc["options"].(map[string]any)
+	redactionOptions := RedactionOptions{}
+	if policy, ok := opts["policy"].(string); ok {
+		switch policy {
+		case "RedactionTraceOnly":
+			redactionOptions.Policy = RedactionTraceOnly
+		case "RedactionNone":
+			redactionOptions.Policy = RedactionNone
+		case "RedactionStrict":
+			redactionOptions.Policy = RedactionStrict
+		default:
+			panic(fmt.Sprintf("unknown redaction policy: %s", policy))
+		}
+	}
+	if names, ok := opts["secret_names"].([]any); ok {
+		for _, name := range names {
+			redactionOptions.SecretNames = append(redactionOptions.SecretNames, name.(string))
+		}
+	}
+	return redactionOptions
+}
+
 type secretStringFunc func()
 
 func (secretStringFunc) String() string {
@@ -53,6 +76,53 @@ func TestRedactFixtures(t *testing.T) {
 			expJSON, _ := json.Marshal(expected)
 			if string(gotJSON) != string(expJSON) {
 				t.Errorf("got %s, want %s", gotJSON, expJSON)
+			}
+		})
+	}
+}
+
+func TestRedactionOptionsFixtures(t *testing.T) {
+	for _, tc := range loadFixture("redaction_options.json") {
+		name := tc["name"].(string)
+		t.Run(name, func(t *testing.T) {
+			options := redactionOptionsFromCase(tc)
+			expected := tc["expected"]
+
+			got := RedactedValueWithOptions(tc["input"], options)
+			gotJSON, _ := json.Marshal(got)
+			expJSON, _ := json.Marshal(expected)
+			if string(gotJSON) != string(expJSON) {
+				t.Errorf("redacted value got %s, want %s", gotJSON, expJSON)
+			}
+
+			b, _ := json.Marshal(tc["input"])
+			var inp any
+			json.Unmarshal(b, &inp)
+			InternalRedactSecretsWithOptions(inp, options)
+			gotJSON, _ = json.Marshal(inp)
+			if string(gotJSON) != string(expJSON) {
+				t.Errorf("in-place got %s, want %s", gotJSON, expJSON)
+			}
+
+			jsonLine := OutputJsonWithOptions(tc["input"], options)
+			var gotOutput any
+			if err := json.Unmarshal([]byte(jsonLine), &gotOutput); err != nil {
+				t.Fatalf("invalid JSON output: %v (%s)", err, jsonLine)
+			}
+			gotJSON, _ = json.Marshal(gotOutput)
+			if string(gotJSON) != string(expJSON) {
+				t.Errorf("json output got %s, want %s", gotJSON, expJSON)
+			}
+
+			if expectedYAML, ok := tc["expected_yaml"].(string); ok {
+				if got := OutputYamlWithOptions(tc["input"], options); got != expectedYAML {
+					t.Errorf("yaml got %q, want %q", got, expectedYAML)
+				}
+			}
+			if expectedPlain, ok := tc["expected_plain"].(string); ok {
+				if got := OutputPlainWithOptions(tc["input"], options); got != expectedPlain {
+					t.Errorf("plain got %q, want %q", got, expectedPlain)
+				}
 			}
 		})
 	}

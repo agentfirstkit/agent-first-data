@@ -64,7 +64,7 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **15 public APIs and 2 types** + **AFDATA logging** (3 protocol builders + 2 redacted value helpers + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
+Public APIs are grouped by role: protocol builders, redaction helpers, output formatters, internal redaction tools, utility/CLI helpers, types, and AFDATA logging integration.
 
 ### Protocol Builders (returns map[string]any)
 
@@ -81,13 +81,14 @@ BuildJsonError(message string, hint string, trace any) map[string]any
 BuildJson(code string, fields any, trace any) map[string]any
 ```
 
-### Redacted Values (returns any)
+### Redaction Helpers (returns any)
 
 Use these before raw HTTP/MCP/SSE serializers that do not call `OutputJson`.
 
 ```go
 RedactedValue(value any) any
 RedactedValueWith(value any, redactionPolicy RedactionPolicy) any
+RedactedValueWithOptions(value any, redactionOptions RedactionOptions) any
 ```
 
 **Use case:** structured protocol payloads (frameworks serialize to JSON)
@@ -128,15 +129,18 @@ notFound := afdata.BuildJson(
 )
 ```
 
-### CLI/Log Output (returns string)
+### Output Formatters (returns string)
 
-Format values for CLI output and logs. `OutputJson` uses full `_secret` redaction by default. `OutputJsonWith` supports explicit scoped policies. YAML and Plain always redact `_secret` and apply human-readable formatting.
+Format values for CLI output and logs. `OutputJson` uses full `_secret` redaction by default. `OutputJsonWith` supports explicit scoped policies. Use the `*WithOptions` functions to pass legacy secret names such as `api_key`. YAML and Plain always redact secrets and apply human-readable formatting.
 
 ```go
 OutputJson(value any) string   // Single-line JSON, original keys, for programs/logs
 OutputJsonWith(value any, redactionPolicy RedactionPolicy) string
+OutputJsonWithOptions(value any, redactionOptions RedactionOptions) string
 OutputYaml(value any) string   // Multi-line YAML, keys stripped, values formatted
+OutputYamlWithOptions(value any, redactionOptions RedactionOptions) string
 OutputPlain(value any) string  // Single-line logfmt, keys stripped, values formatted
+OutputPlainWithOptions(value any, redactionOptions RedactionOptions) string
 ```
 
 ```go
@@ -146,7 +150,14 @@ const (
     RedactionNone      RedactionPolicy = "RedactionNone"
     RedactionStrict    RedactionPolicy = "RedactionStrict"
 )
+
+type RedactionOptions struct {
+    Policy      RedactionPolicy // empty means default full redaction
+    SecretNames []string        // legacy names like "api_key" or "authorization"
+}
 ```
+
+Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. They do not change YAML/Plain suffix stripping.
 
 **Example:**
 ```go
@@ -180,6 +191,7 @@ fmt.Println(afdata.OutputPlain(data))
 
 ```go
 InternalRedactSecrets(value any)  // Manually redact secrets in-place
+InternalRedactSecretsWithOptions(value any, redactionOptions RedactionOptions)
 ```
 
 Most users don't need this. Output functions automatically protect secrets.

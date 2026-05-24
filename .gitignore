@@ -9,3 +9,6 @@ rust/target
 python/build
 python/dist
 python/*.egg-info
+
+# Python venv (auto-provisioned by test.sh when system python lacks deps)
+.venv

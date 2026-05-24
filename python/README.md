@@ -65,7 +65,7 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **15 public APIs and 2 types** + **AFDATA logging** (3 protocol builders + 2 redacted value helpers + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
+Public APIs are grouped by role: protocol builders, redaction helpers, output formatters, internal redaction tools, utility/CLI helpers, types, and AFDATA logging integration.
 
 ### Protocol Builders (returns dict)
 
@@ -82,13 +82,14 @@ build_json_error(message: str, hint: str = None, trace: Any = None) -> dict
 build_json(code: str, fields: Any, trace: Any = None) -> dict
 ```
 
-### Redacted Values (returns Any)
+### Redaction Helpers (returns Any)
 
 Use these before raw HTTP/MCP/SSE serializers that do not call `output_json`.
 
 ```python
 redacted_value(value: Any) -> Any
 redacted_value_with(value: Any, redaction_policy: RedactionPolicy) -> Any
+redacted_value_with_options(value: Any, redaction_options: RedactionOptions) -> Any
 ```
 
 **Use case:** structured protocol payloads (frameworks automatically serialize)
@@ -129,15 +130,18 @@ not_found = build_json(
 )
 ```
 
-### CLI/Log Output (returns str)
+### Output Formatters (returns str)
 
-Format values for CLI output and logs. `output_json` uses full `_secret` redaction by default. `output_json_with` supports explicit scoped policies. YAML and Plain always redact `_secret` and apply human-readable formatting.
+Format values for CLI output and logs. `output_json` uses full `_secret` redaction by default. `output_json_with` supports explicit scoped policies. Use the `*_with_options` functions to pass legacy secret names such as `api_key`. YAML and Plain always redact secrets and apply human-readable formatting.
 
 ```python
 output_json(value: Any) -> str   # Single-line JSON, original keys, for programs/logs
 output_json_with(value: Any, redaction_policy: RedactionPolicy) -> str
+output_json_with_options(value: Any, redaction_options: RedactionOptions) -> str
 output_yaml(value: Any) -> str   # Multi-line YAML, keys stripped, values formatted
+output_yaml_with_options(value: Any, redaction_options: RedactionOptions) -> str
 output_plain(value: Any) -> str  # Single-line logfmt, keys stripped, values formatted
+output_plain_with_options(value: Any, redaction_options: RedactionOptions) -> str
 ```
 
 ```python
@@ -145,7 +149,11 @@ class RedactionPolicy(enum.Enum):
     RedactionTraceOnly = "RedactionTraceOnly"
     RedactionNone = "RedactionNone"
     RedactionStrict = "RedactionStrict"
+
+RedactionOptions(policy: RedactionPolicy | None = None, secret_names: Sequence[str] = ())
 ```
+
+Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. They do not change YAML/Plain suffix stripping.
 
 **Example:**
 ```python
@@ -179,6 +187,7 @@ print(output_plain(data))
 
 ```python
 internal_redact_secrets(value: Any) -> None  # Manually redact secrets in-place
+internal_redact_secrets_with_options(value: Any, redaction_options: RedactionOptions) -> None
 ```
 
 Most users don't need this. Output functions automatically protect secrets.

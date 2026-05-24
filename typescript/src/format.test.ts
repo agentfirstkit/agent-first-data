@@ -12,13 +12,19 @@ import {
   buildJsonError,
   buildJson,
   internalRedactSecrets,
+  internalRedactSecretsWithOptions,
   redactedValue,
   redactedValueWith,
+  redactedValueWithOptions,
   RedactionPolicy,
+  type RedactionOptions,
   outputJson,
   outputJsonWith,
+  outputJsonWithOptions,
   outputYaml,
+  outputYamlWithOptions,
   outputPlain,
+  outputPlainWithOptions,
   type JsonValue,
   parseSize,
 } from "./format.ts";
@@ -30,6 +36,14 @@ function load(name: string): any[] {
   return JSON.parse(readFileSync(join(FIXTURES_DIR, name), "utf-8"));
 }
 
+function redactionOptions(tc: any): RedactionOptions {
+  const opts = tc.options ?? {};
+  return {
+    policy: opts.policy as RedactionPolicy | undefined,
+    secretNames: opts.secret_names ?? [],
+  };
+}
+
 // --- Redact fixtures ---
 
 describe("redact fixtures", () => {
@@ -38,6 +52,30 @@ describe("redact fixtures", () => {
       const inp = JSON.parse(JSON.stringify(tc.input));
       internalRedactSecrets(inp);
       assert.deepEqual(inp, tc.expected);
+    });
+  }
+});
+
+describe("redaction options fixtures", () => {
+  for (const tc of load("redaction_options.json")) {
+    it(tc.name, () => {
+      const options = redactionOptions(tc);
+      const got = redactedValueWithOptions(tc.input, options);
+      assert.deepEqual(got, tc.expected, "value mismatch");
+
+      const inp = JSON.parse(JSON.stringify(tc.input));
+      internalRedactSecretsWithOptions(inp, options);
+      assert.deepEqual(inp, tc.expected, "in-place mismatch");
+
+      const gotJson = JSON.parse(outputJsonWithOptions(tc.input as JsonValue, options));
+      assert.deepEqual(gotJson, tc.expected, "json mismatch");
+
+      if (tc.expected_yaml !== undefined) {
+        assert.equal(outputYamlWithOptions(tc.input as JsonValue, options), tc.expected_yaml, "yaml mismatch");
+      }
+      if (tc.expected_plain !== undefined) {
+        assert.equal(outputPlainWithOptions(tc.input as JsonValue, options), tc.expected_plain, "plain mismatch");
+      }
     });
   }
 });

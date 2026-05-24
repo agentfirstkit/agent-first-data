@@ -1,9 +1,9 @@
 // Package afdata implements Agent-First Data (AFDATA) output formatting
 // and protocol templates.
 //
-// 15 public APIs and 2 types: 3 protocol builders + 2 redacted value helpers +
-// 4 output formatters + 1 redaction + 1 utility + 4 CLI helpers +
-// OutputFormat + RedactionPolicy.
+// 20 public APIs and 3 types: 3 protocol builders + 3 redacted value helpers +
+// 7 output formatters + 2 redaction helpers + 1 utility + 4 CLI helpers +
+// OutputFormat + RedactionPolicy + RedactionOptions.
 package afdata
 
 import (
@@ -73,6 +73,15 @@ const (
 	RedactionStrict    RedactionPolicy = "RedactionStrict"
 )
 
+// RedactionOptions controls scoped redaction and legacy secret field names.
+type RedactionOptions struct {
+	// Policy controls where redaction is applied. Empty means default full redaction.
+	Policy RedactionPolicy
+	// SecretNames are field names to redact in addition to _secret suffixes.
+	// Matching is exact field-name equality at any nesting level.
+	SecretNames []string
+}
+
 // OutputJson formats as single-line JSON. Secrets redacted, original keys, raw values.
 func OutputJson(value any) string {
 	return marshalOutputJSON(RedactedValue(value))
@@ -81,6 +90,11 @@ func OutputJson(value any) string {
 // OutputJsonWith formats as single-line JSON with explicit redaction policy.
 func OutputJsonWith(value any, redactionPolicy RedactionPolicy) string {
 	return marshalOutputJSON(RedactedValueWith(value, redactionPolicy))
+}
+
+// OutputJsonWithOptions formats as single-line JSON with explicit redaction options.
+func OutputJsonWithOptions(value any, redactionOptions RedactionOptions) string {
+	return marshalOutputJSON(RedactedValueWithOptions(value, redactionOptions))
 }
 
 func marshalOutputJSON(value any) string {
@@ -103,10 +117,31 @@ func OutputYaml(value any) string {
 	return strings.Join(lines, "\n")
 }
 
+// OutputYamlWithOptions formats as multi-line YAML with explicit redaction options.
+func OutputYamlWithOptions(value any, redactionOptions RedactionOptions) string {
+	lines := []string{"---"}
+	renderYamlProcessed(RedactedValueWithOptions(value, redactionOptions), 0, &lines)
+	return strings.Join(lines, "\n")
+}
+
 // OutputPlain formats as single-line logfmt. Keys stripped, values formatted, secrets redacted.
 func OutputPlain(value any) string {
 	var pairs [][2]string
 	collectPlainPairs(RedactedValue(value), "", &pairs)
+	sort.Slice(pairs, func(i, j int) bool {
+		return jcsLess(pairs[i][0], pairs[j][0])
+	})
+	parts := make([]string, len(pairs))
+	for i, p := range pairs {
+		parts[i] = fmt.Sprintf("%s=%s", p[0], quoteLogfmtValue(p[1]))
+	}
+	return strings.Join(parts, " ")
+}
+
+// OutputPlainWithOptions formats as single-line logfmt with explicit redaction options.
+func OutputPlainWithOptions(value any, redactionOptions RedactionOptions) string {
+	var pairs [][2]string
+	collectPlainPairs(RedactedValueWithOptions(value, redactionOptions), "", &pairs)
 	sort.Slice(pairs, func(i, j int) bool {
 		return jcsLess(pairs[i][0], pairs[j][0])
 	})
@@ -126,6 +161,11 @@ func InternalRedactSecrets(value any) {
 	redactSecrets(value)
 }
 
+// InternalRedactSecretsWithOptions redacts secret fields in-place using explicit options.
+func InternalRedactSecretsWithOptions(value any, redactionOptions RedactionOptions) {
+	applyRedactionOptions(value, redactionOptions)
+}
+
 // RedactedValue returns a JSON-safe copy with default _secret redaction applied.
 func RedactedValue(value any) any {
 	v := sanitizeForJSON(value)
@@ -137,6 +177,13 @@ func RedactedValue(value any) any {
 func RedactedValueWith(value any, redactionPolicy RedactionPolicy) any {
 	v := sanitizeForJSON(value)
 	applyRedactionPolicy(v, redactionPolicy)
+	return v
+}
+
+// RedactedValueWithOptions returns a JSON-safe copy with explicit redaction options applied.
+func RedactedValueWithOptions(value any, redactionOptions RedactionOptions) any {
+	v := sanitizeForJSON(value)
+	applyRedactionOptions(v, redactionOptions)
 	return v
 }
 
@@ -196,61 +243,105 @@ func ParseSize(s string) (uint64, bool) {
 // Secret Redaction
 // ═══════════════════════════════════════════
 
+type redactionContext struct {
+	secretNames map[string]struct{}
+}
+
+func newRedactionContext(redactionOptions RedactionOptions) redactionContext {
+	names := make(map[string]struct{}, len(redactionOptions.SecretNames))
+	for _, name := range redactionOptions.SecretNames {
+		names[name] = struct{}{}
+	}
+	return redactionContext{secretNames: names}
+}
+
+func (c redactionContext) isSecretKey(key string) bool {
+	if keyHasSecretSuffix(key) {
+		return true
+	}
+	if len(c.secretNames) == 0 {
+		return false
+	}
+	_, ok := c.secretNames[key]
+	return ok
+}
+
+func keyHasSecretSuffix(key string) bool {
+	return strings.HasSuffix(key, "_secret") || strings.HasSuffix(key, "_SECRET")
+}
+
 func redactSecrets(value any) {
+	redactSecretsWithContext(value, redactionContext{})
+}
+
+func redactSecretsWithContext(value any, context redactionContext) {
 	switch v := value.(type) {
 	case map[string]any:
 		for k := range v {
-			if strings.HasSuffix(k, "_secret") || strings.HasSuffix(k, "_SECRET") {
+			if context.isSecretKey(k) {
 				switch v[k].(type) {
 				case map[string]any, []any:
 					// Traverse containers, don't replace
-					redactSecrets(v[k])
+					redactSecretsWithContext(v[k], context)
 				default:
 					v[k] = "***"
 				}
 			} else {
-				redactSecrets(v[k])
+				redactSecretsWithContext(v[k], context)
 			}
 		}
 	case []any:
 		for _, item := range v {
-			redactSecrets(item)
+			redactSecretsWithContext(item, context)
 		}
 	}
 }
 
 func redactSecretsStrict(value any) {
+	redactSecretsStrictWithContext(value, redactionContext{})
+}
+
+func redactSecretsStrictWithContext(value any, context redactionContext) {
 	switch v := value.(type) {
 	case map[string]any:
 		for k := range v {
-			if strings.HasSuffix(k, "_secret") || strings.HasSuffix(k, "_SECRET") {
+			if context.isSecretKey(k) {
 				v[k] = "***"
 			} else {
-				redactSecretsStrict(v[k])
+				redactSecretsStrictWithContext(v[k], context)
 			}
 		}
 	case []any:
 		for _, item := range v {
-			redactSecretsStrict(item)
+			redactSecretsStrictWithContext(item, context)
 		}
 	}
 }
 
 func applyRedactionPolicy(value any, redactionPolicy RedactionPolicy) {
+	applyRedactionPolicyWithContext(value, redactionPolicy, redactionContext{})
+}
+
+func applyRedactionOptions(value any, redactionOptions RedactionOptions) {
+	context := newRedactionContext(redactionOptions)
+	applyRedactionPolicyWithContext(value, redactionOptions.Policy, context)
+}
+
+func applyRedactionPolicyWithContext(value any, redactionPolicy RedactionPolicy, context redactionContext) {
 	switch redactionPolicy {
 	case RedactionTraceOnly:
 		if obj, ok := value.(map[string]any); ok {
 			if trace, exists := obj["trace"]; exists {
-				redactSecrets(trace)
+				redactSecretsWithContext(trace, context)
 			}
 		}
 	case RedactionNone:
 		// Explicitly disabled.
 	case RedactionStrict:
-		redactSecretsStrict(value)
+		redactSecretsStrictWithContext(value, context)
 	default:
-		// Safety fallback for unknown policy values.
-		redactSecrets(value)
+		// Empty/unknown policy falls back to default full redaction.
+		redactSecretsWithContext(value, context)
 	}
 }
 

@@ -63,7 +63,7 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **15 public APIs and 2 types** + **AFDATA logging** (3 protocol builders + 2 redacted value helpers + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
+Public APIs are grouped by role: protocol builders, redaction helpers, output formatters, internal redaction tools, utility/CLI helpers, types, and AFDATA logging integration.
 
 ### Protocol Builders (returns JsonValue)
 
@@ -82,13 +82,14 @@ buildJsonError(message: string, hint?: string, trace?: JsonValue): JsonValue
 buildJson(code: string, fields: JsonValue, trace?: JsonValue): JsonValue
 ```
 
-### Redacted Values (returns JsonValue)
+### Redaction Helpers (returns JsonValue)
 
 Use these before raw HTTP/MCP/SSE serializers that do not call `outputJson`.
 
 ```typescript
 redactedValue(value: unknown): JsonValue
 redactedValueWith(value: unknown, redactionPolicy: RedactionPolicy): JsonValue
+redactedValueWithOptions(value: unknown, redactionOptions: RedactionOptions): JsonValue
 ```
 
 **Use case:** structured protocol payloads (frameworks automatically serialize)
@@ -128,15 +129,18 @@ const notFound = buildJson(
 );
 ```
 
-### CLI/Log Output (returns string)
+### Output Formatters (returns string)
 
-Format values for CLI output and logs. `outputJson` uses full `_secret` redaction by default. `outputJsonWith` supports explicit scoped policies. YAML and Plain always redact `_secret` and apply human-readable formatting.
+Format values for CLI output and logs. `outputJson` uses full `_secret` redaction by default. `outputJsonWith` supports explicit scoped policies. Use the `*WithOptions` functions to pass legacy secret names such as `api_key`. YAML and Plain always redact secrets and apply human-readable formatting.
 
 ```typescript
 outputJson(value: JsonValue): string   // Single-line JSON, original keys, for programs/logs
 outputJsonWith(value: JsonValue, redactionPolicy: RedactionPolicy): string
+outputJsonWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string
 outputYaml(value: JsonValue): string   // Multi-line YAML, keys stripped, values formatted
+outputYamlWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string
 outputPlain(value: JsonValue): string  // Single-line logfmt, keys stripped, values formatted
+outputPlainWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string
 ```
 
 ```typescript
@@ -145,7 +149,14 @@ enum RedactionPolicy {
   RedactionNone = "RedactionNone",
   RedactionStrict = "RedactionStrict",
 }
+
+type RedactionOptions = {
+  policy?: RedactionPolicy;
+  secretNames?: readonly string[]; // legacy names like "api_key" or "authorization"
+}
 ```
+
+Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. They do not change YAML/Plain suffix stripping.
 
 **Example:**
 ```typescript
@@ -179,6 +190,7 @@ console.log(outputPlain(data));
 
 ```typescript
 internalRedactSecrets(value: JsonValue): void  // Manually redact secrets in-place
+internalRedactSecretsWithOptions(value: JsonValue, redactionOptions: RedactionOptions): void
 ```
 
 Most users don't need this. Output functions automatically protect secrets.

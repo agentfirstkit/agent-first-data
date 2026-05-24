@@ -8,13 +8,19 @@ from agent_first_data import (
     build_json_error,
     build_json,
     RedactionPolicy,
+    RedactionOptions,
     internal_redact_secrets,
+    internal_redact_secrets_with_options,
     redacted_value,
     redacted_value_with,
+    redacted_value_with_options,
     output_json,
     output_json_with,
+    output_json_with_options,
     output_yaml,
+    output_yaml_with_options,
     output_plain,
+    output_plain_with_options,
 )
 from agent_first_data.format import (
     _format_bytes_human,
@@ -31,6 +37,12 @@ def _load(name):
         return json.load(f)
 
 
+def _redaction_options(case):
+    opts = case.get("options", {})
+    policy = RedactionPolicy(opts["policy"]) if "policy" in opts else None
+    return RedactionOptions(policy=policy, secret_names=opts.get("secret_names", ()))
+
+
 # --- Redact fixtures ---
 
 
@@ -40,6 +52,30 @@ def test_redact_fixtures():
         inp = json.loads(json.dumps(case["input"]))  # deep copy
         internal_redact_secrets(inp)
         assert inp == case["expected"], f"[redact/{name}] got {inp}"
+
+
+def test_redaction_options_fixtures():
+    for case in _load("redaction_options.json"):
+        name = case["name"]
+        options = _redaction_options(case)
+        expected = case["expected"]
+
+        got = redacted_value_with_options(case["input"], options)
+        assert got == expected, f"[redaction_options/{name}] value mismatch: {got}"
+
+        inp = json.loads(json.dumps(case["input"]))
+        internal_redact_secrets_with_options(inp, options)
+        assert inp == expected, f"[redaction_options/{name}] in-place mismatch: {inp}"
+
+        got_json = json.loads(output_json_with_options(case["input"], options))
+        assert got_json == expected, f"[redaction_options/{name}] json mismatch: {got_json}"
+
+        if "expected_yaml" in case:
+            got_yaml = output_yaml_with_options(case["input"], options)
+            assert got_yaml == case["expected_yaml"], f"[redaction_options/{name}] yaml mismatch: {got_yaml!r}"
+        if "expected_plain" in case:
+            got_plain = output_plain_with_options(case["input"], options)
+            assert got_plain == case["expected_plain"], f"[redaction_options/{name}] plain mismatch: {got_plain!r}"
 
 
 # --- Protocol fixtures ---

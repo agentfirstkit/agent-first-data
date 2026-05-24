@@ -85,7 +85,7 @@ Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` 
 |:-------|:---------|:--------|
 | `_secret` | redact to `***` | `api_key_secret: "sk-or-v1-abc..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Matching recognizes `_secret` and `_SECRET` only — no mixed case.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Matching recognizes `_secret` and `_SECRET` only — no mixed case. For legacy fields that cannot be renamed, pass `RedactionOptions` with `secret_names`/`secretNames` such as `["api_key", "authorization"]`; names match exact field names at any nesting level; no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching.
 
 ### Environment variables
 
@@ -228,27 +228,15 @@ All use `code` / `result` / `error` / `trace`. Do not split protocol events acro
 
 ## Using the Library
 
-15 public APIs and 2 types (same across all languages):
+Public APIs are grouped consistently across languages:
 
-| Function / Type | What it does |
-|:----------------|:-------------|
-| `build_json_ok` | Build `{code: "ok", result, trace?}` |
-| `build_json_error` | Build `{code: "error", error, trace?}` |
-| `build_json` | Build `{code: "<custom>", ...fields, trace?}` |
-| `redacted_value` | JSON-safe copy with default `_secret` redaction |
-| `redacted_value_with` | JSON-safe copy with explicit redaction policy |
-| `output_json` | Single-line JSON, secrets redacted, original keys |
-| `output_json_with` | Single-line JSON with explicit redaction policy |
-| `output_yaml` | Multi-line YAML, keys stripped, values formatted |
-| `output_plain` | Single-line logfmt, keys stripped, values formatted |
-| `internal_redact_secrets` | Redact `_secret` fields in-place |
-| `parse_size` | Parse `"10M"` → bytes |
-| `OutputFormat` | `"json"` / `"yaml"` / `"plain"` enum/type |
-| `RedactionPolicy` | `RedactionTraceOnly` / `RedactionNone` / `RedactionStrict` enum/type |
-| `cli_parse_output` | Parse `--output` flag; error on unknown value |
-| `cli_parse_log_filters` | Normalize `--log` entries: trim, lowercase, dedup, remove empty |
-| `cli_output` | Dispatch to `output_json` / `output_yaml` / `output_plain` |
-| `build_cli_error` | `{code:"error", error_code:"invalid_request", retryable:false, trace:{duration_ms:0}}` |
+| Group | APIs |
+|:------|:-----|
+| Protocol builders | `build_json_ok`, `build_json_error`, `build_json` |
+| Redaction helpers | `redacted_value`, `redacted_value_with`, `redacted_value_with_options`, `internal_redact_secrets`, `internal_redact_secrets_with_options` |
+| Output formatters | `output_json`, `output_json_with`, `output_json_with_options`, `output_yaml`, `output_yaml_with_options`, `output_plain`, `output_plain_with_options` |
+| CLI utilities | `parse_size`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `build_cli_error` |
+| Types | `OutputFormat`, `RedactionPolicy`, `RedactionOptions` |
 
 ### Rust
 

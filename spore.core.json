@@ -2,10 +2,10 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
-  "synopsis": "The field name is the schema — agents read latency_ms and know milliseconds, api_key_secret and know to redact, no external schema needed",
+  "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
   "intent": [
     "Encode all semantic information in the field name itself so agents parse structured data without external schemas, documentation, or type systems — _ms/_s/_epoch_ms for time, _msats/_sats/_usd_cents for currency, _bytes for size, _secret for auto-redaction",
     "Define a JSONL output protocol where every line carries a code field (startup for config state, tool-defined for status/progress, ok/error for results) plus a trace object for execution context (duration, token counts, cost, data source) — same structure whether the transport is CLI stdout, HTTP response body, MCP tool result, or SSE stream",
@@ -13,8 +13,7 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Add cli_render_help and cli_render_help_markdown as optional Rust APIs (cli-help and cli-help-markdown features) for recursive help rendering — agents read --help once and get all subcommands and flags expanded in a single output, with scoping support for subcommand-level help",
-    "Harden secret redaction across the Rust, Go, Python, and TypeScript libraries so _secret-suffixed fields cannot leak: render JSON/YAML/plain output from sanitized redacted copies so key-name collisions cannot restore raw secret values, make Go YAML/plain fallbacks type-only so Stringer and unsupported struct values cannot stringify raw fields, escape logfmt plain values to preserve one record per line, and add a strict redaction mode with shared cross-language test fixtures"
+    "Add RedactionOptions type and *_with_options API variants (redacted_value_with_options, internal_redact_secrets_with_options, output_json_with_options, output_yaml_with_options, output_plain_with_options) across all four languages so legacy fields like api_key or Authorization that cannot be renamed with the _secret suffix can still be redacted by passing an exact name list — names match exact field names at any nesting depth, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching"
   ],
   "bonds": [],
   "tree": {

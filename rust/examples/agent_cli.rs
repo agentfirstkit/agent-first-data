@@ -1,3 +1,11 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
+
 // Minimal agent-first CLI — canonical pattern for tools built on agent-first-data.
 //
 // Demonstrates: recursive --help (all subcommands expanded), --help-markdown,
@@ -10,8 +18,6 @@
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown -- --help-markdown
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown -- ping --timeout-ms 5000
 // Test: cargo test --examples --features cli-help,cli-help-markdown
-
-#![allow(clippy::print_stdout)]
 
 use agent_first_data::{
     build_cli_error, build_json_error, build_json_ok, cli_output, cli_parse_log_filters,

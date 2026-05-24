@@ -65,7 +65,7 @@ Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_fil
 
 ## API Reference
 
-Total: **15 public APIs and 2 types** + optional **CLI help rendering** (2 functions) + optional **AFDATA tracing** (3 protocol builders + 2 redacted value helpers + 4 output functions + 1 internal + 1 utility + 4 CLI helpers + `OutputFormat` + `RedactionPolicy`)
+Public APIs are grouped by role: protocol builders, redaction helpers, output formatters, internal redaction tools, utility/CLI helpers, and types. Optional CLI help rendering and AFDATA tracing add integration-specific helpers.
 
 ### Protocol Builders (returns JSON Value)
 
@@ -82,13 +82,14 @@ build_json_error(message: &str, hint: Option<&str>, trace: Option<Value>) -> Val
 build_json(code: &str, fields: Value, trace: Option<Value>) -> Value
 ```
 
-### Redacted Values (returns Value)
+### Redaction Helpers (returns Value)
 
 Use these before raw HTTP/MCP/SSE serializers that do not call `output_json`.
 
 ```rust
 redacted_value(value: &Value) -> Value
 redacted_value_with(value: &Value, redaction_policy: RedactionPolicy) -> Value
+redacted_value_with_options(value: &Value, redaction_options: &RedactionOptions) -> Value
 ```
 
 **Use case:** structured protocol payloads (frameworks can serialize directly)
@@ -138,16 +139,21 @@ let not_found = build_json(
 );
 ```
 
-### CLI/Log Output (returns String)
+### Output Formatters (returns String)
 
-Format values for CLI output and logs. `output_json` uses full `_secret` redaction by default. `output_json_with` supports explicit scoped policies. YAML and Plain always redact `_secret` and apply human-readable formatting.
+Format values for CLI output and logs. `output_json` uses full `_secret` redaction by default. `output_json_with` supports explicit scoped policies. Use the `*_with_options` functions to pass legacy secret names such as `api_key`. YAML and Plain always redact secrets and apply human-readable formatting.
 
 ```rust
 output_json(value: &Value) -> String   // Single-line JSON, original keys, for programs/logs
 output_json_with(value: &Value, redaction_policy: RedactionPolicy) -> String
+output_json_with_options(value: &Value, redaction_options: &RedactionOptions) -> String
 output_yaml(value: &Value) -> String   // Multi-line YAML, keys stripped, values formatted
+output_yaml_with_options(value: &Value, redaction_options: &RedactionOptions) -> String
 output_plain(value: &Value) -> String  // Single-line logfmt, keys stripped, values formatted
+output_plain_with_options(value: &Value, redaction_options: &RedactionOptions) -> String
 ```
+
+`RedactionOptions` combines an optional `RedactionPolicy` with `secret_names: Vec<String>`. Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. They do not change YAML/Plain suffix stripping.
 
 **Example:**
 ```rust
@@ -182,6 +188,7 @@ println!("{}", output_plain(&data));
 
 ```rust
 internal_redact_secrets(value: &mut Value)  // Manually redact secrets in-place
+internal_redact_secrets_with_options(value: &mut Value, redaction_options: &RedactionOptions)
 ```
 
 Most users don't need this. Output functions automatically protect secrets.

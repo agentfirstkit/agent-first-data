@@ -1,3 +1,11 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::print_stdout,
+    clippy::print_stderr
+)]
+
 use super::*;
 use serde_json::{json, Value};
 
@@ -8,6 +16,37 @@ fn load_fixture(name: &str) -> Value {
     let data =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
     serde_json::from_str(&data).unwrap_or_else(|e| panic!("failed to parse {}: {}", path, e))
+}
+
+fn redaction_options_from_case(case: &Value) -> RedactionOptions {
+    let options = case.get("options").and_then(Value::as_object);
+    let policy = options
+        .and_then(|obj| obj.get("policy"))
+        .and_then(Value::as_str)
+        .map(|policy| match policy {
+            "RedactionTraceOnly" => RedactionPolicy::RedactionTraceOnly,
+            "RedactionNone" => RedactionPolicy::RedactionNone,
+            "RedactionStrict" => RedactionPolicy::RedactionStrict,
+            other => panic!("unknown redaction policy: {other}"),
+        });
+    let secret_names = options
+        .and_then(|obj| obj.get("secret_names"))
+        .and_then(Value::as_array)
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| {
+                    name.as_str()
+                        .unwrap_or_else(|| panic!("secret_names entries must be strings"))
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    RedactionOptions {
+        policy,
+        secret_names,
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -23,6 +62,46 @@ fn test_redact_fixtures() {
         let expected = &case["expected"];
         internal_redact_secrets(&mut input);
         assert_eq!(&input, expected, "[redact/{name}]");
+    }
+}
+
+#[test]
+fn test_redaction_options_fixtures() {
+    let cases = load_fixture("redaction_options.json");
+    for case in cases
+        .as_array()
+        .expect("redaction_options.json must be an array")
+    {
+        let name = case["name"].as_str().expect("missing name");
+        let options = redaction_options_from_case(case);
+        let expected = &case["expected"];
+
+        let got = redacted_value_with_options(&case["input"], &options);
+        assert_eq!(&got, expected, "[redaction_options/{name}] value");
+
+        let mut input = case["input"].clone();
+        internal_redact_secrets_with_options(&mut input, &options);
+        assert_eq!(&input, expected, "[redaction_options/{name}] in-place");
+
+        let json_out = output_json_with_options(&case["input"], &options);
+        let parsed_json: Value = serde_json::from_str(&json_out)
+            .unwrap_or_else(|e| panic!("[redaction_options/{name}] invalid json output: {e}"));
+        assert_eq!(parsed_json, *expected, "[redaction_options/{name}] json");
+
+        if let Some(expected_yaml) = case.get("expected_yaml").and_then(Value::as_str) {
+            assert_eq!(
+                output_yaml_with_options(&case["input"], &options),
+                expected_yaml,
+                "[redaction_options/{name}] yaml"
+            );
+        }
+        if let Some(expected_plain) = case.get("expected_plain").and_then(Value::as_str) {
+            assert_eq!(
+                output_plain_with_options(&case["input"], &options),
+                expected_plain,
+                "[redaction_options/{name}] plain"
+            );
+        }
     }
 }
 
