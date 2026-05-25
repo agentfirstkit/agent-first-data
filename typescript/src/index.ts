@@ -8,6 +8,8 @@ export {
   buildJson,
   RedactionPolicy,
   type RedactionOptions,
+  OutputStyle,
+  type OutputOptions,
   outputJson,
   outputJsonWith,
   outputJsonWithOptions,
@@ -23,4 +25,11 @@ export {
   parseSize,
 } from "./format.js";
 export { log, span, initJson, initPlain, initYaml } from "./afdata_logging.js";
-export { type OutputFormat, cliParseOutput, cliParseLogFilters, cliOutput, buildCliError } from "./cli.js";
+export {
+  type OutputFormat,
+  cliParseOutput,
+  cliParseLogFilters,
+  cliOutput,
+  cliOutputWithOptions,
+  buildCliError,
+} from "./cli.js";

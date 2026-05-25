@@ -86,6 +86,10 @@ func TestRedactionOptionsFixtures(t *testing.T) {
 		name := tc["name"].(string)
 		t.Run(name, func(t *testing.T) {
 			options := redactionOptionsFromCase(tc)
+			outputOptions := OutputOptions{
+				Redaction: options,
+				Style:     OutputStyleReadable,
+			}
 			expected := tc["expected"]
 
 			got := RedactedValueWithOptions(tc["input"], options)
@@ -104,7 +108,7 @@ func TestRedactionOptionsFixtures(t *testing.T) {
 				t.Errorf("in-place got %s, want %s", gotJSON, expJSON)
 			}
 
-			jsonLine := OutputJsonWithOptions(tc["input"], options)
+			jsonLine := OutputJsonWithOptions(tc["input"], outputOptions)
 			var gotOutput any
 			if err := json.Unmarshal([]byte(jsonLine), &gotOutput); err != nil {
 				t.Fatalf("invalid JSON output: %v (%s)", err, jsonLine)
@@ -115,12 +119,12 @@ func TestRedactionOptionsFixtures(t *testing.T) {
 			}
 
 			if expectedYAML, ok := tc["expected_yaml"].(string); ok {
-				if got := OutputYamlWithOptions(tc["input"], options); got != expectedYAML {
+				if got := OutputYamlWithOptions(tc["input"], outputOptions); got != expectedYAML {
 					t.Errorf("yaml got %q, want %q", got, expectedYAML)
 				}
 			}
 			if expectedPlain, ok := tc["expected_plain"].(string); ok {
-				if got := OutputPlainWithOptions(tc["input"], options); got != expectedPlain {
+				if got := OutputPlainWithOptions(tc["input"], outputOptions); got != expectedPlain {
 					t.Errorf("plain got %q, want %q", got, expectedPlain)
 				}
 			}
@@ -283,6 +287,54 @@ func TestOutputFormatFixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOutputYamlRawKeepsSuffixKeysAndStructure(t *testing.T) {
+	options := OutputOptions{
+		Redaction: RedactionOptions{Policy: RedactionTraceOnly},
+		Style:     OutputStyleRaw,
+	}
+	out := OutputYamlWithOptions(map[string]any{
+		"code": "result",
+		"rows": []any{map[string]any{
+			"api_key_secret": "sk-live-1",
+			"duration_ms":    int64(42),
+		}},
+		"trace": map[string]any{"request_secret": "top-secret"},
+	}, options)
+
+	assertContains(t, out, "rows:\n  -")
+	assertContains(t, out, `api_key_secret: "sk-live-1"`)
+	assertContains(t, out, "duration_ms: 42")
+	assertContains(t, out, `request_secret: "***"`)
+	assertNotContains(t, out, `duration: "42ms"`)
+}
+
+func TestOutputPlainRawKeepsSuffixKeysAndRedactsTrace(t *testing.T) {
+	options := OutputOptions{
+		Redaction: RedactionOptions{Policy: RedactionTraceOnly},
+		Style:     OutputStyleRaw,
+	}
+	out := OutputPlainWithOptions(map[string]any{
+		"duration_ms": int64(42),
+		"trace":       map[string]any{"request_secret": "top-secret"},
+	}, options)
+
+	assertContains(t, out, "duration_ms=42")
+	assertContains(t, out, "trace.request_secret=***")
+	assertNotContains(t, out, "duration=42ms")
+}
+
+func TestOutputWithOptionsDefaultsToReadableStyle(t *testing.T) {
+	out := OutputYamlWithOptions(
+		map[string]any{"duration_ms": int64(42)},
+		OutputOptions{
+			Redaction: RedactionOptions{Policy: RedactionNone},
+			Style:     OutputStyleReadable,
+		},
+	)
+	assertContains(t, out, `duration: "42ms"`)
+	assertNotContains(t, out, "duration_ms:")
 }
 
 // --- Output JSON tests ---

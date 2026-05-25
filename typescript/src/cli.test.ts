@@ -4,6 +4,8 @@ import {
   cliParseOutput,
   cliParseLogFilters,
   cliOutput,
+  cliOutputWithOptions,
+  OutputStyle,
   buildCliError,
   outputJson,
 } from "./index.js";
@@ -119,5 +121,12 @@ describe("cliOutput", () => {
     const out = cliOutput(v, "plain");
     assert.ok(!out.includes("\n"));
     assert.ok(out.includes("code=ok"));
+  });
+
+  it("dispatches raw yaml with output options", () => {
+    const v = { size_bytes: 1024 };
+    const out = cliOutputWithOptions(v, "yaml", { style: OutputStyle.Raw });
+    assert.ok(out.includes("size_bytes: 1024"));
+    assert.ok(!out.includes("size:"));
   });
 });

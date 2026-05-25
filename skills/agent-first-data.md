@@ -85,7 +85,7 @@ Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` 
 |:-------|:---------|:--------|
 | `_secret` | redact to `***` | `api_key_secret: "sk-or-v1-abc..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Matching recognizes `_secret` and `_SECRET` only — no mixed case. For legacy fields that cannot be renamed, pass `RedactionOptions` with `secret_names`/`secretNames` such as `["api_key", "authorization"]`; names match exact field names at any nesting level; no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Matching recognizes `_secret` and `_SECRET` only — no mixed case. For legacy fields that cannot be renamed, configure `OutputOptions.redaction` with `secret_names`/`secretNames` such as `["api_key", "authorization"]`; names match exact field names at any nesting level; no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Callers that need schema-preserving YAML/plain rendering can pass `OutputOptions` with the `Raw` output style.
 
 ### Environment variables
 
@@ -131,13 +131,13 @@ ORM struct fields preserve the suffix: `duration_ms: i64`, not `duration: i64`.
 
 ## Part 2: Output Processing
 
-Three output formats. YAML and Plain apply key stripping + value formatting.
+Three output formats. Default YAML and Plain apply key stripping + value formatting.
 
 ### Formats
 
 - **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
-- **YAML** — multi-line, keys stripped, values formatted, secrets redacted
-- **Plain** — single-line logfmt, keys stripped, values formatted, secrets redacted
+- **YAML** — multi-line, keys stripped, values formatted, secrets redacted by default
+- **Plain** — single-line logfmt, keys stripped, values formatted, secrets redacted by default
 
 ### Key stripping (YAML and Plain)
 
@@ -235,8 +235,8 @@ Public APIs are grouped consistently across languages:
 | Protocol builders | `build_json_ok`, `build_json_error`, `build_json` |
 | Redaction helpers | `redacted_value`, `redacted_value_with`, `redacted_value_with_options`, `internal_redact_secrets`, `internal_redact_secrets_with_options` |
 | Output formatters | `output_json`, `output_json_with`, `output_json_with_options`, `output_yaml`, `output_yaml_with_options`, `output_plain`, `output_plain_with_options` |
-| CLI utilities | `parse_size`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `build_cli_error` |
-| Types | `OutputFormat`, `RedactionPolicy`, `RedactionOptions` |
+| CLI utilities | `parse_size`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `cli_output_with_options`, `build_cli_error` |
+| Types | `OutputFormat`, `RedactionPolicy`, `RedactionOptions`, `OutputStyle`, `OutputOptions` |
 
 ### Rust
 

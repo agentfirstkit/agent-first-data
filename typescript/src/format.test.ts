@@ -18,6 +18,8 @@ import {
   redactedValueWithOptions,
   RedactionPolicy,
   type RedactionOptions,
+  OutputStyle,
+  type OutputOptions,
   outputJson,
   outputJsonWith,
   outputJsonWithOptions,
@@ -60,6 +62,10 @@ describe("redaction options fixtures", () => {
   for (const tc of load("redaction_options.json")) {
     it(tc.name, () => {
       const options = redactionOptions(tc);
+      const outputOptions: OutputOptions = {
+        redaction: options,
+        style: OutputStyle.Readable,
+      };
       const got = redactedValueWithOptions(tc.input, options);
       assert.deepEqual(got, tc.expected, "value mismatch");
 
@@ -67,14 +73,14 @@ describe("redaction options fixtures", () => {
       internalRedactSecretsWithOptions(inp, options);
       assert.deepEqual(inp, tc.expected, "in-place mismatch");
 
-      const gotJson = JSON.parse(outputJsonWithOptions(tc.input as JsonValue, options));
+      const gotJson = JSON.parse(outputJsonWithOptions(tc.input as JsonValue, outputOptions));
       assert.deepEqual(gotJson, tc.expected, "json mismatch");
 
       if (tc.expected_yaml !== undefined) {
-        assert.equal(outputYamlWithOptions(tc.input as JsonValue, options), tc.expected_yaml, "yaml mismatch");
+        assert.equal(outputYamlWithOptions(tc.input as JsonValue, outputOptions), tc.expected_yaml, "yaml mismatch");
       }
       if (tc.expected_plain !== undefined) {
-        assert.equal(outputPlainWithOptions(tc.input as JsonValue, options), tc.expected_plain, "plain mismatch");
+        assert.equal(outputPlainWithOptions(tc.input as JsonValue, outputOptions), tc.expected_plain, "plain mismatch");
       }
     });
   }
@@ -167,6 +173,53 @@ describe("output format fixtures", () => {
       assert.equal(gotPlain, tc.expected_plain, "plain mismatch");
     });
   }
+});
+
+describe("output options", () => {
+  it("raw yaml keeps suffix keys and structure", () => {
+    const options: OutputOptions = {
+      redaction: { policy: RedactionPolicy.RedactionTraceOnly },
+      style: OutputStyle.Raw,
+    };
+    const out = outputYamlWithOptions({
+      code: "result",
+      rows: [{ api_key_secret: "sk-live-1", duration_ms: 42 }],
+      trace: { request_secret: "top-secret" },
+    } as JsonValue, options);
+
+    assert.ok(out.includes("rows:\n  -"));
+    assert.ok(out.includes('api_key_secret: "sk-live-1"'));
+    assert.ok(out.includes("duration_ms: 42"));
+    assert.ok(out.includes('request_secret: "***"'));
+    assert.ok(!out.includes('duration: "42ms"'));
+  });
+
+  it("raw plain keeps suffix keys and redacts trace", () => {
+    const options: OutputOptions = {
+      redaction: { policy: RedactionPolicy.RedactionTraceOnly },
+      style: OutputStyle.Raw,
+    };
+    const out = outputPlainWithOptions({
+      duration_ms: 42,
+      trace: { request_secret: "top-secret" },
+    } as JsonValue, options);
+
+    assert.ok(out.includes("duration_ms=42"));
+    assert.ok(out.includes("trace.request_secret=***"));
+    assert.ok(!out.includes("duration=42ms"));
+  });
+
+  it("with-options functions default to readable style", () => {
+    const out = outputYamlWithOptions(
+      { duration_ms: 42 } as JsonValue,
+      {
+        redaction: { policy: RedactionPolicy.RedactionNone },
+        style: OutputStyle.Readable,
+      },
+    );
+    assert.ok(out.includes('duration: "42ms"'));
+    assert.ok(!out.includes("duration_ms:"));
+  });
 });
 
 describe("parseSize safety", () => {

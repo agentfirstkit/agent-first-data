@@ -69,6 +69,19 @@ func CliOutput(value any, format OutputFormat) string {
 	}
 }
 
+// CliOutputWithOptions dispatches output formatting with explicit redaction and style.
+// JSON ignores OutputStyle and preserves original keys and values after redaction.
+func CliOutputWithOptions(value any, format OutputFormat, outputOptions OutputOptions) string {
+	switch format {
+	case OutputFormatYaml:
+		return OutputYamlWithOptions(value, outputOptions)
+	case OutputFormatPlain:
+		return OutputPlainWithOptions(value, outputOptions)
+	default:
+		return OutputJsonWithOptions(value, outputOptions)
+	}
+}
+
 // BuildCliError builds a standard CLI parse error value.
 // Use when flag parsing fails or a flag value is invalid.
 // Print with OutputJson and exit with code 2.

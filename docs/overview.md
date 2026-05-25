@@ -5,7 +5,7 @@
 Agent-First Data (AFDATA) is a convention for self-describing structured data:
 
 1. **Naming** — Encode units and semantics in field name suffixes (`_ms`, `_bytes`, `_secret`, ...)
-2. **Output** — Three formats (JSON/YAML/Plain) with automatic key stripping, value formatting, and secret redaction
+2. **Output** — Three formats (JSON/YAML/Plain) with default key stripping, value formatting, and secret redaction
 3. **Protocol** — Optional structured templates (`ok`, `error`, `log`) with `trace` for execution context
 4. **Logging** — AFDATA-compliant structured logging with span support (per-language integration)
 5. **Channel discipline** — machine-readable protocol/log events use `stdout` only; `stderr` is not a protocol channel
@@ -36,7 +36,7 @@ The tool reads env vars (`UPPER_SNAKE_CASE`), flags (`--kebab-case`), and config
 {"code":"log","event":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
 ```
 
-**YAML** (suffixes stripped from keys, values formatted, for humans):
+**YAML** (default: suffixes stripped from keys, values formatted, for humans):
 ```yaml
 ---
 code: "log"
@@ -50,7 +50,7 @@ env:
   API_KEY: "***"
 ```
 
-**Plain** (single-line logfmt, keys stripped, for log scanning):
+**Plain** (single-line logfmt, default keys stripped, for log scanning):
 ```
 args.input_path=/data/backup.tar.gz code=log event=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
 ```
@@ -85,6 +85,8 @@ CLI logging flags:
 | `internal_redact_secrets_with_options` | void | Redact in-place with explicit policy and secret-name list |
 | `RedactionPolicy` | type | `RedactionTraceOnly` / `RedactionNone` / `RedactionStrict` |
 | `RedactionOptions` | type | Optional policy plus exact `secret_names` / `secretNames` for legacy fields |
+| `OutputStyle` | type | `Readable` default formatting or `Raw` schema-preserving rendering |
+| `OutputOptions` | type | Redaction options plus YAML/plain rendering style |
 
 ### Output formatters
 
@@ -92,11 +94,11 @@ CLI logging flags:
 |:---------|:--------|:------------|
 | `output_json` | String | Single-line JSON, secrets redacted |
 | `output_json_with` | String | Single-line JSON with explicit redaction policy |
-| `output_json_with_options` | String | Single-line JSON with explicit policy and secret-name list |
+| `output_json_with_options` | String | Single-line JSON with explicit output options |
 | `output_yaml` | String | Multi-line YAML, keys stripped, values formatted |
-| `output_yaml_with_options` | String | Multi-line YAML with explicit policy and secret-name list |
+| `output_yaml_with_options` | String | Multi-line YAML with explicit redaction and rendering style |
 | `output_plain` | String | Single-line logfmt, keys stripped, values formatted |
-| `output_plain_with_options` | String | Single-line logfmt with explicit policy and secret-name list |
+| `output_plain_with_options` | String | Single-line logfmt with explicit redaction and rendering style |
 
 ### CLI utilities
 
@@ -107,9 +109,10 @@ CLI logging flags:
 | `cli_parse_output` | OutputFormat | Parse `--output` flag; error on unknown value |
 | `cli_parse_log_filters` | String[] | Normalize `--log` entries: trim, lowercase, dedup, remove empty |
 | `cli_output` | String | Dispatch to `output_json` / `output_yaml` / `output_plain` |
+| `cli_output_with_options` | String | Dispatch with explicit output options |
 | `build_cli_error` | JSON | `{code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}` |
 
-AFDATA suffixes describe local field semantics; they are not a full schema language. Use JSON Schema, OpenAPI, database constraints, or typed APIs for required fields, enums, ranges, and object shapes. For raw JSON transports that do not call `output_json` (HTTP bodies, MCP tool returns, SSE events), call `redacted_value` first. For legacy payloads that use names like `api_key` instead of `api_key_secret`, call the `*_with_options` API with a secret-name list.
+AFDATA suffixes describe local field semantics; they are not a full schema language. Use JSON Schema, OpenAPI, database constraints, or typed APIs for required fields, enums, ranges, and object shapes. For raw JSON transports that do not call `output_json` (HTTP bodies, MCP tool returns, SSE events), call `redacted_value` first. For legacy payloads that use names like `api_key` instead of `api_key_secret`, call the output `*_with_options` API with `OutputOptions.redaction.secret_names`.
 
 ## AFDATA Logging
 

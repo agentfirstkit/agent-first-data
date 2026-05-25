@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,7 +13,8 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Add RedactionOptions type and *_with_options API variants (redacted_value_with_options, internal_redact_secrets_with_options, output_json_with_options, output_yaml_with_options, output_plain_with_options) across all four languages so legacy fields like api_key or Authorization that cannot be renamed with the _secret suffix can still be redacted by passing an exact name list — names match exact field names at any nesting depth, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching"
+    "Add OutputOptions across Rust, Go, Python, and TypeScript that combines RedactionOptions with a new OutputStyle (Readable default, Raw schema-preserving), and reshape output_json_with_options / output_yaml_with_options / output_plain_with_options plus a new cli_output_with_options dispatcher to take OutputOptions — agents that need YAML or plain rendering with original keys and unformatted values (no AFDATA suffix stripping, no human value formatting) can opt in without writing their own renderer, while every existing call site keeps the default Readable behavior. Breaking signature change on the three *_with_options formatters; old RedactionOptions callers move to OutputOptions with redaction and style: Readable.",
+    "Tighten the Rust startup-diagnostic example in the README and agent_cli sample so it only fires inside an explicit --log startup|all|* branch and records env presence as {key, present} pairs instead of raw values — the previous example suggested dumping full env values into a startup log, which an adopter copying the pattern would have shipped as a leak surface."
   ],
   "bonds": [],
   "tree": {

@@ -180,6 +180,21 @@ func TestCliOutput_DispatchesPlain(t *testing.T) {
 	}
 }
 
+func TestCliOutputWithOptions_DispatchesRawYaml(t *testing.T) {
+	v := map[string]any{"size_bytes": int64(1024)}
+	out := CliOutputWithOptions(
+		v,
+		OutputFormatYaml,
+		OutputOptions{Style: OutputStyleRaw},
+	)
+	if !contains(out, "size_bytes: 1024") {
+		t.Errorf("raw yaml output should preserve suffix key, got: %s", out)
+	}
+	if contains(out, "size:") {
+		t.Errorf("raw yaml output should not strip suffix, got: %s", out)
+	}
+}
+
 // ═══════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════

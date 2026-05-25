@@ -2,7 +2,16 @@
  * AFDATA CLI helpers — output format parsing, log filter normalization, error building.
  */
 
-import { JsonValue, outputJson, outputYaml, outputPlain } from "./format.js";
+import {
+  JsonValue,
+  type OutputOptions,
+  outputJson,
+  outputJsonWithOptions,
+  outputYaml,
+  outputYamlWithOptions,
+  outputPlain,
+  outputPlainWithOptions,
+} from "./format.js";
 
 /** Output format for CLI and pipe/MCP modes. */
 export type OutputFormat = "json" | "yaml" | "plain";
@@ -51,6 +60,16 @@ export function cliOutput(value: JsonValue, format: OutputFormat): string {
   if (format === "yaml") return outputYaml(value);
   if (format === "plain") return outputPlain(value);
   return outputJson(value);
+}
+
+/**
+ * Dispatch output formatting with explicit redaction and style.
+ * JSON ignores OutputStyle and preserves original keys and values after redaction.
+ */
+export function cliOutputWithOptions(value: JsonValue, format: OutputFormat, outputOptions: OutputOptions): string {
+  if (format === "yaml") return outputYamlWithOptions(value, outputOptions);
+  if (format === "plain") return outputPlainWithOptions(value, outputOptions);
+  return outputJsonWithOptions(value, outputOptions);
 }
 
 /**

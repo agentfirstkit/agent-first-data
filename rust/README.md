@@ -27,7 +27,7 @@ For CLI diagnostics, enable log categories explicitly:
 
 Without these flags, startup diagnostics should stay off by default.
 
-The tool reads env vars, flags, and config — all with AFDATA suffixes — and can emit a startup diagnostic event:
+When `startup`, `all`, or `*` is requested, emit a minimal startup diagnostic. Keep env var names exact and record presence rather than raw values; do not copy full argv or env values into startup logs:
 
 ```rust
 use agent_first_data::*;
@@ -37,9 +37,12 @@ let startup = build_json(
     "log",
     json!({
         "event": "startup",
-        "config": {"timeout_s": 30, "max_file_size_bytes": 10737418240u64},
-        "args": {"input_path": "/data/backup.tar.gz"},
-        "env": {"API_KEY_SECRET": std::env::var("API_KEY_SECRET").ok()}
+        "env": [
+            {
+                "key": "API_KEY_SECRET",
+                "present": std::env::var_os("API_KEY_SECRET").is_some()
+            }
+        ]
     }),
     None,
 );
@@ -48,20 +51,16 @@ let startup = build_json(
 Three output formats, same data:
 
 ```
-JSON:  {"code":"log","event":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
+JSON:  {"code":"log","event":"startup","env":[{"key":"API_KEY_SECRET","present":true}]}
 YAML:  code: "log"
        event: "startup"
-       args:
-         input_path: "/data/backup.tar.gz"
-       config:
-         max_file_size: "10.0GB"
-         timeout: "30s"
        env:
-         API_KEY: "***"
-Plain: args.input_path=/data/backup.tar.gz code=log event=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
+         - key: "API_KEY_SECRET"
+           present: true
+Plain: code=log env="{\"key\":\"API_KEY_SECRET\",\"present\":true}" event=startup
 ```
 
-`--timeout-s` → `timeout_s` → `timeout: 30s`. `API_KEY_SECRET` → `API_KEY: "***"`. The suffix is the schema.
+`--timeout-s` → `timeout_s` → `timeout: 30s`. `API_KEY_SECRET` stays an exact env key in startup presence metadata. The suffix is the schema.
 
 ## API Reference
 
@@ -104,9 +103,12 @@ let startup = build_json(
     "log",
     json!({
         "event": "startup",
-        "config": {"api_key_secret": "sk-123", "timeout_s": 30},
-        "args": {"config_path": "config.yml"},
-        "env": {"RUST_LOG": "info"}
+        "env": [
+            {
+                "key": "RUST_LOG",
+                "present": std::env::var_os("RUST_LOG").is_some()
+            }
+        ]
     }),
     None,
 );
@@ -141,19 +143,20 @@ let not_found = build_json(
 
 ### Output Formatters (returns String)
 
-Format values for CLI output and logs. `output_json` uses full `_secret` redaction by default. `output_json_with` supports explicit scoped policies. Use the `*_with_options` functions to pass legacy secret names such as `api_key`. YAML and Plain always redact secrets and apply human-readable formatting.
+Format values for CLI output and logs. `output_json` uses full `_secret` redaction by default. `output_json_with` supports explicit scoped policies. Use `OutputOptions` to pass legacy secret names such as `api_key` or request schema-preserving YAML/plain rendering with `OutputStyle::Raw`.
 
 ```rust
 output_json(value: &Value) -> String   // Single-line JSON, original keys, for programs/logs
 output_json_with(value: &Value, redaction_policy: RedactionPolicy) -> String
-output_json_with_options(value: &Value, redaction_options: &RedactionOptions) -> String
+output_json_with_options(value: &Value, output_options: &OutputOptions) -> String
 output_yaml(value: &Value) -> String   // Multi-line YAML, keys stripped, values formatted
-output_yaml_with_options(value: &Value, redaction_options: &RedactionOptions) -> String
+output_yaml_with_options(value: &Value, output_options: &OutputOptions) -> String
 output_plain(value: &Value) -> String  // Single-line logfmt, keys stripped, values formatted
-output_plain_with_options(value: &Value, redaction_options: &RedactionOptions) -> String
+output_plain_with_options(value: &Value, output_options: &OutputOptions) -> String
+cli_output_with_options(value: &Value, format: OutputFormat, output_options: &OutputOptions) -> String
 ```
 
-`RedactionOptions` combines an optional `RedactionPolicy` with `secret_names: Vec<String>`. Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. They do not change YAML/Plain suffix stripping.
+`RedactionOptions` combines an optional `RedactionPolicy` with `secret_names: Vec<String>`. Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. `OutputOptions` combines `RedactionOptions` with `OutputStyle::Readable` (default suffix stripping and value formatting) or `OutputStyle::Raw` (no suffix stripping or value formatting).
 
 **Example:**
 ```rust
@@ -220,6 +223,7 @@ pub enum OutputFormat { Json, Yaml, Plain }
 cli_parse_output(s: &str) -> Result<OutputFormat, String>          // Parse --output flag; Err on unknown
 cli_parse_log_filters<S: AsRef<str>>(entries: &[S]) -> Vec<String> // Normalize --log: trim, lowercase, dedup, remove empty
 cli_output(value: &Value, format: OutputFormat) -> String          // Dispatch to output_json/yaml/plain
+cli_output_with_options(value: &Value, format: OutputFormat, output_options: &OutputOptions) -> String
 build_cli_error(message: &str, hint: Option<&str>) -> Value         // {code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}
 ```
 
@@ -259,6 +263,22 @@ let format = cli_parse_output(&cli.output).unwrap_or_else(|e| {
 });
 
 let log = cli_parse_log_filters(&cli.log);
+if log.iter().any(|c| matches!(c.as_str(), "startup" | "all" | "*")) {
+    let startup = build_json(
+        "log",
+        serde_json::json!({
+            "event": "startup",
+            "env": [
+                {
+                    "key": "AGENT_CLI_HOST",
+                    "present": std::env::var_os("AGENT_CLI_HOST").is_some()
+                }
+            ]
+        }),
+        None,
+    );
+    println!("{}", cli_output(&startup, format));
+}
 // ... do work ...
 println!("{}", cli_output(&result, format));
 ```
@@ -312,14 +332,17 @@ use agent_first_data::*;
 use serde_json::json;
 
 fn main() {
-    // 1. Startup
+    // 1. Startup (only emit this inside a --log startup/all/* branch)
     let startup = build_json(
         "log",
         json!({
             "event": "startup",
-            "config": {"api_key_secret": "sk-sensitive-key", "timeout_s": 30},
-            "args": {"input_path": "data.json"},
-            "env": {"RUST_LOG": "info"}
+            "env": [
+                {
+                    "key": "RUST_LOG",
+                    "present": std::env::var_os("RUST_LOG").is_some()
+                }
+            ]
         }),
         None,
     );
@@ -327,13 +350,9 @@ fn main() {
     // ---
     // code: "log"
     // event: "startup"
-    // args:
-    //   input_path: "data.json"
-    // config:
-    //   api_key: "***"
-    //   timeout: "30s"
     // env:
-    //   RUST_LOG: "info"
+    //   - key: "RUST_LOG"
+    //     present: true
 
     // 2. Progress
     let progress = build_json(

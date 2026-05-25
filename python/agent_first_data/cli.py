@@ -5,7 +5,15 @@ from __future__ import annotations
 import enum
 from typing import Any
 
-from agent_first_data.format import output_json, output_yaml, output_plain
+from agent_first_data.format import (
+    OutputOptions,
+    output_json,
+    output_json_with_options,
+    output_yaml,
+    output_yaml_with_options,
+    output_plain,
+    output_plain_with_options,
+)
 
 
 class OutputFormat(enum.Enum):
@@ -67,6 +75,22 @@ def cli_output(value: Any, format: OutputFormat) -> str:
     if format is OutputFormat.PLAIN:
         return output_plain(value)
     return output_json(value)
+
+
+def cli_output_with_options(
+    value: Any,
+    format: OutputFormat,
+    output_options: OutputOptions,
+) -> str:
+    """Dispatch output formatting with explicit redaction and style.
+
+    JSON ignores OutputStyle and preserves original keys and values after redaction.
+    """
+    if format is OutputFormat.YAML:
+        return output_yaml_with_options(value, output_options)
+    if format is OutputFormat.PLAIN:
+        return output_plain_with_options(value, output_options)
+    return output_json_with_options(value, output_options)
 
 
 def build_cli_error(message: str, hint: str | None = None) -> dict:

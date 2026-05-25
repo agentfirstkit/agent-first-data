@@ -1,14 +1,15 @@
 """AFDATA output formatting and protocol templates.
 
-16 public APIs and 2 types: protocol builders, redacted value helpers,
-output formatters, redaction, parse_size, RedactionPolicy, and RedactionOptions.
+16 public APIs and 4 types: protocol builders, redacted value helpers,
+output formatters, redaction, parse_size, RedactionPolicy, RedactionOptions,
+OutputStyle, and OutputOptions.
 """
 
 from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Sequence
@@ -65,6 +66,21 @@ class RedactionOptions:
     secret_names: Sequence[str] = ()
 
 
+class OutputStyle(str, Enum):
+    """Rendering style for YAML and plain output."""
+
+    Readable = "Readable"
+    Raw = "Raw"
+
+
+@dataclass(frozen=True)
+class OutputOptions:
+    """Output options combining redaction and rendering style."""
+
+    redaction: RedactionOptions = field(default_factory=RedactionOptions)
+    style: OutputStyle = OutputStyle.Readable
+
+
 def output_json(value: Any) -> str:
     """Format as single-line JSON. Secrets redacted, original keys, raw values."""
     return json.dumps(redacted_value(value), ensure_ascii=False, separators=(",", ":"))
@@ -75,10 +91,10 @@ def output_json_with(value: Any, redaction_policy: RedactionPolicy) -> str:
     return json.dumps(redacted_value_with(value, redaction_policy), ensure_ascii=False, separators=(",", ":"))
 
 
-def output_json_with_options(value: Any, redaction_options: RedactionOptions) -> str:
-    """Format as single-line JSON with explicit redaction options."""
+def output_json_with_options(value: Any, output_options: OutputOptions) -> str:
+    """Format as single-line JSON with explicit output options."""
     return json.dumps(
-        redacted_value_with_options(value, redaction_options),
+        redacted_value_with_options(value, output_options.redaction),
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -86,37 +102,33 @@ def output_json_with_options(value: Any, redaction_options: RedactionOptions) ->
 
 def output_yaml(value: Any) -> str:
     """Format as multi-line YAML. Keys stripped, values formatted, secrets redacted."""
-    value = redacted_value(value)
-    lines = ["---"]
-    _render_yaml_processed(value, 0, lines)
-    return "\n".join(lines)
+    return output_yaml_with_options(value, OutputOptions())
 
 
-def output_yaml_with_options(value: Any, redaction_options: RedactionOptions) -> str:
-    """Format as multi-line YAML with explicit redaction options."""
-    value = redacted_value_with_options(value, redaction_options)
+def output_yaml_with_options(value: Any, output_options: OutputOptions) -> str:
+    """Format as multi-line YAML with explicit output options."""
+    value = redacted_value_with_options(value, output_options.redaction)
     lines = ["---"]
-    _render_yaml_processed(value, 0, lines)
+    if output_options.style is OutputStyle.Raw:
+        _render_yaml_raw(value, 0, lines)
+    else:
+        _render_yaml_processed(value, 0, lines)
     return "\n".join(lines)
 
 
 def output_plain(value: Any) -> str:
     """Format as single-line logfmt. Keys stripped, values formatted, secrets redacted."""
-    value = redacted_value(value)
-    pairs: list[tuple[str, str]] = []
-    _collect_plain_pairs(value, "", pairs)
-    pairs.sort(key=lambda p: p[0].encode("utf-16-be"))
-    parts = []
-    for k, v in pairs:
-        parts.append(f"{k}={_quote_logfmt_value(v)}")
-    return " ".join(parts)
+    return output_plain_with_options(value, OutputOptions())
 
 
-def output_plain_with_options(value: Any, redaction_options: RedactionOptions) -> str:
-    """Format as single-line logfmt with explicit redaction options."""
-    value = redacted_value_with_options(value, redaction_options)
+def output_plain_with_options(value: Any, output_options: OutputOptions) -> str:
+    """Format as single-line logfmt with explicit output options."""
+    value = redacted_value_with_options(value, output_options.redaction)
     pairs: list[tuple[str, str]] = []
-    _collect_plain_pairs(value, "", pairs)
+    if output_options.style is OutputStyle.Raw:
+        _collect_plain_pairs_raw(value, "", pairs)
+    else:
+        _collect_plain_pairs(value, "", pairs)
     pairs.sort(key=lambda p: p[0].encode("utf-16-be"))
     parts = []
     for k, v in pairs:
@@ -622,6 +634,53 @@ def _render_yaml_processed(value: Any, indent: int, lines: list[str]) -> None:
             lines.append(f"{prefix}{display_key}: {_yaml_scalar(v)}")
 
 
+def _render_yaml_raw(value: Any, indent: int, lines: list[str]) -> None:
+    prefix = "  " * indent
+    if isinstance(value, dict):
+        for key in _sorted_object_keys(value):
+            _render_yaml_field_raw(prefix, key, value[key], indent, lines)
+    elif isinstance(value, list):
+        _render_yaml_array_raw(value, indent, lines)
+    else:
+        lines.append(f"{prefix}{_yaml_scalar(value)}")
+
+
+def _render_yaml_field_raw(prefix: str, key: str, value: Any, indent: int, lines: list[str]) -> None:
+    if isinstance(value, dict):
+        if value:
+            lines.append(f"{prefix}{key}:")
+            _render_yaml_raw(value, indent + 1, lines)
+        else:
+            lines.append(f"{prefix}{key}: {{}}")
+    elif isinstance(value, list):
+        if value:
+            lines.append(f"{prefix}{key}:")
+            _render_yaml_array_raw(value, indent + 1, lines)
+        else:
+            lines.append(f"{prefix}{key}: []")
+    else:
+        lines.append(f"{prefix}{key}: {_yaml_scalar(value)}")
+
+
+def _render_yaml_array_raw(arr: list[Any], indent: int, lines: list[str]) -> None:
+    prefix = "  " * indent
+    for item in arr:
+        if isinstance(item, dict):
+            if item:
+                lines.append(f"{prefix}-")
+                _render_yaml_raw(item, indent + 1, lines)
+            else:
+                lines.append(f"{prefix}- {{}}")
+        elif isinstance(item, list):
+            if item:
+                lines.append(f"{prefix}-")
+                _render_yaml_array_raw(item, indent + 1, lines)
+            else:
+                lines.append(f"{prefix}- []")
+        else:
+            lines.append(f"{prefix}- {_yaml_scalar(item)}")
+
+
 def _escape_yaml_str(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
 
@@ -662,6 +721,23 @@ def _collect_plain_pairs(value: Any, prefix: str, pairs: list[tuple[str, str]]) 
             pairs.append((full_key, _plain_scalar(v)))
 
 
+def _collect_plain_pairs_raw(value: Any, prefix: str, pairs: list[tuple[str, str]]) -> None:
+    if not isinstance(value, dict):
+        return
+    for key in _sorted_object_keys(value):
+        v = value[key]
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(v, dict):
+            _collect_plain_pairs_raw(v, full_key, pairs)
+        elif isinstance(v, list):
+            joined = ",".join(_plain_scalar_raw(item) for item in v)
+            pairs.append((full_key, joined))
+        elif v is None:
+            pairs.append((full_key, ""))
+        else:
+            pairs.append((full_key, _plain_scalar(v)))
+
+
 def _plain_scalar(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -672,6 +748,12 @@ def _plain_scalar(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     return str(value)
+
+
+def _plain_scalar_raw(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return _plain_scalar(value)
 
 
 def _quote_logfmt_value(value: str) -> str:
@@ -688,3 +770,7 @@ def _quote_logfmt_value(value: str) -> str:
         .replace("\t", "\\t")
     )
     return f'"{escaped}"'
+
+
+def _sorted_object_keys(d: dict) -> list[str]:
+    return sorted(d.keys(), key=lambda k: k.encode("utf-16-be"))

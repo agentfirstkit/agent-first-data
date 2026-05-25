@@ -1,14 +1,16 @@
 //! Agent-First Data (AFDATA) output formatting and protocol templates.
 //!
-//! 20 public APIs and 3 types (+ 2 optional help renderers):
+//! 21 public APIs and 5 types (+ 2 optional help renderers):
 //! - 3 protocol builders: [`build_json_ok`], [`build_json_error`], [`build_json`]
 //! - 3 redacted value helpers: [`redacted_value`], [`redacted_value_with`], [`redacted_value_with_options`]
 //! - 7 output formatters: [`output_json`], [`output_json_with`], [`output_json_with_options`],
 //!   [`output_yaml`], [`output_yaml_with_options`], [`output_plain`], [`output_plain_with_options`]
 //! - 2 redaction utilities: [`internal_redact_secrets`], [`internal_redact_secrets_with_options`]
 //! - 1 parse utility: [`parse_size`]
-//! - 4 CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`], [`cli_output`], [`build_cli_error`]
-//! - 3 types: [`OutputFormat`], [`RedactionPolicy`], [`RedactionOptions`]
+//! - 5 CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`], [`cli_output`],
+//!   [`cli_output_with_options`], [`build_cli_error`]
+//! - 5 types: [`OutputFormat`], [`RedactionPolicy`], [`RedactionOptions`],
+//!   [`OutputStyle`], [`OutputOptions`]
 //! - (feature `cli-help`): [`cli_render_help`] — recursive plain-text help for clap commands
 //! - (feature `cli-help-markdown`): [`cli_render_help_markdown`] — recursive Markdown help
 
@@ -83,6 +85,25 @@ pub struct RedactionOptions {
     pub secret_names: Vec<String>,
 }
 
+/// Rendering style for YAML and plain output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputStyle {
+    /// Human-readable AFDATA rendering: strip suffixes and format values.
+    #[default]
+    Readable,
+    /// Schema-preserving rendering: keep keys and values unchanged after redaction.
+    Raw,
+}
+
+/// Output options combining redaction and rendering style.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OutputOptions {
+    /// Redaction options applied before rendering.
+    pub redaction: RedactionOptions,
+    /// Rendering style for YAML and plain output.
+    pub style: OutputStyle,
+}
+
 /// Format as single-line JSON with full `_secret` redaction.
 pub fn output_json(value: &Value) -> String {
     serialize_json_output(&redacted_value(value))
@@ -93,9 +114,15 @@ pub fn output_json_with(value: &Value, redaction_policy: RedactionPolicy) -> Str
     serialize_json_output(&redacted_value_with(value, redaction_policy))
 }
 
-/// Format as single-line JSON with configurable redaction options.
-pub fn output_json_with_options(value: &Value, redaction_options: &RedactionOptions) -> String {
-    serialize_json_output(&redacted_value_with_options(value, redaction_options))
+/// Format as single-line JSON with configurable output options.
+///
+/// JSON output ignores [`OutputStyle`] and always preserves original keys and values after
+/// redaction.
+pub fn output_json_with_options(value: &Value, output_options: &OutputOptions) -> String {
+    serialize_json_output(&redacted_value_with_options(
+        value,
+        &output_options.redaction,
+    ))
 }
 
 fn serialize_json_output(value: &Value) -> String {
@@ -111,38 +138,33 @@ fn serialize_json_output(value: &Value) -> String {
 
 /// Format as multi-line YAML. Keys stripped, values formatted, secrets redacted.
 pub fn output_yaml(value: &Value) -> String {
-    let mut lines = vec!["---".to_string()];
-    let v = redacted_value(value);
-    render_yaml_processed(&v, 0, &mut lines);
-    lines.join("\n")
+    output_yaml_with_options(value, &OutputOptions::default())
 }
 
-/// Format as multi-line YAML with configurable redaction options.
-pub fn output_yaml_with_options(value: &Value, redaction_options: &RedactionOptions) -> String {
+/// Format as multi-line YAML with configurable output options.
+pub fn output_yaml_with_options(value: &Value, output_options: &OutputOptions) -> String {
     let mut lines = vec!["---".to_string()];
-    let v = redacted_value_with_options(value, redaction_options);
-    render_yaml_processed(&v, 0, &mut lines);
+    let v = redacted_value_with_options(value, &output_options.redaction);
+    match output_options.style {
+        OutputStyle::Readable => render_yaml_processed(&v, 0, &mut lines),
+        OutputStyle::Raw => render_yaml_raw(&v, 0, &mut lines),
+    }
     lines.join("\n")
 }
 
 /// Format as single-line logfmt. Keys stripped, values formatted, secrets redacted.
 pub fn output_plain(value: &Value) -> String {
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    let v = redacted_value(value);
-    collect_plain_pairs(&v, "", &mut pairs);
-    pairs.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
-    pairs
-        .into_iter()
-        .map(|(k, v)| format!("{}={}", k, quote_logfmt_value(&v)))
-        .collect::<Vec<_>>()
-        .join(" ")
+    output_plain_with_options(value, &OutputOptions::default())
 }
 
-/// Format as single-line logfmt with configurable redaction options.
-pub fn output_plain_with_options(value: &Value, redaction_options: &RedactionOptions) -> String {
+/// Format as single-line logfmt with configurable output options.
+pub fn output_plain_with_options(value: &Value, output_options: &OutputOptions) -> String {
     let mut pairs: Vec<(String, String)> = Vec::new();
-    let v = redacted_value_with_options(value, redaction_options);
-    collect_plain_pairs(&v, "", &mut pairs);
+    let v = redacted_value_with_options(value, &output_options.redaction);
+    match output_options.style {
+        OutputStyle::Readable => collect_plain_pairs(&v, "", &mut pairs),
+        OutputStyle::Raw => collect_plain_pairs_raw(&v, "", &mut pairs),
+    }
     pairs.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
     pairs
         .into_iter()
@@ -297,6 +319,22 @@ pub fn cli_output(value: &Value, format: OutputFormat) -> String {
         OutputFormat::Json => output_json(value),
         OutputFormat::Yaml => output_yaml(value),
         OutputFormat::Plain => output_plain(value),
+    }
+}
+
+/// Dispatch output formatting by [`OutputFormat`] with configurable output options.
+///
+/// JSON output ignores [`OutputStyle`] and always preserves original keys and values after
+/// redaction. YAML and plain output use the requested style.
+pub fn cli_output_with_options(
+    value: &Value,
+    format: OutputFormat,
+    output_options: &OutputOptions,
+) -> String {
+    match format {
+        OutputFormat::Json => output_json_with_options(value, output_options),
+        OutputFormat::Yaml => output_yaml_with_options(value, output_options),
+        OutputFormat::Plain => output_plain_with_options(value, output_options),
     }
 }
 
@@ -875,6 +913,77 @@ fn render_yaml_processed(value: &Value, indent: usize, lines: &mut Vec<String>) 
     }
 }
 
+fn render_yaml_raw(value: &Value, indent: usize, lines: &mut Vec<String>) {
+    let prefix = "  ".repeat(indent);
+    match value {
+        Value::Object(map) => {
+            for (key, v) in map {
+                render_yaml_field_raw(&prefix, key, v, indent, lines);
+            }
+        }
+        Value::Array(arr) => {
+            render_yaml_array_raw(arr, indent, lines);
+        }
+        _ => {
+            lines.push(format!("{}{}", prefix, yaml_scalar(value)));
+        }
+    }
+}
+
+fn render_yaml_field_raw(
+    prefix: &str,
+    key: &str,
+    value: &Value,
+    indent: usize,
+    lines: &mut Vec<String>,
+) {
+    match value {
+        Value::Object(inner) if !inner.is_empty() => {
+            lines.push(format!("{}{}:", prefix, key));
+            render_yaml_raw(value, indent + 1, lines);
+        }
+        Value::Object(_) => {
+            lines.push(format!("{}{}: {{}}", prefix, key));
+        }
+        Value::Array(arr) => {
+            if arr.is_empty() {
+                lines.push(format!("{}{}: []", prefix, key));
+            } else {
+                lines.push(format!("{}{}:", prefix, key));
+                render_yaml_array_raw(arr, indent + 1, lines);
+            }
+        }
+        _ => {
+            lines.push(format!("{}{}: {}", prefix, key, yaml_scalar(value)));
+        }
+    }
+}
+
+fn render_yaml_array_raw(arr: &[Value], indent: usize, lines: &mut Vec<String>) {
+    let prefix = "  ".repeat(indent);
+    for item in arr {
+        match item {
+            Value::Object(inner) if !inner.is_empty() => {
+                lines.push(format!("{}-", prefix));
+                render_yaml_raw(item, indent + 1, lines);
+            }
+            Value::Array(nested) if !nested.is_empty() => {
+                lines.push(format!("{}-", prefix));
+                render_yaml_array_raw(nested, indent + 1, lines);
+            }
+            Value::Object(_) => {
+                lines.push(format!("{}- {{}}", prefix));
+            }
+            Value::Array(_) => {
+                lines.push(format!("{}- []", prefix));
+            }
+            _ => {
+                lines.push(format!("{}- {}", prefix, yaml_scalar(item)));
+            }
+        }
+    }
+}
+
 fn escape_yaml_str(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -920,6 +1029,27 @@ fn collect_plain_pairs(value: &Value, prefix: &str, pairs: &mut Vec<(String, Str
                     Value::Null => pairs.push((full_key, String::new())),
                     _ => pairs.push((full_key, plain_scalar(v))),
                 }
+            }
+        }
+    }
+}
+
+fn collect_plain_pairs_raw(value: &Value, prefix: &str, pairs: &mut Vec<(String, String)>) {
+    if let Value::Object(map) = value {
+        for (key, v) in map {
+            let full_key = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{}.{}", prefix, key)
+            };
+            match v {
+                Value::Object(_) => collect_plain_pairs_raw(v, &full_key, pairs),
+                Value::Array(arr) => {
+                    let joined = arr.iter().map(plain_scalar).collect::<Vec<_>>().join(",");
+                    pairs.push((full_key, joined));
+                }
+                Value::Null => pairs.push((full_key, String::new())),
+                _ => pairs.push((full_key, plain_scalar(v))),
             }
         }
     }

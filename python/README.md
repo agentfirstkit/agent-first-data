@@ -132,16 +132,16 @@ not_found = build_json(
 
 ### Output Formatters (returns str)
 
-Format values for CLI output and logs. `output_json` uses full `_secret` redaction by default. `output_json_with` supports explicit scoped policies. Use the `*_with_options` functions to pass legacy secret names such as `api_key`. YAML and Plain always redact secrets and apply human-readable formatting.
+Format values for CLI output and logs. `output_json` uses full `_secret` redaction by default. `output_json_with` supports explicit scoped policies. Use `OutputOptions` to pass legacy secret names such as `api_key` or request schema-preserving YAML/plain rendering with `OutputStyle.Raw`.
 
 ```python
 output_json(value: Any) -> str   # Single-line JSON, original keys, for programs/logs
 output_json_with(value: Any, redaction_policy: RedactionPolicy) -> str
-output_json_with_options(value: Any, redaction_options: RedactionOptions) -> str
+output_json_with_options(value: Any, output_options: OutputOptions) -> str
 output_yaml(value: Any) -> str   # Multi-line YAML, keys stripped, values formatted
-output_yaml_with_options(value: Any, redaction_options: RedactionOptions) -> str
+output_yaml_with_options(value: Any, output_options: OutputOptions) -> str
 output_plain(value: Any) -> str  # Single-line logfmt, keys stripped, values formatted
-output_plain_with_options(value: Any, redaction_options: RedactionOptions) -> str
+output_plain_with_options(value: Any, output_options: OutputOptions) -> str
 ```
 
 ```python
@@ -151,9 +151,15 @@ class RedactionPolicy(enum.Enum):
     RedactionStrict = "RedactionStrict"
 
 RedactionOptions(policy: RedactionPolicy | None = None, secret_names: Sequence[str] = ())
+
+class OutputStyle(enum.Enum):
+    Readable = "Readable"
+    Raw = "Raw"
+
+OutputOptions(redaction: RedactionOptions = RedactionOptions(), style: OutputStyle = OutputStyle.Readable)
 ```
 
-Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. They do not change YAML/Plain suffix stripping.
+Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. `OutputOptions` combines `RedactionOptions` with `OutputStyle.Readable` (default suffix stripping and value formatting) or `OutputStyle.Raw` (no suffix stripping or value formatting).
 
 **Example:**
 ```python
@@ -219,6 +225,7 @@ class OutputFormat(enum.Enum):  # JSON="json", YAML="yaml", PLAIN="plain"
 cli_parse_output(s: str) -> OutputFormat         # Parse --output flag; raises ValueError on unknown
 cli_parse_log_filters(entries: list[str]) -> list[str]  # Normalize --log: trim, lowercase, dedup, remove empty
 cli_output(value: Any, format: OutputFormat) -> str     # Dispatch to output_json/yaml/plain
+cli_output_with_options(value: Any, format: OutputFormat, output_options: OutputOptions) -> str
 build_cli_error(message: str, hint: str = None) -> dict  # {code:"error", error_code:"invalid_request", hint?, retryable:False, trace:{duration_ms:0}}
 ```
 

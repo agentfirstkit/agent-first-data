@@ -131,16 +131,16 @@ const notFound = buildJson(
 
 ### Output Formatters (returns string)
 
-Format values for CLI output and logs. `outputJson` uses full `_secret` redaction by default. `outputJsonWith` supports explicit scoped policies. Use the `*WithOptions` functions to pass legacy secret names such as `api_key`. YAML and Plain always redact secrets and apply human-readable formatting.
+Format values for CLI output and logs. `outputJson` uses full `_secret` redaction by default. `outputJsonWith` supports explicit scoped policies. Use `OutputOptions` to pass legacy secret names such as `api_key` or request schema-preserving YAML/plain rendering with `OutputStyle.Raw`.
 
 ```typescript
 outputJson(value: JsonValue): string   // Single-line JSON, original keys, for programs/logs
 outputJsonWith(value: JsonValue, redactionPolicy: RedactionPolicy): string
-outputJsonWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string
+outputJsonWithOptions(value: JsonValue, outputOptions: OutputOptions): string
 outputYaml(value: JsonValue): string   // Multi-line YAML, keys stripped, values formatted
-outputYamlWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string
+outputYamlWithOptions(value: JsonValue, outputOptions: OutputOptions): string
 outputPlain(value: JsonValue): string  // Single-line logfmt, keys stripped, values formatted
-outputPlainWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string
+outputPlainWithOptions(value: JsonValue, outputOptions: OutputOptions): string
 ```
 
 ```typescript
@@ -154,9 +154,19 @@ type RedactionOptions = {
   policy?: RedactionPolicy;
   secretNames?: readonly string[]; // legacy names like "api_key" or "authorization"
 }
+
+enum OutputStyle {
+  Readable = "Readable",
+  Raw = "Raw",
+}
+
+type OutputOptions = {
+  redaction?: RedactionOptions;
+  style?: OutputStyle;
+}
 ```
 
-Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. They do not change YAML/Plain suffix stripping.
+Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. `OutputOptions` combines `RedactionOptions` with `OutputStyle.Readable` (default suffix stripping and value formatting) or `OutputStyle.Raw` (no suffix stripping or value formatting).
 
 **Example:**
 ```typescript
@@ -222,6 +232,7 @@ type OutputFormat = "json" | "yaml" | "plain"
 cliParseOutput(s: string): OutputFormat             // Parse --output flag; throws on unknown
 cliParseLogFilters(entries: string[]): string[]     // Normalize --log: trim, lowercase, dedup, remove empty
 cliOutput(value: JsonValue, format: OutputFormat): string  // Dispatch to outputJson/Yaml/Plain
+cliOutputWithOptions(value: JsonValue, format: OutputFormat, outputOptions: OutputOptions): string
 buildCliError(message: string, hint?: string): JsonValue  // {code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}
 ```
 

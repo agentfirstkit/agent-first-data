@@ -74,6 +74,10 @@ fn test_redaction_options_fixtures() {
     {
         let name = case["name"].as_str().expect("missing name");
         let options = redaction_options_from_case(case);
+        let output_options = OutputOptions {
+            redaction: options.clone(),
+            style: OutputStyle::Readable,
+        };
         let expected = &case["expected"];
 
         let got = redacted_value_with_options(&case["input"], &options);
@@ -83,21 +87,21 @@ fn test_redaction_options_fixtures() {
         internal_redact_secrets_with_options(&mut input, &options);
         assert_eq!(&input, expected, "[redaction_options/{name}] in-place");
 
-        let json_out = output_json_with_options(&case["input"], &options);
+        let json_out = output_json_with_options(&case["input"], &output_options);
         let parsed_json: Value = serde_json::from_str(&json_out)
             .unwrap_or_else(|e| panic!("[redaction_options/{name}] invalid json output: {e}"));
         assert_eq!(parsed_json, *expected, "[redaction_options/{name}] json");
 
         if let Some(expected_yaml) = case.get("expected_yaml").and_then(Value::as_str) {
             assert_eq!(
-                output_yaml_with_options(&case["input"], &options),
+                output_yaml_with_options(&case["input"], &output_options),
                 expected_yaml,
                 "[redaction_options/{name}] yaml"
             );
         }
         if let Some(expected_plain) = case.get("expected_plain").and_then(Value::as_str) {
             assert_eq!(
-                output_plain_with_options(&case["input"], &options),
+                output_plain_with_options(&case["input"], &output_options),
                 expected_plain,
                 "[redaction_options/{name}] plain"
             );
@@ -488,6 +492,48 @@ fn yaml_strip_ms() {
 }
 
 #[test]
+fn yaml_raw_keeps_suffix_keys_and_structure() {
+    let options = OutputOptions {
+        redaction: RedactionOptions {
+            policy: Some(RedactionPolicy::RedactionTraceOnly),
+            secret_names: vec![],
+        },
+        style: OutputStyle::Raw,
+    };
+    let out = output_yaml_with_options(
+        &json!({
+            "code": "result",
+            "rows": [{"api_key_secret": "sk-live-1", "duration_ms": 42}],
+            "trace": {"request_secret": "top-secret"}
+        }),
+        &options,
+    );
+
+    assert!(out.contains("rows:\n  -"));
+    assert!(out.contains("api_key_secret: \"sk-live-1\""));
+    assert!(out.contains("duration_ms: 42"));
+    assert!(out.contains("request_secret: \"***\""));
+    assert!(!out.contains("duration: \"42ms\""));
+    assert!(!out.contains("rows: \"["));
+}
+
+#[test]
+fn yaml_with_options_defaults_to_readable_style() {
+    let out = output_yaml_with_options(
+        &json!({"duration_ms": 42}),
+        &OutputOptions {
+            redaction: RedactionOptions {
+                policy: Some(RedactionPolicy::RedactionNone),
+                secret_names: vec![],
+            },
+            style: OutputStyle::Readable,
+        },
+    );
+    assert!(out.contains("duration: \"42ms\""));
+    assert!(!out.contains("duration_ms:"));
+}
+
+#[test]
 fn yaml_strip_s() {
     let out = output_yaml(&json!({"timeout_s": 30}));
     assert!(out.contains("timeout:"));
@@ -670,6 +716,27 @@ fn plain_key_collision_keeps_originals() {
     let out = output_plain(&json!({"response_ms": 150, "response_s": 1}));
     assert!(out.contains("response_ms=150"));
     assert!(out.contains("response_s=1"));
+}
+
+#[test]
+fn plain_raw_keeps_suffix_keys_and_redacts_trace() {
+    let options = OutputOptions {
+        redaction: RedactionOptions {
+            policy: Some(RedactionPolicy::RedactionTraceOnly),
+            secret_names: vec![],
+        },
+        style: OutputStyle::Raw,
+    };
+    let out = output_plain_with_options(
+        &json!({
+            "duration_ms": 42,
+            "trace": {"request_secret": "top-secret"}
+        }),
+        &options,
+    );
+    assert!(out.contains("duration_ms=42"));
+    assert!(out.contains("trace.request_secret=***"));
+    assert!(!out.contains("duration=42ms"));
 }
 
 // ═══════════════════════════════════════════

@@ -9,6 +9,8 @@ from agent_first_data import (
     build_json,
     RedactionPolicy,
     RedactionOptions,
+    OutputStyle,
+    OutputOptions,
     internal_redact_secrets,
     internal_redact_secrets_with_options,
     redacted_value,
@@ -58,6 +60,7 @@ def test_redaction_options_fixtures():
     for case in _load("redaction_options.json"):
         name = case["name"]
         options = _redaction_options(case)
+        output_options = OutputOptions(redaction=options, style=OutputStyle.Readable)
         expected = case["expected"]
 
         got = redacted_value_with_options(case["input"], options)
@@ -67,14 +70,14 @@ def test_redaction_options_fixtures():
         internal_redact_secrets_with_options(inp, options)
         assert inp == expected, f"[redaction_options/{name}] in-place mismatch: {inp}"
 
-        got_json = json.loads(output_json_with_options(case["input"], options))
+        got_json = json.loads(output_json_with_options(case["input"], output_options))
         assert got_json == expected, f"[redaction_options/{name}] json mismatch: {got_json}"
 
         if "expected_yaml" in case:
-            got_yaml = output_yaml_with_options(case["input"], options)
+            got_yaml = output_yaml_with_options(case["input"], output_options)
             assert got_yaml == case["expected_yaml"], f"[redaction_options/{name}] yaml mismatch: {got_yaml!r}"
         if "expected_plain" in case:
-            got_plain = output_plain_with_options(case["input"], options)
+            got_plain = output_plain_with_options(case["input"], output_options)
             assert got_plain == case["expected_plain"], f"[redaction_options/{name}] plain mismatch: {got_plain!r}"
 
 
@@ -145,6 +148,57 @@ def test_output_format_fixtures():
 
         got_plain = output_plain(inp)
         assert got_plain == case["expected_plain"], f"[output/{name}] plain mismatch: {got_plain!r}"
+
+
+def test_output_yaml_raw_keeps_suffix_keys_and_structure():
+    options = OutputOptions(
+        redaction=RedactionOptions(policy=RedactionPolicy.RedactionTraceOnly),
+        style=OutputStyle.Raw,
+    )
+    out = output_yaml_with_options(
+        {
+            "code": "result",
+            "rows": [{"api_key_secret": "sk-live-1", "duration_ms": 42}],
+            "trace": {"request_secret": "top-secret"},
+        },
+        options,
+    )
+
+    assert "rows:\n  -" in out
+    assert 'api_key_secret: "sk-live-1"' in out
+    assert "duration_ms: 42" in out
+    assert 'request_secret: "***"' in out
+    assert 'duration: "42ms"' not in out
+
+
+def test_output_plain_raw_keeps_suffix_keys_and_redacts_trace():
+    options = OutputOptions(
+        redaction=RedactionOptions(policy=RedactionPolicy.RedactionTraceOnly),
+        style=OutputStyle.Raw,
+    )
+    out = output_plain_with_options(
+        {
+            "duration_ms": 42,
+            "trace": {"request_secret": "top-secret"},
+        },
+        options,
+    )
+
+    assert "duration_ms=42" in out
+    assert "trace.request_secret=***" in out
+    assert "duration=42ms" not in out
+
+
+def test_output_with_options_defaults_to_readable_style():
+    out = output_yaml_with_options(
+        {"duration_ms": 42},
+        OutputOptions(
+            redaction=RedactionOptions(policy=RedactionPolicy.RedactionNone),
+            style=OutputStyle.Readable,
+        ),
+    )
+    assert 'duration: "42ms"' in out
+    assert "duration_ms:" not in out
 
 
 def test_output_json_exception_field_is_readable():

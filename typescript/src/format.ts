@@ -1,8 +1,9 @@
 /**
  * AFDATA output formatting and protocol templates.
  *
- * 16 public APIs and 2 types: protocol builders, redacted value helpers,
- * output formatters, redaction, parseSize, RedactionPolicy, and RedactionOptions.
+ * 16 public APIs and 4 types: protocol builders, redacted value helpers,
+ * output formatters, redaction, parseSize, RedactionPolicy, RedactionOptions,
+ * OutputStyle, and OutputOptions.
  */
 
 export type JsonValue =
@@ -60,6 +61,18 @@ export type RedactionOptions = {
   secretNames?: readonly string[];
 };
 
+export enum OutputStyle {
+  Readable = "Readable",
+  Raw = "Raw",
+}
+
+export type OutputOptions = {
+  /** Redaction options applied before rendering. */
+  redaction?: RedactionOptions;
+  /** Rendering style for YAML/plain output. Omitted means readable. */
+  style?: OutputStyle;
+};
+
 /** Format as single-line JSON. Secrets redacted, original keys, raw values. */
 export function outputJson(value: JsonValue): string {
   return JSON.stringify(redactedValue(value));
@@ -70,43 +83,42 @@ export function outputJsonWith(value: JsonValue, redactionPolicy: RedactionPolic
   return JSON.stringify(redactedValueWith(value, redactionPolicy));
 }
 
-/** Format as single-line JSON with explicit redaction options. */
-export function outputJsonWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string {
-  return JSON.stringify(redactedValueWithOptions(value, redactionOptions));
+/** Format as single-line JSON with explicit output options. */
+export function outputJsonWithOptions(value: JsonValue, outputOptions: OutputOptions): string {
+  return JSON.stringify(redactedValueWithOptions(value, outputOptions.redaction ?? {}));
 }
 
 /** Format as multi-line YAML. Keys stripped, values formatted, secrets redacted. */
 export function outputYaml(value: JsonValue): string {
-  value = redactedValue(value);
-  const lines = ["---"];
-  renderYamlProcessed(value, 0, lines);
-  return lines.join("\n");
+  return outputYamlWithOptions(value, {});
 }
 
-/** Format as multi-line YAML with explicit redaction options. */
-export function outputYamlWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string {
-  value = redactedValueWithOptions(value, redactionOptions);
+/** Format as multi-line YAML with explicit output options. */
+export function outputYamlWithOptions(value: JsonValue, outputOptions: OutputOptions): string {
+  value = redactedValueWithOptions(value, outputOptions.redaction ?? {});
   const lines = ["---"];
-  renderYamlProcessed(value, 0, lines);
+  if (outputOptions.style === OutputStyle.Raw) {
+    renderYamlRaw(value, 0, lines);
+  } else {
+    renderYamlProcessed(value, 0, lines);
+  }
   return lines.join("\n");
 }
 
 /** Format as single-line logfmt. Keys stripped, values formatted, secrets redacted. */
 export function outputPlain(value: JsonValue): string {
-  value = redactedValue(value);
-  const pairs: [string, string][] = [];
-  collectPlainPairs(value, "", pairs);
-  pairs.sort(([a], [b]) => jcsCompare(a, b));
-  return pairs
-    .map(([k, v]) => `${k}=${quoteLogfmtValue(v)}`)
-    .join(" ");
+  return outputPlainWithOptions(value, {});
 }
 
-/** Format as single-line logfmt with explicit redaction options. */
-export function outputPlainWithOptions(value: JsonValue, redactionOptions: RedactionOptions): string {
-  value = redactedValueWithOptions(value, redactionOptions);
+/** Format as single-line logfmt with explicit output options. */
+export function outputPlainWithOptions(value: JsonValue, outputOptions: OutputOptions): string {
+  value = redactedValueWithOptions(value, outputOptions.redaction ?? {});
   const pairs: [string, string][] = [];
-  collectPlainPairs(value, "", pairs);
+  if (outputOptions.style === OutputStyle.Raw) {
+    collectPlainPairsRaw(value, "", pairs);
+  } else {
+    collectPlainPairs(value, "", pairs);
+  }
   pairs.sort(([a], [b]) => jcsCompare(a, b));
   return pairs
     .map(([k, v]) => `${k}=${quoteLogfmtValue(v)}`)
@@ -553,6 +565,62 @@ function renderYamlProcessed(value: JsonValue, indent: number, lines: string[]):
   }
 }
 
+function renderYamlRaw(value: JsonValue, indent: number, lines: string[]): void {
+  const prefix = "  ".repeat(indent);
+  if (isObject(value)) {
+    for (const key of sortedObjectKeys(value)) {
+      renderYamlFieldRaw(prefix, key, value[key], indent, lines);
+    }
+  } else if (Array.isArray(value)) {
+    renderYamlArrayRaw(value, indent, lines);
+  } else {
+    lines.push(`${prefix}${yamlScalar(value)}`);
+  }
+}
+
+function renderYamlFieldRaw(prefix: string, key: string, value: JsonValue, indent: number, lines: string[]): void {
+  if (isObject(value)) {
+    if (Object.keys(value).length > 0) {
+      lines.push(`${prefix}${key}:`);
+      renderYamlRaw(value, indent + 1, lines);
+    } else {
+      lines.push(`${prefix}${key}: {}`);
+    }
+  } else if (Array.isArray(value)) {
+    if (value.length > 0) {
+      lines.push(`${prefix}${key}:`);
+      renderYamlArrayRaw(value, indent + 1, lines);
+    } else {
+      lines.push(`${prefix}${key}: []`);
+    }
+  } else {
+    lines.push(`${prefix}${key}: ${yamlScalar(value)}`);
+  }
+}
+
+function renderYamlArrayRaw(arr: JsonValue[], indent: number, lines: string[]): void {
+  const prefix = "  ".repeat(indent);
+  for (const item of arr) {
+    if (isObject(item)) {
+      if (Object.keys(item).length > 0) {
+        lines.push(`${prefix}-`);
+        renderYamlRaw(item, indent + 1, lines);
+      } else {
+        lines.push(`${prefix}- {}`);
+      }
+    } else if (Array.isArray(item)) {
+      if (item.length > 0) {
+        lines.push(`${prefix}-`);
+        renderYamlArrayRaw(item, indent + 1, lines);
+      } else {
+        lines.push(`${prefix}- []`);
+      }
+    } else {
+      lines.push(`${prefix}- ${yamlScalar(item)}`);
+    }
+  }
+}
+
 function escapeYamlStr(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
 }
@@ -587,12 +655,36 @@ function collectPlainPairs(value: JsonValue, prefix: string, pairs: [string, str
   }
 }
 
+function collectPlainPairsRaw(value: JsonValue, prefix: string, pairs: [string, string][]): void {
+  if (!isObject(value)) return;
+  for (const key of sortedObjectKeys(value)) {
+    const v = value[key];
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+    if (isObject(v)) {
+      collectPlainPairsRaw(v, fullKey, pairs);
+    } else if (Array.isArray(v)) {
+      pairs.push([fullKey, v.map((i) => plainScalarRaw(i)).join(",")]);
+    } else if (v === null) {
+      pairs.push([fullKey, ""]);
+    } else {
+      pairs.push([fullKey, plainScalar(v)]);
+    }
+  }
+}
+
 function plainScalar(value: JsonValue): string {
   if (typeof value === "string") return value;
   if (value === null) return "null";
   if (typeof value === "boolean") return value.toString();
   if (typeof value === "number") return value.toString();
   return String(value);
+}
+
+function plainScalarRaw(value: JsonValue): string {
+  if (isObject(value) || Array.isArray(value)) {
+    return JSON.stringify(sortJsonValue(value));
+  }
+  return plainScalar(value);
 }
 
 function quoteLogfmtValue(value: string): string {
@@ -653,6 +745,22 @@ function sanitizeForJson(value: unknown, stack = new WeakSet<object>()): JsonVal
 
 function isObject(value: unknown): value is { [key: string]: JsonValue } {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sortedObjectKeys(obj: { [key: string]: JsonValue }): string[] {
+  return Object.keys(obj).sort(jcsCompare);
+}
+
+function sortJsonValue(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) return value.map(sortJsonValue);
+  if (isObject(value)) {
+    const out: { [key: string]: JsonValue } = {};
+    for (const key of sortedObjectKeys(value)) {
+      out[key] = sortJsonValue(value[key]);
+    }
+    return out;
+  }
+  return value;
 }
 
 function jcsCompare(a: string, b: string): number {

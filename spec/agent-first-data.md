@@ -28,7 +28,7 @@ Agent-First Data has three parts:
 | **Currency** | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` | `price_usd_cents: 999` → `price: $9.99` |
 | **Other** | `_percent`, `_secret` | `cpu_percent: 85` → `cpu: 85%` |
 
-**In YAML and Plain:** suffixes are stripped from keys (value already encodes the unit) and values are formatted for readability. JSON preserves original keys and raw values.
+**In default YAML and Plain:** suffixes are stripped from keys (value already encodes the unit) and values are formatted for readability. JSON preserves original keys and raw values.
 
 **Secret protection:** All three formats automatically redact `_secret` fields.
 
@@ -144,7 +144,7 @@ Stablecoins follow the same `_{code}_cents` pattern: `deposit_usdt_cents: 1000`,
 |:-------|:---------|:--------|
 | `_secret` | redact scalar values to `***`; for object/array values, recursively redact nested secrets | `api_key_secret: "sk-or-v1-abc..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Scalar `_secret` values become `***`; object/array `_secret` values are traversed and nested `_secret` fields are redacted. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `RedactionOptions.secret_names` at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction, not YAML/Plain suffix stripping. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time. `RedactionStrict` is available when the entire `_secret` or listed secret subtree must be replaced with `***`.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Scalar `_secret` values become `***`; object/array `_secret` values are traversed and nested `_secret` fields are redacted. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `OutputOptions.redaction.secret_names` (or `RedactionOptions.secret_names` in redaction helpers) at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction; suffix stripping is still controlled by AFDATA suffixes in the default readable style. Callers that need schema-preserving YAML/plain rendering can use `OutputOptions` with the `Raw` output style. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time. `RedactionStrict` is available when the entire `_secret` or listed secret subtree must be replaced with `***`.
 
 ### No suffix needed
 
@@ -349,16 +349,16 @@ Default is tool-defined. Interactive CLIs default to `yaml`, scripting/logging c
 
 JSON is the canonical format. YAML and plain are derived from it.
 
-**All CLI output formats automatically redact `_secret` fields.** Matching recognizes `_secret` and `_SECRET` only. Scalar `_secret` values are replaced with `***`; object/array values are traversed and nested `_secret` fields are redacted. Legacy field names can be protected by passing `RedactionOptions.secret_names` at serialization time; this opt-in list is exact field-name equality and does not affect suffix stripping.
+**All CLI output formats automatically redact `_secret` fields.** Matching recognizes `_secret` and `_SECRET` only. Scalar `_secret` values are replaced with `***`; object/array values are traversed and nested `_secret` fields are redacted. Legacy field names can be protected by passing `OutputOptions.redaction.secret_names` at serialization time; this opt-in list is exact field-name equality. The `Raw` output style disables YAML/plain suffix stripping while keeping the selected redaction policy.
 
 **Format characteristics:**
 - **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
-- **YAML** — multi-line, human-readable, keys stripped, values formatted, secrets redacted
-- **Plain** — single-line logfmt, human-readable, keys stripped, values formatted, secrets redacted
+- **YAML** — multi-line, human-readable, keys stripped, values formatted, secrets redacted by default
+- **Plain** — single-line logfmt, human-readable, keys stripped, values formatted, secrets redacted by default
 
 ### yaml
 
-Each JSON line becomes a YAML document, separated by `---`. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float). **Suffixes stripped from keys** (value already encodes the unit). **Secrets automatically redacted.**
+Each JSON line becomes a YAML document, separated by `---`. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float). In the default readable style, **suffixes are stripped from keys** (value already encodes the unit). **Secrets automatically redacted.**
 
 ```yaml
 ---
@@ -381,7 +381,7 @@ trace:
 
 ### plain
 
-Single-line [logfmt](https://brandur.org/logfmt) style. **Suffixes stripped from keys.** **Secrets automatically redacted.**
+Single-line [logfmt](https://brandur.org/logfmt) style. In the default readable style, **suffixes are stripped from keys.** **Secrets automatically redacted.**
 
 - Nested keys use dot notation: `trace.duration=1.28s`
 - Values containing whitespace, `=`, `"`, or `\` are quoted; `\`, `"`, newline, carriage return, and tab are escaped so each record stays one physical line

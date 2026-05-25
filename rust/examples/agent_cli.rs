@@ -10,20 +10,24 @@
 //
 // Demonstrates: recursive --help (all subcommands expanded), --help-markdown,
 // _secret flags, nested subcommands, cli_parse_output, cli_parse_log_filters,
-// cli_output, build_cli_error, and error hints.
+// opt-in startup diagnostics, cli_output, build_cli_error, and error hints.
 //
 // Run:  cargo run --example agent_cli --features cli-help,cli-help-markdown -- --help
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown -- service --help
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown -- service start --help
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown -- --help-markdown
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown -- ping --timeout-ms 5000
+//       cargo run --example agent_cli --features cli-help,cli-help-markdown -- --log startup ping --host example.com
 // Test: cargo test --examples --features cli-help,cli-help-markdown
 
 use agent_first_data::{
-    build_cli_error, build_json_error, build_json_ok, cli_output, cli_parse_log_filters,
-    cli_parse_output,
+    build_cli_error, build_json, build_json_error, build_json_ok, cli_output,
+    cli_parse_log_filters, cli_parse_output,
 };
 use clap::{CommandFactory, Parser, Subcommand};
+
+const AGENT_CLI_HOST_ENV: &str = "AGENT_CLI_HOST";
+const STARTUP_ENV_KEYS: &[&str] = &[AGENT_CLI_HOST_ENV];
 
 #[derive(Parser)]
 #[command(name = "agent-cli", version, about = "Minimal agent-first CLI example")]
@@ -54,7 +58,7 @@ enum Command {
     },
     /// Ping a remote target
     Ping {
-        /// Target host to ping
+        /// Target host to ping (falls back to AGENT_CLI_HOST)
         #[arg(long)]
         host: Option<String>,
         /// Ping timeout
@@ -151,7 +155,11 @@ fn main() {
         );
         std::process::exit(2);
     });
-    let _log = cli_parse_log_filters(&cli.log);
+    let log = cli_parse_log_filters(&cli.log);
+
+    if startup_log_requested(&log) {
+        println!("{}", cli_output(&build_startup_log(), format));
+    }
 
     match cli.command {
         None => {
@@ -198,10 +206,11 @@ fn main() {
             }
         },
         Some(Command::Ping { host, timeout_ms }) => {
+            let host = host.or_else(|| std::env::var(AGENT_CLI_HOST_ENV).ok());
             if host.is_none() {
                 let err = build_json_error(
                     "ping target not configured",
-                    Some("pass --host"),
+                    Some("pass --host or set AGENT_CLI_HOST"),
                     Some(serde_json::json!({"duration_ms": 0})),
                 );
                 println!("{}", cli_output(&err, format));
@@ -214,6 +223,36 @@ fn main() {
             println!("{}", cli_output(&result, format));
         }
     }
+}
+
+fn startup_log_requested(log: &[String]) -> bool {
+    log.iter()
+        .any(|category| matches!(category.as_str(), "startup" | "all" | "*"))
+}
+
+fn build_startup_log() -> serde_json::Value {
+    build_json(
+        "log",
+        serde_json::json!({
+            "event": "startup",
+            "env": startup_env_snapshot(),
+        }),
+        None,
+    )
+}
+
+fn startup_env_snapshot() -> serde_json::Value {
+    serde_json::Value::Array(
+        STARTUP_ENV_KEYS
+            .iter()
+            .map(|key| {
+                serde_json::json!({
+                    "key": key,
+                    "present": std::env::var_os(*key).is_some(),
+                })
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -387,6 +426,37 @@ mod tests {
     fn parse_log_normalizes() {
         let f = cli_parse_log_filters(&["Startup", " REQUEST ", "startup"]);
         assert_eq!(f, vec!["startup", "request"]);
+    }
+
+    #[test]
+    fn startup_log_filter_is_explicit() {
+        assert!(!startup_log_requested(
+            &cli_parse_log_filters::<String>(&[])
+        ));
+        assert!(!startup_log_requested(&cli_parse_log_filters(&[
+            "query.result"
+        ])));
+        assert!(startup_log_requested(&cli_parse_log_filters(&["startup"])));
+        assert!(startup_log_requested(&cli_parse_log_filters(&["all"])));
+        assert!(startup_log_requested(&cli_parse_log_filters(&["*"])));
+    }
+
+    #[test]
+    fn startup_log_contains_only_env_presence() {
+        let v = build_startup_log();
+        assert_eq!(v["code"], "log");
+        assert_eq!(v["event"], "startup");
+        assert!(v.get("args").is_none());
+        assert!(v.get("mode").is_none());
+        assert!(v.get("command").is_none());
+
+        let env = v["env"].as_array().expect("env must be an array");
+        let host = env
+            .iter()
+            .find(|entry| entry["key"] == AGENT_CLI_HOST_ENV)
+            .expect("startup env must include exact AGENT_CLI_HOST key");
+        assert!(host["present"].is_boolean());
+        assert!(host.get("value").is_none());
     }
 
     #[test]

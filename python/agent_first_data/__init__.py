@@ -6,6 +6,8 @@ from agent_first_data.format import (
     build_json,
     RedactionPolicy,
     RedactionOptions,
+    OutputStyle,
+    OutputOptions,
     output_json,
     output_json_with,
     output_json_with_options,
@@ -36,6 +38,7 @@ from agent_first_data.cli import (
     cli_parse_output,
     cli_parse_log_filters,
     cli_output,
+    cli_output_with_options,
     build_cli_error,
 )
 
@@ -45,6 +48,8 @@ __all__ = [
     "build_json",
     "RedactionPolicy",
     "RedactionOptions",
+    "OutputStyle",
+    "OutputOptions",
     "output_json",
     "output_json_with",
     "output_json_with_options",
@@ -69,5 +74,6 @@ __all__ = [
     "cli_parse_output",
     "cli_parse_log_filters",
     "cli_output",
+    "cli_output_with_options",
     "build_cli_error",
 ]

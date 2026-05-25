@@ -131,16 +131,16 @@ notFound := afdata.BuildJson(
 
 ### Output Formatters (returns string)
 
-Format values for CLI output and logs. `OutputJson` uses full `_secret` redaction by default. `OutputJsonWith` supports explicit scoped policies. Use the `*WithOptions` functions to pass legacy secret names such as `api_key`. YAML and Plain always redact secrets and apply human-readable formatting.
+Format values for CLI output and logs. `OutputJson` uses full `_secret` redaction by default. `OutputJsonWith` supports explicit scoped policies. Use `OutputOptions` to pass legacy secret names such as `api_key` or request schema-preserving YAML/plain rendering with `OutputStyleRaw`.
 
 ```go
 OutputJson(value any) string   // Single-line JSON, original keys, for programs/logs
 OutputJsonWith(value any, redactionPolicy RedactionPolicy) string
-OutputJsonWithOptions(value any, redactionOptions RedactionOptions) string
+OutputJsonWithOptions(value any, outputOptions OutputOptions) string
 OutputYaml(value any) string   // Multi-line YAML, keys stripped, values formatted
-OutputYamlWithOptions(value any, redactionOptions RedactionOptions) string
+OutputYamlWithOptions(value any, outputOptions OutputOptions) string
 OutputPlain(value any) string  // Single-line logfmt, keys stripped, values formatted
-OutputPlainWithOptions(value any, redactionOptions RedactionOptions) string
+OutputPlainWithOptions(value any, outputOptions OutputOptions) string
 ```
 
 ```go
@@ -155,9 +155,20 @@ type RedactionOptions struct {
     Policy      RedactionPolicy // empty means default full redaction
     SecretNames []string        // legacy names like "api_key" or "authorization"
 }
+
+type OutputStyle string
+const (
+    OutputStyleReadable OutputStyle = "Readable"
+    OutputStyleRaw      OutputStyle = "Raw"
+)
+
+type OutputOptions struct {
+    Redaction RedactionOptions
+    Style     OutputStyle
+}
 ```
 
-Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. They do not change YAML/Plain suffix stripping.
+Secret names match exact field names at any nesting level; there is no trim, case folding, hyphen/underscore normalization, glob, regex, or substring matching. `OutputOptions` combines `RedactionOptions` with `OutputStyleReadable` (default suffix stripping and value formatting) or `OutputStyleRaw` (no suffix stripping or value formatting).
 
 **Example:**
 ```go
@@ -223,6 +234,7 @@ type OutputFormat string  // "json" | "yaml" | "plain"
 CliParseOutput(s string) (OutputFormat, error)    // Parse --output flag; error on unknown
 CliParseLogFilters(entries []string) []string     // Normalize --log: trim, lowercase, dedup, remove empty
 CliOutput(value any, format OutputFormat) string  // Dispatch to OutputJson/Yaml/Plain
+CliOutputWithOptions(value any, format OutputFormat, outputOptions OutputOptions) string
 BuildCliError(message string, hint string) map[string]any  // {code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}
 ```
 

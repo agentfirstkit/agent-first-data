@@ -2,9 +2,12 @@
 import pytest
 from agent_first_data import (
     OutputFormat,
+    OutputStyle,
+    OutputOptions,
     cli_parse_output,
     cli_parse_log_filters,
     cli_output,
+    cli_output_with_options,
     build_cli_error,
     output_json,
 )
@@ -106,3 +109,14 @@ def test_cli_output_dispatches_plain():
     out = cli_output(v, OutputFormat.PLAIN)
     assert "\n" not in out
     assert "code=ok" in out
+
+
+def test_cli_output_with_options_dispatches_raw_yaml():
+    v = {"size_bytes": 1024}
+    out = cli_output_with_options(
+        v,
+        OutputFormat.YAML,
+        OutputOptions(style=OutputStyle.Raw),
+    )
+    assert "size_bytes: 1024" in out
+    assert "size:" not in out

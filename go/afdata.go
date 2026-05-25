@@ -1,9 +1,9 @@
 // Package afdata implements Agent-First Data (AFDATA) output formatting
 // and protocol templates.
 //
-// 20 public APIs and 3 types: 3 protocol builders + 3 redacted value helpers +
-// 7 output formatters + 2 redaction helpers + 1 utility + 4 CLI helpers +
-// OutputFormat + RedactionPolicy + RedactionOptions.
+// 21 public APIs and 5 types: 3 protocol builders + 3 redacted value helpers +
+// 7 output formatters + 2 redaction helpers + 1 utility + 5 CLI helpers +
+// OutputFormat + RedactionPolicy + RedactionOptions + OutputStyle + OutputOptions.
 package afdata
 
 import (
@@ -82,6 +82,22 @@ type RedactionOptions struct {
 	SecretNames []string
 }
 
+// OutputStyle controls YAML/plain rendering style.
+type OutputStyle string
+
+const (
+	// OutputStyleReadable strips AFDATA suffixes and formats values.
+	OutputStyleReadable OutputStyle = "Readable"
+	// OutputStyleRaw preserves keys and values after redaction.
+	OutputStyleRaw OutputStyle = "Raw"
+)
+
+// OutputOptions combines redaction and rendering style.
+type OutputOptions struct {
+	Redaction RedactionOptions
+	Style     OutputStyle
+}
+
 // OutputJson formats as single-line JSON. Secrets redacted, original keys, raw values.
 func OutputJson(value any) string {
 	return marshalOutputJSON(RedactedValue(value))
@@ -92,9 +108,10 @@ func OutputJsonWith(value any, redactionPolicy RedactionPolicy) string {
 	return marshalOutputJSON(RedactedValueWith(value, redactionPolicy))
 }
 
-// OutputJsonWithOptions formats as single-line JSON with explicit redaction options.
-func OutputJsonWithOptions(value any, redactionOptions RedactionOptions) string {
-	return marshalOutputJSON(RedactedValueWithOptions(value, redactionOptions))
+// OutputJsonWithOptions formats as single-line JSON with explicit output options.
+// JSON ignores OutputStyle and preserves original keys and values after redaction.
+func OutputJsonWithOptions(value any, outputOptions OutputOptions) string {
+	return marshalOutputJSON(RedactedValueWithOptions(value, outputOptions.Redaction))
 }
 
 func marshalOutputJSON(value any) string {
@@ -112,36 +129,35 @@ func marshalOutputJSON(value any) string {
 
 // OutputYaml formats as multi-line YAML. Keys stripped, values formatted, secrets redacted.
 func OutputYaml(value any) string {
-	lines := []string{"---"}
-	renderYamlProcessed(RedactedValue(value), 0, &lines)
-	return strings.Join(lines, "\n")
+	return OutputYamlWithOptions(value, OutputOptions{})
 }
 
-// OutputYamlWithOptions formats as multi-line YAML with explicit redaction options.
-func OutputYamlWithOptions(value any, redactionOptions RedactionOptions) string {
+// OutputYamlWithOptions formats as multi-line YAML with explicit output options.
+func OutputYamlWithOptions(value any, outputOptions OutputOptions) string {
 	lines := []string{"---"}
-	renderYamlProcessed(RedactedValueWithOptions(value, redactionOptions), 0, &lines)
+	v := RedactedValueWithOptions(value, outputOptions.Redaction)
+	if outputOptions.Style == OutputStyleRaw {
+		renderYamlRaw(v, 0, &lines)
+	} else {
+		renderYamlProcessed(v, 0, &lines)
+	}
 	return strings.Join(lines, "\n")
 }
 
 // OutputPlain formats as single-line logfmt. Keys stripped, values formatted, secrets redacted.
 func OutputPlain(value any) string {
-	var pairs [][2]string
-	collectPlainPairs(RedactedValue(value), "", &pairs)
-	sort.Slice(pairs, func(i, j int) bool {
-		return jcsLess(pairs[i][0], pairs[j][0])
-	})
-	parts := make([]string, len(pairs))
-	for i, p := range pairs {
-		parts[i] = fmt.Sprintf("%s=%s", p[0], quoteLogfmtValue(p[1]))
-	}
-	return strings.Join(parts, " ")
+	return OutputPlainWithOptions(value, OutputOptions{})
 }
 
-// OutputPlainWithOptions formats as single-line logfmt with explicit redaction options.
-func OutputPlainWithOptions(value any, redactionOptions RedactionOptions) string {
+// OutputPlainWithOptions formats as single-line logfmt with explicit output options.
+func OutputPlainWithOptions(value any, outputOptions OutputOptions) string {
 	var pairs [][2]string
-	collectPlainPairs(RedactedValueWithOptions(value, redactionOptions), "", &pairs)
+	v := RedactedValueWithOptions(value, outputOptions.Redaction)
+	if outputOptions.Style == OutputStyleRaw {
+		collectPlainPairsRaw(v, "", &pairs)
+	} else {
+		collectPlainPairs(v, "", &pairs)
+	}
 	sort.Slice(pairs, func(i, j int) bool {
 		return jcsLess(pairs[i][0], pairs[j][0])
 	})
@@ -716,6 +732,65 @@ func renderYamlProcessed(value any, indent int, lines *[]string) {
 	}
 }
 
+func renderYamlRaw(value any, indent int, lines *[]string) {
+	prefix := strings.Repeat("  ", indent)
+	switch v := value.(type) {
+	case map[string]any:
+		for _, key := range sortedObjectKeys(v) {
+			renderYamlFieldRaw(prefix, key, v[key], indent, lines)
+		}
+	case []any:
+		renderYamlArrayRaw(v, indent, lines)
+	default:
+		*lines = append(*lines, fmt.Sprintf("%s%s", prefix, yamlScalar(value)))
+	}
+}
+
+func renderYamlFieldRaw(prefix, key string, value any, indent int, lines *[]string) {
+	switch v := value.(type) {
+	case map[string]any:
+		if len(v) > 0 {
+			*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, key))
+			renderYamlRaw(v, indent+1, lines)
+		} else {
+			*lines = append(*lines, fmt.Sprintf("%s%s: {}", prefix, key))
+		}
+	case []any:
+		if len(v) == 0 {
+			*lines = append(*lines, fmt.Sprintf("%s%s: []", prefix, key))
+		} else {
+			*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, key))
+			renderYamlArrayRaw(v, indent+1, lines)
+		}
+	default:
+		*lines = append(*lines, fmt.Sprintf("%s%s: %s", prefix, key, yamlScalar(value)))
+	}
+}
+
+func renderYamlArrayRaw(arr []any, indent int, lines *[]string) {
+	prefix := strings.Repeat("  ", indent)
+	for _, item := range arr {
+		switch v := item.(type) {
+		case map[string]any:
+			if len(v) > 0 {
+				*lines = append(*lines, fmt.Sprintf("%s-", prefix))
+				renderYamlRaw(v, indent+1, lines)
+			} else {
+				*lines = append(*lines, fmt.Sprintf("%s- {}", prefix))
+			}
+		case []any:
+			if len(v) > 0 {
+				*lines = append(*lines, fmt.Sprintf("%s-", prefix))
+				renderYamlArrayRaw(v, indent+1, lines)
+			} else {
+				*lines = append(*lines, fmt.Sprintf("%s- []", prefix))
+			}
+		default:
+			*lines = append(*lines, fmt.Sprintf("%s- %s", prefix, yamlScalar(item)))
+		}
+	}
+}
+
 func escapeYamlStr(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
@@ -787,6 +862,33 @@ func collectPlainPairs(value any, prefix string, pairs *[][2]string) {
 	}
 }
 
+func collectPlainPairsRaw(value any, prefix string, pairs *[][2]string) {
+	m, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	for _, key := range sortedObjectKeys(m) {
+		fullKey := key
+		if prefix != "" {
+			fullKey = prefix + "." + key
+		}
+		switch v := m[key].(type) {
+		case map[string]any:
+			collectPlainPairsRaw(v, fullKey, pairs)
+		case []any:
+			parts := make([]string, len(v))
+			for i, item := range v {
+				parts[i] = plainScalarRaw(item)
+			}
+			*pairs = append(*pairs, [2]string{fullKey, strings.Join(parts, ",")})
+		case nil:
+			*pairs = append(*pairs, [2]string{fullKey, ""})
+		default:
+			*pairs = append(*pairs, [2]string{fullKey, plainScalar(v)})
+		}
+	}
+}
+
 func plainScalar(value any) string {
 	switch v := value.(type) {
 	case string:
@@ -812,6 +914,16 @@ func plainScalar(value any) string {
 	default:
 		return fmt.Sprintf("<unsupported:%T>", value)
 	}
+}
+
+func plainScalarRaw(value any) string {
+	switch value.(type) {
+	case map[string]any, []any:
+		if b, err := json.Marshal(value); err == nil {
+			return string(b)
+		}
+	}
+	return plainScalar(value)
 }
 
 func quoteLogfmtValue(value string) string {
@@ -956,4 +1068,15 @@ func jcsLess(a, b string) bool {
 		}
 	}
 	return len(ua) < len(ub)
+}
+
+func sortedObjectKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return jcsLess(keys[i], keys[j])
+	})
+	return keys
 }
