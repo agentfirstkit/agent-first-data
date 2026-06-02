@@ -42,5 +42,35 @@
     "input": {"db": {"api_key": {"nested": "real"}, "host": "localhost"}},
     "options": {"policy": "RedactionStrict", "secret_names": ["api_key"]},
     "expected": {"db": {"api_key": "***", "host": "localhost"}}
+  },
+  {
+    "name": "url-suffixed field with secret param",
+    "input": {"final_url": "https://h/cb?code_secret=abc&page=2", "status": 200},
+    "options": {},
+    "expected": {"final_url": "https://h/cb?code_secret=***&page=2", "status": 200}
+  },
+  {
+    "name": "url-suffixed field legacy param via secret_names",
+    "input": {"endpoint_url": "wss://host:9222/cdp?token=abc"},
+    "options": {"secret_names": ["token"]},
+    "expected": {"endpoint_url": "wss://host:9222/cdp?token=***"}
+  },
+  {
+    "name": "url-suffixed field userinfo password",
+    "input": {"database_url": "postgres://u:pw@h/db"},
+    "options": {},
+    "expected": {"database_url": "postgres://u:***@h/db"}
+  },
+  {
+    "name": "non-url-suffixed field is not scanned",
+    "input": {"message": "connect https://h/?api_secret=x"},
+    "options": {},
+    "expected": {"message": "connect https://h/?api_secret=x"}
+  },
+  {
+    "name": "none policy leaves url-suffixed field untouched",
+    "input": {"final_url": "https://h/cb?code_secret=abc"},
+    "options": {"policy": "RedactionNone"},
+    "expected": {"final_url": "https://h/cb?code_secret=abc"}
   }
 ]

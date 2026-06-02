@@ -1,11 +1,14 @@
 //! Agent-First Data (AFDATA) output formatting and protocol templates.
 //!
-//! 21 public APIs and 5 types (+ 2 optional help renderers):
+//! 23 public APIs and 5 types (+ 2 optional help renderers):
 //! - 3 protocol builders: [`build_json_ok`], [`build_json_error`], [`build_json`]
-//! - 3 redacted value helpers: [`redacted_value`], [`redacted_value_with`], [`redacted_value_with_options`]
+//! - 3 value-copy redactors: [`redacted_value`], [`redacted_value_with`], [`redacted_value_with_options`]
 //! - 7 output formatters: [`output_json`], [`output_json_with`], [`output_json_with_options`],
 //!   [`output_yaml`], [`output_yaml_with_options`], [`output_plain`], [`output_plain_with_options`]
-//! - 2 redaction utilities: [`internal_redact_secrets`], [`internal_redact_secrets_with_options`]
+//! - 2 in-place value redactors: [`internal_redact_secrets`], [`internal_redact_secrets_with_options`]
+//!   (these redact `_secret` and `_url` fields in a JSON value)
+//! - 2 URL-string redactors: [`redact_url_secrets`], [`redact_url_secrets_with_options`]
+//!   (operate on one URL string; the value redactors above apply these to `_url` fields)
 //! - 1 parse utility: [`parse_size`]
 //! - 5 CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`], [`cli_output`],
 //!   [`cli_output_with_options`], [`build_cli_error`]
@@ -81,7 +84,9 @@ pub struct RedactionOptions {
     pub policy: Option<RedactionPolicy>,
     /// Field names to treat as secrets in addition to `_secret` suffixes.
     ///
-    /// Matching is exact field-name equality at any nesting level.
+    /// Matching is exact field-name equality at any nesting level. The same
+    /// list also matches URL query-parameter names inside `_url` fields (see
+    /// [`redact_url_secrets`]).
     pub secret_names: Vec<String>,
 }
 
@@ -209,6 +214,28 @@ pub fn redacted_value_with_options(value: &Value, redaction_options: &RedactionO
     let mut v = value.clone();
     apply_redaction_options(&mut v, redaction_options);
     v
+}
+
+/// Redact secret components of a single URL string, using default options.
+///
+/// Returns `url` with its userinfo password and any `_secret`-suffixed query
+/// parameter values replaced by `***`. See [`redact_url_secrets_with_options`].
+pub fn redact_url_secrets(url: &str) -> String {
+    redact_url_secrets_with_options(url, &RedactionOptions::default())
+}
+
+/// Redact secret components of a single URL string.
+///
+/// A query parameter is redacted iff its (form-decoded) name ends in
+/// `_secret`/`_SECRET` or matches an exact entry in `secret_names`. The
+/// userinfo password (`scheme://user:pass@host`) is always redacted as a
+/// structural rule. Only the secret spans are replaced with `***`; every other
+/// byte is preserved. A string that is not a single, whitespace-free,
+/// scheme-prefixed URL (including a URL embedded in surrounding prose) is
+/// returned unchanged.
+pub fn redact_url_secrets_with_options(url: &str, redaction_options: &RedactionOptions) -> String {
+    let context = RedactionContext::from_options(redaction_options);
+    redact_url_in_str(url, &context).unwrap_or_else(|| url.to_string())
 }
 
 /// Parse a human-readable size string into bytes.
@@ -495,6 +522,10 @@ fn key_has_secret_suffix(key: &str) -> bool {
     key.ends_with("_secret") || key.ends_with("_SECRET")
 }
 
+fn key_has_url_suffix(key: &str) -> bool {
+    key.ends_with("_url") || key.ends_with("_URL")
+}
+
 fn redact_secrets(value: &mut Value) {
     let context = RedactionContext::default();
     redact_secrets_with_context(value, &context);
@@ -514,6 +545,13 @@ fn redact_secrets_with_context(value: &mut Value, context: &RedactionContext) {
                             map.insert(key.clone(), Value::String("***".into()));
                             continue;
                         }
+                    }
+                } else if key_has_url_suffix(&key) {
+                    if let Some(Value::String(s)) = map.get_mut(&key) {
+                        if let Some(redacted) = redact_url_in_str(s, context) {
+                            *s = redacted;
+                        }
+                        continue;
                     }
                 }
                 if let Some(v) = map.get_mut(&key) {
@@ -537,6 +575,14 @@ fn redact_secrets_strict_with_context(value: &mut Value, context: &RedactionCont
             for key in keys {
                 if context.is_secret_key(&key) {
                     map.insert(key, Value::String("***".into()));
+                } else if key_has_url_suffix(&key) {
+                    if let Some(Value::String(s)) = map.get_mut(&key) {
+                        if let Some(redacted) = redact_url_in_str(s, context) {
+                            *s = redacted;
+                        }
+                    } else if let Some(v) = map.get_mut(&key) {
+                        redact_secrets_strict_with_context(v, context);
+                    }
                 } else if let Some(v) = map.get_mut(&key) {
                     redact_secrets_strict_with_context(v, context);
                 }
@@ -549,6 +595,103 @@ fn redact_secrets_strict_with_context(value: &mut Value, context: &RedactionCont
         }
         _ => {}
     }
+}
+
+/// Redact secret components of a single URL string, returning `Some(redacted)`
+/// when `s` is a processable URL, or `None` when it is not (so callers can keep
+/// the original). Only secret spans change; all other bytes are preserved.
+fn redact_url_in_str(s: &str, context: &RedactionContext) -> Option<String> {
+    // Fast path + precondition: a single, whitespace-free, scheme-prefixed URL.
+    if !s.contains("://") || !is_single_url(s) || url::Url::parse(s).is_err() {
+        return None;
+    }
+    let scheme_sep = s.find("://")?;
+    let scheme = &s[..scheme_sep];
+    let rest = &s[scheme_sep + 3..];
+
+    // Authority runs from after "://" to the first '/', '?', or '#'.
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..auth_end];
+    let remainder = &rest[auth_end..];
+
+    let new_authority = redact_userinfo_password(authority);
+
+    // Query runs from the first '?' to the first '#' (or end).
+    let new_remainder = match remainder.find('?') {
+        Some(q) => {
+            let (path, q_onwards) = remainder.split_at(q);
+            let query_body = &q_onwards[1..];
+            let (query, fragment) = match query_body.find('#') {
+                Some(h) => (&query_body[..h], &query_body[h..]),
+                None => (query_body, ""),
+            };
+            format!("{path}?{}{fragment}", redact_query(query, context))
+        }
+        None => remainder.to_string(),
+    };
+
+    Some(format!("{scheme}://{new_authority}{new_remainder}"))
+}
+
+/// Replace the userinfo password (`user:pass@`) with `***`, preserving the
+/// username. Authority without `@`, or userinfo without `:`, is unchanged.
+fn redact_userinfo_password(authority: &str) -> String {
+    let Some(at) = authority.find('@') else {
+        return authority.to_string();
+    };
+    let userinfo = &authority[..at];
+    match userinfo.find(':') {
+        Some(colon) => format!("{}:***{}", &authority[..colon], &authority[at..]),
+        None => authority.to_string(),
+    }
+}
+
+/// Redact the values of secret-named query parameters, preserving raw bytes of
+/// every other segment (keys, benign values, encoding, ordering, separators).
+fn redact_query(query: &str, context: &RedactionContext) -> String {
+    query
+        .split('&')
+        .map(|segment| {
+            let Some(eq) = segment.find('=') else {
+                return segment.to_string();
+            };
+            let raw_key = &segment[..eq];
+            // Form-decode the name (`+` → space, percent-decode) for the check.
+            let name = url::form_urlencoded::parse(segment.as_bytes())
+                .next()
+                .map(|(k, _)| k.into_owned())
+                .unwrap_or_default();
+            if context.is_secret_key(&name) {
+                format!("{raw_key}=***")
+            } else {
+                segment.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// True when `s` begins with a URL scheme (`ALPHA *(ALPHA / DIGIT / "+" / "-" /
+/// ".") "://"`) and contains no ASCII whitespace — i.e. a single bare URL, not
+/// a URL embedded in prose.
+fn is_single_url(s: &str) -> bool {
+    if s.bytes().any(|b| b.is_ascii_whitespace()) {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    if !bytes.first().is_some_and(|b| b.is_ascii_alphabetic()) {
+        return false;
+    }
+    let mut i = 1;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.') {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    s[i..].starts_with("://")
 }
 
 fn apply_redaction_policy(value: &mut Value, redaction_policy: RedactionPolicy) {

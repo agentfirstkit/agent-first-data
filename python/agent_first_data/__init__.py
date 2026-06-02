@@ -20,6 +20,8 @@ from agent_first_data.format import (
     redacted_value,
     redacted_value_with,
     redacted_value_with_options,
+    redact_url_secrets,
+    redact_url_secrets_with_options,
     parse_size,
 )
 
@@ -62,6 +64,8 @@ __all__ = [
     "redacted_value",
     "redacted_value_with",
     "redacted_value_with_options",
+    "redact_url_secrets",
+    "redact_url_secrets_with_options",
     "parse_size",
     "AfdataHandler",
     "AfdataJsonHandler",

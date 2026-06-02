@@ -1,9 +1,10 @@
 /**
  * AFDATA output formatting and protocol templates.
  *
- * 16 public APIs and 4 types: protocol builders, redacted value helpers,
- * output formatters, redaction, parseSize, RedactionPolicy, RedactionOptions,
- * OutputStyle, and OutputOptions.
+ * 18 public APIs and 4 types: protocol builders, value redactors (copy and
+ * in-place; cover _secret and _url fields), output formatters, URL-string
+ * redactors (redactUrlSecrets / WithOptions), parseSize, RedactionPolicy,
+ * RedactionOptions, OutputStyle, and OutputOptions.
  */
 
 export type JsonValue =
@@ -56,7 +57,9 @@ export type RedactionOptions = {
   policy?: RedactionPolicy;
   /**
    * Field names to treat as secrets in addition to _secret suffixes.
-   * Matching is exact field-name equality at any nesting level.
+   * Matching is exact field-name equality at any nesting level. The same
+   * list also matches URL query-parameter names inside _url fields (see
+   * redactUrlSecrets).
    */
   secretNames?: readonly string[];
 };
@@ -161,6 +164,31 @@ export function redactedValueWithOptions(value: unknown, redactionOptions: Redac
 }
 
 /**
+ * Redact secret components of a single URL string, using default options.
+ *
+ * Returns url with its userinfo password and any _secret-suffixed query
+ * parameter values replaced by "***". See redactUrlSecretsWithOptions.
+ */
+export function redactUrlSecrets(url: string): string {
+  return redactUrlSecretsWithOptions(url, {});
+}
+
+/**
+ * Redact secret components of a single URL string.
+ *
+ * A query parameter is redacted iff its (form-decoded) name ends in
+ * _secret/_SECRET or matches an exact entry in secretNames. The userinfo
+ * password (scheme://user:pass@host) is always redacted as a structural rule.
+ * Only the secret spans are replaced with "***"; every other byte is preserved.
+ * A string that is not a single, whitespace-free, scheme-prefixed URL
+ * (including a URL embedded in surrounding prose) is returned unchanged.
+ */
+export function redactUrlSecretsWithOptions(url: string, redactionOptions: RedactionOptions): string {
+  const redacted = redactUrlInStr(url, secretNameSet(redactionOptions));
+  return redacted ?? url;
+}
+
+/**
  * Parse a human-readable size string into bytes.
  * Accepts bare numbers or numbers followed by a unit letter (B/K/M/G/T).
  * Case-insensitive. Trims whitespace. Returns null for invalid input.
@@ -195,86 +223,252 @@ export function parseSize(s: string): number | null {
 // Secret Redaction
 // ═══════════════════════════════════════════
 
-const EMPTY_SECRET_NAMES: ReadonlySet<string> = new Set<string>();
+type RedactionContext = {
+  secretNames: ReadonlySet<string>;
+};
+
+const DEFAULT_CONTEXT: RedactionContext = {
+  secretNames: new Set<string>(),
+};
 
 function secretNameSet(redactionOptions: RedactionOptions): ReadonlySet<string> {
   return new Set(redactionOptions.secretNames ?? []);
+}
+
+function contextFromOptions(redactionOptions: RedactionOptions): RedactionContext {
+  return { secretNames: secretNameSet(redactionOptions) };
 }
 
 function keyHasSecretSuffix(key: string): boolean {
   return key.endsWith("_secret") || key.endsWith("_SECRET");
 }
 
+function keyHasUrlSuffix(key: string): boolean {
+  return key.endsWith("_url") || key.endsWith("_URL");
+}
+
 function isSecretKey(key: string, secretNames: ReadonlySet<string>): boolean {
   return keyHasSecretSuffix(key) || secretNames.has(key);
 }
 
-function redactSecrets(value: JsonValue, secretNames: ReadonlySet<string> = EMPTY_SECRET_NAMES): void {
+function redactSecrets(value: JsonValue, context: RedactionContext = DEFAULT_CONTEXT): void {
   if (isObject(value)) {
     for (const k of Object.keys(value)) {
-      if (isSecretKey(k, secretNames)) {
-        const v = value[k];
+      const v = value[k];
+      if (isSecretKey(k, context.secretNames)) {
         if (isObject(v) || Array.isArray(v)) {
-          redactSecrets(v, secretNames);
+          redactSecrets(v, context);
         } else {
           value[k] = "***";
         }
+      } else if (keyHasUrlSuffix(k) && typeof v === "string") {
+        const redacted = redactUrlInStr(v, context.secretNames);
+        if (redacted !== null) value[k] = redacted;
       } else {
-        redactSecrets(value[k], secretNames);
+        redactSecrets(v, context);
       }
     }
   } else if (Array.isArray(value)) {
-    for (const item of value) {
-      redactSecrets(item, secretNames);
+    for (let i = 0; i < value.length; i++) {
+      redactSecrets(value[i], context);
     }
   }
 }
 
-function redactSecretsStrict(value: JsonValue, secretNames: ReadonlySet<string> = EMPTY_SECRET_NAMES): void {
+function redactSecretsStrict(value: JsonValue, context: RedactionContext = DEFAULT_CONTEXT): void {
   if (isObject(value)) {
     for (const k of Object.keys(value)) {
-      if (isSecretKey(k, secretNames)) {
+      const v = value[k];
+      if (isSecretKey(k, context.secretNames)) {
         value[k] = "***";
+      } else if (keyHasUrlSuffix(k) && typeof v === "string") {
+        const redacted = redactUrlInStr(v, context.secretNames);
+        if (redacted !== null) value[k] = redacted;
       } else {
-        redactSecretsStrict(value[k], secretNames);
+        redactSecretsStrict(v, context);
       }
     }
   } else if (Array.isArray(value)) {
-    for (const item of value) {
-      redactSecretsStrict(item, secretNames);
+    for (let i = 0; i < value.length; i++) {
+      redactSecretsStrict(value[i], context);
     }
   }
 }
 
 function applyRedactionPolicy(value: JsonValue, redactionPolicy: RedactionPolicy): void {
-  applyRedactionPolicyWithNames(value, redactionPolicy, EMPTY_SECRET_NAMES);
+  applyRedactionPolicyWithContext(value, redactionPolicy, DEFAULT_CONTEXT);
 }
 
 function applyRedactionOptions(value: JsonValue, redactionOptions: RedactionOptions): void {
-  applyRedactionPolicyWithNames(value, redactionOptions.policy, secretNameSet(redactionOptions));
+  applyRedactionPolicyWithContext(value, redactionOptions.policy, contextFromOptions(redactionOptions));
 }
 
-function applyRedactionPolicyWithNames(
+function applyRedactionPolicyWithContext(
   value: JsonValue,
   redactionPolicy: RedactionPolicy | undefined,
-  secretNames: ReadonlySet<string>,
+  context: RedactionContext,
 ): void {
   switch (redactionPolicy) {
     case RedactionPolicy.RedactionTraceOnly:
       if (isObject(value) && value.trace !== undefined) {
-        redactSecrets(value.trace, secretNames);
+        redactSecrets(value.trace, context);
       }
       break;
     case RedactionPolicy.RedactionNone:
       break;
     case RedactionPolicy.RedactionStrict:
-      redactSecretsStrict(value, secretNames);
+      redactSecretsStrict(value, context);
       break;
     default:
       // Empty/unknown policy falls back to default full redaction.
-      redactSecrets(value, secretNames);
+      redactSecrets(value, context);
       break;
   }
+}
+
+// ═══════════════════════════════════════════
+// URL Secret Redaction
+// ═══════════════════════════════════════════
+
+/**
+ * Redact secret components of a single URL string, returning the redacted URL
+ * when s is a processable URL, or null when it is not (so callers can keep the
+ * original). Only secret spans change; all other bytes are preserved.
+ */
+function redactUrlInStr(s: string, secretNames: ReadonlySet<string>): string | null {
+  // Fast path + precondition: a single, whitespace-free, scheme-prefixed URL.
+  if (!s.includes("://") || !isSingleUrl(s) || !urlParses(s)) {
+    return null;
+  }
+  const schemeSep = s.indexOf("://");
+  const scheme = s.slice(0, schemeSep);
+  const rest = s.slice(schemeSep + 3);
+
+  // Authority runs from after "://" to the first '/', '?', or '#'.
+  let authEnd = rest.length;
+  for (let i = 0; i < rest.length; i++) {
+    const c = rest[i];
+    if (c === "/" || c === "?" || c === "#") {
+      authEnd = i;
+      break;
+    }
+  }
+  const authority = rest.slice(0, authEnd);
+  const remainder = rest.slice(authEnd);
+
+  const newAuthority = redactUserinfoPassword(authority);
+
+  // Query runs from the first '?' to the first '#' (or end).
+  let newRemainder: string;
+  const q = remainder.indexOf("?");
+  if (q >= 0) {
+    const path = remainder.slice(0, q);
+    const qOnwards = remainder.slice(q + 1);
+    const hash = qOnwards.indexOf("#");
+    let query: string;
+    let fragment: string;
+    if (hash >= 0) {
+      query = qOnwards.slice(0, hash);
+      fragment = qOnwards.slice(hash);
+    } else {
+      query = qOnwards;
+      fragment = "";
+    }
+    newRemainder = `${path}?${redactQuery(query, secretNames)}${fragment}`;
+  } else {
+    newRemainder = remainder;
+  }
+
+  return `${scheme}://${newAuthority}${newRemainder}`;
+}
+
+/**
+ * Replace the userinfo password (user:pass@) with "***", preserving the
+ * username. Authority without '@', or userinfo without ':', is unchanged.
+ */
+function redactUserinfoPassword(authority: string): string {
+  const at = authority.indexOf("@");
+  if (at < 0) return authority;
+  const userinfo = authority.slice(0, at);
+  const colon = userinfo.indexOf(":");
+  if (colon < 0) return authority;
+  return `${authority.slice(0, colon)}:***${authority.slice(at)}`;
+}
+
+/**
+ * Redact the values of secret-named query parameters, preserving raw bytes of
+ * every other segment (keys, benign values, encoding, ordering, separators).
+ */
+function redactQuery(query: string, secretNames: ReadonlySet<string>): string {
+  return query
+    .split("&")
+    .map((segment) => {
+      const eq = segment.indexOf("=");
+      if (eq < 0) return segment;
+      const rawKey = segment.slice(0, eq);
+      const name = formDecode(rawKey);
+      if (isSecretKey(name, secretNames)) {
+        return `${rawKey}=***`;
+      }
+      return segment;
+    })
+    .join("&");
+}
+
+/** Form-decode a query-parameter name: '+' → space, then percent-decode. */
+function formDecode(rawKey: string): string {
+  const withSpaces = rawKey.replace(/\+/g, " ");
+  try {
+    return decodeURIComponent(withSpaces);
+  } catch {
+    return withSpaces;
+  }
+}
+
+/** True when s parses as a URL (mirrors Rust's url::Url::parse check). */
+function urlParses(s: string): boolean {
+  try {
+    new URL(s);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when s begins with a URL scheme (ALPHA *(ALPHA / DIGIT / "+" / "-" /
+ * ".") "://") and contains no ASCII whitespace — i.e. a single bare URL, not a
+ * URL embedded in prose.
+ */
+function isSingleUrl(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    // ASCII whitespace: tab, LF, VT, FF, CR, space.
+    if (c === 0x09 || c === 0x0a || c === 0x0b || c === 0x0c || c === 0x0d || c === 0x20) {
+      return false;
+    }
+  }
+  if (s.length === 0) return false;
+  const first = s.charCodeAt(0);
+  if (!isAsciiAlpha(first)) return false;
+  let i = 1;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (isAsciiAlphanumeric(c) || c === 0x2b /* + */ || c === 0x2d /* - */ || c === 0x2e /* . */) {
+      i += 1;
+    } else {
+      break;
+    }
+  }
+  return s.slice(i).startsWith("://");
+}
+
+function isAsciiAlpha(c: number): boolean {
+  return (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a);
+}
+
+function isAsciiAlphanumeric(c: number): boolean {
+  return isAsciiAlpha(c) || (c >= 0x30 && c <= 0x39);
 }
 
 // ═══════════════════════════════════════════

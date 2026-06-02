@@ -1,0 +1,78 @@
+[
+  {
+    "name": "no scheme is untouched",
+    "input": "not a url token_secret=abc",
+    "expected": "not a url token_secret=abc"
+  },
+  {
+    "name": "url embedded in prose is untouched",
+    "input": "connect to ws://h/x?token_secret=abc now",
+    "expected": "connect to ws://h/x?token_secret=abc now"
+  },
+  {
+    "name": "scheme not at start is untouched",
+    "input": "CDP connect ws://host/cdp?token_secret=abc: timeout",
+    "expected": "CDP connect ws://host/cdp?token_secret=abc: timeout"
+  },
+  {
+    "name": "secret-suffixed query param",
+    "input": "https://api.example.com/v1?token_secret=abc123&page=2",
+    "expected": "https://api.example.com/v1?token_secret=***&page=2"
+  },
+  {
+    "name": "benign params untouched",
+    "input": "https://example.com/?page=2&limit=50",
+    "expected": "https://example.com/?page=2&limit=50"
+  },
+  {
+    "name": "multiple secret params",
+    "input": "https://h/cb?code_secret=a&state=xy&id_token_secret=b",
+    "expected": "https://h/cb?code_secret=***&state=xy&id_token_secret=***"
+  },
+  {
+    "name": "case-insensitive suffix",
+    "input": "https://h/?API_KEY_SECRET=zzz",
+    "expected": "https://h/?API_KEY_SECRET=***"
+  },
+  {
+    "name": "userinfo password is redacted",
+    "input": "postgres://user:hunter2@db.internal:5432/app",
+    "expected": "postgres://user:***@db.internal:5432/app"
+  },
+  {
+    "name": "userinfo without password is untouched",
+    "input": "https://token@api.example.com/",
+    "expected": "https://token@api.example.com/"
+  },
+  {
+    "name": "userinfo password and secret query together",
+    "input": "https://u:p@h/cb?sig_secret=zzz&ok=1",
+    "expected": "https://u:***@h/cb?sig_secret=***&ok=1"
+  },
+  {
+    "name": "fragment after secret query is preserved",
+    "input": "https://h/p?token_secret=a#section",
+    "expected": "https://h/p?token_secret=***#section"
+  },
+  {
+    "name": "benign value percent-encoding preserved",
+    "input": "https://h/?q=a%20b&token_secret=x%2Fy",
+    "expected": "https://h/?q=a%20b&token_secret=***"
+  },
+  {
+    "name": "legacy param redacted via secret_names",
+    "input": "wss://host:9222/cdp?token=abcdef",
+    "options": {"secret_names": ["token"]},
+    "expected": "wss://host:9222/cdp?token=***"
+  },
+  {
+    "name": "legacy param not in list is untouched",
+    "input": "wss://host:9222/cdp?token=abcdef",
+    "expected": "wss://host:9222/cdp?token=abcdef"
+  },
+  {
+    "name": "bare secret key without value is untouched",
+    "input": "https://h/?flag_secret&page=2",
+    "expected": "https://h/?flag_secret&page=2"
+  }
+]

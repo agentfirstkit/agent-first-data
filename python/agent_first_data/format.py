@@ -1,8 +1,9 @@
 """AFDATA output formatting and protocol templates.
 
-16 public APIs and 4 types: protocol builders, redacted value helpers,
-output formatters, redaction, parse_size, RedactionPolicy, RedactionOptions,
-OutputStyle, and OutputOptions.
+18 public APIs and 4 types: protocol builders, value redactors (copy and
+in-place; cover _secret and _url fields), output formatters, URL-string
+redactors (redact_url_secrets / _with_options), parse_size, RedactionPolicy,
+RedactionOptions, OutputStyle, and OutputOptions.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Sequence
+from urllib.parse import unquote_plus
 
 
 # ═══════════════════════════════════════════
@@ -62,7 +64,8 @@ class RedactionOptions:
     """Redaction options for legacy secret field names."""
 
     policy: RedactionPolicy | None = None
-    # Exact field-name matches at any nesting level.
+    # Exact field-name matches at any nesting level. The same list also matches
+    # URL query-parameter names inside _url fields (see redact_url_secrets).
     secret_names: Sequence[str] = ()
 
 
@@ -172,31 +175,57 @@ def redacted_value_with_options(value: Any, redaction_options: RedactionOptions)
     return v
 
 
+def redact_url_secrets(url: str) -> str:
+    """Redact secret components of a single URL string, using default options.
+
+    Returns ``url`` with its userinfo password and any ``_secret``-suffixed
+    query-parameter values replaced by ``***``. See
+    :func:`redact_url_secrets_with_options`.
+    """
+    return redact_url_secrets_with_options(url, RedactionOptions())
+
+
+def redact_url_secrets_with_options(url: str, redaction_options: RedactionOptions) -> str:
+    """Redact secret components of a single URL string.
+
+    A query parameter is redacted iff its (form-decoded) name ends in
+    ``_secret``/``_SECRET`` or matches an exact entry in ``secret_names``. The
+    userinfo password (``scheme://user:pass@host``) is always redacted as a
+    structural rule. Only the secret spans are replaced with ``***``; every
+    other byte is preserved. A string that is not a single, whitespace-free,
+    scheme-prefixed URL (including a URL embedded in surrounding prose) is
+    returned unchanged.
+    """
+    context = _RedactionContext.from_options(redaction_options)
+    redacted = _redact_url_in_str(url, context)
+    return redacted if redacted is not None else url
+
+
 def _apply_redaction_policy(value: Any, redaction_policy: RedactionPolicy) -> None:
-    _apply_redaction_policy_with_names(value, redaction_policy, frozenset())
+    _apply_redaction_policy_with_context(value, redaction_policy, _RedactionContext())
 
 
 def _apply_redaction_options(value: Any, redaction_options: RedactionOptions) -> None:
-    secret_names = _secret_name_set(redaction_options.secret_names)
-    _apply_redaction_policy_with_names(value, redaction_options.policy, secret_names)
+    context = _RedactionContext.from_options(redaction_options)
+    _apply_redaction_policy_with_context(value, redaction_options.policy, context)
 
 
-def _apply_redaction_policy_with_names(
+def _apply_redaction_policy_with_context(
     value: Any,
     redaction_policy: RedactionPolicy | None,
-    secret_names: frozenset[str],
+    context: _RedactionContext,
 ) -> None:
     if redaction_policy == RedactionPolicy.RedactionTraceOnly:
         if isinstance(value, dict) and "trace" in value:
-            _redact_secrets(value["trace"], secret_names)
+            _redact_secrets(value["trace"], context)
         return
     if redaction_policy == RedactionPolicy.RedactionNone:
         return
     if redaction_policy == RedactionPolicy.RedactionStrict:
-        _redact_secrets_strict(value, secret_names)
+        _redact_secrets_strict(value, context)
         return
     # Empty/unknown policy falls back to default full redaction.
-    _redact_secrets(value, secret_names)
+    _redact_secrets(value, context)
 
 
 def parse_size(s: str) -> int | None:
@@ -284,43 +313,175 @@ def _sanitize_for_json(value: Any, stack: set[int] | None = None) -> Any:
     return f"<unsupported:{type(value).__name__}>"
 
 
-def _secret_name_set(secret_names: Sequence[str]) -> frozenset[str]:
-    return frozenset(secret_names)
+@dataclass(frozen=True)
+class _RedactionContext:
+    """Internal redaction context: the secret-name set."""
+
+    secret_names: frozenset[str] = frozenset()
+
+    @classmethod
+    def from_options(cls, redaction_options: RedactionOptions) -> _RedactionContext:
+        return cls(secret_names=frozenset(redaction_options.secret_names))
+
+    def is_secret_key(self, key: str) -> bool:
+        return _key_has_secret_suffix(key) or key in self.secret_names
 
 
 def _key_has_secret_suffix(key: str) -> bool:
     return key.endswith("_secret") or key.endswith("_SECRET")
 
 
-def _is_secret_key(key: str, secret_names: frozenset[str]) -> bool:
-    return _key_has_secret_suffix(key) or key in secret_names
+def _key_has_url_suffix(key: str) -> bool:
+    return key.endswith("_url") or key.endswith("_URL")
 
 
-def _redact_secrets(value: Any, secret_names: frozenset[str] = frozenset()) -> None:
+def _redact_secrets(value: Any, context: _RedactionContext = _RedactionContext()) -> None:
     if isinstance(value, dict):
         for k in list(value.keys()):
-            if _is_secret_key(k, secret_names):
-                if isinstance(value[k], (dict, list)):
-                    _redact_secrets(value[k], secret_names)
+            v = value[k]
+            if context.is_secret_key(k):
+                if isinstance(v, (dict, list)):
+                    _redact_secrets(v, context)
                 else:
                     value[k] = "***"
+            elif _key_has_url_suffix(k):
+                if isinstance(v, str):
+                    redacted = _redact_url_in_str(v, context)
+                    if redacted is not None:
+                        value[k] = redacted
+                else:
+                    _redact_secrets(v, context)
             else:
-                _redact_secrets(value[k], secret_names)
+                _redact_secrets(v, context)
     elif isinstance(value, list):
         for item in value:
-            _redact_secrets(item, secret_names)
+            _redact_secrets(item, context)
 
 
-def _redact_secrets_strict(value: Any, secret_names: frozenset[str] = frozenset()) -> None:
+def _redact_secrets_strict(value: Any, context: _RedactionContext = _RedactionContext()) -> None:
     if isinstance(value, dict):
         for k in list(value.keys()):
-            if _is_secret_key(k, secret_names):
+            v = value[k]
+            if context.is_secret_key(k):
                 value[k] = "***"
+            elif _key_has_url_suffix(k):
+                if isinstance(v, str):
+                    redacted = _redact_url_in_str(v, context)
+                    if redacted is not None:
+                        value[k] = redacted
+                else:
+                    _redact_secrets_strict(v, context)
             else:
-                _redact_secrets_strict(value[k], secret_names)
+                _redact_secrets_strict(v, context)
     elif isinstance(value, list):
         for item in value:
-            _redact_secrets_strict(item, secret_names)
+            _redact_secrets_strict(item, context)
+
+
+# ═══════════════════════════════════════════
+# URL-aware Secret Redaction
+# ═══════════════════════════════════════════
+
+
+def _redact_url_in_str(s: str, context: _RedactionContext) -> str | None:
+    """Redact secret components of a single URL string.
+
+    Returns the redacted string when ``s`` is a processable URL, or None when it
+    is not (so callers keep the original). Only secret spans change; every other
+    byte is preserved.
+    """
+    # Fast path + precondition: a single, whitespace-free, scheme-prefixed URL.
+    if "://" not in s or not _is_single_url(s):
+        return None
+    scheme_sep = s.find("://")
+    scheme = s[:scheme_sep]
+    rest = s[scheme_sep + 3 :]
+
+    # Authority runs from after "://" to the first '/', '?', or '#'.
+    auth_end = len(rest)
+    for i, c in enumerate(rest):
+        if c in "/?#":
+            auth_end = i
+            break
+    authority = rest[:auth_end]
+    remainder = rest[auth_end:]
+
+    new_authority = _redact_userinfo_password(authority)
+
+    # Query runs from the first '?' to the first '#' (or end).
+    q = remainder.find("?")
+    if q == -1:
+        new_remainder = remainder
+    else:
+        path = remainder[:q]
+        query_body = remainder[q + 1 :]
+        h = query_body.find("#")
+        if h == -1:
+            query, fragment = query_body, ""
+        else:
+            query, fragment = query_body[:h], query_body[h:]
+        new_remainder = f"{path}?{_redact_query(query, context)}{fragment}"
+
+    return f"{scheme}://{new_authority}{new_remainder}"
+
+
+def _redact_userinfo_password(authority: str) -> str:
+    """Replace the userinfo password (``user:pass@``) with ``***``.
+
+    Preserves the username. Authority without ``@``, or userinfo without ``:``,
+    is unchanged.
+    """
+    at = authority.find("@")
+    if at == -1:
+        return authority
+    userinfo = authority[:at]
+    colon = userinfo.find(":")
+    if colon == -1:
+        return authority
+    return f"{authority[:colon]}:***{authority[at:]}"
+
+
+def _redact_query(query: str, context: _RedactionContext) -> str:
+    """Redact the values of secret-named query parameters.
+
+    Preserves the raw bytes of every other segment (keys, benign values,
+    encoding, ordering, separators).
+    """
+    segments = []
+    for segment in query.split("&"):
+        eq = segment.find("=")
+        if eq == -1:
+            segments.append(segment)
+            continue
+        raw_key = segment[:eq]
+        # Form-decode the name ('+' -> space, percent-decode) for the check.
+        name = unquote_plus(raw_key)
+        if context.is_secret_key(name):
+            segments.append(f"{raw_key}=***")
+        else:
+            segments.append(segment)
+    return "&".join(segments)
+
+
+def _is_single_url(s: str) -> bool:
+    """True when ``s`` is a single bare URL, not a URL embedded in prose.
+
+    It must begin with a URL scheme (ALPHA *(ALPHA / DIGIT / "+" / "-" / ".")
+    "://") and contain no ASCII whitespace.
+    """
+    if any(c in " \t\n\r\f\v" for c in s):
+        return False
+    if not s or not (s[0].isascii() and s[0].isalpha()):
+        return False
+    i = 1
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c.isascii() and (c.isalnum() or c in "+-."):
+            i += 1
+        else:
+            break
+    return s[i:].startswith("://")
 
 
 # ═══════════════════════════════════════════

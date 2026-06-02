@@ -1,8 +1,10 @@
 // Package afdata implements Agent-First Data (AFDATA) output formatting
 // and protocol templates.
 //
-// 21 public APIs and 5 types: 3 protocol builders + 3 redacted value helpers +
-// 7 output formatters + 2 redaction helpers + 1 utility + 5 CLI helpers +
+// 23 public APIs and 5 types: 3 protocol builders + 3 value-copy redactors +
+// 7 output formatters + 2 in-place value redactors (redact _secret and _url
+// fields) + 2 URL-string redactors (operate on one URL string; the value
+// redactors apply these to _url fields) + 1 utility + 5 CLI helpers +
 // OutputFormat + RedactionPolicy + RedactionOptions + OutputStyle + OutputOptions.
 package afdata
 
@@ -11,6 +13,7 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"net/url"
 	"reflect"
 	"sort"
 	"strconv"
@@ -78,7 +81,9 @@ type RedactionOptions struct {
 	// Policy controls where redaction is applied. Empty means default full redaction.
 	Policy RedactionPolicy
 	// SecretNames are field names to redact in addition to _secret suffixes.
-	// Matching is exact field-name equality at any nesting level.
+	// Matching is exact field-name equality at any nesting level. The same list
+	// also matches URL query-parameter names inside _url fields (see
+	// RedactURLSecrets).
 	SecretNames []string
 }
 
@@ -129,7 +134,7 @@ func marshalOutputJSON(value any) string {
 
 // OutputYaml formats as multi-line YAML. Keys stripped, values formatted, secrets redacted.
 func OutputYaml(value any) string {
-	return OutputYamlWithOptions(value, OutputOptions{})
+	return OutputYamlWithOptions(value, OutputOptions{Redaction: RedactionOptions{}})
 }
 
 // OutputYamlWithOptions formats as multi-line YAML with explicit output options.
@@ -146,7 +151,7 @@ func OutputYamlWithOptions(value any, outputOptions OutputOptions) string {
 
 // OutputPlain formats as single-line logfmt. Keys stripped, values formatted, secrets redacted.
 func OutputPlain(value any) string {
-	return OutputPlainWithOptions(value, OutputOptions{})
+	return OutputPlainWithOptions(value, OutputOptions{Redaction: RedactionOptions{}})
 }
 
 // OutputPlainWithOptions formats as single-line logfmt with explicit output options.
@@ -172,35 +177,71 @@ func OutputPlainWithOptions(value any, outputOptions OutputOptions) string {
 // Public API: Redaction & Utility
 // ═══════════════════════════════════════════
 
-// InternalRedactSecrets redacts _secret fields in-place.
+// InternalRedactSecrets redacts _secret fields in-place. Container roots
+// (objects, arrays) are mutated in place; a bare string root cannot be replaced
+// through this API — use RedactedValue or RedactURLSecrets for that.
 func InternalRedactSecrets(value any) {
-	redactSecrets(value)
+	redactSecretsWithContext(value, redactionContext{})
 }
 
 // InternalRedactSecretsWithOptions redacts secret fields in-place using explicit options.
 func InternalRedactSecretsWithOptions(value any, redactionOptions RedactionOptions) {
-	applyRedactionOptions(value, redactionOptions)
+	context := newRedactionContext(redactionOptions)
+	switch redactionOptions.Policy {
+	case RedactionTraceOnly:
+		if obj, ok := value.(map[string]any); ok {
+			if trace, exists := obj["trace"]; exists {
+				obj["trace"] = redactSecretsWithContext(trace, context)
+			}
+		}
+	case RedactionNone:
+		// Explicitly disabled.
+	case RedactionStrict:
+		redactSecretsStrictWithContext(value, context)
+	default:
+		redactSecretsWithContext(value, context)
+	}
 }
 
 // RedactedValue returns a JSON-safe copy with default _secret redaction applied.
 func RedactedValue(value any) any {
-	v := sanitizeForJSON(value)
-	redactSecrets(v)
-	return v
+	return RedactedValueWithOptions(value, RedactionOptions{})
 }
 
 // RedactedValueWith returns a JSON-safe copy with an explicit redaction policy applied.
 func RedactedValueWith(value any, redactionPolicy RedactionPolicy) any {
 	v := sanitizeForJSON(value)
-	applyRedactionPolicy(v, redactionPolicy)
-	return v
+	return applyRedactionPolicyWithContext(v, redactionPolicy, redactionContext{})
 }
 
 // RedactedValueWithOptions returns a JSON-safe copy with explicit redaction options applied.
 func RedactedValueWithOptions(value any, redactionOptions RedactionOptions) any {
 	v := sanitizeForJSON(value)
-	applyRedactionOptions(v, redactionOptions)
-	return v
+	return applyRedactionOptions(v, redactionOptions)
+}
+
+// RedactURLSecrets redacts secret components of a single URL string, using
+// default options. Returns url with its userinfo password and any
+// _secret-suffixed query parameter values replaced by "***".
+// See RedactURLSecretsWithOptions.
+func RedactURLSecrets(rawURL string) string {
+	return RedactURLSecretsWithOptions(rawURL, RedactionOptions{})
+}
+
+// RedactURLSecretsWithOptions redacts secret components of a single URL string.
+//
+// A query parameter is redacted iff its (form-decoded) name ends in
+// _secret/_SECRET or matches an exact entry in SecretNames. The userinfo
+// password (scheme://user:pass@host) is always redacted as a structural rule.
+// Only the secret spans are replaced with "***"; every other byte is preserved.
+// A string that is not a single, whitespace-free, scheme-prefixed URL (including
+// a URL embedded in surrounding prose) is returned unchanged.
+func RedactURLSecretsWithOptions(rawURL string, redactionOptions RedactionOptions) string {
+	context := newRedactionContext(redactionOptions)
+	if redacted, ok := redactURLInStr(rawURL, context); ok {
+		return redacted
+	}
+	return rawURL
 }
 
 // ParseSize parses a human-readable size string into bytes.
@@ -286,79 +327,250 @@ func keyHasSecretSuffix(key string) bool {
 	return strings.HasSuffix(key, "_secret") || strings.HasSuffix(key, "_SECRET")
 }
 
-func redactSecrets(value any) {
-	redactSecretsWithContext(value, redactionContext{})
+func keyHasURLSuffix(key string) bool {
+	return strings.HasSuffix(key, "_url") || strings.HasSuffix(key, "_URL")
 }
 
-func redactSecretsWithContext(value any, context redactionContext) {
+// redactSecretsWithContext walks value applying default-policy redaction and
+// returns the (possibly replaced) value. Containers are mutated in place. A
+// _secret field becomes "***"; a _url field has its URL secrets scrubbed in
+// place. No other string is scanned.
+func redactSecretsWithContext(value any, context redactionContext) any {
 	switch v := value.(type) {
 	case map[string]any:
 		for k := range v {
-			if context.isSecretKey(k) {
+			switch {
+			case context.isSecretKey(k):
 				switch v[k].(type) {
 				case map[string]any, []any:
 					// Traverse containers, don't replace
-					redactSecretsWithContext(v[k], context)
+					v[k] = redactSecretsWithContext(v[k], context)
 				default:
 					v[k] = "***"
 				}
-			} else {
-				redactSecretsWithContext(v[k], context)
+			case keyHasURLSuffix(k):
+				if s, ok := v[k].(string); ok {
+					v[k] = maybeRedactURL(s, context)
+				} else {
+					v[k] = redactSecretsWithContext(v[k], context)
+				}
+			default:
+				v[k] = redactSecretsWithContext(v[k], context)
 			}
 		}
+		return v
 	case []any:
-		for _, item := range v {
-			redactSecretsWithContext(item, context)
+		for i, item := range v {
+			v[i] = redactSecretsWithContext(item, context)
 		}
+		return v
+	default:
+		return value
 	}
 }
 
-func redactSecretsStrict(value any) {
-	redactSecretsStrictWithContext(value, redactionContext{})
-}
-
-func redactSecretsStrictWithContext(value any, context redactionContext) {
+func redactSecretsStrictWithContext(value any, context redactionContext) any {
 	switch v := value.(type) {
 	case map[string]any:
 		for k := range v {
-			if context.isSecretKey(k) {
+			switch {
+			case context.isSecretKey(k):
 				v[k] = "***"
-			} else {
-				redactSecretsStrictWithContext(v[k], context)
+			case keyHasURLSuffix(k):
+				if s, ok := v[k].(string); ok {
+					v[k] = maybeRedactURL(s, context)
+				} else {
+					v[k] = redactSecretsStrictWithContext(v[k], context)
+				}
+			default:
+				v[k] = redactSecretsStrictWithContext(v[k], context)
 			}
 		}
+		return v
 	case []any:
-		for _, item := range v {
-			redactSecretsStrictWithContext(item, context)
+		for i, item := range v {
+			v[i] = redactSecretsStrictWithContext(item, context)
 		}
+		return v
+	default:
+		return value
 	}
 }
 
-func applyRedactionPolicy(value any, redactionPolicy RedactionPolicy) {
-	applyRedactionPolicyWithContext(value, redactionPolicy, redactionContext{})
-}
-
-func applyRedactionOptions(value any, redactionOptions RedactionOptions) {
+func applyRedactionOptions(value any, redactionOptions RedactionOptions) any {
 	context := newRedactionContext(redactionOptions)
-	applyRedactionPolicyWithContext(value, redactionOptions.Policy, context)
+	return applyRedactionPolicyWithContext(value, redactionOptions.Policy, context)
 }
 
-func applyRedactionPolicyWithContext(value any, redactionPolicy RedactionPolicy, context redactionContext) {
+func applyRedactionPolicyWithContext(value any, redactionPolicy RedactionPolicy, context redactionContext) any {
 	switch redactionPolicy {
 	case RedactionTraceOnly:
 		if obj, ok := value.(map[string]any); ok {
 			if trace, exists := obj["trace"]; exists {
-				redactSecretsWithContext(trace, context)
+				obj["trace"] = redactSecretsWithContext(trace, context)
 			}
 		}
+		return value
 	case RedactionNone:
 		// Explicitly disabled.
+		return value
 	case RedactionStrict:
-		redactSecretsStrictWithContext(value, context)
+		return redactSecretsStrictWithContext(value, context)
 	default:
 		// Empty/unknown policy falls back to default full redaction.
-		redactSecretsWithContext(value, context)
+		return redactSecretsWithContext(value, context)
 	}
+}
+
+// ═══════════════════════════════════════════
+// URL Secret Redaction
+// ═══════════════════════════════════════════
+
+// maybeRedactURL scrubs the URL secrets in a _url field's value, returning the
+// original string when it is not a processable single URL.
+func maybeRedactURL(s string, context redactionContext) string {
+	if redacted, ok := redactURLInStr(s, context); ok {
+		return redacted
+	}
+	return s
+}
+
+// redactURLInStr redacts secret components of a single URL string, returning
+// (redacted, true) when s is a processable URL, or ("", false) when it is not
+// (so callers keep the original). Only secret spans change; all other bytes are
+// preserved.
+func redactURLInStr(s string, context redactionContext) (string, bool) {
+	// Fast path + precondition: a single, whitespace-free, scheme-prefixed URL.
+	if !strings.Contains(s, "://") || !isSingleURL(s) {
+		return "", false
+	}
+	if _, err := url.Parse(s); err != nil {
+		return "", false
+	}
+	schemeSep := strings.Index(s, "://")
+	if schemeSep < 0 {
+		return "", false
+	}
+	scheme := s[:schemeSep]
+	rest := s[schemeSep+3:]
+
+	// Authority runs from after "://" to the first '/', '?', or '#'.
+	authEnd := strings.IndexAny(rest, "/?#")
+	if authEnd < 0 {
+		authEnd = len(rest)
+	}
+	authority := rest[:authEnd]
+	remainder := rest[authEnd:]
+
+	newAuthority := redactUserinfoPassword(authority)
+
+	// Query runs from the first '?' to the first '#' (or end).
+	newRemainder := remainder
+	if q := strings.Index(remainder, "?"); q >= 0 {
+		path := remainder[:q]
+		queryBody := remainder[q+1:]
+		query := queryBody
+		fragment := ""
+		if h := strings.Index(queryBody, "#"); h >= 0 {
+			query = queryBody[:h]
+			fragment = queryBody[h:]
+		}
+		newRemainder = path + "?" + redactQuery(query, context) + fragment
+	}
+
+	return scheme + "://" + newAuthority + newRemainder, true
+}
+
+// redactUserinfoPassword replaces the userinfo password (user:pass@) with "***",
+// preserving the username. Authority without '@', or userinfo without ':', is
+// unchanged.
+func redactUserinfoPassword(authority string) string {
+	at := strings.Index(authority, "@")
+	if at < 0 {
+		return authority
+	}
+	userinfo := authority[:at]
+	colon := strings.Index(userinfo, ":")
+	if colon < 0 {
+		return authority
+	}
+	return authority[:colon] + ":***" + authority[at:]
+}
+
+// redactQuery redacts the values of secret-named query parameters, preserving
+// raw bytes of every other segment (keys, benign values, encoding, ordering,
+// separators).
+func redactQuery(query string, context redactionContext) string {
+	segments := strings.Split(query, "&")
+	for i, segment := range segments {
+		eq := strings.Index(segment, "=")
+		if eq < 0 {
+			continue
+		}
+		rawKey := segment[:eq]
+		// Form-decode the name (`+` → space, percent-decode) for the check.
+		name := formDecodeName(segment)
+		if context.isSecretKey(name) {
+			segments[i] = rawKey + "=***"
+		}
+	}
+	return strings.Join(segments, "&")
+}
+
+// formDecodeName form-decodes the parameter name (the bytes before the first
+// '='), matching application/x-www-form-urlencoded: '+' → space then
+// percent-decode. Falls back to the raw key bytes on a decode error.
+func formDecodeName(segment string) string {
+	eq := strings.Index(segment, "=")
+	rawKey := segment
+	if eq >= 0 {
+		rawKey = segment[:eq]
+	}
+	decoded, err := url.QueryUnescape(rawKey)
+	if err != nil {
+		return rawKey
+	}
+	return decoded
+}
+
+// isSingleURL reports whether s begins with a URL scheme
+// (ALPHA *(ALPHA / DIGIT / "+" / "-" / ".") "://") and contains no ASCII
+// whitespace — i.e. a single bare URL, not a URL embedded in prose.
+func isSingleURL(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if isASCIIWhitespace(s[i]) {
+			return false
+		}
+	}
+	if len(s) == 0 || !isASCIIAlpha(s[0]) {
+		return false
+	}
+	i := 1
+	for i < len(s) {
+		c := s[i]
+		if isASCIIAlphanumeric(c) || c == '+' || c == '-' || c == '.' {
+			i++
+		} else {
+			break
+		}
+	}
+	return strings.HasPrefix(s[i:], "://")
+}
+
+func isASCIIWhitespace(b byte) bool {
+	switch b {
+	case '\t', '\n', '\v', '\f', '\r', ' ':
+		return true
+	}
+	return false
+}
+
+func isASCIIAlpha(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func isASCIIAlphanumeric(b byte) bool {
+	return isASCIIAlpha(b) || (b >= '0' && b <= '9')
 }
 
 // ═══════════════════════════════════════════

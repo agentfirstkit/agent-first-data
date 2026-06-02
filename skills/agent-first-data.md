@@ -84,8 +84,11 @@ Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` 
 | Suffix | Handling | Example |
 |:-------|:---------|:--------|
 | `_secret` | redact to `***` | `api_key_secret: "sk-or-v1-abc..."` |
+| `_url` | scrub secrets *inside* the URL value, keep the rest | `callback_url: "https://h/cb?code_secret=..."` |
 
 All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Matching recognizes `_secret` and `_SECRET` only — no mixed case. For legacy fields that cannot be renamed, configure `OutputOptions.redaction` with `secret_names`/`secretNames` such as `["api_key", "authorization"]`; names match exact field names at any nesting level; no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Callers that need schema-preserving YAML/plain rendering can pass `OutputOptions` with the `Raw` output style.
+
+Name URL-valued fields `_url` so the userinfo password and any `_secret`/`secret_names` query parameter inside them are scrubbed automatically (the rest of the URL is preserved; the suffix is not stripped). For a URL inside a free-form message, redact it with `redact_url_secrets` before interpolating — `_url` only fires on whole-URL field values, never on prose.
 
 ### Environment variables
 
@@ -99,7 +102,7 @@ TOKEN_VALIDITY_HOURS=24
 
 ### No suffix needed
 
-Fields whose meaning is obvious: `callback_url`, `redb_path`, `proof_count`, `search_enabled`, `method`, `domain`, `model`.
+Fields whose meaning is obvious: `redb_path`, `proof_count`, `search_enabled`, `method`, `domain`, `model`. (URL fields are the exception — use `_url` so embedded secrets are scrubbed.)
 
 ### Database columns
 
@@ -234,6 +237,7 @@ Public APIs are grouped consistently across languages:
 |:------|:-----|
 | Protocol builders | `build_json_ok`, `build_json_error`, `build_json` |
 | Redaction helpers | `redacted_value`, `redacted_value_with`, `redacted_value_with_options`, `internal_redact_secrets`, `internal_redact_secrets_with_options` |
+| URL redaction | `redact_url_secrets`, `redact_url_secrets_with_options` |
 | Output formatters | `output_json`, `output_json_with`, `output_json_with_options`, `output_yaml`, `output_yaml_with_options`, `output_plain`, `output_plain_with_options` |
 | CLI utilities | `parse_size`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `cli_output_with_options`, `build_cli_error` |
 | Types | `OutputFormat`, `RedactionPolicy`, `RedactionOptions`, `OutputStyle`, `OutputOptions` |

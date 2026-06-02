@@ -28,5 +28,20 @@
     "name": "non-string secret with nested secrets",
     "input": {"db_secret": {"password_secret": "real", "host": "localhost"}, "name": "test"},
     "expected": {"db_secret": {"password_secret": "***", "host": "localhost"}, "name": "test"}
+  },
+  {
+    "name": "url-suffixed field scrubbed on default path",
+    "input": {"location_url": "https://h/r?access_secret=zzz&q=1", "name": "test"},
+    "expected": {"location_url": "https://h/r?access_secret=***&q=1", "name": "test"}
+  },
+  {
+    "name": "url-suffixed field userinfo password scrubbed",
+    "input": {"cache_url": "redis://app:s3cr3t@cache:6379/0"},
+    "expected": {"cache_url": "redis://app:***@cache:6379/0"}
+  },
+  {
+    "name": "non-url-suffixed field is not scanned",
+    "input": {"note": "https://h/?token_secret=abc"},
+    "expected": {"note": "https://h/?token_secret=abc"}
   }
 ]

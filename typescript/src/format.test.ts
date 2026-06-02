@@ -27,6 +27,7 @@ import {
   outputYamlWithOptions,
   outputPlain,
   outputPlainWithOptions,
+  redactUrlSecretsWithOptions,
   type JsonValue,
   parseSize,
 } from "./format.ts";
@@ -45,6 +46,17 @@ function redactionOptions(tc: any): RedactionOptions {
     secretNames: opts.secret_names ?? [],
   };
 }
+
+// --- URL redaction fixtures ---
+
+describe("redact_url fixtures", () => {
+  for (const tc of load("redact_url.json")) {
+    it(tc.name, () => {
+      const options = redactionOptions(tc);
+      assert.equal(redactUrlSecretsWithOptions(tc.input, options), tc.expected);
+    });
+  }
+});
 
 // --- Redact fixtures ---
 

@@ -58,6 +58,21 @@ func (secretStringFunc) String() string {
 
 // --- Redact fixtures ---
 
+func TestRedactURLFixtures(t *testing.T) {
+	for _, tc := range loadFixture("redact_url.json") {
+		name := tc["name"].(string)
+		t.Run(name, func(t *testing.T) {
+			input := tc["input"].(string)
+			expected := tc["expected"].(string)
+			options := redactionOptionsFromCase(tc)
+			got := RedactURLSecretsWithOptions(input, options)
+			if got != expected {
+				t.Errorf("got %q, want %q", got, expected)
+			}
+		})
+	}
+}
+
 func TestRedactFixtures(t *testing.T) {
 	for _, tc := range loadFixture("redact.json") {
 		name := tc["name"].(string)

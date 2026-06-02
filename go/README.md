@@ -91,6 +91,13 @@ RedactedValueWith(value any, redactionPolicy RedactionPolicy) any
 RedactedValueWithOptions(value any, redactionOptions RedactionOptions) any
 ```
 
+`_url` fields are scrubbed in place during redaction (userinfo password, plus query parameters whose name follows the `_secret`/`SecretNames` rule). For a URL inside a free-form string, redact it directly before interpolating:
+
+```go
+RedactURLSecrets(rawURL string) string
+RedactURLSecretsWithOptions(rawURL string, redactionOptions RedactionOptions) string
+```
+
 **Use case:** structured protocol payloads (frameworks serialize to JSON)
 
 **Example:**

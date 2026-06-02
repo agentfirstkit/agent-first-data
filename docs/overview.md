@@ -81,8 +81,10 @@ CLI logging flags:
 | `redacted_value` | JSON | JSON-safe copy with default `_secret` redaction |
 | `redacted_value_with` | JSON | JSON-safe copy with explicit redaction policy |
 | `redacted_value_with_options` | JSON | JSON-safe copy with explicit policy and secret-name list |
-| `internal_redact_secrets` | void | Redact `_secret` fields in-place |
+| `internal_redact_secrets` | void | Redact `_secret` (and `_url`) fields in-place |
 | `internal_redact_secrets_with_options` | void | Redact in-place with explicit policy and secret-name list |
+| `redact_url_secrets` | String | Scrub secrets (userinfo password, secret-named query params) inside one URL string |
+| `redact_url_secrets_with_options` | String | URL redaction with an explicit secret-name list |
 | `RedactionPolicy` | type | `RedactionTraceOnly` / `RedactionNone` / `RedactionStrict` |
 | `RedactionOptions` | type | Optional policy plus exact `secret_names` / `secretNames` for legacy fields |
 | `OutputStyle` | type | `Readable` default formatting or `Raw` schema-preserving rendering |
@@ -185,7 +187,9 @@ await span({ request_id: uuid }, async () => {
 | **Timestamps** | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` | `created_at_epoch_ms: 1738886400000` → `created_at: 2025-02-07T00:00:00.000Z` |
 | **Size** | `_bytes` (output), `_size` (config input) | `file_size_bytes: 5242880` → `file_size: 5.0MB` |
 | **Currency** | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` | `price_usd_cents: 999` → `price: $9.99` |
-| **Other** | `_percent`, `_secret` | `cpu_percent: 85` → `cpu: 85%` |
+| **Other** | `_percent`, `_secret`, `_url` | `cpu_percent: 85` → `cpu: 85%` |
+
+`_url` fields keep their value but have secret components (userinfo password, secret-named query params) scrubbed; the suffix is not stripped.
 
 ## Language Documentation
 

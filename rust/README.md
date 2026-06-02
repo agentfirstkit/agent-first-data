@@ -91,6 +91,13 @@ redacted_value_with(value: &Value, redaction_policy: RedactionPolicy) -> Value
 redacted_value_with_options(value: &Value, redaction_options: &RedactionOptions) -> Value
 ```
 
+`_url` fields are scrubbed in place during redaction (userinfo password, plus query parameters whose name follows the `_secret`/`secret_names` rule). For a URL inside a free-form string, redact it directly before interpolating:
+
+```rust
+redact_url_secrets(url: &str) -> String
+redact_url_secrets_with_options(url: &str, redaction_options: &RedactionOptions) -> String
+```
+
 **Use case:** structured protocol payloads (frameworks can serialize directly)
 
 **Example:**

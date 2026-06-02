@@ -54,6 +54,21 @@ fn redaction_options_from_case(case: &Value) -> RedactionOptions {
 // ═══════════════════════════════════════════
 
 #[test]
+fn test_redact_url_fixtures() {
+    let cases = load_fixture("redact_url.json");
+    for case in cases.as_array().expect("redact_url.json must be an array") {
+        let name = case["name"].as_str().expect("missing name");
+        let input = case["input"].as_str().expect("input must be a string");
+        let expected = case["expected"]
+            .as_str()
+            .expect("expected must be a string");
+        let options = redaction_options_from_case(case);
+        let got = redact_url_secrets_with_options(input, &options);
+        assert_eq!(got, expected, "[redact_url/{name}]");
+    }
+}
+
+#[test]
 fn test_redact_fixtures() {
     let cases = load_fixture("redact.json");
     for case in cases.as_array().expect("redact.json must be an array") {

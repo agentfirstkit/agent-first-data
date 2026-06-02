@@ -16,6 +16,7 @@ from agent_first_data import (
     redacted_value,
     redacted_value_with,
     redacted_value_with_options,
+    redact_url_secrets_with_options,
     output_json,
     output_json_with,
     output_json_with_options,
@@ -42,10 +43,21 @@ def _load(name):
 def _redaction_options(case):
     opts = case.get("options", {})
     policy = RedactionPolicy(opts["policy"]) if "policy" in opts else None
-    return RedactionOptions(policy=policy, secret_names=opts.get("secret_names", ()))
+    return RedactionOptions(
+        policy=policy,
+        secret_names=opts.get("secret_names", ()),
+    )
 
 
 # --- Redact fixtures ---
+
+
+def test_redact_url_fixtures():
+    for case in _load("redact_url.json"):
+        name = case["name"]
+        options = _redaction_options(case)
+        got = redact_url_secrets_with_options(case["input"], options)
+        assert got == case["expected"], f"[redact_url/{name}] got {got!r}"
 
 
 def test_redact_fixtures():

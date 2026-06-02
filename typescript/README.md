@@ -92,6 +92,13 @@ redactedValueWith(value: unknown, redactionPolicy: RedactionPolicy): JsonValue
 redactedValueWithOptions(value: unknown, redactionOptions: RedactionOptions): JsonValue
 ```
 
+`_url` fields are scrubbed in place during redaction (userinfo password, plus query parameters whose name follows the `_secret`/`secretNames` rule). For a URL inside a free-form string, redact it directly before interpolating:
+
+```typescript
+redactUrlSecrets(url: string): string
+redactUrlSecretsWithOptions(url: string, redactionOptions: RedactionOptions): string
+```
+
 **Use case:** structured protocol payloads (frameworks automatically serialize)
 
 **Example:**

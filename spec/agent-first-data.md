@@ -26,11 +26,11 @@ Agent-First Data has three parts:
 | **Timestamps** | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` | `created_at_epoch_ms: 1707868800000` → `created_at: 2024-02-14T...` |
 | **Size** | `_bytes` (output), `_size` (config input) | `file_size_bytes: 5242880` → `file_size: 5.0MB` |
 | **Currency** | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` | `price_usd_cents: 999` → `price: $9.99` |
-| **Other** | `_percent`, `_secret` | `cpu_percent: 85` → `cpu: 85%` |
+| **Other** | `_percent`, `_secret`, `_url` | `cpu_percent: 85` → `cpu: 85%` |
 
-**In default YAML and Plain:** suffixes are stripped from keys (value already encodes the unit) and values are formatted for readability. JSON preserves original keys and raw values.
+**In default YAML and Plain:** suffixes are stripped from keys (value already encodes the unit) and values are formatted for readability. JSON preserves original keys and raw values. (`_url` is not stripped — the value stays a usable URL.)
 
-**Secret protection:** All three formats automatically redact `_secret` fields.
+**Secret protection:** All three formats automatically redact `_secret` fields and scrub secret components (userinfo password, secret-named query params) inside `_url` field values.
 
 **Boundary:** AFDATA names communicate local field semantics. They do not replace schemas for required fields, enum values, numeric ranges, object shapes, or cross-field validation. Use JSON Schema, OpenAPI, database constraints, or typed APIs for those guarantees.
 
@@ -143,18 +143,37 @@ Stablecoins follow the same `_{code}_cents` pattern: `deposit_usdt_cents: 1000`,
 | Suffix | Handling | Example |
 |:-------|:---------|:--------|
 | `_secret` | redact scalar values to `***`; for object/array values, recursively redact nested secrets | `api_key_secret: "sk-or-v1-abc..."` |
+| `_url` | redact secret components **inside** the URL value (userinfo password, secret-named query params); the rest of the URL is preserved | `callback_url: "https://h/cb?code_secret=..."` |
 
 All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Scalar `_secret` values become `***`; object/array `_secret` values are traversed and nested `_secret` fields are redacted. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `OutputOptions.redaction.secret_names` (or `RedactionOptions.secret_names` in redaction helpers) at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction; suffix stripping is still controlled by AFDATA suffixes in the default readable style. Callers that need schema-preserving YAML/plain rendering can use `OutputOptions` with the `Raw` output style. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time. `RedactionStrict` is available when the entire `_secret` or listed secret subtree must be replaced with `***`.
+
+#### Secrets inside URLs
+
+Key-based redaction cannot reach a secret embedded **inside** a URL string — `token` in `wss://host/cdp?token=abc` is not its own field, and the URL often lives in a free-form `error` or log message that must stay readable. Implementations expose a URL-aware helper for this:
+
+- `redact_url_secrets(url)` / `redact_url_secrets_with_options(url, options)` — returns `url` with its secret components redacted to `***`.
+
+The same secret decision as everywhere else applies, **to the URL's query-parameter names**: a parameter is redacted iff its (form-decoded) name ends in `_secret`/`_SECRET`, or matches an exact entry in `secret_names`. No built-in list of "sensitive" parameter names exists — a legacy parameter such as `?token=` is redacted only when the caller passes `secret_names: ["token"]`, exactly as for legacy field names. Consumers that own the URL should instead rename the parameter to follow the suffix convention (`?token_secret=`).
+
+Independently of the parameter convention, the **userinfo password** component is always redacted as a structural rule: `scheme://user:pass@host` → `scheme://user:***@host` (the username is preserved; a userinfo with no `:` is left untouched).
+
+**Input must be a single URL.** A string is processed iff it begins with a scheme (`^[A-Za-z][A-Za-z0-9+.-]*://`) and contains no whitespace; any other string — including a URL embedded in surrounding prose — is returned unchanged. Callers that build messages around a URL redact the URL **before** interpolating it: `format("connect {}: {}", redact_url_secrets(url), err)`.
+
+**Surgical replacement.** Only the secret spans (a secret parameter's value bytes after `=` up to the next `&`/`#`/end; the password bytes after the first `:` up to `@`) are replaced with the literal `***`. Every other byte — scheme, host, path, fragment, benign parameters, percent-encoding, ordering — is preserved exactly. Implementations parse with their URL library but must not re-serialize the whole URL (normalization differs across libraries and would break cross-language parity); output equals input outside the redacted spans.
+
+**Automatic application via the `_url` suffix.** Redaction (default policy and `RedactionStrict`) applies `redact_url_secrets` to the string value of any field whose name ends in `_url`/`_URL` — and **only** those fields. No payload string is scanned: the trigger is the field name, exactly like `_secret`. So `final_url` and `callback_url` are scrubbed automatically, while a free-form `error` or `message` field is never touched even if it contains a URL (redact such a URL with the helper before interpolating it). `RedactionNone` disables it along with all other redaction; `RedactionTraceOnly` scopes it to the `trace` subtree. A `_url` value that is not a single URL is left unchanged by the helper's own no-op rule. The `secret_names` list applies to query-parameter names inside `_url` values as well. (A field carrying both meanings, e.g. `token_url_secret`, ends in `_secret` and so its whole value is redacted to `***`.)
 
 ### No suffix needed
 
 Fields whose meaning is obvious from the name alone:
 
-- URLs: `callback_url`, `homepage_url`
 - Paths: `redb_path`, `config_path`
 - Counts: `proof_count`, `relay_count`
 - Booleans: `search_enabled`, `forward_pulse`
 - Identifiers: `method`, `domain`, `model`, `backend`
+
+(URL-valued fields are the exception: end them in `_url` so secrets inside the
+URL are scrubbed — see the `_url` suffix above.)
 
 ### CLI arguments
 
