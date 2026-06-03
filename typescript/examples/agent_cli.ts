@@ -17,7 +17,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  type JsonValue,
   type OutputFormat,
+  type SkillAction,
+  type SkillAgentSelection,
+  type SkillOptions,
+  type SkillScope,
+  type SkillSpec,
+  SkillError,
   buildCliError,
   buildJson,
   buildJsonError,
@@ -26,7 +33,19 @@ import {
   cliParseLogFilters,
   cliParseOutput,
   outputJson,
+  runSkillAdmin,
 } from "../src/index.js";
+
+// A fictional spore's embedded Agent Skill, used by the `skill` subcommand to
+// demonstrate runSkillAdmin.
+const WIDGET_SKILL =
+  "---\nname: agent-first-widget\ndescription: Example skill bundled by the agent-cli demo.\n---\n\n# Agent-First Widget\n\nExample behavior rules go here.\n";
+const WIDGET_SPEC: SkillSpec = {
+  name: "agent-first-widget",
+  source: WIDGET_SKILL,
+  title: "Agent-First Widget",
+  markerSlug: "afwidget",
+};
 
 interface Subcommand {
   name: string;
@@ -37,6 +56,12 @@ interface Subcommand {
 const SUBCOMMANDS: Subcommand[] = [
   { name: "echo", about: "Echo back the input as structured output", flags: "  --dry-run    Preview without executing" },
   { name: "ping", about: "Ping a remote target", flags: "  --host       Target host to ping" },
+  {
+    name: "skill",
+    about: "Manage this tool's embedded Agent Skill",
+    flags:
+      "  status|install|uninstall  Skill action\n  --agent      all, codex, claude-code, opencode (default: all)\n  --scope      personal, project (default: personal)\n  --skills-dir Skills directory (requires a single concrete --agent)\n  --force      Overwrite or remove a skill this tool did not manage",
+  },
 ];
 
 /** Format help for root command and all subcommands. */
@@ -70,11 +95,27 @@ function formatSubcommandHelp(name: string): string {
   return `agent-cli ${sc.name} — ${sc.about}\n\nFlags:\n${sc.flags}\n`;
 }
 
+// Flags that consume the following token as their value.
+const VALUE_FLAGS = new Set(["--output", "--log", "--host", "--agent", "--scope", "--skills-dir"]);
+
+/** Collect positional arguments, skipping flags and the values they consume. */
+function positionalArgs(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a.startsWith("--")) continue;
+    if (i > 0 && VALUE_FLAGS.has(args[i - 1]!)) continue;
+    out.push(a);
+  }
+  return out;
+}
+
 function main(): void {
   const args = process.argv.slice(2);
   const showHelp = args.includes("--help") || args.includes("-h");
   const argsWithoutHelp = args.filter((a) => a !== "--help" && a !== "-h");
-  const command = argsWithoutHelp.find((a) => !a.startsWith("--") && argsWithoutHelp[argsWithoutHelp.indexOf(a) - 1] !== "--output" && argsWithoutHelp[argsWithoutHelp.indexOf(a) - 1] !== "--log");
+  const positionals = positionalArgs(argsWithoutHelp);
+  const command = positionals[0];
 
   // Complete help: --help expands all subcommands in one output.
   // Subcommand --help expands only that subcommand.
@@ -134,11 +175,88 @@ function main(): void {
       }
       break;
     }
+    case "skill": {
+      // Step 6: wire the embedded Agent Skill installer to the library.
+      const agentIdx = args.indexOf("--agent");
+      const scopeIdx = args.indexOf("--scope");
+      const skillsDirIdx = args.indexOf("--skills-dir");
+      const agentArg = agentIdx !== -1 ? args[agentIdx + 1] : "all";
+      const scopeArg = scopeIdx !== -1 ? args[scopeIdx + 1] : "personal";
+      const skillsDir = skillsDirIdx !== -1 ? args[skillsDirIdx + 1] : undefined;
+      const force = args.includes("--force");
+      process.exit(runSkill(positionals[1], agentArg ?? "all", scopeArg ?? "personal", skillsDir, force, fmt));
+      break;
+    }
     default: {
-      console.log(outputJson(buildCliError(`unknown command: ${command}`, "valid commands: echo, ping")));
+      console.log(outputJson(buildCliError(`unknown command: ${command}`, "valid commands: echo, ping, skill")));
       process.exit(2);
     }
   }
+}
+
+/**
+ * Wire the parsed `skill` subcommand to the library and print the result.
+ * Returns the process exit code (0 ok, 1 action error, 2 bad flag value).
+ */
+function runSkill(
+  verb: string | undefined,
+  agentArg: string,
+  scopeArg: string,
+  skillsDir: string | undefined,
+  force: boolean,
+  fmt: OutputFormat,
+): number {
+  const actions: Record<string, SkillAction> = { status: "status", install: "install", uninstall: "uninstall" };
+  const action = verb !== undefined ? actions[verb] : undefined;
+  if (action === undefined) {
+    const err = buildCliError("skill requires a subcommand: status, install, uninstall", "example: agent-cli skill status --agent opencode");
+    console.log(cliOutput(err, fmt));
+    return 2;
+  }
+
+  const built = buildSkillOptions(agentArg, scopeArg, skillsDir, force);
+  if ("error" in built) {
+    console.log(cliOutput(buildCliError(built.error, built.hint), fmt));
+    return 2;
+  }
+
+  try {
+    const report = runSkillAdmin(WIDGET_SPEC, action, built.options);
+    // The report is structured; serialize it for output (it is already JSON-shaped).
+    console.log(cliOutput(report as unknown as JsonValue, fmt));
+    return 0;
+  } catch (e) {
+    if (e instanceof SkillError) {
+      console.log(cliOutput(buildCliError(e.message, e.hint), fmt));
+      return 1;
+    }
+    throw e;
+  }
+}
+
+/** Parse the --agent/--scope string flags into the library types. */
+function buildSkillOptions(
+  agentArg: string,
+  scopeArg: string,
+  skillsDir: string | undefined,
+  force: boolean,
+): { options: SkillOptions } | { error: string; hint: string } {
+  const agents: Record<string, SkillAgentSelection> = {
+    all: "all",
+    codex: "codex",
+    "claude-code": "claude-code",
+    opencode: "opencode",
+  };
+  const agent = agents[agentArg];
+  if (agent === undefined) {
+    return { error: `invalid --agent '${agentArg}'`, hint: "valid values: all, codex, claude-code, opencode" };
+  }
+  const scopes: Record<string, SkillScope> = { personal: "personal", project: "project" };
+  const scope = scopes[scopeArg];
+  if (scope === undefined) {
+    return { error: `invalid --scope '${scopeArg}'`, hint: "valid values: personal, project" };
+  }
+  return { options: { agent, scope, skillsDir, force } };
 }
 
 // ── Tests (run via: npx tsx --test examples/agent_cli.ts) ────────────────────

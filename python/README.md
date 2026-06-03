@@ -258,6 +258,26 @@ print(cli_output(result, fmt))
 
 See `examples/agent_cli.py` for the complete working example (`pytest examples/agent_cli.py`).
 
+### Skill Admin (for spore CLIs that ship an Agent Skill)
+
+`run_skill_admin` installs, uninstalls, and reports status of a spore's embedded `SKILL.md` across Codex, Claude Code, and opencode. Describe the skill once with a `SkillSpec`, then call it per action. It returns a typed `SkillReport` dataclass (`SkillStatusReport` / `SkillInstallReport` / `SkillUninstallReport` — read fields directly, or call `.to_dict()` to serialize with `cli_output`) or raises `SkillError`; it never writes to stdout/stderr. The generated `SKILL.md` is byte-identical to the Rust, Go, and TypeScript ports.
+
+```python
+run_skill_admin(spec: SkillSpec, action: SkillAction, options: SkillOptions) -> SkillReport
+
+spec = SkillSpec(name="agent-first-widget", source=skill_markdown, title="Agent-First Widget", marker_slug="afwidget")
+options = SkillOptions(agent=SkillAgentSelection.ALL, scope=SkillScope.PERSONAL)
+
+try:
+    report = run_skill_admin(spec, SkillAction.INSTALL, options)
+except SkillError as e:
+    print(cli_output(build_cli_error(e.message, hint=e.hint), fmt))
+    sys.exit(1)
+print(cli_output(report.to_dict(), fmt))  # read report fields directly, or serialize
+```
+
+`status` reports `installed` / `valid` / `managed` / `current` per target; `current` is true only when the installed content matches the bundle, so re-running `install` refreshes a stale copy. See `examples/agent_cli.py` for the `skill` subcommand wiring.
+
 ## Usage Examples
 
 ### Example 1: REST API

@@ -114,6 +114,10 @@ CLI logging flags:
 | `cli_output_with_options` | String | Dispatch with explicit output options |
 | `build_cli_error` | JSON | `{code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}` |
 
+### Skill admin
+
+`run_skill_admin` installs, uninstalls, and reports status of a spore's embedded Agent Skill across Codex, Claude Code, and opencode. The caller passes a `SkillSpec` (skill name, bundled `SKILL.md`, title, marker slug) plus a `SkillAction` and `SkillOptions`, and gets back a **structured** `SkillReport` — read its fields directly, or serialize it (render with `cli_output`) — or a skill error. Each port returns its idiomatic typed form: a Rust `code`-tagged enum, a Go sealed-interface struct, a Python dataclass with `to_dict()`, and a TypeScript discriminated union. `status` reports `installed` / `valid` / `managed` / `current` per target, where `current` is true only when the installed content matches the bundled skill — re-running `install` refreshes a stale copy. The generated `SKILL.md` (markers and all) and the serialized report are byte-identical across every port. This is filesystem/CLI tooling for the spore binaries rather than part of the cross-language data API above; in Rust it lives behind the `skill-admin` cargo feature, and the Go, Python, and TypeScript ports ship it as a normal module.
+
 AFDATA suffixes describe local field semantics; they are not a full schema language. Use JSON Schema, OpenAPI, database constraints, or typed APIs for required fields, enums, ranges, and object shapes. For raw JSON transports that do not call `output_json` (HTTP bodies, MCP tool returns, SSE events), call `redacted_value` first. For legacy payloads that use names like `api_key` instead of `api_key_secret`, call the output `*_with_options` API with `OutputOptions.redaction.secret_names`.
 
 ## AFDATA Logging

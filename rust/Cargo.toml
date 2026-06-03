@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-data"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 description = "A naming convention that lets AI agents understand your data without being told what it means."
 license = "MIT"
@@ -12,9 +12,11 @@ default = []
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
 cli-help = ["dep:clap"]
 cli-help-markdown = ["cli-help", "dep:clap-markdown"]
+skill-admin = ["dep:serde"]
 
 [dependencies]
 serde_json = "1"
+serde = { version = "1", features = ["derive"], optional = true }
 chrono = "0.4"
 url = "2"
 tracing = { version = "0.1", optional = true }

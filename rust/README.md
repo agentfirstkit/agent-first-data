@@ -313,6 +313,29 @@ cli_render_help_markdown(cmd: &clap::Command, subcommand_path: &[&str]) -> Strin
 
 **`cli_render_help_markdown`** produces Markdown with headings and anchor links, suitable for `myapp --help-markdown > docs/cli.md`. The `clap-markdown` footer is automatically stripped.
 
+### Skill Admin (optional feature `skill-admin`, for spore CLIs that ship an Agent Skill)
+
+`skill::run_skill_admin` installs, uninstalls, and reports status of a spore's embedded `SKILL.md` across Codex, Claude Code, and opencode. Describe the skill once with a `SkillSpec`, then call it per action. It returns a typed `SkillReport` (a `code`-tagged enum — match to read fields, or serialize with `serde` and render with `cli_output`) or a `SkillError`; it never writes to stdout/stderr. The generated `SKILL.md` is byte-identical to the Go, Python, and TypeScript ports.
+
+```bash
+cargo add agent-first-data --features skill-admin
+```
+
+```rust
+use agent_first_data::skill::{run_skill_admin, SkillSpec, SkillAction, SkillOptions, SkillAgentSelection, SkillScope};
+
+const WIDGET_SKILL: &str = "---\nname: agent-first-widget\ndescription: ...\n---\n\n# Agent-First Widget\n";
+let spec = SkillSpec { name: "agent-first-widget", source: WIDGET_SKILL, title: "Agent-First Widget", marker_slug: "afwidget" };
+let opts = SkillOptions { agent: SkillAgentSelection::All, scope: SkillScope::Personal, skills_dir: None, force: false };
+
+match run_skill_admin(&spec, SkillAction::Install, &opts) {
+    Ok(report) => println!("{}", cli_output(&serde_json::to_value(&report)?, format)),
+    Err(e) => println!("{}", cli_output(&build_cli_error(&e.message, e.hint.as_deref()), format)),
+}
+```
+
+`status` reports `installed` / `valid` / `managed` / `current` per target; `current` is true only when the installed content matches the bundle, so re-running `install` refreshes a stale copy. See `examples/agent_cli.rs` (run with the `skill-admin` feature) for the `skill` subcommand wiring.
+
 ## Usage Examples
 
 ### Example 1: REST API

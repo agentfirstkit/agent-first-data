@@ -16,9 +16,15 @@
 //!   [`OutputStyle`], [`OutputOptions`]
 //! - (feature `cli-help`): [`cli_render_help`] — recursive plain-text help for clap commands
 //! - (feature `cli-help-markdown`): [`cli_render_help_markdown`] — recursive Markdown help
+//! - (feature `skill-admin`): [`skill::run_skill_admin`] — install/uninstall/status a spore's
+//!   embedded Agent Skill across Codex, Claude Code, and opencode; returns a typed
+//!   [`skill::SkillReport`]
 
 #[cfg(feature = "tracing")]
 pub mod afdata_tracing;
+
+#[cfg(feature = "skill-admin")]
+pub mod skill;
 
 use serde_json::Value;
 use std::collections::HashSet;

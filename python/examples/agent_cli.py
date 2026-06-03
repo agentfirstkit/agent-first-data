@@ -18,6 +18,12 @@ import sys
 
 from agent_first_data import (
     OutputFormat,
+    SkillAction,
+    SkillAgentSelection,
+    SkillError,
+    SkillOptions,
+    SkillScope,
+    SkillSpec,
     build_cli_error,
     build_json,
     build_json_error,
@@ -26,6 +32,21 @@ from agent_first_data import (
     cli_parse_log_filters,
     cli_parse_output,
     output_json,
+    run_skill_admin,
+)
+
+# A fictional spore's embedded Agent Skill, used by the `skill` subcommand to
+# demonstrate run_skill_admin.
+WIDGET_SKILL = (
+    "---\nname: agent-first-widget\n"
+    "description: Example skill bundled by the agent-cli demo.\n"
+    "---\n\n# Agent-First Widget\n\nExample behavior rules go here.\n"
+)
+WIDGET_SPEC = SkillSpec(
+    name="agent-first-widget",
+    source=WIDGET_SKILL,
+    title="Agent-First Widget",
+    marker_slug="afwidget",
 )
 
 
@@ -48,6 +69,14 @@ def build_parser() -> argparse.ArgumentParser:
     ping_p = subs.add_parser("ping", add_help=False, help="Ping a remote target")
     ping_p.add_argument("--help", "-h", action="store_true", help="Show help for ping")
     ping_p.add_argument("--host", help="Target host to ping")
+
+    skill_p = subs.add_parser("skill", add_help=False, help="Manage this tool's embedded Agent Skill")
+    skill_p.add_argument("--help", "-h", action="store_true", help="Show help for skill")
+    skill_p.add_argument("verb", nargs="?", help="status, install, or uninstall")
+    skill_p.add_argument("--agent", default="all", help="all, codex, claude-code, opencode")
+    skill_p.add_argument("--scope", default="personal", help="personal, project")
+    skill_p.add_argument("--skills-dir", dest="skills_dir", default=None, help="Skills directory (requires a single concrete --agent)")
+    skill_p.add_argument("--force", action="store_true", help="Overwrite or remove a skill this tool did not manage")
 
     return parser
 
@@ -115,6 +144,66 @@ def main() -> None:
             err = build_json_error("ping target not configured", hint="set PING_HOST or pass --host", trace={"duration_ms": 0})
             print(cli_output(err, fmt))
             sys.exit(1)
+
+    elif args.command == "skill":
+        # Step 6: wire the embedded Agent Skill installer to the library.
+        sys.exit(run_skill(args, fmt))
+
+
+def build_skill_options(args):
+    """Parse the --agent/--scope flags into library enums.
+
+    Returns ``(options, None)`` or ``(None, (message, hint))`` on an unknown value.
+    """
+    agents = {
+        "all": SkillAgentSelection.ALL,
+        "codex": SkillAgentSelection.CODEX,
+        "claude-code": SkillAgentSelection.CLAUDE_CODE,
+        "opencode": SkillAgentSelection.OPENCODE,
+    }
+    agent = agents.get(args.agent)
+    if agent is None:
+        return None, (f"invalid --agent '{args.agent}'", "valid values: all, codex, claude-code, opencode")
+    scopes = {"personal": SkillScope.PERSONAL, "project": SkillScope.PROJECT}
+    scope = scopes.get(args.scope)
+    if scope is None:
+        return None, (f"invalid --scope '{args.scope}'", "valid values: personal, project")
+    return SkillOptions(agent=agent, scope=scope, skills_dir=args.skills_dir, force=args.force), None
+
+
+def run_skill(args, fmt) -> int:
+    """Wire the parsed `skill` subcommand to the library and print the result.
+
+    Returns the process exit code (0 ok, 1 action error, 2 bad flag value).
+    """
+    actions = {
+        "status": SkillAction.STATUS,
+        "install": SkillAction.INSTALL,
+        "uninstall": SkillAction.UNINSTALL,
+    }
+    action = actions.get(args.verb)
+    if action is None:
+        err = build_cli_error(
+            "skill requires a subcommand: status, install, uninstall",
+            hint="example: agent-cli skill status --agent opencode",
+        )
+        print(cli_output(err, fmt))
+        return 2
+
+    options, parse_error = build_skill_options(args)
+    if parse_error is not None:
+        message, hint = parse_error
+        print(cli_output(build_cli_error(message, hint=hint), fmt))
+        return 2
+
+    try:
+        report = run_skill_admin(WIDGET_SPEC, action, options)
+    except SkillError as e:
+        print(cli_output(build_cli_error(e.message, hint=e.hint), fmt))
+        return 1
+    # The report is structured; serialize it for output.
+    print(cli_output(report.to_dict(), fmt))
+    return 0
 
 
 # ── Tests (run via: pytest examples/agent_cli.py) ─────────────────────────────

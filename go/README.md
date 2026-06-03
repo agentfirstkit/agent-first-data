@@ -266,6 +266,26 @@ fmt.Println(afdata.CliOutput(result, format))
 
 See `examples/agent_cli/` for the complete working example (`go test ./...`).
 
+### Skill Admin (for spore CLIs that ship an Agent Skill)
+
+`RunSkillAdmin` installs, uninstalls, and reports status of a spore's embedded `SKILL.md` across Codex, Claude Code, and opencode. Describe the skill once with a `SkillSpec`, then call it per action. It returns a typed `SkillReport` (`*SkillStatusReport` / `*SkillInstallReport` / `*SkillUninstallReport` — type-switch to read fields, or pass to `CliOutput` to serialize) or a `*SkillError`; it never writes to stdout/stderr. The generated `SKILL.md` is byte-identical to the Rust, Python, and TypeScript ports.
+
+```go
+RunSkillAdmin(spec SkillSpec, action SkillAction, opts SkillOptions) (SkillReport, *SkillError)
+
+spec := afdata.SkillSpec{Name: "agent-first-widget", Source: skillMarkdown, Title: "Agent-First Widget", MarkerSlug: "afwidget"}
+opts := afdata.SkillOptions{Agent: afdata.SkillAgentAll, Scope: afdata.SkillScopePersonal}
+
+report, err := afdata.RunSkillAdmin(spec, afdata.SkillActionInstall, opts)
+if err != nil {
+    fmt.Println(afdata.CliOutput(afdata.BuildCliError(err.Message, err.Hint), format))
+    os.Exit(1)
+}
+fmt.Println(afdata.CliOutput(report, format))
+```
+
+`status` reports `installed` / `valid` / `managed` / `current` per target; `current` is true only when the installed content matches the bundle, so re-running `install` refreshes a stale copy. See `examples/agent_cli/` for the `skill` subcommand wiring.
+
 ## Usage Examples
 
 ### Example 1: REST API

@@ -6,6 +6,7 @@ export {
   buildJsonOk,
   buildJsonError,
   buildJson,
+  type JsonValue,
   RedactionPolicy,
   type RedactionOptions,
   OutputStyle,
@@ -35,3 +36,16 @@ export {
   cliOutputWithOptions,
   buildCliError,
 } from "./cli.js";
+export {
+  type SkillSpec,
+  type SkillAction,
+  type SkillScope,
+  type SkillAgentSelection,
+  type SkillAgent,
+  type SkillOptions,
+  type SkillTargetStatus,
+  type SkillUninstallStatus,
+  type SkillReport,
+  SkillError,
+  runSkillAdmin,
+} from "./skill.js";

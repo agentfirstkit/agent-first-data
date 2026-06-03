@@ -2,7 +2,8 @@
 //
 // Demonstrates: complete --help (all subcommands in one output),
 // CliParseOutput, CliParseLogFilters, CliOutput, BuildCliError,
-// --dry-run, and error hints.
+// --dry-run, error hints, and a `skill` subcommand that installs/uninstalls/
+// reports status of an embedded Agent Skill across Codex, Claude Code, and opencode.
 //
 // Run: go run ./examples/agent_cli --help
 //
@@ -10,6 +11,8 @@
 //	go run ./examples/agent_cli echo
 //	go run ./examples/agent_cli echo --dry-run
 //	go run ./examples/agent_cli ping
+//	go run ./examples/agent_cli skill status --agent opencode --skills-dir /tmp/ex
+//	go run ./examples/agent_cli skill install --agent opencode --skills-dir /tmp/ex
 package main
 
 import (
@@ -20,6 +23,17 @@ import (
 	afdata "github.com/agentfirstkit/agent-first-data/go"
 )
 
+// A fictional spore's embedded Agent Skill, used by the `skill` subcommand to
+// demonstrate afdata.RunSkillAdmin.
+const widgetSkill = "---\nname: agent-first-widget\ndescription: Example skill bundled by the agent-cli demo.\n---\n\n# Agent-First Widget\n\nExample behavior rules go here.\n"
+
+var widgetSpec = afdata.SkillSpec{
+	Name:       "agent-first-widget",
+	Source:     widgetSkill,
+	Title:      "Agent-First Widget",
+	MarkerSlug: "afwidget",
+}
+
 type subcommand struct {
 	name  string
 	about string
@@ -29,6 +43,7 @@ type subcommand struct {
 var subcommands = []subcommand{
 	{name: "echo", about: "Echo back the input as structured output", flags: "  --dry-run    Preview without executing"},
 	{name: "ping", about: "Ping a remote target", flags: "  --host       Target host to ping"},
+	{name: "skill", about: "Manage this tool's embedded Agent Skill", flags: "  status|install|uninstall  Skill action\n  --agent      all, codex, claude-code, opencode (default: all)\n  --scope      personal, project (default: personal)\n  --skills-dir Skills directory (requires a single concrete --agent)\n  --force      Overwrite or remove a skill this tool did not manage"},
 }
 
 // formatCompleteHelp returns help for the root command and all subcommands.
@@ -64,12 +79,16 @@ func formatSubcommandHelp(name string) string {
 }
 
 func main() {
-	command := ""
 	output := "json"
 	dryRun := false
 	logArg := ""
 	host := ""
+	agent := "all"
+	scope := "personal"
+	skillsDir := ""
+	force := false
 	showHelp := false
+	var positionals []string
 
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
@@ -93,11 +112,33 @@ func main() {
 			if i < len(args) {
 				host = args[i]
 			}
+		case "--agent":
+			i++
+			if i < len(args) {
+				agent = args[i]
+			}
+		case "--scope":
+			i++
+			if i < len(args) {
+				scope = args[i]
+			}
+		case "--skills-dir":
+			i++
+			if i < len(args) {
+				skillsDir = args[i]
+			}
+		case "--force":
+			force = true
 		default:
-			if command == "" && !strings.HasPrefix(args[i], "--") {
-				command = args[i]
+			if !strings.HasPrefix(args[i], "--") {
+				positionals = append(positionals, args[i])
 			}
 		}
+	}
+
+	command := ""
+	if len(positionals) > 0 {
+		command = positionals[0]
 	}
 
 	// Complete help: --help expands all subcommands in one output.
@@ -156,9 +197,76 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "skill":
+		os.Exit(runSkill(positionals, agent, scope, skillsDir, force, format))
+
 	default:
-		hint := "valid commands: echo, ping"
+		hint := "valid commands: echo, ping, skill"
 		fmt.Println(afdata.OutputJson(afdata.BuildCliError("unknown command: "+command, hint)))
 		os.Exit(2)
 	}
+}
+
+// runSkill wires the parsed `skill` subcommand to the library and prints the result.
+// Returns the process exit code (0 ok, 1 action error, 2 bad flag value).
+func runSkill(positionals []string, agentStr, scopeStr, skillsDir string, force bool, format afdata.OutputFormat) int {
+	verb := ""
+	if len(positionals) > 1 {
+		verb = positionals[1]
+	}
+	var action afdata.SkillAction
+	switch verb {
+	case "status":
+		action = afdata.SkillActionStatus
+	case "install":
+		action = afdata.SkillActionInstall
+	case "uninstall":
+		action = afdata.SkillActionUninstall
+	default:
+		errVal := afdata.BuildCliError("skill requires a subcommand: status, install, uninstall", "example: agent-cli skill status --agent opencode")
+		fmt.Println(afdata.CliOutput(errVal, format))
+		return 2
+	}
+
+	opts, message, hint := buildSkillOptions(agentStr, scopeStr, skillsDir, force)
+	if message != "" {
+		fmt.Println(afdata.CliOutput(afdata.BuildCliError(message, hint), format))
+		return 2
+	}
+
+	report, serr := afdata.RunSkillAdmin(widgetSpec, action, opts)
+	if serr != nil {
+		fmt.Println(afdata.CliOutput(afdata.BuildCliError(serr.Message, serr.Hint), format))
+		return 1
+	}
+	fmt.Println(afdata.CliOutput(report, format))
+	return 0
+}
+
+// buildSkillOptions parses the --agent/--scope string flags into the library enums.
+// Returns a non-empty message (and optional hint) on an unknown value.
+func buildSkillOptions(agentStr, scopeStr, skillsDir string, force bool) (afdata.SkillOptions, string, string) {
+	var agent afdata.SkillAgentSelection
+	switch agentStr {
+	case "all":
+		agent = afdata.SkillAgentAll
+	case "codex":
+		agent = afdata.SkillAgentCodex
+	case "claude-code":
+		agent = afdata.SkillAgentClaudeCode
+	case "opencode":
+		agent = afdata.SkillAgentOpencode
+	default:
+		return afdata.SkillOptions{}, fmt.Sprintf("invalid --agent '%s'", agentStr), "valid values: all, codex, claude-code, opencode"
+	}
+	var sc afdata.SkillScope
+	switch scopeStr {
+	case "personal":
+		sc = afdata.SkillScopePersonal
+	case "project":
+		sc = afdata.SkillScopeProject
+	default:
+		return afdata.SkillOptions{}, fmt.Sprintf("invalid --scope '%s'", scopeStr), "valid values: personal, project"
+	}
+	return afdata.SkillOptions{Agent: agent, Scope: sc, SkillsDir: skillsDir, Force: force}, "", ""
 }

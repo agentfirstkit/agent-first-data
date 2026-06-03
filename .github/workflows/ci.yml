@@ -64,6 +64,7 @@ jobs:
         run: |
           cargo fmt --all --check
           cargo clippy --lib -- -D warnings
+          cargo clippy --lib --features skill-admin -- -D warnings
 
       - name: Go (fmt + compile)
         run: |
@@ -83,7 +84,9 @@ jobs:
         run: |
           cargo test --lib --tests
           cargo test --lib --tests --features tracing
+          cargo test --lib --tests --features skill-admin
           cargo test --examples --features cli-help,cli-help-markdown
+          cargo test --examples --features cli-help,cli-help-markdown,skill-admin
 
       - name: Go (tests)
         run: cd go && go test -v ./...

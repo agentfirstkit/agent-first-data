@@ -266,6 +266,30 @@ console.log(cliOutput(result, fmt));
 
 See `examples/agent_cli.ts` for the complete working example (`npx tsx --test examples/agent_cli.ts`).
 
+### Skill Admin (for spore CLIs that ship an Agent Skill)
+
+`runSkillAdmin` installs, uninstalls, and reports status of a spore's embedded `SKILL.md` across Codex, Claude Code, and opencode. Describe the skill once with a `SkillSpec`, then call it per action. It returns a typed `SkillReport` discriminated union (narrow on `code` to read fields, or serialize with `cliOutput`) or throws `SkillError`; it never writes to stdout/stderr. The generated `SKILL.md` is byte-identical to the Rust, Go, and Python ports.
+
+```typescript
+runSkillAdmin(spec: SkillSpec, action: SkillAction, options: SkillOptions): SkillReport
+
+const spec: SkillSpec = { name: "agent-first-widget", source: skillMarkdown, title: "Agent-First Widget", markerSlug: "afwidget" };
+const options: SkillOptions = { agent: "all", scope: "personal" };
+
+try {
+  const report = runSkillAdmin(spec, "install", options);
+  console.log(cliOutput(report as unknown as JsonValue, fmt));
+} catch (e) {
+  if (e instanceof SkillError) {
+    console.log(cliOutput(buildCliError(e.message, e.hint), fmt));
+    process.exit(1);
+  }
+  throw e;
+}
+```
+
+`status` reports `installed` / `valid` / `managed` / `current` per target; `current` is true only when the installed content matches the bundle, so re-running `install` refreshes a stale copy. See `examples/agent_cli.ts` for the `skill` subcommand wiring.
+
 ## Usage Examples
 
 ### Example 1: REST API

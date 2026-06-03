@@ -44,6 +44,22 @@ from agent_first_data.cli import (
     build_cli_error,
 )
 
+from agent_first_data.skill import (
+    SkillSpec,
+    SkillAction,
+    SkillScope,
+    SkillAgentSelection,
+    SkillAgent,
+    SkillOptions,
+    SkillError,
+    SkillTargetStatus,
+    SkillUninstallStatus,
+    SkillStatusReport,
+    SkillInstallReport,
+    SkillUninstallReport,
+    run_skill_admin,
+)
+
 __all__ = [
     "build_json_ok",
     "build_json_error",
@@ -80,4 +96,17 @@ __all__ = [
     "cli_output",
     "cli_output_with_options",
     "build_cli_error",
+    "SkillSpec",
+    "SkillAction",
+    "SkillScope",
+    "SkillAgentSelection",
+    "SkillAgent",
+    "SkillOptions",
+    "SkillError",
+    "SkillTargetStatus",
+    "SkillUninstallStatus",
+    "SkillStatusReport",
+    "SkillInstallReport",
+    "SkillUninstallReport",
+    "run_skill_admin",
 ]
