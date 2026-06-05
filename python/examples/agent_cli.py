@@ -88,6 +88,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def leaf_global_options_note() -> str:
+    """Note appended to a leaf --help target so it still advertises the global
+    --output formats. Only added for the help *target*, never for descendants in
+    a recursive dump (the root already documented the modifiers once)."""
+    return (
+        "\nGlobal options:\n"
+        "  --output <FORMAT>  Output format: json, yaml, plain; help also accepts markdown\n"
+    )
+
+
 def format_complete_help(parser: argparse.ArgumentParser) -> str:
     """Format help for a parser and all its subcommands recursively."""
     lines = [parser.format_help()]
@@ -106,7 +116,7 @@ def format_markdown_help(parser: argparse.ArgumentParser, command: str | None, r
     """Format Markdown docs for the selected command; expand the tree if recursive."""
     sub = find_subparser(parser, command)
     if sub is not None:
-        return f"# {parser.prog} {command}\n\n```text\n{sub.format_help()}```\n"
+        return f"# {parser.prog} {command}\n\n```text\n{sub.format_help()}{leaf_global_options_note()}```\n"
 
     lines = [f"# {parser.prog} - Minimal agent-first CLI example", "", "```text", parser.format_help().rstrip(), "```"]
     if not recursive:
@@ -165,6 +175,22 @@ def build_startup_log() -> dict:
     return build_json("log", {"category": "startup", "event": "startup"})
 
 
+def global_help_options(include_recursive: bool) -> list[dict]:
+    """Global flags documented in the structured (json/yaml) help schema so it
+    advertises the help surface — the scope modifier and output formats — like
+    the plain and markdown formats do. Only the target command carries it; a leaf
+    target omits --recursive (nothing to expand)."""
+    opts = [
+        {"name": "--output", "help": "Output format: json, yaml, plain; help also accepts markdown"},
+        {"name": "--log", "help": "Log categories (comma-separated); --log all (or --verbose) enables every category"},
+        {"name": "--verbose", "help": "Enable all log categories (shorthand for --log all)"},
+    ]
+    if include_recursive:
+        opts.append({"name": "--recursive", "help": "With --help, expand the full command tree (a bare --recursive is ignored)"})
+    opts.append({"name": "--help", "help": "Show this help (one-level)"})
+    return opts
+
+
 def help_schema(parser: argparse.ArgumentParser, command: str | None, scope: str) -> dict:
     sub = find_subparser(parser, command)
     if sub is not None:
@@ -175,6 +201,7 @@ def help_schema(parser: argparse.ArgumentParser, command: str | None, scope: str
             "command_path": f"{parser.prog} {command}",
             "usage": sub.format_usage().strip(),
             "help": sub.format_help(),
+            "options": global_help_options(False),
         }
     commands = []
     for action in parser._subparsers._actions:
@@ -190,6 +217,7 @@ def help_schema(parser: argparse.ArgumentParser, command: str | None, scope: str
         "name": parser.prog,
         "command_path": parser.prog,
         "usage": parser.format_usage().strip(),
+        "options": global_help_options(True),
         "commands": commands,
     }
 
@@ -209,7 +237,7 @@ def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
 
     if not explicit or value == "plain":
         if sub is not None:
-            text = sub.format_help()
+            text = sub.format_help() + leaf_global_options_note()
         elif recursive:
             text = format_complete_help(parser)
         else:
@@ -421,6 +449,41 @@ def test_subcommand_help_scoped():
             echo_help = action.choices["echo"].format_help()
             assert "--dry-run" in echo_help, "echo --help must include --dry-run"
             assert "--host" not in echo_help, "echo --help must NOT include ping's --host"
+
+
+def test_leaf_help_target_documents_formats():
+    # A leaf --help target (markdown here) must still advertise the --output
+    # formats via the global-options note.
+    parser = build_parser()
+    leaf_md = format_markdown_help(parser, "echo", False)
+    assert "--output" in leaf_md, "leaf --help target must document --output"
+    assert "markdown" in leaf_md, "leaf --help target must mention the markdown format"
+    assert "Global options" in leaf_md
+
+
+def test_recursive_dumps_do_not_repeat_global_options():
+    # Token economy: the modifiers are documented once on the target, never
+    # repeated on every descendant block in a recursive dump.
+    parser = build_parser()
+    assert "Global options" not in format_complete_help(parser), (
+        "recursive plain must not repeat the leaf global-options note"
+    )
+    assert "Global options" not in format_markdown_help(parser, None, True), (
+        "recursive markdown must not repeat the leaf global-options note"
+    )
+
+
+def test_help_schema_documents_formats():
+    import json
+
+    parser = build_parser()
+    root = json.dumps(help_schema(parser, None, "one_level"))
+    for token in ("--output", "markdown", "--recursive"):
+        assert token in root, f"root help schema must document {token!r}"
+    leaf = json.dumps(help_schema(parser, "echo", "one_level"))
+    assert "--output" in leaf and "markdown" in leaf, (
+        "leaf help schema must document the --output formats"
+    )
 
 
 def test_parse_output_all_variants():

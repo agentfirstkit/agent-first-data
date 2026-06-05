@@ -57,7 +57,7 @@ func formatRootHelp() string {
 	b.WriteString("agent-cli — Minimal agent-first CLI example\n\n")
 	b.WriteString("Usage: agent-cli [OPTIONS] <COMMAND>\n\n")
 	b.WriteString("Options:\n")
-	b.WriteString("  --output <FORMAT>  Output format: json, yaml, plain (default: json)\n")
+	b.WriteString("  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n")
 	b.WriteString("  --log <FILTERS>    Log categories (comma-separated); --log all (or --verbose) enables every category\n")
 	b.WriteString("  --verbose          Enable all log categories (shorthand for --log all)\n")
 	b.WriteString("  --help             Show this help (one-level); add --recursive to expand all subcommands\n")
@@ -80,12 +80,20 @@ func formatCompleteHelp() string {
 	return b.String()
 }
 
-// formatSubcommandHelp returns help for a single subcommand.
-func formatSubcommandHelp(name string) string {
+// formatSubcommandHelp returns help for a single subcommand. When the
+// subcommand is the help target (withGlobals), it also documents the global
+// --output formats so even a leaf `--help` advertises the format options.
+// Descendants in a recursive dump pass withGlobals=false: the root already
+// documented the modifiers once, so repeating them per command is pure noise.
+func formatSubcommandHelp(name string, withGlobals bool) string {
 	for _, sc := range subcommands {
 		if sc.name == name {
 			var b strings.Builder
 			fmt.Fprintf(&b, "agent-cli %s — %s\n\nFlags:\n%s\n", sc.name, sc.about, sc.flags)
+			if withGlobals {
+				b.WriteString("\nGlobal options:\n")
+				b.WriteString("  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n")
+			}
 			return b.String()
 		}
 	}
@@ -99,7 +107,7 @@ func formatMarkdownHelp(command string, recursive bool) string {
 			if sc.name == command {
 				fmt.Fprintf(&b, "# agent-cli %s - %s\n\n", sc.name, sc.about)
 				b.WriteString("```text\n")
-				b.WriteString(formatSubcommandHelp(command))
+				b.WriteString(formatSubcommandHelp(command, true))
 				b.WriteString("```\n")
 				return b.String()
 			}
@@ -115,10 +123,28 @@ func formatMarkdownHelp(command string, recursive bool) string {
 	for _, sc := range subcommands {
 		fmt.Fprintf(&b, "\n## agent-cli %s - %s\n\n", sc.name, sc.about)
 		b.WriteString("```text\n")
-		b.WriteString(formatSubcommandHelp(sc.name))
+		b.WriteString(formatSubcommandHelp(sc.name, false))
 		b.WriteString("```\n")
 	}
 	return b.String()
+}
+
+// globalHelpOptions documents the global flags so a structured (json/yaml) help
+// dump advertises the help surface — the scope modifier and the output formats —
+// just like the plain and markdown formats do. Only the target command carries
+// it (descendants omit it) to keep a recursive dump lean. A leaf target omits
+// --recursive, which has nothing to expand.
+func globalHelpOptions(includeRecursive bool) []map[string]any {
+	opts := []map[string]any{
+		{"name": "--output", "help": "Output format: json, yaml, plain (default: json); help also accepts markdown"},
+		{"name": "--log", "help": "Log categories (comma-separated); --log all (or --verbose) enables every category"},
+		{"name": "--verbose", "help": "Enable all log categories (shorthand for --log all)"},
+	}
+	if includeRecursive {
+		opts = append(opts, map[string]any{"name": "--recursive", "help": "With --help, expand the full command tree (a bare --recursive is ignored)"})
+	}
+	opts = append(opts, map[string]any{"name": "--help", "help": "Show this help (one-level)"})
+	return opts
 }
 
 func helpSchema(command, scope string) map[string]any {
@@ -134,6 +160,7 @@ func helpSchema(command, scope string) map[string]any {
 					"name":         sc.name,
 					"about":        sc.about,
 					"flags":        sc.flags,
+					"options":      globalHelpOptions(false),
 				}
 			}
 		}
@@ -153,6 +180,7 @@ func helpSchema(command, scope string) map[string]any {
 		"command_path": commandPath,
 		"name":         "agent-cli",
 		"about":        "Minimal agent-first CLI example",
+		"options":      globalHelpOptions(true),
 		"commands":     commands,
 	}
 }
@@ -172,7 +200,7 @@ func printHelp(command, output string, outputExplicit bool, outputMissing bool, 
 	if !outputExplicit || output == "plain" {
 		switch {
 		case command != "":
-			fmt.Print(formatSubcommandHelp(command))
+			fmt.Print(formatSubcommandHelp(command, true))
 		case recursive:
 			fmt.Print(formatCompleteHelp())
 		default:

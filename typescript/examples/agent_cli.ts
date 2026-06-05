@@ -100,18 +100,28 @@ function formatCompleteHelp(): string {
   return lines.join("\n") + "\n";
 }
 
-/** Format help scoped to a single subcommand. */
-function formatSubcommandHelp(name: string): string {
+/**
+ * Format help scoped to a single subcommand. When the subcommand is the help
+ * target (withGlobals), it also documents the global --output formats so even a
+ * leaf `--help` advertises them. Descendants in a recursive dump pass
+ * withGlobals=false: the root already documented the modifiers once, so
+ * repeating them per command would be pure noise.
+ */
+function formatSubcommandHelp(name: string, withGlobals = false): string {
   const sc = SUBCOMMANDS.find((s) => s.name === name);
   if (!sc) return "";
-  return `agent-cli ${sc.name} — ${sc.about}\n\nFlags:\n${sc.flags}\n`;
+  let help = `agent-cli ${sc.name} — ${sc.about}\n\nFlags:\n${sc.flags}\n`;
+  if (withGlobals) {
+    help += "\nGlobal options:\n  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n";
+  }
+  return help;
 }
 
 function formatMarkdownHelp(command: string | undefined, recursive: boolean): string {
   if (command) {
     const sc = SUBCOMMANDS.find((s) => s.name === command);
     if (sc) {
-      return `# agent-cli ${sc.name} - ${sc.about}\n\n\`\`\`text\n${formatSubcommandHelp(sc.name)}\`\`\`\n`;
+      return `# agent-cli ${sc.name} - ${sc.about}\n\n\`\`\`text\n${formatSubcommandHelp(sc.name, true)}\`\`\`\n`;
     }
   }
 
@@ -124,9 +134,28 @@ function formatMarkdownHelp(command: string | undefined, recursive: boolean): st
   ];
   if (!recursive) return `${lines.join("\n")}\n`;
   for (const sc of SUBCOMMANDS) {
-    lines.push("", `## agent-cli ${sc.name} - ${sc.about}`, "", "```text", formatSubcommandHelp(sc.name).trimEnd(), "```");
+    lines.push("", `## agent-cli ${sc.name} - ${sc.about}`, "", "```text", formatSubcommandHelp(sc.name, false).trimEnd(), "```");
   }
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Global flags documented in the structured (json/yaml) help schema so it
+ * advertises the help surface — the scope modifier and output formats — like the
+ * plain and markdown formats do. Only the target command carries it; a leaf
+ * target omits --recursive (nothing to expand).
+ */
+function globalHelpOptions(includeRecursive: boolean): JsonValue[] {
+  const opts: JsonValue[] = [
+    { name: "--output", help: "Output format: json, yaml, plain (default: json); help also accepts markdown" },
+    { name: "--log", help: "Log categories (comma-separated); --log all (or --verbose) enables every category" },
+    { name: "--verbose", help: "Enable all log categories (shorthand for --log all)" },
+  ];
+  if (includeRecursive) {
+    opts.push({ name: "--recursive", help: "With --help, expand the full command tree (a bare --recursive is ignored)" });
+  }
+  opts.push({ name: "--help", help: "Show this help (one-level)" });
+  return opts;
 }
 
 function helpSchema(command: string | undefined, scope: "one_level" | "recursive"): JsonValue {
@@ -141,6 +170,7 @@ function helpSchema(command: string | undefined, scope: "one_level" | "recursive
         name: sc.name,
         about: sc.about,
         flags: sc.flags,
+        options: globalHelpOptions(false),
       };
     }
   }
@@ -150,6 +180,7 @@ function helpSchema(command: string | undefined, scope: "one_level" | "recursive
     command_path: commandPath,
     name: "agent-cli",
     about: "Minimal agent-first CLI example",
+    options: globalHelpOptions(true),
     commands: SUBCOMMANDS.map((sc) => {
       const entry: Record<string, JsonValue> = { name: sc.name, about: sc.about };
       if (scope === "recursive") entry.flags = sc.flags;
@@ -183,7 +214,7 @@ function renderHelpOutput(
   // subcommand is leaf-level here, so its scope is the same either way.
   const scope = recursive ? "recursive" : "one_level";
   if (!outputExplicit || outputArg === "plain") {
-    if (command) return formatSubcommandHelp(command);
+    if (command) return formatSubcommandHelp(command, true);
     return recursive ? formatCompleteHelp() : formatRootHelp();
   }
   if (outputArg === "markdown") return formatMarkdownHelp(command, recursive);
@@ -449,9 +480,33 @@ if (process.env["NODE_TEST_CONTEXT"]) {
     });
 
     it("subcommand help scoped to subtree", () => {
-      const echoHelp = formatSubcommandHelp("echo");
+      const echoHelp = formatSubcommandHelp("echo", true);
       assert.ok(echoHelp.includes("--dry-run"), "echo --help must include --dry-run");
       assert.ok(!echoHelp.includes("--host"), "echo --help must NOT include ping's --host");
+    });
+
+    it("leaf help target documents formats; descendants do not", () => {
+      const target = formatSubcommandHelp("echo", true);
+      assert.ok(target.includes("--output"), "leaf --help target must document --output");
+      assert.ok(target.includes("markdown"), "leaf --help target must mention markdown");
+      const descendant = formatSubcommandHelp("echo", false);
+      assert.ok(!descendant.includes("Global options"), "descendant rendering must not repeat global options");
+    });
+
+    it("recursive dumps document modifiers once, not per descendant", () => {
+      const plain = formatCompleteHelp();
+      const md = formatMarkdownHelp(undefined, true);
+      assert.equal((plain.match(/Global options/g) ?? []).length, 0, "recursive plain must not repeat global-options note");
+      assert.equal((md.match(/Global options/g) ?? []).length, 0, "recursive markdown must not repeat global-options note");
+    });
+
+    it("every help schema documents the formats", () => {
+      const root = JSON.stringify(helpSchema(undefined, "one_level"));
+      for (const token of ["--output", "markdown", "--recursive"]) {
+        assert.ok(root.includes(token), `root help schema must document ${token}`);
+      }
+      const leaf = JSON.stringify(helpSchema("echo", "one_level"));
+      assert.ok(leaf.includes("--output") && leaf.includes("markdown"), "leaf help schema must document --output formats");
     });
   });
 

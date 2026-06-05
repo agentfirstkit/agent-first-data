@@ -652,6 +652,70 @@ mod tests {
             !help.contains("--recursive"),
             "a leaf command with no subcommands must not advertise --recursive:\n{help}"
         );
+        assert!(
+            help.contains("--output"),
+            "even a leaf --help must document the --output formats:\n{help}"
+        );
+    }
+
+    /// Invariant: any `--help` invocation, in any scope and any output format,
+    /// must document the help formats in at least one place.
+    #[cfg(feature = "cli-help")]
+    #[test]
+    fn help_always_documents_formats_in_every_output() {
+        for output in ["plain", "json", "yaml", "markdown"] {
+            for extra in [Vec::new(), vec!["--recursive".to_string()]] {
+                let mut raw = vec!["agent-cli".to_string(), "--help".to_string()];
+                raw.extend(extra.iter().cloned());
+                raw.push("--output".to_string());
+                raw.push(output.to_string());
+
+                let help = agent_first_data::cli_handle_help_or_continue(
+                    &raw,
+                    &Cli::command(),
+                    &agent_first_data::HelpConfig::human_cli_default(),
+                )
+                .expect("valid help request")
+                .unwrap_or_else(|| panic!("help should render for --output {output} {extra:?}"));
+
+                for token in ["--recursive", "--output", "json", "yaml", "markdown"] {
+                    assert!(
+                        help.contains(token),
+                        "--help --output {output} {extra:?} must document '{token}':\n{help}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Token economy: in a recursive dump the help modifiers must be documented
+    /// once (on the target command), not repeated on every descendant block.
+    #[cfg(feature = "cli-help")]
+    #[test]
+    fn recursive_help_documents_modifiers_once() {
+        let raw = vec![
+            "agent-cli".to_string(),
+            "--help".to_string(),
+            "--recursive".to_string(),
+        ];
+        let help = agent_first_data::cli_handle_help_or_continue(
+            &raw,
+            &Cli::command(),
+            &agent_first_data::HelpConfig::human_cli_default(),
+        )
+        .expect("valid help request")
+        .expect("recursive help should render");
+        let occurrences = help.matches("render this help in another format").count();
+        assert_eq!(
+            occurrences, 1,
+            "recursive plain help must advertise the modifiers exactly once \
+             (found {occurrences}):\n{help}"
+        );
+        // Descendant command blocks fall back to clap's bare wording.
+        assert!(
+            help.contains("Print help\n"),
+            "descendant commands should keep the plain 'Print help' wording:\n{help}"
+        );
     }
 
     #[cfg(feature = "cli-help")]

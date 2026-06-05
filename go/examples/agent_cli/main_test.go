@@ -80,12 +80,57 @@ func TestHelpSchemaOneLevelOmitsChildFlags(t *testing.T) {
 }
 
 func TestSubcommandHelpScoped(t *testing.T) {
-	echoHelp := formatSubcommandHelp("echo")
+	echoHelp := formatSubcommandHelp("echo", true)
 	if !containsStr(echoHelp, "--dry-run") {
 		t.Error("echo --help missing --dry-run")
 	}
 	if containsStr(echoHelp, "--host") {
 		t.Error("echo --help should NOT contain --host")
+	}
+}
+
+// A leaf --help target must still advertise the --output formats; a descendant
+// rendering (withGlobals=false) must not, to keep recursive dumps lean.
+func TestLeafHelpTargetDocumentsFormats(t *testing.T) {
+	target := formatSubcommandHelp("echo", true)
+	for _, want := range []string{"--output", "markdown"} {
+		if !containsStr(target, want) {
+			t.Errorf("leaf --help target missing %q:\n%s", want, target)
+		}
+	}
+	descendant := formatSubcommandHelp("echo", false)
+	if containsStr(descendant, "Global options") {
+		t.Errorf("descendant rendering must not repeat global options:\n%s", descendant)
+	}
+}
+
+// Invariant: every --help output, in every format, documents the help formats.
+func TestHelpAlwaysDocumentsFormats(t *testing.T) {
+	// Structured (json/yaml) schema, root and leaf targets.
+	root := afdata.OutputJson(helpSchema("", "one_level"))
+	for _, want := range []string{"--output", "markdown", "--recursive"} {
+		if !containsStr(root, want) {
+			t.Errorf("root help schema missing %q:\n%s", want, root)
+		}
+	}
+	leaf := afdata.OutputJson(helpSchema("echo", "one_level"))
+	if !containsStr(leaf, "--output") || !containsStr(leaf, "markdown") {
+		t.Errorf("leaf help schema must document --output formats:\n%s", leaf)
+	}
+	// Plain and markdown root help.
+	if !containsStr(formatRootHelp(), "markdown") {
+		t.Error("root plain help must mention the markdown format")
+	}
+}
+
+// Token economy: a recursive dump documents the modifiers once (at the root),
+// never repeating the leaf "Global options" note per descendant.
+func TestRecursiveDumpsDoNotRepeatGlobalOptions(t *testing.T) {
+	if strings.Count(formatCompleteHelp(), "Global options") != 0 {
+		t.Error("recursive plain must not repeat the leaf Global options note")
+	}
+	if strings.Count(formatMarkdownHelp("", true), "Global options") != 0 {
+		t.Error("recursive markdown must not repeat the leaf Global options note")
 	}
 }
 

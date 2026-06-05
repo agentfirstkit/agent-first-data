@@ -588,14 +588,7 @@ pub fn cli_render_help_with_options(
     let target = walk_to_subcommand(cmd, subcommand_path);
     let mut rendered = match options.format {
         HelpFormat::Plain => match options.scope {
-            HelpScope::OneLevel => {
-                // One-level help is clap-generated and so cannot list the
-                // afdata-handled `--recursive` modifier; advertise it here so a
-                // plain `--help` is self-documenting when subcommands exist.
-                let mut help = render_help_one_level_plain(target);
-                append_recursive_help_hint(&mut help, target);
-                help
-            }
+            HelpScope::OneLevel => render_help_one_level_plain(target),
             HelpScope::Recursive => {
                 let mut buf = String::new();
                 render_help_recursive_plain(target, &[], &mut buf);
@@ -747,28 +740,51 @@ fn walk_to_subcommand_with_names<'a>(
 
 #[cfg(feature = "cli-help")]
 fn render_help_one_level_plain(cmd: &clap::Command) -> String {
-    cmd.clone().render_long_help().to_string()
+    enriched_help_command(cmd).render_long_help().to_string()
 }
 
-/// Append a short note documenting the built-in `--recursive` help modifier.
+/// Clone `cmd` and fold the afdata-handled help modifiers into clap's own
+/// `-h, --help` description.
 ///
-/// Only emitted when the command actually has visible subcommands (a leaf
-/// command has nothing to expand). Plain one-level help is rendered by clap and
-/// cannot otherwise mention a flag the afdata handler consumes before clap.
+/// Help is rendered by clap, which has no knowledge of the `--recursive` scope
+/// modifier or the `--output` help formats (afdata consumes both before clap
+/// parses). Rather than appending a separate section, we patch the description
+/// of the existing help flag so the help surface is documented in place — in
+/// every format, since plain/markdown render this flag and the JSON/YAML schema
+/// reads it. Commands with subcommands advertise `--recursive`; leaf commands
+/// only advertise the `--output` formats (they have nothing to expand).
 #[cfg(feature = "cli-help")]
-fn append_recursive_help_hint(help: &mut String, cmd: &clap::Command) {
-    use std::fmt::Write;
-    if visible_subcommands(cmd).next().is_none() {
-        return;
-    }
-    if !help.ends_with('\n') {
-        help.push('\n');
-    }
-    let _ = write!(
-        help,
-        "\nHelp scope:\n      --recursive\n          Show this help for every nested subcommand, not just the current\n          level. Add --output json|yaml|markdown to export the whole tree.\n"
-    );
+fn enriched_help_command(cmd: &clap::Command) -> clap::Command {
+    let cmd = cmd.clone();
+    let description = if visible_subcommands(&cmd).next().is_some() {
+        HELP_FLAG_WITH_SUBCOMMANDS
+    } else {
+        HELP_FLAG_LEAF
+    };
+    // clap auto-generates `-h, --help` lazily during build, so `mut_arg` cannot
+    // reach it yet. Replace it with an explicit flag carrying the enriched
+    // description. This command is only rendered, never parsed (afdata handles
+    // `--help` before clap), so the action is immaterial.
+    cmd.disable_help_flag(true).arg(
+        clap::Arg::new("help")
+            .short('h')
+            .long("help")
+            .help(description)
+            .long_help(description)
+            .action(clap::ArgAction::Help),
+    )
 }
+
+/// Description for the `-h, --help` flag on commands that have subcommands.
+#[cfg(feature = "cli-help")]
+const HELP_FLAG_WITH_SUBCOMMANDS: &str =
+    "Print help. Add --recursive to expand every nested subcommand; \
+     add --output json|yaml|markdown to render this help in another format.";
+
+/// Description for the `-h, --help` flag on leaf commands (no subcommands).
+#[cfg(feature = "cli-help")]
+const HELP_FLAG_LEAF: &str =
+    "Print help. Add --output json|yaml|markdown to render this help in another format.";
 
 #[cfg(feature = "cli-help")]
 fn render_help_recursive_plain(cmd: &clap::Command, parent_path: &[&str], buf: &mut String) {
@@ -793,8 +809,15 @@ fn render_help_recursive_plain(cmd: &clap::Command, parent_path: &[&str], buf: &
     }
     let _ = writeln!(buf);
 
-    // Render clap's built-in help for this command (usage, args, options)
-    let styled = cmd.clone().render_long_help();
+    // Render clap's built-in help for this command (usage, args, options).
+    // Only the target command (top of the recursion) advertises the help
+    // modifiers; repeating them on every descendant block would be pure noise.
+    let is_target = parent_path.is_empty();
+    let styled = if is_target {
+        enriched_help_command(cmd).render_long_help()
+    } else {
+        cmd.clone().render_long_help()
+    };
     let help_text = styled.to_string();
     let _ = write!(buf, "{help_text}");
 
@@ -811,7 +834,7 @@ fn render_help_recursive_plain(cmd: &clap::Command, parent_path: &[&str], buf: &
 fn render_help_markdown(cmd: &clap::Command, subcommand_path: &[&str], scope: HelpScope) -> String {
     let (target, names) = walk_to_subcommand_with_names(cmd, subcommand_path);
     let mut buf = String::new();
-    render_markdown_command(target, &names, &mut buf, 1);
+    render_markdown_command(target, &names, &mut buf, 1, true);
     if matches!(scope, HelpScope::Recursive) {
         render_markdown_descendants(target, &names, &mut buf, 2);
     }
@@ -831,13 +854,19 @@ fn render_markdown_descendants(
         }
         let mut names = parent_names.to_vec();
         names.push(sub.get_name().to_string());
-        render_markdown_command(sub, &names, buf, level);
+        render_markdown_command(sub, &names, buf, level, false);
         render_markdown_descendants(sub, &names, buf, level.saturating_add(1));
     }
 }
 
 #[cfg(feature = "cli-help")]
-fn render_markdown_command(cmd: &clap::Command, names: &[String], buf: &mut String, level: usize) {
+fn render_markdown_command(
+    cmd: &clap::Command,
+    names: &[String],
+    buf: &mut String,
+    level: usize,
+    enrich: bool,
+) {
     use std::fmt::Write;
 
     if !buf.is_empty() {
@@ -856,7 +885,12 @@ fn render_markdown_command(cmd: &clap::Command, names: &[String], buf: &mut Stri
     }
     let _ = writeln!(buf);
     let _ = writeln!(buf, "```text");
-    write_trimmed_help(buf, &cmd.clone().render_long_help().to_string());
+    let help = if enrich {
+        enriched_help_command(cmd).render_long_help()
+    } else {
+        cmd.clone().render_long_help()
+    };
+    write_trimmed_help(buf, &help.to_string());
     if !buf.ends_with('\n') {
         let _ = writeln!(buf);
     }
@@ -1027,7 +1061,7 @@ fn flag_takes_value(cmd: &clap::Command, raw_flag: &str) -> bool {
 #[cfg(feature = "cli-help")]
 fn build_help_schema(cmd: &clap::Command, subcommand_path: &[&str], scope: HelpScope) -> Value {
     let (target, names) = walk_to_subcommand_with_names(cmd, subcommand_path);
-    let mut schema = command_schema(target, &names, matches!(scope, HelpScope::Recursive));
+    let mut schema = command_schema(target, &names, matches!(scope, HelpScope::Recursive), true);
     if let Value::Object(map) = &mut schema {
         map.insert("code".to_string(), Value::String("help".to_string()));
         map.insert(
@@ -1047,13 +1081,14 @@ fn help_scope_tag(scope: HelpScope) -> &'static str {
 }
 
 #[cfg(feature = "cli-help")]
-fn command_schema(cmd: &clap::Command, names: &[String], recursive: bool) -> Value {
+fn command_schema(cmd: &clap::Command, names: &[String], recursive: bool, enrich: bool) -> Value {
     let subcommands: Vec<Value> = visible_subcommands(cmd)
         .map(|sub| {
             let mut child_names = names.to_vec();
             child_names.push(sub.get_name().to_string());
             if recursive {
-                command_schema(sub, &child_names, true)
+                // Descendants never re-advertise the help modifiers (enrich=false).
+                command_schema(sub, &child_names, true, false)
             } else {
                 command_summary_schema(sub, &child_names)
             }
@@ -1067,7 +1102,7 @@ fn command_schema(cmd: &clap::Command, names: &[String], recursive: bool) -> Val
         "about": styled_to_value(cmd.get_about()),
         "long_about": styled_to_value(cmd.get_long_about()),
         "usage": cmd.clone().render_usage().to_string(),
-        "arguments": command_arguments_schema(cmd),
+        "arguments": command_arguments_schema(cmd, enrich),
         "subcommands": subcommands,
     })
 }
@@ -1093,8 +1128,16 @@ fn visible_subcommands(cmd: &clap::Command) -> impl Iterator<Item = &clap::Comma
 }
 
 #[cfg(feature = "cli-help")]
-fn command_arguments_schema(cmd: &clap::Command) -> Vec<Value> {
-    cmd.get_arguments()
+fn command_arguments_schema(cmd: &clap::Command, enrich: bool) -> Vec<Value> {
+    // For the target command, render through the enriched clone so the schema
+    // documents the `-h, --help` modifiers (`--recursive`, `--output`) just like
+    // the plain and markdown formats do (clap adds `--help` lazily during build,
+    // so the raw command would omit it). Descendants stay un-enriched to avoid
+    // repeating the same modifier doc on every command in a recursive dump.
+    let owned = enrich.then(|| enriched_help_command(cmd));
+    let source = owned.as_ref().unwrap_or(cmd);
+    source
+        .get_arguments()
         .filter(|arg| !arg.is_hide_set())
         .map(argument_schema)
         .collect()
