@@ -234,30 +234,31 @@ cli_output_with_options(value: &Value, format: OutputFormat, output_options: &Ou
 build_cli_error(message: &str, hint: Option<&str>) -> Value         // {code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}
 ```
 
-**Canonical pattern** — intercept `--help` for recursive output, parse flags, emit JSONL errors to stdout:
+**Canonical pattern** — handle configurable help before clap, parse flags, emit JSONL errors to stdout:
 
 ```rust
 use agent_first_data::*;
 use clap::{CommandFactory, Parser};
 
 let raw: Vec<String> = std::env::args().collect();
-let subcommand_path: Vec<&str> = raw[1..].iter()
-    .take_while(|a| !a.starts_with('-'))
-    .map(|s| s.as_str()).collect();
-
-// --help: recursive plain-text help, all subcommands expanded
-if raw.iter().any(|a| a == "--help" || a == "-h") {
-    print!("{}", cli_render_help(&Cli::command(), &subcommand_path));
-    std::process::exit(0);
-}
-// --help-markdown: Markdown for doc generation
-if raw.iter().any(|a| a == "--help-markdown") {
-    print!("{}", cli_render_help_markdown(&Cli::command(), &subcommand_path));
-    std::process::exit(0);
+match cli_handle_help_or_continue(
+    &raw,
+    &Cli::command(),
+    &HelpConfig::human_cli_default(),
+) {
+    Ok(Some(help)) => {
+        print!("{help}");
+        std::process::exit(0);
+    }
+    Ok(None) => {}
+    Err(err) => {
+        println!("{}", output_json(&err));
+        std::process::exit(2);
+    }
 }
 
 let cli = Cli::try_parse().unwrap_or_else(|e| {
-    if matches!(e.kind(), clap::error::ErrorKind::DisplayVersion) {
+    if matches!(e.kind(), clap::error::ErrorKind::DisplayVersion | clap::error::ErrorKind::DisplayHelp) {
         e.exit();
     }
     println!("{}", output_json(&build_cli_error(&e.to_string(), None)));
@@ -294,24 +295,33 @@ See `examples/agent_cli.rs` for the complete working example (`cargo test --exam
 
 ### CLI Help Rendering (optional features)
 
-Recursive help rendering for CLIs with subcommands. Agents read `--help` once and get the complete interface — no crawling subcommands one by one.
+Configurable help rendering for CLIs with subcommands. Scope and format are orthogonal: human `--help` is one-level plain, `--recursive` expands the command tree, and `--output json|yaml|markdown` independently picks the format (so `--help --recursive --output markdown` is a recursive Markdown export).
 
 ```bash
-cargo add agent-first-data --features cli-help          # plain-text recursive help
-cargo add agent-first-data --features cli-help-markdown  # + Markdown doc generation
+cargo add agent-first-data --features cli-help           # configurable plain/json/yaml/markdown help
+cargo add agent-first-data --features cli-help-markdown  # + legacy cli_render_help_markdown wrapper
 ```
 
 ```rust
 // Feature: cli-help
+HelpScope::{OneLevel, Recursive}
+HelpFormat::{Plain, Markdown, Json, Yaml}
+HelpOptions { scope, format }
+HelpConfig::human_cli_default()
+HelpConfig::agent_cli_default()
+cli_render_help_with_options(cmd: &clap::Command, subcommand_path: &[&str], options: &HelpOptions) -> String
+cli_handle_help_or_continue(raw_args: &[String], cmd: &clap::Command, config: &HelpConfig) -> Result<Option<String>, serde_json::Value>
 cli_render_help(cmd: &clap::Command, subcommand_path: &[&str]) -> String
 
 // Feature: cli-help-markdown
 cli_render_help_markdown(cmd: &clap::Command, subcommand_path: &[&str]) -> String
 ```
 
-**`cli_render_help`** recursively expands all subcommands into plain text. Pass an empty slice for root help, or `&["service", "start"]` to scope to a subcommand.
+**`cli_render_help_with_options`** renders one-level or recursive help as plain text, Markdown, JSON, or YAML. JSON/YAML are structured command schemas.
 
-**`cli_render_help_markdown`** produces Markdown with headings and anchor links, suitable for `myapp --help-markdown > docs/cli.md`. The `clap-markdown` footer is automatically stripped.
+**`cli_handle_help_or_continue`** scans argv before `Cli::try_parse()` so `myapp --help --recursive`, `myapp --help --recursive --output json`, and `myapp sub --help` can be handled without clap's `DisplayHelp` short-circuit. Scope is set by `--recursive` (built in; an extra alias can be configured) and format by `--output` — the two are independent. A bare `--recursive` without `--help` returns `Ok(None)` so the flag falls through to your own parser. Invalid help formats return a standard `build_cli_error` value for exit 2.
+
+**`cli_render_help`** remains a recursive plain-text wrapper. **`cli_render_help_markdown`** remains a recursive Markdown wrapper for doc generation.
 
 ### Skill Admin (optional feature `skill-admin`, for spore CLIs that ship an Agent Skill)
 

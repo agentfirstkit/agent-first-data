@@ -85,6 +85,7 @@ jobs:
           cargo test --lib --tests
           cargo test --lib --tests --features tracing
           cargo test --lib --tests --features skill-admin
+          cargo test --all-features
           cargo test --examples --features cli-help,cli-help-markdown
           cargo test --examples --features cli-help,cli-help-markdown,skill-admin
 

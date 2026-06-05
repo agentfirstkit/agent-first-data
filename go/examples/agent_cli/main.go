@@ -1,15 +1,20 @@
 // Command agent_cli demonstrates canonical CLI helper usage for agent tools.
 //
-// Demonstrates: complete --help (all subcommands in one output),
+// Demonstrates: human --help (one-level) plus orthogonal --recursive scope and
+// --output json|yaml|markdown format for full surface export,
 // CliParseOutput, CliParseLogFilters, CliOutput, BuildCliError,
 // --dry-run, error hints, and a `skill` subcommand that installs/uninstalls/
 // reports status of an embedded Agent Skill across Codex, Claude Code, and opencode.
 //
 // Run: go run ./examples/agent_cli --help
 //
+//	go run ./examples/agent_cli --help --recursive
+//	go run ./examples/agent_cli --help --recursive --output json
+//	go run ./examples/agent_cli --help --recursive --output markdown
 //	go run ./examples/agent_cli echo --help
 //	go run ./examples/agent_cli echo
 //	go run ./examples/agent_cli echo --dry-run
+//	go run ./examples/agent_cli --log all ping   # or --verbose
 //	go run ./examples/agent_cli ping
 //	go run ./examples/agent_cli skill status --agent opencode --skills-dir /tmp/ex
 //	go run ./examples/agent_cli skill install --agent opencode --skills-dir /tmp/ex
@@ -46,19 +51,28 @@ var subcommands = []subcommand{
 	{name: "skill", about: "Manage this tool's embedded Agent Skill", flags: "  status|install|uninstall  Skill action\n  --agent      all, codex, claude-code, opencode (default: all)\n  --scope      personal, project (default: personal)\n  --skills-dir Skills directory (requires a single concrete --agent)\n  --force      Overwrite or remove a skill this tool did not manage"},
 }
 
-// formatCompleteHelp returns help for the root command and all subcommands.
-func formatCompleteHelp() string {
+// formatRootHelp returns one-level help for the root command.
+func formatRootHelp() string {
 	var b strings.Builder
 	b.WriteString("agent-cli — Minimal agent-first CLI example\n\n")
 	b.WriteString("Usage: agent-cli [OPTIONS] <COMMAND>\n\n")
 	b.WriteString("Options:\n")
 	b.WriteString("  --output <FORMAT>  Output format: json, yaml, plain (default: json)\n")
-	b.WriteString("  --log <FILTERS>    Log categories (comma-separated)\n")
-	b.WriteString("  --help             Show this help\n\n")
+	b.WriteString("  --log <FILTERS>    Log categories (comma-separated); --log all (or --verbose) enables every category\n")
+	b.WriteString("  --verbose          Enable all log categories (shorthand for --log all)\n")
+	b.WriteString("  --help             Show this help (one-level); add --recursive to expand all subcommands\n")
+	b.WriteString("  --recursive        With --help, expand the full command tree; --output picks the format\n\n")
 	b.WriteString("Commands:\n")
 	for _, sc := range subcommands {
 		fmt.Fprintf(&b, "  %-8s %s\n", sc.name, sc.about)
 	}
+	return b.String()
+}
+
+// formatCompleteHelp returns recursive help for the root command and all subcommands.
+func formatCompleteHelp() string {
+	var b strings.Builder
+	b.WriteString(formatRootHelp())
 	for _, sc := range subcommands {
 		fmt.Fprintf(&b, "\n%s\n%s\n\n", strings.Repeat("=", 60), "agent-cli "+sc.name)
 		fmt.Fprintf(&b, "%s\n%s\n\nFlags:\n%s\n", strings.Repeat("=", 60), sc.about, sc.flags)
@@ -78,8 +92,139 @@ func formatSubcommandHelp(name string) string {
 	return ""
 }
 
+func formatMarkdownHelp(command string, recursive bool) string {
+	var b strings.Builder
+	if command != "" {
+		for _, sc := range subcommands {
+			if sc.name == command {
+				fmt.Fprintf(&b, "# agent-cli %s - %s\n\n", sc.name, sc.about)
+				b.WriteString("```text\n")
+				b.WriteString(formatSubcommandHelp(command))
+				b.WriteString("```\n")
+				return b.String()
+			}
+		}
+	}
+	b.WriteString("# agent-cli - Minimal agent-first CLI example\n\n")
+	b.WriteString("```text\n")
+	b.WriteString(formatRootHelp())
+	b.WriteString("```\n")
+	if !recursive {
+		return b.String()
+	}
+	for _, sc := range subcommands {
+		fmt.Fprintf(&b, "\n## agent-cli %s - %s\n\n", sc.name, sc.about)
+		b.WriteString("```text\n")
+		b.WriteString(formatSubcommandHelp(sc.name))
+		b.WriteString("```\n")
+	}
+	return b.String()
+}
+
+func helpSchema(command, scope string) map[string]any {
+	commandPath := "agent-cli"
+	if command != "" {
+		commandPath += " " + command
+		for _, sc := range subcommands {
+			if sc.name == command {
+				return map[string]any{
+					"code":         "help",
+					"scope":        scope,
+					"command_path": commandPath,
+					"name":         sc.name,
+					"about":        sc.about,
+					"flags":        sc.flags,
+				}
+			}
+		}
+	}
+
+	commands := make([]map[string]any, 0, len(subcommands))
+	for _, sc := range subcommands {
+		entry := map[string]any{"name": sc.name, "about": sc.about}
+		if scope == "recursive" {
+			entry["flags"] = sc.flags
+		}
+		commands = append(commands, entry)
+	}
+	return map[string]any{
+		"code":         "help",
+		"scope":        scope,
+		"command_path": commandPath,
+		"name":         "agent-cli",
+		"about":        "Minimal agent-first CLI example",
+		"commands":     commands,
+	}
+}
+
+func printHelp(command, output string, outputExplicit bool, outputMissing bool, recursive bool) int {
+	if outputMissing {
+		fmt.Println(afdata.OutputJson(afdata.BuildCliError("missing value for --output: expected plain, json, yaml, or markdown", "valid help output formats: plain, markdown, json, yaml")))
+		return 2
+	}
+	// Scope (one-level vs recursive) is set by --recursive; --output only picks
+	// the format. A specific subcommand is leaf-level here, so its scope is the
+	// same either way.
+	scope := "one_level"
+	if recursive {
+		scope = "recursive"
+	}
+	if !outputExplicit || output == "plain" {
+		switch {
+		case command != "":
+			fmt.Print(formatSubcommandHelp(command))
+		case recursive:
+			fmt.Print(formatCompleteHelp())
+		default:
+			fmt.Print(formatRootHelp())
+		}
+		return 0
+	}
+	if output == "markdown" {
+		fmt.Print(formatMarkdownHelp(command, recursive))
+		return 0
+	}
+	format, err := afdata.CliParseOutput(output)
+	if err != nil {
+		fmt.Println(afdata.OutputJson(afdata.BuildCliError(err.Error(), "")))
+		return 2
+	}
+	fmt.Println(afdata.CliOutput(helpSchema(command, scope), format))
+	return 0
+}
+
+// logEnabled reports whether a diagnostic category should be emitted. `all` /
+// `*` (what --verbose expands to) enable every category, including unnamed ones.
+func logEnabled(filters []string, category string) bool {
+	for _, f := range filters {
+		if f == category || f == "all" || f == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func buildRequestLog(command string) map[string]any {
+	if command == "" {
+		command = "none"
+	}
+	return afdata.BuildJson("log", map[string]any{
+		"category": "request",
+		"command":  command,
+	}, nil)
+}
+
+func buildStartupLog() map[string]any {
+	return afdata.BuildJson("log", map[string]any{
+		"category": "startup",
+		"event":    "startup",
+	}, nil)
+}
+
 func main() {
 	output := "json"
+	outputExplicit := false
+	outputMissing := false
 	dryRun := false
 	logArg := ""
 	host := ""
@@ -88,17 +233,32 @@ func main() {
 	skillsDir := ""
 	force := false
 	showHelp := false
+	recursive := false
+	verbose := false
 	var positionals []string
 
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], "--output=") {
+			output = strings.TrimPrefix(args[i], "--output=")
+			outputExplicit = true
+			continue
+		}
 		switch args[i] {
 		case "--help", "-h":
 			showHelp = true
+		case "--recursive":
+			// A help modifier only: it selects recursive scope when --help is
+			// present and is otherwise ignored, so it never affects normal
+			// command parsing.
+			recursive = true
 		case "--output":
-			i++
-			if i < len(args) {
+			outputExplicit = true
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
 				output = args[i]
+			} else {
+				outputMissing = true
 			}
 		case "--log":
 			i++
@@ -129,6 +289,8 @@ func main() {
 			}
 		case "--force":
 			force = true
+		case "--verbose":
+			verbose = true
 		default:
 			if !strings.HasPrefix(args[i], "--") {
 				positionals = append(positionals, args[i])
@@ -141,15 +303,10 @@ func main() {
 		command = positionals[0]
 	}
 
-	// Complete help: --help expands all subcommands in one output.
-	// Subcommand --help expands only that subcommand.
+	// --help is one-level plain; --recursive expands the tree and --output picks
+	// the format. A bare --recursive (no --help) falls through to normal parsing.
 	if showHelp {
-		if command != "" {
-			fmt.Print(formatSubcommandHelp(command))
-		} else {
-			fmt.Print(formatCompleteHelp())
-		}
-		return
+		os.Exit(printHelp(command, output, outputExplicit, outputMissing, recursive))
 	}
 
 	// 1. Parse --output flag with structured error on failure.
@@ -163,6 +320,19 @@ func main() {
 	var filters []string
 	if logArg != "" {
 		filters = afdata.CliParseLogFilters(strings.Split(logArg, ","))
+	}
+	if verbose {
+		// --verbose is shorthand for --log all.
+		filters = append(filters, "all")
+	}
+
+	// Each diagnostic line self-tags with its `category`, so `--log all` reveals
+	// the full set from real output rather than a static help list.
+	if logEnabled(filters, "request") {
+		fmt.Println(afdata.CliOutput(buildRequestLog(command), format))
+	}
+	if logEnabled(filters, "startup") {
+		fmt.Println(afdata.CliOutput(buildStartupLog(), format))
 	}
 
 	// 3. No subcommand → error with hint.

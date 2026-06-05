@@ -215,7 +215,7 @@ The flag name, the JSON field name, and the formatted output all tell the same s
 
 **Secret flags** (`--api-key-secret`, `--database-url-secret`) are automatically redacted in startup messages, logs, and YAML/Plain output. Tools should also consider redacting them from `/proc` process listings where possible.
 
-**Complete help.** `--help` SHOULD expand all subcommands and their flags in a single output. An agent reads `myapp --help` once and gets the complete interface — no crawling subcommands one by one. `myapp sub --help` SHOULD expand only that subcommand and its descendants.
+**Human help vs export surface.** Help scope and help format are orthogonal. Scope is controlled by `--recursive`: `--help` is one-level (and `myapp sub --help` is one-level for that subcommand), while `--help --recursive` expands the selected command subtree. Format is controlled by `--output`: plain by default, or `json|yaml|markdown`. So human-facing CLIs use plain one-level `--help`; agent/doc flows use `--help --recursive` (recursive plain), `--help --recursive --output json|yaml` (recursive export), or `--help --recursive --output markdown` (recursive docs). A bare `--recursive` without `--help` is a no-op for help and MUST NOT be consumed by the help layer — it falls through to the application's own parser. Help `markdown` is help-only and SHOULD NOT become a general business output format.
 
 ### Environment variables
 

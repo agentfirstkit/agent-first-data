@@ -226,6 +226,13 @@ assert parse_size("512") == 512
 
 Shared helpers that prevent flag-parsing drift between CLI tools. Use these instead of reimplementing `--output` and `--log` handling in each tool.
 
+Help scope and format are orthogonal: `--recursive` decides one-level vs
+recursive, `--output` decides plain/json/yaml/markdown. Human-facing CLIs use
+one-level `--help` (and scoped `sub --help`); agent/doc flows use
+`--help --recursive`, adding `--output json|yaml|markdown` for a recursive
+export. A bare `--recursive` without `--help` is ignored by the help layer.
+See `examples/agent_cli.py` for that pattern.
+
 ```python
 class OutputFormat(enum.Enum):  # JSON="json", YAML="yaml", PLAIN="plain"
 

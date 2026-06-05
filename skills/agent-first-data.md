@@ -343,7 +343,7 @@ CLI tools that use AFDATA should support output and logging flags:
 
 - Protocol output (`build_json_*` + `output_*`) follows `--output`
 - Log format follows `--output` or a separate `--log-format` flag if independent control is needed
-- `--help` SHOULD expand all subcommands and flags in one output. `myapp sub --help` scopes to that subtree. `--help-markdown` outputs Markdown for doc generation. Rust: use `cli_render_help()` and `cli_render_help_markdown()` from the `cli-help` / `cli-help-markdown` features.
+- Help scope and format are orthogonal: `--recursive` decides one-level vs recursive, `--output` decides plain/json/yaml/markdown. Human help is one-level `--help` (and scoped `myapp sub --help`); agents/docs use `--help --recursive` and add `--output json|yaml|markdown` for a recursive export. A bare `--recursive` without `--help` falls through to the app's own parser. `markdown` is help-only. Rust: use `cli_handle_help_or_continue()` / `cli_render_help_with_options()` from the `cli-help` feature; wrappers `cli_render_help()` and `cli_render_help_markdown()` remain available for recursive output.
 
 ## Review Checklist
 

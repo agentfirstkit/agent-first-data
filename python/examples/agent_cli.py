@@ -1,14 +1,19 @@
 """Minimal agent-first CLI — canonical pattern for tools built on agent-first-data.
 
-Demonstrates: complete --help (all subcommands in one output), cli_parse_output,
+Demonstrates: human --help (one-level) plus orthogonal --recursive scope and
+--output json|yaml|markdown format for full surface export, cli_parse_output,
 cli_parse_log_filters, cli_output, build_cli_error, --dry-run, and error hints.
 
 Run:  PYTHONPATH=. python3 examples/agent_cli.py --help
+      PYTHONPATH=. python3 examples/agent_cli.py --help --recursive
+      PYTHONPATH=. python3 examples/agent_cli.py --help --recursive --output json
+      PYTHONPATH=. python3 examples/agent_cli.py --help --recursive --output markdown
       PYTHONPATH=. python3 examples/agent_cli.py echo --help
       PYTHONPATH=. python3 examples/agent_cli.py echo --output json
       PYTHONPATH=. python3 examples/agent_cli.py echo --dry-run --output yaml
       PYTHONPATH=. python3 examples/agent_cli.py ping --output json
       PYTHONPATH=. python3 examples/agent_cli.py echo --output yaml --log startup,request
+      PYTHONPATH=. python3 examples/agent_cli.py --log all ping   # or --verbose
 Test: PYTHONPATH=. python3 -m pytest examples/agent_cli.py -v
 """
 
@@ -56,9 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Minimal agent-first CLI example",
         add_help=False,  # we handle --help ourselves
     )
-    parser.add_argument("--help", "-h", action="store_true", help="Show complete help")
-    parser.add_argument("--output", default="json", help="Output format: json, yaml, plain")
-    parser.add_argument("--log", default="", help="Log categories (comma-separated)")
+    parser.add_argument("--help", "-h", action="store_true", help="Show this help (one-level)")
+    parser.add_argument("--recursive", action="store_true", help="With --help, expand the full command tree (a bare --recursive is ignored)")
+    parser.add_argument("--output", default="json", help="Output format: json, yaml, plain; help also accepts markdown")
+    parser.add_argument("--log", default="", help="Log categories (comma-separated); --log all (or --verbose) enables every category")
+    parser.add_argument("--verbose", action="store_true", help="Enable all log categories (shorthand for --log all)")
 
     subs = parser.add_subparsers(dest="command")
 
@@ -95,22 +102,146 @@ def format_complete_help(parser: argparse.ArgumentParser) -> str:
     return "\n".join(lines)
 
 
+def format_markdown_help(parser: argparse.ArgumentParser, command: str | None, recursive: bool) -> str:
+    """Format Markdown docs for the selected command; expand the tree if recursive."""
+    sub = find_subparser(parser, command)
+    if sub is not None:
+        return f"# {parser.prog} {command}\n\n```text\n{sub.format_help()}```\n"
+
+    lines = [f"# {parser.prog} - Minimal agent-first CLI example", "", "```text", parser.format_help().rstrip(), "```"]
+    if not recursive:
+        return "\n".join(lines) + "\n"
+    for action in parser._subparsers._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, choice in action.choices.items():
+                lines.extend(["", f"## {parser.prog} {name}", "", "```text", choice.format_help().rstrip(), "```"])
+    return "\n".join(lines) + "\n"
+
+
+def find_subparser(parser: argparse.ArgumentParser, command: str | None) -> argparse.ArgumentParser | None:
+    if not command:
+        return None
+    for action in parser._subparsers._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices.get(command)
+    return None
+
+
+def output_explicit(raw: list[str]) -> bool:
+    return "--output" in raw or any(arg.startswith("--output=") for arg in raw)
+
+
+def output_value(raw: list[str], default: str | None = None) -> str | None:
+    for arg in raw:
+        if arg.startswith("--output="):
+            return arg.split("=", 1)[1]
+    if "--output" in raw:
+        idx = raw.index("--output")
+        if idx + 1 < len(raw) and not raw[idx + 1].startswith("-"):
+            return raw[idx + 1]
+    return default
+
+
+def help_requested(raw: list[str]) -> bool:
+    return "--help" in raw or "-h" in raw
+
+
+def recursive_requested(raw: list[str]) -> bool:
+    # A help *modifier*: only consulted when --help is present, so a bare
+    # --recursive never affects normal command parsing.
+    return "--recursive" in raw
+
+
+def log_enabled(filters: list[str], category: str) -> bool:
+    """`all` / `*` (what --verbose expands to) enable every category."""
+    return any(f in (category, "all", "*") for f in filters)
+
+
+def build_request_log(command: str | None) -> dict:
+    return build_json("log", {"category": "request", "command": command or "none"})
+
+
+def build_startup_log() -> dict:
+    return build_json("log", {"category": "startup", "event": "startup"})
+
+
+def help_schema(parser: argparse.ArgumentParser, command: str | None, scope: str) -> dict:
+    sub = find_subparser(parser, command)
+    if sub is not None:
+        return {
+            "code": "help",
+            "scope": scope,
+            "name": command,
+            "command_path": f"{parser.prog} {command}",
+            "usage": sub.format_usage().strip(),
+            "help": sub.format_help(),
+        }
+    commands = []
+    for action in parser._subparsers._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, choice in action.choices.items():
+                item = {"name": name, "usage": choice.format_usage().strip()}
+                if scope == "recursive":
+                    item["help"] = choice.format_help()
+                commands.append(item)
+    return {
+        "code": "help",
+        "scope": scope,
+        "name": parser.prog,
+        "command_path": parser.prog,
+        "usage": parser.format_usage().strip(),
+        "commands": commands,
+    }
+
+
+def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
+    explicit = output_explicit(raw)
+    value = output_value(raw, args.output)
+    sub = find_subparser(parser, args.command)
+    # Scope (--recursive) and format (--output) are orthogonal. A specific
+    # subcommand is leaf-level here, so its scope is the same either way.
+    recursive = recursive_requested(raw)
+    scope = "recursive" if recursive else "one_level"
+
+    if explicit and value is None:
+        print(output_json(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml")))
+        sys.exit(2)
+
+    if not explicit or value == "plain":
+        if sub is not None:
+            text = sub.format_help()
+        elif recursive:
+            text = format_complete_help(parser)
+        else:
+            text = parser.format_help()
+        print(text, end="" if text.endswith("\n") else "\n")
+        return
+
+    if value == "markdown":
+        text = format_markdown_help(parser, args.command, recursive)
+        print(text, end="" if text.endswith("\n") else "\n")
+        return
+
+    try:
+        fmt = cli_parse_output(value)
+    except ValueError as e:
+        print(output_json(build_cli_error(str(e))))
+        sys.exit(2)
+    print(cli_output(help_schema(parser, args.command, scope), fmt))
+
+
 def main() -> None:
     parser = build_parser()
+    raw = sys.argv[1:]
+    if help_requested(raw) and output_explicit(raw) and output_value(raw) is None:
+        print(output_json(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml")))
+        sys.exit(2)
     args, _ = parser.parse_known_args()
 
-    # Complete help: --help expands all subcommands in one output.
-    # Subcommand --help expands only that subcommand.
+    # --help is one-level plain; --recursive expands the tree and --output picks
+    # the format. A bare --recursive (no --help) is ignored and parsing continues.
     if args.help:
-        if args.command:
-            # Scoped to subcommand
-            for action in parser._subparsers._actions:
-                if isinstance(action, argparse._SubParsersAction):
-                    sub = action.choices.get(args.command)
-                    if sub:
-                        print(sub.format_help())
-                        return
-        print(format_complete_help(parser))
+        print_help(parser, args, raw)
         return
 
     # Step 1: parse --output with shared helper
@@ -122,6 +253,16 @@ def main() -> None:
 
     # Step 2: parse --log with shared helper (trim + lowercase + dedup)
     log = cli_parse_log_filters(args.log.split(",") if args.log else [])
+    if args.verbose:
+        # --verbose is shorthand for --log all.
+        log.append("all")
+
+    # Each diagnostic line self-tags with its `category`, so `--log all` reveals
+    # the full set from real output rather than a static help list.
+    if log_enabled(log, "request"):
+        print(cli_output(build_request_log(args.command), fmt))
+    if log_enabled(log, "startup"):
+        print(cli_output(build_startup_log(), fmt))
 
     # Step 3: no subcommand → error with hint
     if not args.command:
@@ -209,14 +350,68 @@ def run_skill(args, fmt) -> int:
 # ── Tests (run via: pytest examples/agent_cli.py) ─────────────────────────────
 
 
-def test_complete_help_contains_all_subcommands():
+def test_root_help_is_one_level():
     parser = build_parser()
-    md = format_complete_help(parser)
+    md = parser.format_help()
     assert "echo" in md, "root --help must include echo subcommand"
     assert "ping" in md, "root --help must include ping subcommand"
     assert "--output" in md, "root --help must include global flags"
-    assert "--dry-run" in md, "root --help must include echo's --dry-run"
-    assert "--host" in md, "root --help must include ping's --host"
+    assert "--help-all" not in md, "root --help must not advertise removed recursive flag"
+    assert "--dry-run" not in md, "root --help must not include echo's --dry-run"
+    assert "--host" not in md, "root --help must not include ping's --host"
+
+
+def test_recursive_markdown_export_contains_all_subcommand_details():
+    parser = build_parser()
+    md = format_markdown_help(parser, None, True)
+    assert "# agent-cli" in md, "markdown export must include root heading"
+    assert "--dry-run" in md, "recursive markdown export must include echo's --dry-run"
+    assert "--host" in md, "recursive markdown export must include ping's --host"
+
+
+def test_one_level_markdown_omits_descendant_details():
+    parser = build_parser()
+    md = format_markdown_help(parser, None, False)
+    assert "# agent-cli" in md, "one-level markdown must include root heading"
+    assert "--dry-run" not in md, "one-level markdown must not expand echo's --dry-run"
+    assert "--host" not in md, "one-level markdown must not expand ping's --host"
+
+
+def test_one_level_help_schema_omits_child_flags():
+    parser = build_parser()
+    schema = help_schema(parser, None, "one_level")
+    assert schema["scope"] == "one_level"
+    assert not any("help" in command for command in schema["commands"]), (
+        "one-level schema must not expand child help"
+    )
+
+
+def test_recursive_requested_is_help_modifier_only():
+    # The detector is purely a flag presence check; main only consults it when
+    # --help is present, so a bare --recursive never triggers help.
+    assert recursive_requested(["--help", "--recursive"]) is True
+    assert recursive_requested(["--recursive"]) is True
+    assert help_requested(["--recursive"]) is False, (
+        "a bare --recursive must not be treated as a help request"
+    )
+
+
+def test_recursive_help_contains_all_subcommand_details():
+    parser = build_parser()
+    md = format_complete_help(parser)
+    assert "echo" in md, "recursive help must include echo subcommand"
+    assert "ping" in md, "recursive help must include ping subcommand"
+    assert "--output" in md, "recursive help must include global flags"
+    assert "--dry-run" in md, "recursive help must include echo's --dry-run"
+    assert "--host" in md, "recursive help must include ping's --host"
+
+
+def test_help_schema_is_recursive_export():
+    parser = build_parser()
+    schema = help_schema(parser, None, "recursive")
+    assert schema["code"] == "help"
+    assert schema["scope"] == "recursive"
+    assert any("help" in command for command in schema["commands"])
 
 
 def test_subcommand_help_scoped():
@@ -239,6 +434,23 @@ def test_parse_output_all_variants():
 
 def test_parse_log_normalizes():
     assert cli_parse_log_filters(["Startup", " REQUEST ", "startup"]) == ["startup", "request"]
+
+
+def test_log_enabled_wildcards():
+    assert not log_enabled([], "startup")
+    assert log_enabled(["startup"], "startup")
+    assert not log_enabled(["startup"], "request")
+    # all / * enable every category, including unnamed ones
+    for everything in ("all", "*"):
+        assert log_enabled([everything], "startup")
+        assert log_enabled([everything], "request")
+
+
+def test_log_lines_are_category_tagged():
+    req = build_request_log(None)
+    assert req["code"] == "log" and req["category"] == "request" and req["command"] == "none"
+    start = build_startup_log()
+    assert start["code"] == "log" and start["category"] == "startup"
 
 
 def test_build_cli_error_structure():

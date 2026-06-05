@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,10 +13,12 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Add a reusable skill-admin capability — run_skill_admin installs, uninstalls, and reports status of a spore's embedded Agent Skill across Codex, Claude Code, and opencode — available in all four languages (Rust, Go, Python, TypeScript) with byte-identical generated SKILL.md and output.",
-    "Return a structured, typed report from skill-admin (Rust code-tagged enum, Go sealed-interface structs, Python dataclass with to_dict(), TypeScript discriminated union) so callers read fields directly or serialize it, rather than an opaque map/dict/value.",
-    "Report a per-target 'current' freshness flag so a stale installed skill is detected and a re-run of install refreshes it.",
-    "Guard installs and uninstalls with a managed-marker check that refuses to overwrite or remove a skill the tool did not generate unless --force is passed."
+    "Separate CLI help scope from help format: --recursive controls one-level vs recursive expansion, --output controls plain/json/yaml/markdown rendering, and the two are independent (so --help --recursive --output markdown is a recursive Markdown export)",
+    "Make plain --help one-level by default for human readers, with 'sub --help' scoping to that subcommand; agents and doc generation opt into the full surface with --help --recursive",
+    "Add a pre-clap help handler that scans argv before parsing so --help combined with --recursive/--output is honored instead of being short-circuited by clap's built-in help, while a bare --recursive without --help falls through to the application's own parser",
+    "Add structured JSON and YAML help output as command-tree schemas, alongside plain and markdown, with markdown kept help-only and not a general business output format",
+    "Replace the dedicated --help-markdown flag with --help --recursive --output markdown; keep cli_render_help and cli_render_help_markdown as recursive wrappers",
+    "Implement the orthogonal scope/format help model consistently across Rust, Go, Python, and TypeScript with matching examples, tests, READMEs, skill, and spec"
   ],
   "bonds": [],
   "tree": {
