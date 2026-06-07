@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,11 +13,9 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Document the --recursive scope modifier and --output json|yaml|markdown formats inline on the -h/--help flag (Rust) instead of a separate appended section, clarifying that --output sets format and --recursive sets scope",
-    "Make every --help output advertise the available formats in at least one place, including leaf-command help and the JSON/YAML help schema, not only the root plain-text help",
-    "In recursive --help dumps, document the help modifiers once on the target command instead of repeating them on every descendant block",
-    "Apply the same help-documentation behavior consistently across Rust, Go, Python, and TypeScript, with matching examples and tests",
-    "Exclude node_modules from spore content packaging so releasing no longer fails on a node_modules symlink"
+    "Unify cross-language number formatting: render integral-valued floats without a trailing .0 and accept them for integer-required suffixes (_bytes/_epoch_*/_cents/_jpy) across all four languages, gating on value integrality rather than lexical form; guard _epoch_s * 1000 against integer overflow and preserve >2^53 integer precision in Go",
+    "Redact structured-logging fields by name (_secret suffix, _url scrubbing) at emit time across every tracing record_* path, instead of substring-scanning rendered values, fixing a leak where info!(api_key_secret = %x) passed through unredacted",
+    "Fix _url secret leak where Rust and TypeScript silently left malformed URLs unredacted (userinfo passwords, secret query params) by dropping a redundant URL-library parse gate; round _bytes half-to-even in TypeScript to match the %.1f formatting used by Rust/Go/Python"
   ],
   "bonds": [],
   "tree": {
@@ -25,7 +23,12 @@
     "exclude_names": [
       ".git",
       ".cmn",
-      "node_modules"
+      "node_modules",
+      "target",
+      "dist",
+      "build",
+      "__pycache__",
+      ".venv"
     ],
     "follow_rules": [
       ".gitignore"

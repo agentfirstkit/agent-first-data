@@ -74,5 +74,20 @@
     "name": "bare secret key without value is untouched",
     "input": "https://h/?flag_secret&page=2",
     "expected": "https://h/?flag_secret&page=2"
+  },
+  {
+    "name": "port above 65535 still redacts (no url-library parse gate)",
+    "input": "http://user:pass@host:99999/?t_secret=1",
+    "expected": "http://user:***@host:99999/?t_secret=***"
+  },
+  {
+    "name": "empty host still redacts",
+    "input": "http://?a_secret=1",
+    "expected": "http://?a_secret=***"
+  },
+  {
+    "name": "out-of-range port with userinfo, fragment and benign param",
+    "input": "https://u:p@h:70000/p?x_secret=9&ok=1#frag",
+    "expected": "https://u:***@h:70000/p?x_secret=***&ok=1#frag"
   }
 ]

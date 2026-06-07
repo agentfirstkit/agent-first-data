@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Sequence
 from urllib.parse import unquote_plus
@@ -515,9 +515,27 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _number_str(value: int | float) -> str:
+    """Render a number canonically for YAML/plain output.
+
+    An integral-valued float drops its trailing ``.0`` (``3.0`` -> ``3``) so the
+    four language implementations stay byte-identical with Go/TS/Rust.
+    """
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 def _as_int(value: Any) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
         return value
+    # Accept integral-valued floats (3.0 -> 3): JS/TS cannot distinguish 3 from
+    # 3.0 after JSON parsing, so integrality (not lexical form) gates integer
+    # suffixes, keeping the four implementations consistent.
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        return int(value)
     return None
 
 
@@ -714,10 +732,12 @@ def _format_ms_value(value: Any) -> str | None:
 
 
 def _format_rfc3339_ms(ms: int) -> str:
+    # Build from an integer timedelta (not float ms/1000) so large values keep
+    # full precision and the second split matches Rust's div_euclid exactly.
     try:
-        dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        dt = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=ms)
         return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms % 1000:03d}Z"
-    except (OSError, OverflowError, ValueError):
+    except (OverflowError, ValueError):
         return str(ms)
 
 
@@ -854,7 +874,7 @@ def _yaml_scalar(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
-        return str(value)
+        return _number_str(value)
     escaped = str(value).replace('"', '\\"')
     return f'"{escaped}"'
 
@@ -907,7 +927,7 @@ def _plain_scalar(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
-        return str(value)
+        return _number_str(value)
     return str(value)
 
 

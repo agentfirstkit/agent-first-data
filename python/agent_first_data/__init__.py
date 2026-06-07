@@ -27,7 +27,6 @@ from agent_first_data.format import (
 
 from agent_first_data.afdata_logging import (
     AfdataHandler,
-    AfdataJsonHandler,
     init_json as init_logging_json,
     init_plain as init_logging_plain,
     init_yaml as init_logging_yaml,
@@ -84,7 +83,6 @@ __all__ = [
     "redact_url_secrets_with_options",
     "parse_size",
     "AfdataHandler",
-    "AfdataJsonHandler",
     "init_logging_json",
     "init_logging_plain",
     "init_logging_yaml",

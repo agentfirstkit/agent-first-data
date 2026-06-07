@@ -1276,8 +1276,13 @@ fn redact_secrets_strict_with_context(value: &mut Value, context: &RedactionCont
 /// when `s` is a processable URL, or `None` when it is not (so callers can keep
 /// the original). Only secret spans change; all other bytes are preserved.
 fn redact_url_in_str(s: &str, context: &RedactionContext) -> Option<String> {
-    // Fast path + precondition: a single, whitespace-free, scheme-prefixed URL.
-    if !s.contains("://") || !is_single_url(s) || url::Url::parse(s).is_err() {
+    // Precondition (spec): a single, whitespace-free, scheme-prefixed URL.
+    // The gate is scheme + no-whitespace only — NOT "parses as a URL library
+    // object". Span location below is purely byte-wise, so we never re-serialize
+    // the URL; adding a `url::Url::parse` gate here would diverge across
+    // languages (e.g. ports > 65535 or empty hosts that one library rejects and
+    // another accepts) and silently leak secrets in the values it rejects.
+    if !s.contains("://") || !is_single_url(s) {
         return None;
     }
     let scheme_sep = s.find("://")?;
@@ -1432,35 +1437,57 @@ fn try_strip_generic_cents(key: &str) -> Option<(String, String)> {
 
 /// Try suffix-driven processing. Returns Some((stripped_key, formatted_value))
 /// when suffix matches and type is valid. None for no match or type mismatch.
+/// Accept an integer value, including an integral-valued float (`3.0` → `3`).
+/// Non-integral floats and out-of-range values return `None`. This keeps the
+/// four language implementations consistent: JS/TS cannot distinguish `3` from
+/// `3.0` after JSON parsing, so the value's integrality — not its lexical form —
+/// decides whether an integer-required suffix applies.
+fn as_int(value: &Value) -> Option<i64> {
+    if let Some(i) = value.as_i64() {
+        return Some(i);
+    }
+    let f = value.as_f64()?;
+    if f.is_finite() && f.fract() == 0.0 && (i64::MIN as f64..=i64::MAX as f64).contains(&f) {
+        return Some(f as i64);
+    }
+    None
+}
+
+/// Like [`as_int`] but for non-negative integers (rejects negatives).
+fn as_uint(value: &Value) -> Option<u64> {
+    if let Some(u) = value.as_u64() {
+        return Some(u);
+    }
+    let f = value.as_f64()?;
+    if f.is_finite() && f.fract() == 0.0 && (0.0..=u64::MAX as f64).contains(&f) {
+        return Some(f as u64);
+    }
+    None
+}
+
 fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
     // Group 1: compound timestamp suffixes
     if let Some(stripped) = strip_suffix_ci(key, "_epoch_ms") {
-        return value.as_i64().map(|ms| (stripped, format_rfc3339_ms(ms)));
+        return as_int(value).map(|ms| (stripped, format_rfc3339_ms(ms)));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_epoch_s") {
-        return value
-            .as_i64()
-            .map(|s| (stripped, format_rfc3339_ms(s * 1000)));
+        return as_int(value)
+            .and_then(|s| s.checked_mul(1000))
+            .map(|ms| (stripped, format_rfc3339_ms(ms)));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_epoch_ns") {
-        return value
-            .as_i64()
-            .map(|ns| (stripped, format_rfc3339_ms(ns.div_euclid(1_000_000))));
+        return as_int(value).map(|ns| (stripped, format_rfc3339_ms(ns.div_euclid(1_000_000))));
     }
 
     // Group 2: compound currency suffixes
     if let Some(stripped) = strip_suffix_ci(key, "_usd_cents") {
-        return value
-            .as_u64()
-            .map(|n| (stripped, format!("${}.{:02}", n / 100, n % 100)));
+        return as_uint(value).map(|n| (stripped, format!("${}.{:02}", n / 100, n % 100)));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_eur_cents") {
-        return value
-            .as_u64()
-            .map(|n| (stripped, format!("€{}.{:02}", n / 100, n % 100)));
+        return as_uint(value).map(|n| (stripped, format!("€{}.{:02}", n / 100, n % 100)));
     }
     if let Some((stripped, code)) = try_strip_generic_cents(key) {
-        return value.as_u64().map(|n| {
+        return as_uint(value).map(|n| {
             (
                 stripped,
                 format!("{}.{:02} {}", n / 100, n % 100, code.to_uppercase()),
@@ -1500,7 +1527,7 @@ fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
             .then(|| (stripped, format!("{}sats", number_str(value))));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_bytes") {
-        return value.as_i64().map(|n| (stripped, format_bytes_human(n)));
+        return as_int(value).map(|n| (stripped, format_bytes_human(n)));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_percent") {
         return value
@@ -1518,9 +1545,7 @@ fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
             .then(|| (stripped, format!("{} BTC", number_str(value))));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_jpy") {
-        return value
-            .as_u64()
-            .map(|n| (stripped, format!("¥{}", format_with_commas(n))));
+        return as_uint(value).map(|n| (stripped, format!("¥{}", format_with_commas(n))));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_ns") {
         return value
@@ -1588,9 +1613,25 @@ fn process_object_fields<'a>(
 
 fn number_str(value: &Value) -> String {
     match value {
-        Value::Number(n) => n.to_string(),
+        Value::Number(n) => format_number(n),
         _ => String::new(),
     }
+}
+
+/// Render a JSON number canonically for YAML/plain output: an integral-valued
+/// float drops its trailing `.0` so `3.0` and `3` both render as `3`. This
+/// matches Go (`strconv.FormatFloat(_, 'f', -1, 64)`), TypeScript
+/// (`Number.prototype.toString`), and Python (`int(v)` for integral floats),
+/// keeping the four implementations byte-identical.
+fn format_number(n: &serde_json::Number) -> String {
+    if n.is_f64() {
+        if let Some(f) = n.as_f64() {
+            if f.is_finite() && f.fract() == 0.0 {
+                return format!("{f:.0}");
+            }
+        }
+    }
+    n.to_string()
 }
 
 /// Format ms as seconds: 3 decimal places, trim trailing zeros, min 1 decimal.
@@ -1817,7 +1858,7 @@ fn yaml_scalar(value: &Value) -> String {
         }
         Value::Null => "null".to_string(),
         Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
+        Value::Number(n) => format_number(n),
         other => format!("\"{}\"", other.to_string().replace('"', "\\\"")),
     }
 }
@@ -1878,7 +1919,7 @@ fn plain_scalar(value: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Null => "null".to_string(),
         Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
+        Value::Number(n) => format_number(n),
         other => other.to_string(),
     }
 }

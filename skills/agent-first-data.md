@@ -331,6 +331,8 @@ await span({ request_id: uuid }, async () => {
 
 Every log line contains: `timestamp_epoch_ms`, `message`, `code` (defaults to log level, overridable), plus span fields and event fields.
 
+Log redaction is **by field name** (the same `_secret`/`_url` rule as all output), applied when the line is emitted. So name the secret field — `info!(api_key_secret = %key)` — rather than logging a whole object by its `Debug`/string rendering, which hides the inner field names from redaction. For structured/nested secret-bearing data, build a value, redact it (`internal_redact_secrets`), then emit via `output_*` — do not pass the struct to a `?`/`%`-rendered log field.
+
 ## CLI Flags
 
 CLI tools that use AFDATA should support output and logging flags:

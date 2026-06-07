@@ -87,10 +87,6 @@ class AfdataHandler(logging.Handler):
         sys.stdout.flush()
 
 
-# Keep old name as alias for backwards compat
-AfdataJsonHandler = AfdataHandler
-
-
 class _AfdataLoggerAdapter(logging.LoggerAdapter):
     """Logger adapter that passes extra fields to AfdataHandler."""
 

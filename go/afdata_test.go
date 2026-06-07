@@ -990,3 +990,18 @@ func assertEqual(t *testing.T, got, want string) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestNormalizePreservesLargeIntegers guards the normalize() UseNumber fix:
+// integers beyond 2^53 inside structs/uint64 must survive OutputJson without
+// collapsing to a lossy float64. Not a shared fixture — JSON-in-JS cannot
+// represent these values, so it is verified per-language.
+func TestNormalizePreservesLargeIntegers(t *testing.T) {
+	type event struct {
+		CreatedEpochNs int64  `json:"created_epoch_ns"`
+		SizeBytes      uint64 `json:"size_bytes"`
+	}
+	in := event{CreatedEpochNs: 1707868800123456789, SizeBytes: 18446744073709551615}
+	got := OutputJson(in)
+	want := `{"created_epoch_ns":1707868800123456789,"size_bytes":18446744073709551615}`
+	assertEqual(t, got, want)
+}

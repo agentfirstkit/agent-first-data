@@ -93,5 +93,67 @@
     },
     "expected_yaml": "---\nmessage: \"hello = \\\"world\\\" \\\\ path\\nnext\\trow\"",
     "expected_plain": "message=\"hello = \\\"world\\\" \\\\ path\\nnext\\trow\""
+  },
+  {
+    "name": "integral_floats_render_without_trailing_decimal",
+    "input": {
+      "reserve_btc": 3.0,
+      "cpu_percent": 95.0,
+      "timeout_s": 30.0,
+      "balance_msats": 50000.0
+    },
+    "expected_json": {
+      "reserve_btc": 3.0,
+      "cpu_percent": 95.0,
+      "timeout_s": 30.0,
+      "balance_msats": 50000.0
+    },
+    "expected_yaml": "---\nbalance: \"50000msats\"\ncpu: \"95%\"\nreserve: \"3 BTC\"\ntimeout: \"30s\"",
+    "expected_plain": "balance=50000msats cpu=95% reserve=\"3 BTC\" timeout=30s"
+  },
+  {
+    "name": "integral_floats_satisfy_integer_required_suffixes",
+    "input": {
+      "price_usd_cents": 999.0,
+      "file_size_bytes": 5242880.0,
+      "fee_jpy": 1500.0,
+      "created_at_epoch_ms": 1738886400000.0
+    },
+    "expected_json": {
+      "price_usd_cents": 999.0,
+      "file_size_bytes": 5242880.0,
+      "fee_jpy": 1500.0,
+      "created_at_epoch_ms": 1738886400000.0
+    },
+    "expected_yaml": "---\ncreated_at: \"2025-02-07T00:00:00.000Z\"\nfee: \"¥1,500\"\nfile_size: \"5.0MB\"\nprice: \"$9.99\"",
+    "expected_plain": "created_at=2025-02-07T00:00:00.000Z fee=¥1,500 file_size=5.0MB price=$9.99"
+  },
+  {
+    "name": "fractional_floats_render_shortest_round_trip",
+    "input": {
+      "ratio_percent": 99.9,
+      "amount_btc": 0.5
+    },
+    "expected_json": {
+      "ratio_percent": 99.9,
+      "amount_btc": 0.5
+    },
+    "expected_yaml": "---\namount: \"0.5 BTC\"\nratio: \"99.9%\"",
+    "expected_plain": "amount=\"0.5 BTC\" ratio=99.9%"
+  },
+  {
+    "name": "bytes_round_half_to_even",
+    "input": {
+      "a_bytes": 1280,
+      "b_bytes": 3328,
+      "c_bytes": 1310720
+    },
+    "expected_json": {
+      "a_bytes": 1280,
+      "b_bytes": 3328,
+      "c_bytes": 1310720
+    },
+    "expected_yaml": "---\na: \"1.2KB\"\nb: \"3.2KB\"\nc: \"1.2MB\"",
+    "expected_plain": "a=1.2KB b=3.2KB c=1.2MB"
   }
 ]

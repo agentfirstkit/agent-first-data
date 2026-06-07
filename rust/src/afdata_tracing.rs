@@ -192,11 +192,13 @@ impl Visit for JsonVisitor {
         if field.name() == "message" {
             self.message = Some(val);
         } else {
-            let safe_val = sanitize_debug_field(field.name(), val);
-            self.fields.push((
-                field.name().to_string(),
-                serde_json::Value::String(safe_val),
-            ));
+            // Push the raw value under its field name. Redaction happens at emit
+            // time in `on_event` via `output_json`/`output_plain`/`output_yaml`,
+            // which redact by field name (`_secret` suffix, `_url` scrubbing) —
+            // exactly like every other AFDATA surface. The visitor never scans
+            // rendered values for secret markers.
+            self.fields
+                .push((field.name().to_string(), serde_json::Value::String(val)));
         }
     }
 
@@ -243,40 +245,47 @@ impl Visit for JsonVisitor {
     }
 }
 
-fn sanitize_debug_field(field_name: &str, raw_value: String) -> String {
-    if field_name.ends_with("_secret")
-        || field_name.ends_with("_SECRET")
-        || raw_value.contains("_secret")
-        || raw_value.contains("_SECRET")
-    {
-        "***".to_string()
-    } else {
-        raw_value
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::sanitize_debug_field;
+    use serde_json::json;
+
+    // The tracing layer redacts log fields the same way every AFDATA surface
+    // does: by FIELD NAME, applied by `output_*` at emit time — never by
+    // scanning a rendered value for the substring "_secret". These tests pin
+    // that contract (the visitor records raw values; emit redacts by name).
 
     #[test]
-    fn sanitize_debug_field_redacts_secret_key() {
-        let got = sanitize_debug_field("api_key_secret", "\"sk-live-123\"".to_string());
-        assert_eq!(got, "***");
+    fn secret_named_field_is_redacted_at_emit() {
+        let line = crate::output_json(&json!({
+            "code": "info",
+            "api_key_secret": "sk-live-123",
+        }));
+        assert!(line.contains("\"api_key_secret\":\"***\""), "{line}");
+        assert!(!line.contains("sk-live-123"), "{line}");
     }
 
     #[test]
-    fn sanitize_debug_field_redacts_nested_secret_marker() {
-        let got = sanitize_debug_field(
-            "meta",
-            "Object {\"api_key_secret\": String(\"sk-live-123\")}".to_string(),
+    fn non_secret_field_whose_value_mentions_secret_is_not_redacted() {
+        // A real secret value never contains the literal "_secret"; the old
+        // substring scan only ever produced false positives like this one.
+        let line = crate::output_json(&json!({
+            "code": "info",
+            "note": "see the api_key_secret field in docs",
+        }));
+        assert!(
+            line.contains("see the api_key_secret field in docs"),
+            "{line}"
         );
-        assert_eq!(got, "***");
     }
 
     #[test]
-    fn sanitize_debug_field_keeps_safe_debug_values() {
-        let got = sanitize_debug_field("attempt", "3".to_string());
-        assert_eq!(got, "3");
+    fn secret_typed_field_is_redacted_regardless_of_record_path() {
+        // record_str / record_i64 etc. push raw values too; emit-time redaction
+        // covers every record_* path, not just record_debug.
+        let line = crate::output_json(&json!({
+            "code": "warn",
+            "db_password_secret": 1234,
+        }));
+        assert!(line.contains("\"db_password_secret\":\"***\""), "{line}");
     }
 }

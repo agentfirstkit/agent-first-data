@@ -336,8 +336,13 @@ function applyRedactionPolicyWithContext(
  * original). Only secret spans change; all other bytes are preserved.
  */
 function redactUrlInStr(s: string, secretNames: ReadonlySet<string>): string | null {
-  // Fast path + precondition: a single, whitespace-free, scheme-prefixed URL.
-  if (!s.includes("://") || !isSingleUrl(s) || !urlParses(s)) {
+  // Precondition (spec): a single, whitespace-free, scheme-prefixed URL.
+  // The gate is scheme + no-whitespace only — NOT "parses via `new URL`". Span
+  // location below is purely byte-wise (we never re-serialize the URL), so a
+  // `new URL` gate would only diverge across languages — it rejects inputs
+  // (ports > 65535, empty host) that other languages' URL libraries accept, and
+  // rejecting here would silently leak secrets in the values it rejects.
+  if (!s.includes("://") || !isSingleUrl(s)) {
     return null;
   }
   const schemeSep = s.indexOf("://");
@@ -422,16 +427,6 @@ function formDecode(rawKey: string): string {
     return decodeURIComponent(withSpaces);
   } catch {
     return withSpaces;
-  }
-}
-
-/** True when s parses as a URL (mirrors Rust's url::Url::parse check). */
-function urlParses(s: string): boolean {
-  try {
-    new URL(s);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -681,6 +676,25 @@ function formatRfc3339Ms(ms: number): string {
   }
 }
 
+/**
+ * Round to `digits` decimals using round-half-to-even (banker's rounding) and
+ * format with a fixed decimal count. `Number.toFixed` rounds half away from
+ * zero, which diverges from the printf `%.1f` used by Rust/Go/Python on exact
+ * ties (e.g. 1280 bytes = 1.25 KB → "1.2KB", not "1.3KB").
+ */
+function toFixedHalfEven(x: number, digits: number): string {
+  const factor = 10 ** digits;
+  const scaled = x * factor;
+  const floor = Math.floor(scaled);
+  const diff = scaled - floor;
+  const eps = 1e-9;
+  let rounded: number;
+  if (diff > 0.5 + eps) rounded = floor + 1;
+  else if (diff < 0.5 - eps) rounded = floor;
+  else rounded = floor % 2 === 0 ? floor : floor + 1;
+  return (rounded / factor).toFixed(digits);
+}
+
 function formatBytesHuman(bytes: number): string {
   const KB = 1024;
   const MB = KB * 1024;
@@ -688,10 +702,10 @@ function formatBytesHuman(bytes: number): string {
   const TB = GB * 1024;
   const sign = bytes < 0 ? "-" : "";
   const b = Math.abs(bytes);
-  if (b >= TB) return `${sign}${(b / TB).toFixed(1)}TB`;
-  if (b >= GB) return `${sign}${(b / GB).toFixed(1)}GB`;
-  if (b >= MB) return `${sign}${(b / MB).toFixed(1)}MB`;
-  if (b >= KB) return `${sign}${(b / KB).toFixed(1)}KB`;
+  if (b >= TB) return `${sign}${toFixedHalfEven(b / TB, 1)}TB`;
+  if (b >= GB) return `${sign}${toFixedHalfEven(b / GB, 1)}GB`;
+  if (b >= MB) return `${sign}${toFixedHalfEven(b / MB, 1)}MB`;
+  if (b >= KB) return `${sign}${toFixedHalfEven(b / KB, 1)}KB`;
   return `${bytes}B`;
 }
 

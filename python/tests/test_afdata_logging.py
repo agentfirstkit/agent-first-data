@@ -6,7 +6,7 @@ import sys
 from io import StringIO
 from unittest.mock import patch
 
-from agent_first_data.afdata_logging import AfdataHandler, AfdataJsonHandler, init_json, init_plain, init_yaml, span, get_logger
+from agent_first_data.afdata_logging import AfdataHandler, init_json, init_plain, init_yaml, span, get_logger
 
 
 def capture_log(fn):
@@ -20,9 +20,9 @@ def capture_log(fn):
 
 
 def make_logger(name="test"):
-    """Create a fresh logger with AfdataJsonHandler."""
+    """Create a fresh logger with AfdataHandler."""
     logger = logging.getLogger(name)
-    logger.handlers = [AfdataJsonHandler()]
+    logger.handlers = [AfdataHandler()]
     logger.setLevel(logging.DEBUG)
     return logger
 
@@ -121,9 +121,9 @@ class TestCodeOverride:
 
 class TestGetLogger:
     def test_default_fields(self):
-        # Ensure root logger has AfdataJsonHandler
+        # Ensure root logger has AfdataHandler
         root = logging.getLogger()
-        root.handlers = [AfdataJsonHandler()]
+        root.handlers = [AfdataHandler()]
         root.setLevel(logging.DEBUG)
 
         adapter = get_logger("test_adapter", component="myservice")

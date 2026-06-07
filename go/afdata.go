@@ -9,6 +9,7 @@
 package afdata
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -440,11 +441,13 @@ func maybeRedactURL(s string, context redactionContext) string {
 // (so callers keep the original). Only secret spans change; all other bytes are
 // preserved.
 func redactURLInStr(s string, context redactionContext) (string, bool) {
-	// Fast path + precondition: a single, whitespace-free, scheme-prefixed URL.
+	// Precondition (spec): a single, whitespace-free, scheme-prefixed URL.
+	// The gate is scheme + no-whitespace only — NOT "parses via net/url". Span
+	// location below is purely byte-wise (we never re-serialize the URL), so a
+	// url.Parse gate would only diverge across languages — net/url accepts
+	// inputs (ports > 65535, empty host) that other languages' URL libraries
+	// reject, and rejecting here would silently leak secrets in those values.
 	if !strings.Contains(s, "://") || !isSingleURL(s) {
-		return "", false
-	}
-	if _, err := url.Parse(s); err != nil {
 		return "", false
 	}
 	schemeSep := strings.Index(s, "://")
@@ -622,6 +625,9 @@ func tryProcessField(key string, value any) (string, string, bool) {
 	}
 	if stripped, ok := stripSuffixCI(key, "_epoch_s"); ok {
 		if n, ok := asInt64(value); ok {
+			if n > math.MaxInt64/1000 || n < math.MinInt64/1000 {
+				return "", "", false // *1000 would overflow; fall through to raw
+			}
 			return stripped, formatRFC3339Ms(n * 1000), true
 		}
 		return "", "", false
@@ -1028,9 +1034,8 @@ func yamlScalar(value any) string {
 	case int64:
 		return strconv.FormatInt(v, 10)
 	case float64:
-		if v == math.Trunc(v) && !math.IsInf(v, 0) && math.Abs(v) < 1e15 {
-			return fmt.Sprintf("%.0f", v)
-		}
+		// 'f', -1 yields the shortest round-trip form and drops the trailing
+		// ".0" from integral floats (3.0 -> "3"), matching Rust/TS/Python.
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	case json.Number:
 		return v.String()
@@ -1117,9 +1122,8 @@ func plainScalar(value any) string {
 	case int64:
 		return strconv.FormatInt(v, 10)
 	case float64:
-		if v == math.Trunc(v) && !math.IsInf(v, 0) && math.Abs(v) < 1e15 {
-			return fmt.Sprintf("%.0f", v)
-		}
+		// 'f', -1 yields the shortest round-trip form and drops the trailing
+		// ".0" from integral floats (3.0 -> "3"), matching Rust/TS/Python.
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	case json.Number:
 		return v.String()
@@ -1209,8 +1213,12 @@ func normalize(value any) any {
 	if err != nil {
 		return value
 	}
+	// UseNumber so large integers (>2^53) inside structs/uint64 survive the
+	// round-trip instead of collapsing to a lossy float64.
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
 	var result any
-	if err := json.Unmarshal(b, &result); err != nil {
+	if err := dec.Decode(&result); err != nil {
 		return value
 	}
 	return result

@@ -592,7 +592,21 @@ All three formats use the library's own output functions, so AFDATA suffix proce
 | **Plain** | `init_plain` | stripped | formatted | development, compact scanning |
 | **YAML** | `init_yaml` | stripped | formatted | debugging, detailed inspection |
 
-All formats automatically redact `_secret` fields in log output.
+### Secret redaction in logs
+
+Redaction is **by field name**, applied by `output_*` when the line is emitted — a field whose name ends in `_secret`/`_SECRET` becomes `***`, and `_url` fields have their embedded secrets scrubbed. This covers every recording path (`info!(api_key_secret = %x)`, `= ?x`, `= 1234`, span fields), so naming the field is the whole contract.
+
+The value itself is never scanned for secret markers. That means logging a whole struct by its `Debug` rendering hides the field names from redaction:
+
+```rust
+// BAD — `conf` is one opaque field value; its inner secret is not redacted.
+info!(conf = ?config, "loaded");
+
+// GOOD — name the secret field, or build + redact a value, then log/emit it.
+info!(api_key_secret = %config.api_key, "loaded");
+// For nested/structured config, build a serde_json::Value, call
+// `agent_first_data::internal_redact_secrets(&mut v)`, then `output_json(&v)`.
+```
 
 ## Output Formats
 

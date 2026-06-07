@@ -71,7 +71,7 @@ Applies to all structured data: JSON, YAML, TOML, CLI arguments, environment var
 | `_epoch_s` | seconds since Unix epoch | `cached_epoch_s: 1707868800` |
 | `_rfc3339` | RFC 3339 string | `expires_rfc3339: "2026-02-14T10:30:00Z"` |
 
-> **Precision note**: `_epoch_ns` values near the current era (~1.7×10¹⁸) exceed JavaScript's safe integer range (2⁵³ ≈ 9×10¹⁵). JSON parsed by JavaScript will silently lose nanosecond precision. Use `BigInt` or a custom JSON parser when nanosecond accuracy matters.
+> **Precision note**: this is a property of the host's JSON number parsing, not of AFDATA. Any integer beyond 2⁵³ (≈ 9×10¹⁵) — most commonly `_epoch_ns` (~1.7×10¹⁸ near the current era), but also large `_msats`/`_sats` balances — loses precision wherever JSON numbers are parsed as IEEE-754 doubles. This affects **JavaScript** (`JSON.parse` always yields a double; use `BigInt` or a custom parser) and **Go** with the default `json.Unmarshal` into `any` (yields `float64`; decode with `json.Decoder` + `UseNumber()` to preserve exact integers — the library formats `json.Number` losslessly). Rust (`serde_json` i64/u64) and Python (arbitrary-precision `int`) preserve such integers exactly. When exact large integers must survive every language boundary, transport them as strings.
 
 ### Size
 
@@ -463,7 +463,9 @@ YAML and plain apply two transformations:
 - `_jpy` → yen (`1500` → `¥1,500`), negative falls through
 - `_secret` → `***`
 
-**Type constraints**: `_bytes` and `_epoch_*` require integer values. `_usd_cents`, `_eur_cents`, `_jpy`, and `_{code}_cents` require non-negative integers. Duration, Bitcoin, and `_percent` suffixes accept any number. When the value type doesn't match, formatting falls through to the raw value with the original key preserved.
+**Type constraints**: `_bytes` and `_epoch_*` require integer values. `_usd_cents`, `_eur_cents`, `_jpy`, and `_{code}_cents` require non-negative integers. Duration, Bitcoin, and `_percent` suffixes accept any number. When the value type doesn't match, formatting falls through to the raw value with the original key preserved. An **integral-valued float** counts as an integer for the integer-required suffixes (`3.0` is treated as `3`): a JSON number's value, not its lexical form, decides, because JavaScript cannot distinguish `3` from `3.0` after parsing.
+
+**Number rendering**: a number is rendered for YAML/plain by its shortest round-trip decimal, and an integral-valued float drops its trailing `.0` — `3.0` → `3`, `0.5` → `0.5`. This keeps the four implementations byte-identical. Integers beyond 2⁵³ are preserved exactly by Rust, Go, and Python; JavaScript loses precision on them (see the `_epoch_ns` precision note above).
 
 ### Key ordering
 
@@ -525,6 +527,8 @@ Minimum logging envelope across language integrations:
 - Required fields: `timestamp_epoch_ms`, `message`, `code`
 - Optional common field: `target`
 - Additional tool/span fields are free-form and additive
+
+Log fields are redacted **by field name** at emit time — the same `_secret`/`_url` rule as all other output, applied by the formatter, not by scanning rendered values. Emit secrets as named fields (`api_key_secret`) so the rule can see them. Logging a whole object pre-rendered to a single string (e.g. a language's debug/inspect form) defeats redaction, because the inner field names are no longer visible: build a structured value and redact it before logging instead.
 
 Three values are reserved: `log`, `ok`, `error`. All other values are tool-defined.
 
