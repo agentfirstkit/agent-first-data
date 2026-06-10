@@ -20,7 +20,7 @@ It is a convention, not a framework — a small set of name endings, plus a tiny
 
 - **Names carry meaning.** Endings like `_ms`, `_bytes`, `_secret`, `_usd_cents`, and `_percent` put units and intent directly into the field name.
 - **One set of data, three ways to show it.** The same fields render as JSON for machines, YAML for people, or a single log line for scanning — units formatted, secrets removed.
-- **Secrets stay secret.** Anything ending in `_secret` is hidden automatically, in output and in logs. A `_url` field keeps its address but loses the secrets inside it — passwords and tokens in the URL. Legacy names like `api_key` can be protected by passing an explicit secret-name list.
+- **Secrets stay secret.** Anything ending in `_secret` is hidden automatically, in output and in logs. A `_url` field keeps its address but scrubs the userinfo password and secret-named query parameters. Legacy names like `api_key` can be protected by passing an explicit secret-name list.
 - **Logging agents can read.** Structured logs that follow the same rules, with request-scoped fields.
 - **The same in four languages.** One identical API across Rust, Go, Python, and TypeScript.
 

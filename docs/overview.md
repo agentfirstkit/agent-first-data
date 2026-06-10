@@ -1,207 +1,114 @@
 # Overview
 
-**The field name is the schema.** Agents read `latency_ms` and know milliseconds, `api_key_secret` and know to redact — no external schema needed.
+**The field name is the schema.** Agents read `latency_ms` and know milliseconds, `api_key_secret` and know to redact, and `callback_url` and know URL credentials must be scrubbed.
 
-Agent-First Data (AFDATA) is a convention for self-describing structured data:
+Agent-First Data (AFDATA) is a convention plus four small libraries:
 
-1. **Naming** — Encode units and semantics in field name suffixes (`_ms`, `_bytes`, `_secret`, ...)
-2. **Output** — Three formats (JSON/YAML/Plain) with default key stripping, value formatting, and secret redaction
-3. **Protocol** — Optional structured templates (`ok`, `error`, `log`) with `trace` for execution context
-4. **Logging** — AFDATA-compliant structured logging with span support (per-language integration)
-5. **Channel discipline** — machine-readable protocol/log events use `stdout` only; `stderr` is not a protocol channel
+1. **Naming** - encode units and sensitivity in field names (`_ms`, `_bytes`, `_secret`, `_url`, ...)
+2. **Output** - render the same data as JSON, YAML, or plain logfmt with deterministic formatting
+3. **Protocol** - optional JSONL objects with `code`, `result`/`error`, and `trace`
+4. **Logging** - structured logs that use the same redaction and suffix formatting rules
+5. **Channel discipline** - machine-readable events go to `stdout`; `stderr` is not a protocol stream
 
-See the full [specification](../spec/agent-first-data.md) and the [agent skill](../skills/agent-first-data.md) for AI-assisted development.
+See the full [specification](../spec/agent-first-data.md) and the [agent skill](../skills/agent-first-data.md).
 
 ## Installation
 
 ```bash
 cargo add agent-first-data        # Rust
-pip install agent-first-data       # Python
-npm install agent-first-data       # TypeScript
+pip install agent-first-data      # Python
+npm install agent-first-data      # TypeScript
 go get github.com/agentfirstkit/agent-first-data/go  # Go
 ```
 
 ## Quick Example
 
-A backup tool invoked from the CLI — flags, env vars, and config all use the same suffixes:
+Input data:
 
-```bash
-API_KEY_SECRET=sk-1234 cloudback --timeout-s 30 --max-file-size-bytes 10737418240 --log startup /data/backup.tar.gz
-```
-
-The tool reads env vars (`UPPER_SNAKE_CASE`), flags (`--kebab-case`), and config (`snake_case`) — all with AFDATA suffixes. When `startup` logging is enabled, it emits a startup log event. Three output formats, same data:
-
-**JSON** (secrets redacted, original keys, for machines):
 ```json
-{"code":"log","event":"startup","args":{"input_path":"/data/backup.tar.gz"},"config":{"max_file_size_bytes":10737418240,"timeout_s":30},"env":{"API_KEY_SECRET":"***"}}
+{"code":"log","event":"startup","args":{"timeout_s":30,"api_key_secret":"sk-123"},"db_url":"postgres://user:p@ss@db/app?token_secret=abc","trace":{"duration_ms":1280}}
 ```
 
-**YAML** (default: suffixes stripped from keys, values formatted, for humans):
+JSON keeps original keys and raw values, but redacts secrets:
+
+```json
+{"code":"log","event":"startup","args":{"timeout_s":30,"api_key_secret":"***"},"db_url":"postgres://user:***@db/app?token_secret=***","trace":{"duration_ms":1280}}
+```
+
+YAML and plain strip formatting suffixes and format values:
+
 ```yaml
 ---
-code: "log"
-event: "startup"
 args:
-  input_path: "/data/backup.tar.gz"
-config:
-  max_file_size: "10.0GB"
+  api_key: "***"
   timeout: "30s"
-env:
-  API_KEY: "***"
+code: "log"
+db_url: "postgres://user:***@db/app?token_secret=***"
+event: "startup"
+trace:
+  duration: "1.28s"
 ```
 
-**Plain** (single-line logfmt, default keys stripped, for log scanning):
-```
-args.input_path=/data/backup.tar.gz code=log event=startup config.max_file_size=10.0GB config.timeout=30s env.API_KEY=***
-```
-
-`--timeout-s` → `timeout_s` → `timeout: 30s`. `API_KEY_SECRET` → `API_KEY: "***"`. Same suffixes flow through env vars, CLI flags, JSON, and formatted output — the suffix is the schema.
-
-CLI logging flags:
-
-```bash
---log startup,request,progress,retry,redirect
---verbose   # shorthand for all log categories
+```text
+args.api_key=*** args.timeout=30s code=log db_url=postgres://user:***@db/app?token_secret=*** event=startup trace.duration=1.28s
 ```
 
-## API (grouped, same across all languages)
+## Current API Surface
 
-### Protocol builders
+Language names follow each ecosystem's casing. The shared contract is:
 
-| Function | Returns | Description |
-|:---------|:--------|:------------|
-| `build_json_ok` | JSON | `{code: "ok", result, trace?}` |
-| `build_json_error` | JSON | `{code: "error", error, hint?, trace?}` |
-| `build_json` | JSON | `{code: "<custom>", ...fields, trace?}` |
+| Group | APIs |
+|:--|:--|
+| Protocol builders | `build_json_ok`, `build_json_error`, `build_json` |
+| Output | `output_json`, `output_json_with`, `output_json_with_options`, `output_yaml`, `output_yaml_with_options`, `output_plain`, `output_plain_with_options` |
+| Redaction | `redacted_value`, `redacted_value_with`, `redacted_value_with_options`, `redact_secrets_in_place`, `redact_secrets_in_place_with_options` |
+| URL redaction | `redact_url_secrets`, `redact_url_secrets_with_options` |
+| CLI helpers | `parse_size`, `normalize_utc_offset`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `cli_output_with_options`, `build_cli_error` |
+| Types | `OutputFormat`, `RedactionPolicy`, `RedactionOptions`, `OutputStyle`, `OutputOptions` |
 
-### Redaction helpers
+`RedactionPolicy` has two explicit overrides: `RedactionTraceOnly` and `RedactionNone`. The default policy is full redaction: every `_secret` or configured secret-name field is replaced by `***`, including object and array subtrees. `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed, and internal whitespace causes the whole URL field to become `***`.
 
-| Function / Type | Returns | Description |
-|:----------------|:--------|:------------|
-| `redacted_value` | JSON | JSON-safe copy with default `_secret` redaction |
-| `redacted_value_with` | JSON | JSON-safe copy with explicit redaction policy |
-| `redacted_value_with_options` | JSON | JSON-safe copy with explicit policy and secret-name list |
-| `internal_redact_secrets` | void | Redact `_secret` (and `_url`) fields in-place |
-| `internal_redact_secrets_with_options` | void | Redact in-place with explicit policy and secret-name list |
-| `redact_url_secrets` | String | Scrub secrets (userinfo password, secret-named query params) inside one URL string |
-| `redact_url_secrets_with_options` | String | URL redaction with an explicit secret-name list |
-| `RedactionPolicy` | type | `RedactionTraceOnly` / `RedactionNone` / `RedactionStrict` |
-| `RedactionOptions` | type | Optional policy plus exact `secret_names` / `secretNames` for legacy fields |
-| `OutputStyle` | type | `Readable` default formatting or `Raw` schema-preserving rendering |
-| `OutputOptions` | type | Redaction options plus YAML/plain rendering style |
+`build_cli_error(message, hint?)` returns only the protocol error shape: `{code:"error", error: message, hint?}`. It does not invent retry metadata or fake traces.
 
-### Output formatters
+The Rust `cli-help` and `skill-admin` features are implementation utilities for spore binaries. They are intentionally separate from the cross-language AFDATA formatting contract; language README files point back here instead of duplicating the full reference.
 
-| Function | Returns | Description |
-|:---------|:--------|:------------|
-| `output_json` | String | Single-line JSON, secrets redacted |
-| `output_json_with` | String | Single-line JSON with explicit redaction policy |
-| `output_json_with_options` | String | Single-line JSON with explicit output options |
-| `output_yaml` | String | Multi-line YAML, keys stripped, values formatted |
-| `output_yaml_with_options` | String | Multi-line YAML with explicit redaction and rendering style |
-| `output_plain` | String | Single-line logfmt, keys stripped, values formatted |
-| `output_plain_with_options` | String | Single-line logfmt with explicit redaction and rendering style |
+## Logging Contract
 
-### CLI utilities
+Logging integrations emit structured records through the same output formatters.
 
-| Function / Type | Returns | Description |
-|:----------------|:--------|:------------|
-| `parse_size` | int | Parse `"10M"` -> bytes; invalid/overflow returns language-specific invalid result |
-| `OutputFormat` | type | `"json"` / `"yaml"` / `"plain"` enum/type |
-| `cli_parse_output` | OutputFormat | Parse `--output` flag; error on unknown value |
-| `cli_parse_log_filters` | String[] | Normalize `--log` entries: trim, lowercase, dedup, remove empty |
-| `cli_output` | String | Dispatch to `output_json` / `output_yaml` / `output_plain` |
-| `cli_output_with_options` | String | Dispatch with explicit output options |
-| `build_cli_error` | JSON | `{code:"error", error_code:"invalid_request", hint?, retryable:false, trace:{duration_ms:0}}` |
+Required log fields:
 
-### Skill admin
+- `timestamp_epoch_ms`
+- `message`
+- `code: "log"`
+- `level: "debug" | "info" | "warn" | "error"`
 
-`run_skill_admin` installs, uninstalls, and reports status of a spore's embedded Agent Skill across Codex, Claude Code, and opencode. The caller passes a `SkillSpec` (skill name, bundled `SKILL.md`, title, marker slug) plus a `SkillAction` and `SkillOptions`, and gets back a **structured** `SkillReport` — read its fields directly, or serialize it (render with `cli_output`) — or a skill error. Each port returns its idiomatic typed form: a Rust `code`-tagged enum, a Go sealed-interface struct, a Python dataclass with `to_dict()`, and a TypeScript discriminated union. `status` reports `installed` / `valid` / `managed` / `current` per target, where `current` is true only when the installed content matches the bundled skill — re-running `install` refreshes a stale copy. The generated `SKILL.md` (markers and all) and the serialized report are byte-identical across every port. This is filesystem/CLI tooling for the spore binaries rather than part of the cross-language data API above; in Rust it lives behind the `skill-admin` cargo feature, and the Go, Python, and TypeScript ports ship it as a normal module.
+`code` is always `"log"`; the logging level lives in `level`. This prevents an error-level log line from being mistaken for a terminal protocol result with `code:"error"`.
 
-AFDATA suffixes describe local field semantics; they are not a full schema language. Use JSON Schema, OpenAPI, database constraints, or typed APIs for required fields, enums, ranges, and object shapes. For raw JSON transports that do not call `output_json` (HTTP bodies, MCP tool returns, SSE events), call `redacted_value` first. For legacy payloads that use names like `api_key` instead of `api_key_secret`, call the output `*_with_options` API with `OutputOptions.redaction.secret_names`.
+Example plain line:
 
-## AFDATA Logging
-
-AFDATA-compliant structured logging. Log output is formatted using the library's own `output_json`/`output_plain`/`output_yaml` functions — same suffix processing, key stripping, and secret redaction as the core output API. Span fields are automatically flattened into each event line, solving concurrent request interleaving.
-
-Each language integrates with its native logging ecosystem:
-
-| Language | Integration | Span Mechanism | Output Formats |
-|:---------|:------------|:---------------|:---------------|
-| **Rust** | `tracing` Layer (feature `"tracing"`) | tracing spans | `init_json` / `init_plain` / `init_yaml` |
-| **Go** | `log/slog` Handler | `WithAttrs` / `WithSpan(ctx)` | `InitJson` / `InitPlain` / `InitYaml` |
-| **Python** | `logging` Handler | `contextvars` | `init_logging_json` / `init_logging_plain` / `init_logging_yaml` |
-| **TypeScript** | Built-in logger | `AsyncLocalStorage` | `initJson` / `initPlain` / `initYaml` |
-
-Minimum envelope contract across languages:
-- Required fields: `timestamp_epoch_ms`, `message`, `code`
-- Optional fields: `target` and tool-specific structured fields
-
-**JSON output** (production — secrets redacted, original keys):
-```json
-{"timestamp_epoch_ms":1739000000000,"message":"Processing","request_id":"abc-123","code":"info"}
+```text
+code=log level=info message=Processing request_id=abc-123 timestamp=2025-02-08T07:33:20.000Z
 ```
 
-**Plain output** (development — keys stripped, values formatted):
-```
-code=info message=Processing request_id=abc-123 timestamp_epoch_ms=1739000000000
-```
-
-**Rust:**
-```rust
-use agent_first_data::afdata_tracing;
-afdata_tracing::init_json(EnvFilter::new("info"));   // or init_plain / init_yaml
-
-let span = info_span!("request", request_id = %uuid);
-let _guard = span.enter();
-info!("Processing");
-```
-
-**Go:**
-```go
-afdata.InitJson()   // or InitPlain / InitYaml
-
-ctx := afdata.WithSpan(ctx, map[string]any{"request_id": uuid})
-afdata.LoggerFromContext(ctx).Info("Processing")
-```
-
-**Python:**
-```python
-from agent_first_data import init_logging_json, span  # or init_logging_plain / init_logging_yaml
-
-init_logging_json("INFO")
-with span(request_id=uuid):
-    logger.info("Processing")
-```
-
-**TypeScript:**
-```typescript
-import { log, span, initJson } from "agent-first-data";  // or initPlain / initYaml
-
-await span({ request_id: uuid }, async () => {
-  log.info("Processing");
-});
-```
+Name secret log fields explicitly (`api_key_secret`, `db_url`) so redaction can see the field name. URL fields should end in `_url`; any token-bearing query parameter must either be renamed to an `_secret` parameter such as `token_secret`, or listed in `secret_names` / `SecretNames` / `secretNames` when legacy names cannot change. Do not log a whole secret-bearing object as a pre-rendered debug string.
 
 ## Supported Suffixes
 
-| Category | Suffixes | Example |
-|:---------|:---------|:--------|
-| **Duration** | `_ns`, `_us`, `_ms`, `_s`, `_minutes`, `_hours`, `_days` | `latency_ms: 1280` → `latency: 1.28s` |
-| **Timestamps** | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` | `created_at_epoch_ms: 1738886400000` → `created_at: 2025-02-07T00:00:00.000Z` |
-| **Size** | `_bytes` (output), `_size` (config input) | `file_size_bytes: 5242880` → `file_size: 5.0MB` |
-| **Currency** | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` | `price_usd_cents: 999` → `price: $9.99` |
-| **Other** | `_percent`, `_secret`, `_url` | `cpu_percent: 85` → `cpu: 85%` |
+| Category | Suffixes |
+|:--|:--|
+| Duration | `_ns`, `_us`, `_ms`, `_s`, `_minutes`, `_hours`, `_days` |
+| Timestamps | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` |
+| Size | `_bytes` for numeric output, `_size` for config input strings |
+| Currency | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` where `code` is 3-4 ASCII letters |
+| Strict strings | `_bcp47`, `_utc_offset` |
+| Other | `_percent`, `_secret`, `_url` |
 
-`_url` fields keep their value but have secret components (userinfo password, secret-named query params) scrubbed; the suffix is not stripped.
+YAML and plain output sort keys by UTF-16 code unit order after key stripping. Plain output escapes both keys and values so every record stays one physical line.
 
 ## Language Documentation
 
-- **[Rust](../rust)** — Full API reference, examples, and AFDATA tracing
-- **[Go](../go)** — Full API reference, examples, and AFDATA logging
-- **[Python](../python)** — Full API reference, examples, and AFDATA logging
-- **[TypeScript](../typescript)** — Full API reference, examples, and AFDATA logging
-
-## License
-
-MIT
+- [Rust](../rust)
+- [Go](../go)
+- [Python](../python)
+- [TypeScript](../typescript)

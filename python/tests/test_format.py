@@ -11,8 +11,8 @@ from agent_first_data import (
     RedactionOptions,
     OutputStyle,
     OutputOptions,
-    internal_redact_secrets,
-    internal_redact_secrets_with_options,
+    redact_secrets_in_place,
+    redact_secrets_in_place_with_options,
     redacted_value,
     redacted_value_with,
     redacted_value_with_options,
@@ -24,6 +24,7 @@ from agent_first_data import (
     output_yaml_with_options,
     output_plain,
     output_plain_with_options,
+    normalize_utc_offset,
 )
 from agent_first_data.format import (
     _format_bytes_human,
@@ -64,7 +65,7 @@ def test_redact_fixtures():
     for case in _load("redact.json"):
         name = case["name"]
         inp = json.loads(json.dumps(case["input"]))  # deep copy
-        internal_redact_secrets(inp)
+        redact_secrets_in_place(inp)
         assert inp == case["expected"], f"[redact/{name}] got {inp}"
 
 
@@ -79,7 +80,7 @@ def test_redaction_options_fixtures():
         assert got == expected, f"[redaction_options/{name}] value mismatch: {got}"
 
         inp = json.loads(json.dumps(case["input"]))
-        internal_redact_secrets_with_options(inp, options)
+        redact_secrets_in_place_with_options(inp, options)
         assert inp == expected, f"[redaction_options/{name}] in-place mismatch: {inp}"
 
         got_json = json.loads(output_json_with_options(case["input"], output_options))
@@ -144,6 +145,9 @@ def test_helper_fixtures():
                 assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
             elif name == "parse_size":
                 got = parse_size(inp)
+                assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
+            elif name == "normalize_utc_offset":
+                got = normalize_utc_offset(inp)
                 assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
 
 
@@ -270,10 +274,7 @@ def test_redacted_value_returns_safe_copy():
     assert inp["api_key_secret"] == "sk-live-123"
 
 
-def test_redacted_value_with_strict_redacts_secret_subtree():
+def test_redacted_value_redacts_secret_subtree_by_default():
     inp = {"db_secret": {"password_secret": "real", "host": "localhost"}}
     default = redacted_value(inp)
-    strict = redacted_value_with(inp, RedactionPolicy.RedactionStrict)
-    assert default["db_secret"]["password_secret"] == "***"
-    assert default["db_secret"]["host"] == "localhost"
-    assert strict["db_secret"] == "***"
+    assert default["db_secret"] == "***"

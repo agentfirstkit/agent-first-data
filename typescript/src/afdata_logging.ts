@@ -18,28 +18,45 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { outputJson, outputYaml, outputPlain, type JsonValue } from "./format.js";
+import {
+  outputJsonWithOptions,
+  outputYamlWithOptions,
+  outputPlainWithOptions,
+  type JsonValue,
+  type RedactionOptions,
+} from "./format.js";
 
 type Level = "trace" | "debug" | "info" | "warn" | "error";
 type LogFormat = "json" | "plain" | "yaml";
+type LoggingRedactionOptions = {
+  secretNames?: readonly string[];
+};
 
 const spanStore = new AsyncLocalStorage<Record<string, unknown>>();
 
 let currentFormat: LogFormat = "json";
+let currentRedaction: RedactionOptions = {};
+
+function setFormat(format: LogFormat, options?: LoggingRedactionOptions): void {
+  currentFormat = format;
+  currentRedaction = options?.secretNames ? { secretNames: options.secretNames } : {};
+}
 
 /** Set log output to single-line JSONL (secrets redacted, original keys). */
-export function initJson(): void { currentFormat = "json"; }
+export function initJson(options?: LoggingRedactionOptions): void { setFormat("json", options); }
 
 /** Set log output to single-line logfmt (keys stripped, values formatted). */
-export function initPlain(): void { currentFormat = "plain"; }
+export function initPlain(options?: LoggingRedactionOptions): void { setFormat("plain", options); }
 
 /** Set log output to multi-line YAML (keys stripped, values formatted). */
-export function initYaml(): void { currentFormat = "yaml"; }
+export function initYaml(options?: LoggingRedactionOptions): void { setFormat("yaml", options); }
 
 function emit(level: Level, message: string, fields?: Record<string, unknown>): void {
   const entry: Record<string, unknown> = {
     timestamp_epoch_ms: Date.now(),
     message,
+    code: "log",
+    level,
   };
 
   // Span fields (from AsyncLocalStorage)
@@ -50,18 +67,12 @@ function emit(level: Level, message: string, fields?: Record<string, unknown>): 
     }
   }
 
-  // Event fields (override span fields on collision)
-  let hasCode = false;
+  // Event fields override span fields, except protocol code is always "log".
   if (fields) {
     for (const [k, v] of Object.entries(fields)) {
-      if (k === "code") hasCode = true;
+      if (k === "code") continue;
       entry[k] = v;
     }
-  }
-
-  // Default code from level
-  if (!hasCode) {
-    entry["code"] = level;
   }
 
   // Format using the library's own output functions
@@ -69,13 +80,13 @@ function emit(level: Level, message: string, fields?: Record<string, unknown>): 
   let line: string;
   switch (currentFormat) {
     case "plain":
-      line = outputPlain(value);
+      line = outputPlainWithOptions(value, { redaction: currentRedaction });
       break;
     case "yaml":
-      line = outputYaml(value);
+      line = outputYamlWithOptions(value, { redaction: currentRedaction });
       break;
     default:
-      line = outputJson(value);
+      line = outputJsonWithOptions(value, { redaction: currentRedaction });
       break;
   }
 

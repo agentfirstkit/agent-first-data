@@ -43,6 +43,19 @@ The field name is the schema. Always encode units and semantics in the field nam
 | `_epoch_ns` | nanoseconds since Unix epoch | `created_epoch_ns: 1707868800000000000` |
 | `_rfc3339` | RFC 3339 string | `expires_rfc3339: "2026-02-14T10:30:00Z"` |
 
+### Strict string formats
+
+| Suffix | Format | Example |
+|:-------|:-------|:--------|
+| `_bcp47` | BCP-47 language tag string | `language_bcp47: "zh-CN"` |
+| `_utc_offset` | fixed UTC offset string | `timezone_utc_offset: "+08:00"` |
+
+`*_bcp47` identifies a BCP-47 language tag string. AFDATA does not implement the full BCP-47 registry; tools may validate tags when needed.
+
+`*_utc_offset` identifies a fixed UTC offset. Canonical persisted and structured output values are `"UTC"` or `±HH:MM`, with `HH` in `00..23` and `MM` in `00..59`; zero offsets normalize to `"UTC"`. This is not an IANA timezone name, DST rule, or timezone database field. If a tool needs IANA timezone names, use a separate explicit field such as `timezone_name`.
+
+Avoid magic string sentinels such as `"auto"` inside strict-format fields. If a tool needs auto/default behavior, define it in that tool's own config semantics, not as an AFDATA-wide rule.
+
 ### Size
 
 | Suffix | Example |
@@ -70,7 +83,7 @@ Bitcoin:
 | `_sats` | `withdrawn_sats: 1234` |
 | `_btc` | `reserve_btc: 0.5` |
 
-Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` for currencies without:
+Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` for currencies without. Generic `_{code}_cents` matches only 3-4 ASCII letters:
 
 | Suffix | Example |
 |:-------|:--------|
@@ -83,12 +96,14 @@ Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` 
 
 | Suffix | Handling | Example |
 |:-------|:---------|:--------|
-| `_secret` | redact to `***` | `api_key_secret: "sk-or-v1-abc..."` |
+| `_secret` | redact the entire value/subtree to `***` | `api_key_secret: "sk-or-v1-abc..."` |
 | `_url` | scrub secrets *inside* the URL value, keep the rest | `callback_url: "https://h/cb?code_secret=..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Matching recognizes `_secret` and `_SECRET` only — no mixed case. For legacy fields that cannot be renamed, configure `OutputOptions.redaction` with `secret_names`/`secretNames` such as `["api_key", "authorization"]`; names match exact field names at any nesting level; no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Callers that need schema-preserving YAML/plain rendering can pass `OutputOptions` with the `Raw` output style.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Matching recognizes `_secret` and `_SECRET` only — no mixed case. The entire `_secret` value/subtree becomes `***`, including objects and arrays. For legacy fields that cannot be renamed, configure `OutputOptions.redaction` with `secret_names`/`secretNames` such as `["api_key", "authorization"]`; names match exact field names at any nesting level; no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Callers that need schema-preserving YAML/plain rendering can pass `OutputOptions` with the `Raw` output style.
 
 Name URL-valued fields `_url` so the userinfo password and any `_secret`/`secret_names` query parameter inside them are scrubbed automatically (the rest of the URL is preserved; the suffix is not stripped). For a URL inside a free-form message, redact it with `redact_url_secrets` before interpolating — `_url` only fires on whole-URL field values, never on prose.
+
+**`_url` scrubs the userinfo password and suffix-named params only — not arbitrary credential params.** Common parameters like `?access_token=`, `?api_key=`, `?code=`, `?sig=` are NOT redacted unless their name ends in `_secret` or is passed in `secret_names`. Rename params you own to the suffix (`?access_token_secret=`); list the rest in `secret_names`. A `_url` value that is not a clean scheme-prefixed URL but carries internal whitespace or an `@` credential sigil (e.g. a schemeless `user:pass@host/db`) is redacted wholesale to `***` (fail-closed).
 
 ### Environment variables
 
@@ -139,24 +154,24 @@ Three output formats. Default YAML and Plain apply key stripping + value formatt
 ### Formats
 
 - **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
-- **YAML** — multi-line, keys stripped, values formatted, secrets redacted by default
-- **Plain** — single-line logfmt, keys stripped, values formatted, secrets redacted by default
+- **YAML** — multi-line, formatting suffixes stripped, values formatted, secrets redacted by default
+- **Plain** — single-line logfmt, formatting suffixes stripped, values formatted, secrets redacted by default
 
 ### Key stripping (YAML and Plain)
 
-Remove recognized suffix from key. Longest match first, exact lowercase or uppercase only:
+Remove recognized formatting suffix from key. Longest match first, exact lowercase or uppercase only:
 
 1. `_epoch_ms`, `_epoch_s`, `_epoch_ns`
-2. `_usd_cents`, `_eur_cents`, `_{code}_cents`
+2. `_usd_cents`, `_eur_cents`, `_{code}_cents` (`code` is 3-4 ASCII letters)
 3. `_rfc3339`, `_minutes`, `_hours`, `_days`
 4. `_msats`, `_sats`, `_bytes`, `_percent`, `_secret`
 5. `_btc`, `_jpy`, `_ns`, `_us`, `_ms`, `_s`
 
-`_size` is NOT stripped (pass through). If two keys collide after stripping, both revert to original key AND raw value (no formatting).
+`_size`, `_bcp47`, and `_utc_offset` are NOT stripped (pass through). If two keys collide after stripping, both revert to original key AND raw value (no formatting). Redaction runs before collision handling, so fallback never restores a secret.
 
 ### Value formatting (YAML and Plain)
 
-- `_ms` < 1000 → `{n}ms`; ≥ 1000 → seconds (`1280` → `1.28s`, `5000` → `5.0s`)
+- `_ms` with absolute value < 1000 → `{n}ms`; absolute value ≥ 1000 → seconds (`1280` → `1.28s`, `-1500` → `-1.5s`)
 - `_s`, `_ns`, `_us` → append unit (`3600s`, `450000ns`, `830μs`)
 - `_minutes`, `_hours`, `_days` → append unit (`30 minutes`)
 - `_epoch_ms`/`_epoch_s`/`_epoch_ns` → RFC 3339 (negative = pre-1970)
@@ -165,15 +180,16 @@ Remove recognized suffix from key. Longest match first, exact lowercase or upper
 - `_size` → pass through
 - `_percent` → append `%`
 - `_msats` → `{n}msats`, `_sats` → `{n}sats`, `_btc` → `{n} BTC`
-- `_usd_cents` → `$X.XX`, `_eur_cents` → `€X.XX`, `_jpy` → `¥X,XXX`, `_{code}_cents` → `X.XX CODE`
-- `_secret` → `***`
+- `_usd_cents` → `$X.XX`, `_eur_cents` → `€X.XX`, `_jpy` → `¥X,XXX`, `_{code}_cents` → `X.XX CODE` where `code` is 3-4 ASCII letters
+- `_secret` → `***` (the redaction phase already replaced the subtree)
+- `_bcp47`, `_utc_offset` → pass through unchanged
 
 **Type constraints**: `_bytes`/`_epoch_*` require integer. `_usd_cents`/`_eur_cents`/`_jpy`/`_{code}_cents` require non-negative integer. Duration/Bitcoin/`_percent` accept any number. Wrong type → raw value + original key.
 
 ### Plain logfmt details
 
 - Nested keys use dot notation: `trace.duration=1.28s`
-- Values with spaces are quoted: `message="uploading chunks"`
+- Keys and values with ASCII space, tab/newline, VT, FF, NBSP, `=`, `"`, or `\` are quoted/escaped so each record stays one physical line
 - Arrays comma-joined: `fields=email,age`
 - Null → empty value: `RUST_LOG=`
 - Sort by full dot path (JCS / UTF-16 code unit order)
@@ -229,62 +245,17 @@ All use `code` / `result` / `error` / `trace`. Do not split protocol events acro
 
 ---
 
-## Using the Library
+## Library Usage
 
-Public APIs are grouped consistently across languages:
+Use the local language README for installation and the full overview/spec for API reference. Keep this skill focused on naming, output, protocol, logging, and review rules rather than duplicating import snippets that drift across languages.
 
-| Group | APIs |
-|:------|:-----|
-| Protocol builders | `build_json_ok`, `build_json_error`, `build_json` |
-| Redaction helpers | `redacted_value`, `redacted_value_with`, `redacted_value_with_options`, `internal_redact_secrets`, `internal_redact_secrets_with_options` |
-| URL redaction | `redact_url_secrets`, `redact_url_secrets_with_options` |
-| Output formatters | `output_json`, `output_json_with`, `output_json_with_options`, `output_yaml`, `output_yaml_with_options`, `output_plain`, `output_plain_with_options` |
-| CLI utilities | `parse_size`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `cli_output_with_options`, `build_cli_error` |
-| Types | `OutputFormat`, `RedactionPolicy`, `RedactionOptions`, `OutputStyle`, `OutputOptions` |
+Required cross-language behavior to rely on:
 
-### Rust
-
-```rust
-use agent_first_data::{build_json_ok, build_json_error, build_json, output_json, output_yaml, output_plain, internal_redact_secrets, parse_size};
-use agent_first_data::{OutputFormat, cli_parse_output, cli_parse_log_filters, cli_output, build_cli_error};
-```
-
-### Python
-
-```python
-from agent_first_data import build_json_ok, build_json_error, build_json, output_json, output_yaml, output_plain, internal_redact_secrets, parse_size
-from agent_first_data import OutputFormat, cli_parse_output, cli_parse_log_filters, cli_output, build_cli_error
-```
-
-### TypeScript
-
-```typescript
-import { buildJsonOk, buildJsonError, buildJson, outputJson, outputYaml, outputPlain, internalRedactSecrets, parseSize } from "agent-first-data";
-import { type OutputFormat, cliParseOutput, cliParseLogFilters, cliOutput, buildCliError } from "agent-first-data";
-```
-
-### Go
-
-```go
-import afdata "github.com/agentfirstkit/agent-first-data/go"
-
-afdata.OutputPlain(value)
-afdata.ParseSize("10M")
-afdata.CliParseOutput("json")
-afdata.BuildCliError("--output: invalid value 'xml'")
-```
-
-### CLI Helpers Pattern
-
-When building a CLI tool on AFDATA, always use the CLI helpers to parse `--output` and `--log` flags. This ensures consistent behavior and error format across all tools:
-
-```
---output json|yaml|plain    → cli_parse_output
---log startup,request,...   → cli_parse_log_filters (trim, lowercase, dedup, remove empty)
-parse errors                → build_cli_error + output_json + exit 2
-```
-
-Key rule: use `try_parse()` / `try_parse_from()` (not `parse()`) in Rust/clap so that parse errors go to stdout as JSONL, not stderr as plain text.
+- Output helpers redact before formatting.
+- Use `redacted_value` for raw HTTP/MCP/SSE serialization paths that bypass `output_json`.
+- Use `redact_secrets_in_place` only when mutating an existing JSON value is intentional; otherwise prefer copy-returning redactors.
+- Use `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, and `build_cli_error` for CLI tools instead of custom parsing/error envelopes.
+- `build_cli_error(message, hint?)` returns `{code:"error", error: message, hint?}` only.
 
 ## AFDATA Logging
 
@@ -329,9 +300,9 @@ await span({ request_id: uuid }, async () => {
 
 ### Output fields
 
-Every log line contains: `timestamp_epoch_ms`, `message`, `code` (defaults to log level, overridable), plus span fields and event fields.
+Every log line contains `timestamp_epoch_ms`, `message`, `code: "log"`, `level` (debug/info/warn/error), plus span fields and event fields. Do not use the log level as `code`; `code:"error"` is reserved for terminal protocol errors.
 
-Log redaction is **by field name** (the same `_secret`/`_url` rule as all output), applied when the line is emitted. So name the secret field — `info!(api_key_secret = %key)` — rather than logging a whole object by its `Debug`/string rendering, which hides the inner field names from redaction. For structured/nested secret-bearing data, build a value, redact it (`internal_redact_secrets`), then emit via `output_*` — do not pass the struct to a `?`/`%`-rendered log field.
+Log redaction is **by field name** (the same `_secret`/`_url` rule as all output), applied when the line is emitted. So name the secret field — `info!(api_key_secret = %key)` — rather than logging a whole object by its `Debug`/string rendering, which hides the inner field names from redaction. For structured/nested secret-bearing data, build a value, redact it (`redact_secrets_in_place`), then emit via `output_*` — do not pass the struct to a `?`/`%`-rendered log field.
 
 ## CLI Flags
 

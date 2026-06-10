@@ -11,8 +11,8 @@ import {
   buildJsonOk,
   buildJsonError,
   buildJson,
-  internalRedactSecrets,
-  internalRedactSecretsWithOptions,
+  redactSecretsInPlace,
+  redactSecretsInPlaceWithOptions,
   redactedValue,
   redactedValueWith,
   redactedValueWithOptions,
@@ -30,6 +30,7 @@ import {
   redactUrlSecretsWithOptions,
   type JsonValue,
   parseSize,
+  normalizeUtcOffset,
 } from "./format.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -64,7 +65,7 @@ describe("redact fixtures", () => {
   for (const tc of load("redact.json")) {
     it(tc.name, () => {
       const inp = JSON.parse(JSON.stringify(tc.input));
-      internalRedactSecrets(inp);
+      redactSecretsInPlace(inp);
       assert.deepEqual(inp, tc.expected);
     });
   }
@@ -82,7 +83,7 @@ describe("redaction options fixtures", () => {
       assert.deepEqual(got, tc.expected, "value mismatch");
 
       const inp = JSON.parse(JSON.stringify(tc.input));
-      internalRedactSecretsWithOptions(inp, options);
+      redactSecretsInPlaceWithOptions(inp, options);
       assert.deepEqual(inp, tc.expected, "in-place mismatch");
 
       const gotJson = JSON.parse(outputJsonWithOptions(tc.input as JsonValue, outputOptions));
@@ -164,6 +165,13 @@ describe("helper fixtures", () => {
       for (const [input, expected] of tc.cases) {
         it(`parseSize ${JSON.stringify(input)} → ${expected}`, () => {
           assert.equal(parseSize(input), expected);
+        });
+      }
+    }
+    if (tc.name === "normalize_utc_offset") {
+      for (const [input, expected] of tc.cases) {
+        it(`normalizeUtcOffset ${JSON.stringify(input)} → ${expected}`, () => {
+          assert.equal(normalizeUtcOffset(input), expected);
         });
       }
     }
@@ -294,13 +302,9 @@ describe("json safety", () => {
     assert.equal(input.api_key_secret, "sk-live-123");
   });
 
-  it("redactedValueWith RedactionStrict redacts secret subtrees", () => {
+  it("redactedValue redacts secret subtrees by default", () => {
     const input = { db_secret: { password_secret: "real", host: "localhost" } };
     const defaultValue = redactedValue(input) as Record<string, unknown>;
-    const strictValue = redactedValueWith(input, RedactionPolicy.RedactionStrict) as Record<string, unknown>;
-    const defaultSecret = defaultValue["db_secret"] as Record<string, unknown>;
-    assert.equal(defaultSecret["password_secret"], "***");
-    assert.equal(defaultSecret["host"], "localhost");
-    assert.equal(strictValue["db_secret"], "***");
+    assert.equal(defaultValue["db_secret"], "***");
   });
 });

@@ -98,22 +98,8 @@ def build_cli_error(message: str, hint: str | None = None) -> dict:
 
     Use when argument parsing fails or a flag value is invalid.
     Print with output_json and exit with code 2.
-
-    >>> v = build_cli_error("--output: invalid value 'xml'")
-    >>> v["code"]
-    'error'
-    >>> v["error_code"]
-    'invalid_request'
-    >>> v["retryable"]
-    False
     """
-    m: dict = {
-        "code": "error",
-        "error_code": "invalid_request",
-        "error": message,
-        "retryable": False,
-        "trace": {"duration_ms": 0},
-    }
+    m: dict = {"code": "error", "error": message}
     if hint is not None:
         m["hint"] = hint
     return m

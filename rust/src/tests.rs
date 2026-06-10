@@ -26,7 +26,6 @@ fn redaction_options_from_case(case: &Value) -> RedactionOptions {
         .map(|policy| match policy {
             "RedactionTraceOnly" => RedactionPolicy::RedactionTraceOnly,
             "RedactionNone" => RedactionPolicy::RedactionNone,
-            "RedactionStrict" => RedactionPolicy::RedactionStrict,
             other => panic!("unknown redaction policy: {other}"),
         });
     let secret_names = options
@@ -75,7 +74,7 @@ fn test_redact_fixtures() {
         let name = case["name"].as_str().expect("missing name");
         let mut input = case["input"].clone();
         let expected = &case["expected"];
-        internal_redact_secrets(&mut input);
+        redact_secrets_in_place(&mut input);
         assert_eq!(&input, expected, "[redact/{name}]");
     }
 }
@@ -99,7 +98,7 @@ fn test_redaction_options_fixtures() {
         assert_eq!(&got, expected, "[redaction_options/{name}] value");
 
         let mut input = case["input"].clone();
-        internal_redact_secrets_with_options(&mut input, &options);
+        redact_secrets_in_place_with_options(&mut input, &options);
         assert_eq!(&input, expected, "[redaction_options/{name}] in-place");
 
         let json_out = output_json_with_options(&case["input"], &output_options);
@@ -240,6 +239,22 @@ fn test_helper_fixtures() {
                         parse_size(input),
                         expected,
                         "[helpers/parse_size({input:?})]"
+                    );
+                }
+            }
+            "normalize_utc_offset" => {
+                for tc in test_cases {
+                    let arr = tc.as_array().expect("case must be [input, expected]");
+                    let input = arr[0].as_str().expect("input must be string");
+                    let expected = if arr[1].is_null() {
+                        None
+                    } else {
+                        arr[1].as_str().map(str::to_string)
+                    };
+                    assert_eq!(
+                        normalize_utc_offset(input),
+                        expected,
+                        "[helpers/normalize_utc_offset({input:?})]"
                     );
                 }
             }
@@ -474,13 +489,10 @@ fn redacted_value_returns_safe_copy() {
 }
 
 #[test]
-fn redacted_value_with_strict_redacts_secret_subtree() {
+fn redacted_value_redacts_secret_subtree_by_default() {
     let input = json!({"db_secret": {"password_secret": "real", "host": "localhost"}});
     let default = redacted_value(&input);
-    let strict = redacted_value_with(&input, RedactionPolicy::RedactionStrict);
-    assert_eq!(default["db_secret"]["password_secret"], "***");
-    assert_eq!(default["db_secret"]["host"], "localhost");
-    assert_eq!(strict["db_secret"], "***");
+    assert_eq!(default["db_secret"], "***");
 }
 
 #[test]
@@ -1311,13 +1323,13 @@ fn suffix_priority_msats_over_s() {
 }
 
 // ═══════════════════════════════════════════
-// internal_redact_secrets
+// redact_secrets_in_place
 // ═══════════════════════════════════════════
 
 #[test]
 fn redact_flat() {
     let mut v = json!({"api_key_secret": "sk-123", "name": "test"});
-    internal_redact_secrets(&mut v);
+    redact_secrets_in_place(&mut v);
     assert_eq!(v["api_key_secret"], "***");
     assert_eq!(v["name"], "test");
 }
@@ -1325,14 +1337,14 @@ fn redact_flat() {
 #[test]
 fn redact_nested() {
     let mut v = json!({"config": {"password_secret": "real"}});
-    internal_redact_secrets(&mut v);
+    redact_secrets_in_place(&mut v);
     assert_eq!(v["config"]["password_secret"], "***");
 }
 
 #[test]
 fn redact_array_traversal() {
     let mut v = json!([{"api_key_secret": "a"}, {"token_secret": "b"}]);
-    internal_redact_secrets(&mut v);
+    redact_secrets_in_place(&mut v);
     assert_eq!(v[0]["api_key_secret"], "***");
     assert_eq!(v[1]["token_secret"], "***");
 }
@@ -1340,7 +1352,7 @@ fn redact_array_traversal() {
 #[test]
 fn redact_non_string_redacted() {
     let mut v = json!({"count_secret": 42});
-    internal_redact_secrets(&mut v);
+    redact_secrets_in_place(&mut v);
     assert_eq!(v["count_secret"], "***");
 }
 
@@ -1403,10 +1415,10 @@ fn cli_parse_log_filters_preserves_order() {
 fn build_cli_error_required_fields() {
     let v = build_cli_error("missing --sql", None);
     assert_eq!(v["code"], "error");
-    assert_eq!(v["error_code"], "invalid_request");
     assert_eq!(v["error"], "missing --sql");
-    assert_eq!(v["retryable"], false);
-    assert_eq!(v["trace"]["duration_ms"], 0);
+    assert!(v.get("error_code").is_none());
+    assert!(v.get("retryable").is_none());
+    assert!(v.get("trace").is_none());
 }
 
 #[test]

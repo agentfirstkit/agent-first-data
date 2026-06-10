@@ -1,76 +1,249 @@
 [
   {
     "name": "legacy api_key scalar",
-    "input": {"api_key": "sk-123", "name": "test"},
-    "options": {"secret_names": ["api_key"]},
-    "expected": {"api_key": "***", "name": "test"},
+    "input": {
+      "api_key": "sk-123",
+      "name": "test"
+    },
+    "options": {
+      "secret_names": [
+        "api_key"
+      ]
+    },
+    "expected": {
+      "api_key": "***",
+      "name": "test"
+    },
     "expected_yaml": "---\napi_key: \"***\"\nname: \"test\"",
     "expected_plain": "api_key=*** name=test"
   },
   {
     "name": "exact header names",
-    "input": {"headers": {"Authorization": "Bearer abc", "x-api-key": "sk-123", "content_type": "json"}},
-    "options": {"secret_names": ["Authorization", "x-api-key"]},
-    "expected": {"headers": {"Authorization": "***", "x-api-key": "***", "content_type": "json"}}
+    "input": {
+      "headers": {
+        "Authorization": "Bearer abc",
+        "x-api-key": "sk-123",
+        "content_type": "json"
+      }
+    },
+    "options": {
+      "secret_names": [
+        "Authorization",
+        "x-api-key"
+      ]
+    },
+    "expected": {
+      "headers": {
+        "Authorization": "***",
+        "x-api-key": "***",
+        "content_type": "json"
+      }
+    }
   },
   {
     "name": "exact names are not normalized",
-    "input": {"api_key": "sk-1", "api-key": "sk-2", " API_KEY ": "sk-3", "Authorization": "Bearer abc"},
-    "options": {"secret_names": ["api_key", " API_KEY ", "authorization"]},
-    "expected": {"api_key": "***", "api-key": "sk-2", " API_KEY ": "***", "Authorization": "Bearer abc"}
+    "input": {
+      "api_key": "sk-1",
+      "api-key": "sk-2",
+      " API_KEY ": "sk-3",
+      "Authorization": "Bearer abc"
+    },
+    "options": {
+      "secret_names": [
+        "api_key",
+        " API_KEY ",
+        "authorization"
+      ]
+    },
+    "expected": {
+      "api_key": "***",
+      "api-key": "sk-2",
+      " API_KEY ": "***",
+      "Authorization": "Bearer abc"
+    }
   },
   {
     "name": "no secret names by default",
-    "input": {"api_key": "sk-123", "api_key_secret": "sk-456"},
+    "input": {
+      "api_key": "sk-123",
+      "api_key_secret": "sk-456"
+    },
     "options": {},
-    "expected": {"api_key": "sk-123", "api_key_secret": "***"}
+    "expected": {
+      "api_key": "sk-123",
+      "api_key_secret": "***"
+    }
   },
   {
     "name": "trace only with secret names",
-    "input": {"result": {"api_key": "sk-result"}, "trace": {"api_key": "sk-trace", "request_secret": "top-secret"}},
-    "options": {"policy": "RedactionTraceOnly", "secret_names": ["api_key"]},
-    "expected": {"result": {"api_key": "sk-result"}, "trace": {"api_key": "***", "request_secret": "***"}}
+    "input": {
+      "result": {
+        "api_key": "sk-result"
+      },
+      "trace": {
+        "api_key": "sk-trace",
+        "request_secret": "top-secret"
+      }
+    },
+    "options": {
+      "policy": "RedactionTraceOnly",
+      "secret_names": [
+        "api_key"
+      ]
+    },
+    "expected": {
+      "result": {
+        "api_key": "sk-result"
+      },
+      "trace": {
+        "api_key": "***",
+        "request_secret": "***"
+      }
+    }
   },
   {
     "name": "none disables suffix and list",
-    "input": {"api_key": "sk-123", "api_key_secret": "sk-456"},
-    "options": {"policy": "RedactionNone", "secret_names": ["api_key"]},
-    "expected": {"api_key": "sk-123", "api_key_secret": "sk-456"}
+    "input": {
+      "api_key": "sk-123",
+      "api_key_secret": "sk-456"
+    },
+    "options": {
+      "policy": "RedactionNone",
+      "secret_names": [
+        "api_key"
+      ]
+    },
+    "expected": {
+      "api_key": "sk-123",
+      "api_key_secret": "sk-456"
+    }
   },
   {
-    "name": "strict redacts legacy subtree",
-    "input": {"db": {"api_key": {"nested": "real"}, "host": "localhost"}},
-    "options": {"policy": "RedactionStrict", "secret_names": ["api_key"]},
-    "expected": {"db": {"api_key": "***", "host": "localhost"}}
+    "name": "secret names redact legacy subtree by default",
+    "input": {
+      "db": {
+        "api_key": {
+          "nested": "real"
+        },
+        "host": "localhost"
+      }
+    },
+    "options": {
+      "secret_names": [
+        "api_key"
+      ]
+    },
+    "expected": {
+      "db": {
+        "api_key": "***",
+        "host": "localhost"
+      }
+    }
   },
   {
     "name": "url-suffixed field with secret param",
-    "input": {"final_url": "https://h/cb?code_secret=abc&page=2", "status": 200},
+    "input": {
+      "final_url": "https://h/cb?code_secret=abc&page=2",
+      "status": 200
+    },
     "options": {},
-    "expected": {"final_url": "https://h/cb?code_secret=***&page=2", "status": 200}
+    "expected": {
+      "final_url": "https://h/cb?code_secret=***&page=2",
+      "status": 200
+    }
   },
   {
     "name": "url-suffixed field legacy param via secret_names",
-    "input": {"endpoint_url": "wss://host:9222/cdp?token=abc"},
-    "options": {"secret_names": ["token"]},
-    "expected": {"endpoint_url": "wss://host:9222/cdp?token=***"}
+    "input": {
+      "endpoint_url": "wss://host:9222/cdp?token=abc"
+    },
+    "options": {
+      "secret_names": [
+        "token"
+      ]
+    },
+    "expected": {
+      "endpoint_url": "wss://host:9222/cdp?token=***"
+    }
   },
   {
     "name": "url-suffixed field userinfo password",
-    "input": {"database_url": "postgres://u:pw@h/db"},
+    "input": {
+      "database_url": "postgres://u:pw@h/db"
+    },
     "options": {},
-    "expected": {"database_url": "postgres://u:***@h/db"}
+    "expected": {
+      "database_url": "postgres://u:***@h/db"
+    }
   },
   {
     "name": "non-url-suffixed field is not scanned",
-    "input": {"message": "connect https://h/?api_secret=x"},
+    "input": {
+      "message": "connect https://h/?api_secret=x"
+    },
     "options": {},
-    "expected": {"message": "connect https://h/?api_secret=x"}
+    "expected": {
+      "message": "connect https://h/?api_secret=x"
+    }
   },
   {
     "name": "none policy leaves url-suffixed field untouched",
-    "input": {"final_url": "https://h/cb?code_secret=abc"},
-    "options": {"policy": "RedactionNone"},
-    "expected": {"final_url": "https://h/cb?code_secret=abc"}
+    "input": {
+      "final_url": "https://h/cb?code_secret=abc"
+    },
+    "options": {
+      "policy": "RedactionNone"
+    },
+    "expected": {
+      "final_url": "https://h/cb?code_secret=abc"
+    }
+  },
+  {
+    "name": "trace only redacts secret subtree",
+    "input": {
+      "result": {
+        "db_secret": {
+          "inner": "sk-result"
+        }
+      },
+      "trace": {
+        "db_secret": {
+          "inner": "sk-trace"
+        }
+      }
+    },
+    "options": {
+      "policy": "RedactionTraceOnly"
+    },
+    "expected": {
+      "result": {
+        "db_secret": {
+          "inner": "sk-result"
+        }
+      },
+      "trace": {
+        "db_secret": "***"
+      }
+    }
+  },
+  {
+    "name": "url-suffixed field trims before scrubbing",
+    "input": {
+      "final_url": "https://u:p@h/cb?code_secret=abc "
+    },
+    "options": {},
+    "expected": {
+      "final_url": "https://u:***@h/cb?code_secret=***"
+    }
+  },
+  {
+    "name": "url-suffixed field internal whitespace redacts whole value",
+    "input": {
+      "final_url": "https://u:p @h/cb?code_secret=abc"
+    },
+    "options": {},
+    "expected": {
+      "final_url": "***"
+    }
   }
 ]

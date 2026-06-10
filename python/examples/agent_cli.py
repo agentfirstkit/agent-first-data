@@ -519,9 +519,10 @@ def test_log_lines_are_category_tagged():
 def test_build_cli_error_structure():
     v = build_cli_error("--output: invalid value 'xml'")
     assert v["code"] == "error"
-    assert v["error_code"] == "invalid_request"
-    assert v["retryable"] is False
-    assert v["trace"]["duration_ms"] == 0
+    assert v["error"] == "--output: invalid value 'xml'"
+    assert "error_code" not in v
+    assert "retryable" not in v
+    assert "trace" not in v
 
 
 def test_build_cli_error_with_hint():

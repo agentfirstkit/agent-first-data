@@ -21,13 +21,19 @@ Usage:
 import logging
 import sys
 from contextvars import ContextVar, Token
-from typing import Any
+from typing import Any, Sequence
 
-from agent_first_data.format import output_json, output_plain, output_yaml
+from agent_first_data.format import (
+    OutputOptions,
+    RedactionOptions,
+    output_json_with_options,
+    output_plain_with_options,
+    output_yaml_with_options,
+)
 
 _span_fields: ContextVar[dict[str, Any]] = ContextVar("afdata_span", default={})
 
-_LEVEL_TO_CODE = {
+_LEVEL_TO_NAME = {
     "CRITICAL": "error",
     "ERROR": "error",
     "WARNING": "warn",
@@ -44,17 +50,24 @@ class AfdataHandler(logging.Handler):
     Formats output using the library's own output_json/output_plain/output_yaml.
     """
 
-    def __init__(self, format: str = "json") -> None:
+    def __init__(
+        self,
+        format: str = "json",
+        redaction: RedactionOptions | None = None,
+        secret_names: Sequence[str] | None = None,
+    ) -> None:
         super().__init__()
         if format not in ("json", "plain", "yaml"):
             raise ValueError(f"Unknown format: {format!r}, expected json/plain/yaml")
         self._format = format
+        self._redaction = _redaction_options(redaction, secret_names)
 
     def emit(self, record: logging.LogRecord) -> None:
         entry: dict[str, Any] = {
             "timestamp_epoch_ms": int(record.created * 1000),
             "message": record.getMessage(),
-            "target": record.name,
+            "code": "log",
+            "level": _LEVEL_TO_NAME.get(record.levelname, "info"),
         }
 
         # Span fields (from contextvars, async-safe)
@@ -62,26 +75,23 @@ class AfdataHandler(logging.Handler):
         if span_data:
             entry.update(span_data)
 
-        # Event fields (passed via extra= in logging calls)
-        has_code = False
+        # Event fields (passed via extra= in logging calls). The protocol code
+        # is always "log"; use event for business categorization.
         extra = getattr(record, "_afdata_fields", None)
         if extra:
             for k, v in extra.items():
                 if k == "code":
-                    has_code = True
+                    continue
                 entry[k] = v
 
-        # Default code from level
-        if not has_code:
-            entry["code"] = _LEVEL_TO_CODE.get(record.levelname, "info")
-
-        # Format using the library's own output functions
+        # Format using the library's own output functions.
+        options = OutputOptions(redaction=self._redaction)
         if self._format == "plain":
-            line = output_plain(entry)
+            line = output_plain_with_options(entry, options)
         elif self._format == "yaml":
-            line = output_yaml(entry)
+            line = output_yaml_with_options(entry, options)
         else:
-            line = output_json(entry)
+            line = output_json_with_options(entry, options)
 
         sys.stdout.write(line + "\n")
         sys.stdout.flush()
@@ -100,26 +110,56 @@ class _AfdataLoggerAdapter(logging.LoggerAdapter):
         return msg, kwargs
 
 
-def _init_with_format(format: str, level: str = "INFO") -> None:
-    handler = AfdataHandler(format=format)
+def _redaction_options(
+    redaction: RedactionOptions | None,
+    secret_names: Sequence[str] | None,
+) -> RedactionOptions:
+    if redaction is not None and secret_names is not None:
+        raise ValueError("Pass either redaction or secret_names, not both")
+    if redaction is not None:
+        return redaction
+    if secret_names is not None:
+        return RedactionOptions(secret_names=tuple(secret_names))
+    return RedactionOptions()
+
+
+def _init_with_format(
+    format: str,
+    level: str = "INFO",
+    redaction: RedactionOptions | None = None,
+    secret_names: Sequence[str] | None = None,
+) -> None:
+    handler = AfdataHandler(format=format, redaction=redaction, secret_names=secret_names)
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
 
-def init_json(level: str = "INFO") -> None:
+def init_json(
+    level: str = "INFO",
+    redaction: RedactionOptions | None = None,
+    secret_names: Sequence[str] | None = None,
+) -> None:
     """Initialize the root logger with AFDATA JSON output to stdout."""
-    _init_with_format("json", level)
+    _init_with_format("json", level, redaction=redaction, secret_names=secret_names)
 
 
-def init_plain(level: str = "INFO") -> None:
+def init_plain(
+    level: str = "INFO",
+    redaction: RedactionOptions | None = None,
+    secret_names: Sequence[str] | None = None,
+) -> None:
     """Initialize the root logger with AFDATA plain/logfmt output to stdout."""
-    _init_with_format("plain", level)
+    _init_with_format("plain", level, redaction=redaction, secret_names=secret_names)
 
 
-def init_yaml(level: str = "INFO") -> None:
+def init_yaml(
+    level: str = "INFO",
+    redaction: RedactionOptions | None = None,
+    secret_names: Sequence[str] | None = None,
+) -> None:
     """Initialize the root logger with AFDATA YAML output to stdout."""
-    _init_with_format("yaml", level)
+    _init_with_format("yaml", level, redaction=redaction, secret_names=secret_names)
 
 
 def get_logger(name: str, **fields: Any) -> logging.LoggerAdapter:

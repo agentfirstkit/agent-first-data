@@ -17,6 +17,19 @@
     "expected_plain": "api_key=*** created_at=2025-02-07T00:00:00.000Z file_size=5.0MB latency=1.28s"
   },
   {
+    "name": "negative_ms_uses_abs_threshold",
+    "input": {
+      "short_ms": -999,
+      "long_ms": -1500
+    },
+    "expected_json": {
+      "short_ms": -999,
+      "long_ms": -1500
+    },
+    "expected_yaml": "---\nlong: \"-1.5s\"\nshort: \"-999ms\"",
+    "expected_plain": "long=-1.5s short=-999ms"
+  },
+  {
     "name": "collision_reverts_to_original_keys_and_raw_values",
     "input": {
       "response_ms": 150,
@@ -155,5 +168,140 @@
     },
     "expected_yaml": "---\na: \"1.2KB\"\nb: \"3.2KB\"\nc: \"1.2MB\"",
     "expected_plain": "a=1.2KB b=3.2KB c=1.2MB"
+  },
+  {
+    "name": "strict_string_suffixes_pass_through",
+    "input": {
+      "language_bcp47": "zh-CN",
+      "timezone_utc_offset": "+08:00"
+    },
+    "expected_json": {
+      "language_bcp47": "zh-CN",
+      "timezone_utc_offset": "+08:00"
+    },
+    "expected_yaml": "---\nlanguage_bcp47: \"zh-CN\"\ntimezone_utc_offset: \"+08:00\"",
+    "expected_plain": "language_bcp47=zh-CN timezone_utc_offset=+08:00"
+  },
+  {
+    "name": "container_secret_collision_never_leaks",
+    "input": {
+      "creds_secret": {
+        "inner": "sk-OBJ-SECRET"
+      },
+      "creds": "plain"
+    },
+    "expected_json": {
+      "creds_secret": "***",
+      "creds": "plain"
+    },
+    "expected_yaml": "---\ncreds: \"plain\"\ncreds_secret: \"***\"",
+    "expected_plain": "creds=plain creds_secret=***"
+  },
+  {
+    "name": "plain_array_objects_use_canonical_json",
+    "input": {
+      "items": [
+        {
+          "a": 1
+        },
+        {
+          "b_secret": "sk"
+        }
+      ]
+    },
+    "expected_json": {
+      "items": [
+        {
+          "a": 1
+        },
+        {
+          "b_secret": "***"
+        }
+      ]
+    },
+    "expected_yaml": "---\nitems:\n  -\n    a: 1\n  -\n    b: \"***\"",
+    "expected_plain": "items=\"{\\\"a\\\":1},{\\\"b_secret\\\":\\\"***\\\"}\""
+  },
+  {
+    "name": "float_exponent_rendering",
+    "input": {
+      "small_percent": 1e-07,
+      "huge_s": 1e+21
+    },
+    "expected_json": {
+      "small_percent": 1e-07,
+      "huge_s": 1e+21
+    },
+    "expected_yaml": "---\nhuge: \"1e+21s\"\nsmall: \"1e-7%\"",
+    "expected_plain": "huge=1e+21s small=1e-7%"
+  },
+  {
+    "name": "out_of_range_epoch_falls_through",
+    "input": {
+      "created_at_epoch_ms": 253402300800000,
+      "ok_epoch_ms": 253402300799999
+    },
+    "expected_json": {
+      "created_at_epoch_ms": 253402300800000,
+      "ok_epoch_ms": 253402300799999
+    },
+    "expected_yaml": "---\ncreated_at_epoch_ms: 253402300800000\nok: \"9999-12-31T23:59:59.999Z\"",
+    "expected_plain": "created_at_epoch_ms=253402300800000 ok=9999-12-31T23:59:59.999Z"
+  },
+  {
+    "name": "dangerous_keys_are_escaped",
+    "input": {
+      "k\nadmin: true\nx": "v",
+      "sp ace": "a",
+      "eq=key": "b"
+    },
+    "expected_json": {
+      "k\nadmin: true\nx": "v",
+      "sp ace": "a",
+      "eq=key": "b"
+    },
+    "expected_yaml": "---\n\"eq=key\": \"b\"\n\"k\\nadmin: true\\nx\": \"v\"\n\"sp ace\": \"a\"",
+    "expected_plain": "\"eq=key\"=b \"k\\nadmin: true\\nx\"=v \"sp ace\"=a"
+  },
+  {
+    "name": "generic_cents_requires_currency_code",
+    "input": {
+      "fare_thb_cents": 15050,
+      "total_amount_cents": 15050
+    },
+    "expected_json": {
+      "fare_thb_cents": 15050,
+      "total_amount_cents": 15050
+    },
+    "expected_yaml": "---\nfare: \"150.50 THB\"\ntotal_amount_cents: 15050",
+    "expected_plain": "fare=\"150.50 THB\" total_amount_cents=15050"
+  },
+  {
+    "name": "plain_quotes_vt_ff_nbsp",
+    "input": {
+      "form_feed": "a\fb",
+      "nbsp": "a\u00a0b",
+      "vertical_tab": "a\u000bb"
+    },
+    "expected_json": {
+      "form_feed": "a\fb",
+      "nbsp": "a\u00a0b",
+      "vertical_tab": "a\u000bb"
+    },
+    "expected_yaml": "---\nform_feed: \"a\\fb\"\nnbsp: \"a\u00a0b\"\nvertical_tab: \"a\\vb\"",
+    "expected_plain": "form_feed=\"a\\fb\" nbsp=\"a\u00a0b\" vertical_tab=\"a\\vb\""
+  },
+  {
+    "name": "url_params_redacted_not_reformatted",
+    "input": {
+      "latency_ms": 1280,
+      "endpoint_url": "https://h/api?timeout_ms=5000&size_bytes=1048576&token_secret=abc&page=2"
+    },
+    "expected_json": {
+      "latency_ms": 1280,
+      "endpoint_url": "https://h/api?timeout_ms=5000&size_bytes=1048576&token_secret=***&page=2"
+    },
+    "expected_yaml": "---\nendpoint_url: \"https://h/api?timeout_ms=5000&size_bytes=1048576&token_secret=***&page=2\"\nlatency: \"1.28s\"",
+    "expected_plain": "endpoint_url=\"https://h/api?timeout_ms=5000&size_bytes=1048576&token_secret=***&page=2\" latency=1.28s"
   }
 ]

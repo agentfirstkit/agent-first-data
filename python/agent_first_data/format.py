@@ -1,15 +1,17 @@
 """AFDATA output formatting and protocol templates.
 
-18 public APIs and 4 types: protocol builders, value redactors (copy and
+19 public APIs and 4 types: protocol builders, value redactors (copy and
 in-place; cover _secret and _url fields), output formatters, URL-string
-redactors (redact_url_secrets / _with_options), parse_size, RedactionPolicy,
-RedactionOptions, OutputStyle, and OutputOptions.
+redactors (redact_url_secrets / _with_options), parse_size,
+normalize_utc_offset, RedactionPolicy, RedactionOptions, OutputStyle, and
+OutputOptions.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -56,7 +58,6 @@ def build_json(code: str, fields: Any, trace: Any = None) -> dict:
 class RedactionPolicy(str, Enum):
     RedactionTraceOnly = "RedactionTraceOnly"
     RedactionNone = "RedactionNone"
-    RedactionStrict = "RedactionStrict"
 
 
 @dataclass(frozen=True)
@@ -132,10 +133,10 @@ def output_plain_with_options(value: Any, output_options: OutputOptions) -> str:
         _collect_plain_pairs_raw(value, "", pairs)
     else:
         _collect_plain_pairs(value, "", pairs)
-    pairs.sort(key=lambda p: p[0].encode("utf-16-be"))
+    pairs.sort(key=lambda p: _utf16_sort_key(p[0]))
     parts = []
     for k, v in pairs:
-        parts.append(f"{k}={_quote_logfmt_value(v)}")
+        parts.append(f"{_quote_logfmt_key(k)}={_quote_logfmt_value(v)}")
     return " ".join(parts)
 
 
@@ -144,12 +145,12 @@ def output_plain_with_options(value: Any, output_options: OutputOptions) -> str:
 # ═══════════════════════════════════════════
 
 
-def internal_redact_secrets(value: Any) -> None:
+def redact_secrets_in_place(value: Any) -> None:
     """Redact _secret fields in-place."""
     _redact_secrets(value)
 
 
-def internal_redact_secrets_with_options(value: Any, redaction_options: RedactionOptions) -> None:
+def redact_secrets_in_place_with_options(value: Any, redaction_options: RedactionOptions) -> None:
     """Redact secret fields in-place using explicit redaction options."""
     _apply_redaction_options(value, redaction_options)
 
@@ -221,9 +222,6 @@ def _apply_redaction_policy_with_context(
         return
     if redaction_policy == RedactionPolicy.RedactionNone:
         return
-    if redaction_policy == RedactionPolicy.RedactionStrict:
-        _redact_secrets_strict(value, context)
-        return
     # Empty/unknown policy falls back to default full redaction.
     _redact_secrets(value, context)
 
@@ -235,7 +233,7 @@ def parse_size(s: str) -> int | None:
     Case-insensitive. Trims whitespace. Returns None for invalid input.
     """
     _multipliers = {"b": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
-    _max_u64 = (1 << 64) - 1
+    _max_safe_integer = (1 << 53) - 1
     s = s.strip()
     if not s:
         return None
@@ -250,11 +248,13 @@ def parse_size(s: str) -> int | None:
         return None
     if not num_str:
         return None
+    if not re.fullmatch(r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", num_str):
+        return None
     try:
         n = int(num_str)
         if n < 0:
             return None
-        if n > _max_u64 // mult:
+        if n > _max_safe_integer // mult:
             return None
         return n * mult
     except ValueError:
@@ -264,11 +264,55 @@ def parse_size(s: str) -> int | None:
         if f < 0 or not math.isfinite(f):
             return None
         result = f * mult
-        if not math.isfinite(result) or result > _max_u64:
+        if not math.isfinite(result) or result > _max_safe_integer:
             return None
         return int(result)
     except (ValueError, OverflowError):
         return None
+
+
+def normalize_utc_offset(value: str) -> str | None:
+    """Normalize a fixed UTC offset string to "UTC" or ±HH:MM.
+
+    This helper handles fixed offsets only; IANA timezone names and DST rules
+    are intentionally out of scope.
+    """
+    s = value.strip()
+    if s.lower() in ("utc", "z"):
+        return "UTC"
+    if not s or s[0] not in "+-":
+        return None
+    parsed = _parse_utc_offset_body(s[1:])
+    if parsed is None:
+        return None
+    hours, minutes = parsed
+    if hours > 23 or minutes > 59:
+        return None
+    if hours == 0 and minutes == 0:
+        return "UTC"
+    return f"{s[0]}{hours:02d}:{minutes:02d}"
+
+
+def _parse_utc_offset_body(body: str) -> tuple[int, int] | None:
+    if not body:
+        return None
+    if ":" in body:
+        parts = body.split(":")
+        if len(parts) != 2:
+            return None
+        hours, minutes = parts
+        if not hours or len(hours) > 2 or len(minutes) != 2:
+            return None
+        if not (hours.isascii() and minutes.isascii() and hours.isdigit() and minutes.isdigit()):
+            return None
+        return int(hours), int(minutes)
+    if not (body.isascii() and body.isdigit()):
+        return None
+    if len(body) in (1, 2):
+        return int(body), 0
+    if len(body) == 4:
+        return int(body[:2]), int(body[2:])
+    return None
 
 
 # ═══════════════════════════════════════════
@@ -276,7 +320,14 @@ def parse_size(s: str) -> int | None:
 # ═══════════════════════════════════════════
 
 
-def _sanitize_for_json(value: Any, stack: set[int] | None = None) -> Any:
+MAX_DEPTH = 256
+MIN_RFC3339_MS = -62135596800000
+MAX_RFC3339_MS = 253402300799999
+
+
+def _sanitize_for_json(value: Any, stack: set[int] | None = None, depth: int = 0) -> Any:
+    if depth >= MAX_DEPTH:
+        return "***"
     if stack is None:
         stack = set()
 
@@ -297,7 +348,7 @@ def _sanitize_for_json(value: Any, stack: set[int] | None = None) -> Any:
         out: dict[str, Any] = {}
         for k, v in value.items():
             key = k if isinstance(k, str) else str(k)
-            out[key] = _sanitize_for_json(v, stack)
+            out[key] = _sanitize_for_json(v, stack, depth + 1)
         stack.remove(obj_id)
         return out
 
@@ -306,7 +357,7 @@ def _sanitize_for_json(value: Any, stack: set[int] | None = None) -> Any:
         if obj_id in stack:
             return "<unsupported:circular>"
         stack.add(obj_id)
-        out = [_sanitize_for_json(item, stack) for item in value]
+        out = [_sanitize_for_json(item, stack, depth + 1) for item in value]
         stack.remove(obj_id)
         return out
 
@@ -335,30 +386,9 @@ def _key_has_url_suffix(key: str) -> bool:
     return key.endswith("_url") or key.endswith("_URL")
 
 
-def _redact_secrets(value: Any, context: _RedactionContext = _RedactionContext()) -> None:
-    if isinstance(value, dict):
-        for k in list(value.keys()):
-            v = value[k]
-            if context.is_secret_key(k):
-                if isinstance(v, (dict, list)):
-                    _redact_secrets(v, context)
-                else:
-                    value[k] = "***"
-            elif _key_has_url_suffix(k):
-                if isinstance(v, str):
-                    redacted = _redact_url_in_str(v, context)
-                    if redacted is not None:
-                        value[k] = redacted
-                else:
-                    _redact_secrets(v, context)
-            else:
-                _redact_secrets(v, context)
-    elif isinstance(value, list):
-        for item in value:
-            _redact_secrets(item, context)
-
-
-def _redact_secrets_strict(value: Any, context: _RedactionContext = _RedactionContext()) -> None:
+def _redact_secrets(value: Any, context: _RedactionContext = _RedactionContext(), depth: int = 0) -> None:
+    if depth >= MAX_DEPTH:
+        return
     if isinstance(value, dict):
         for k in list(value.keys()):
             v = value[k]
@@ -366,16 +396,21 @@ def _redact_secrets_strict(value: Any, context: _RedactionContext = _RedactionCo
                 value[k] = "***"
             elif _key_has_url_suffix(k):
                 if isinstance(v, str):
-                    redacted = _redact_url_in_str(v, context)
-                    if redacted is not None:
-                        value[k] = redacted
+                    value[k] = _redact_url_field_value(v, context)
+                elif depth + 1 >= MAX_DEPTH:
+                    value[k] = "***"
                 else:
-                    _redact_secrets_strict(v, context)
+                    _redact_secrets(v, context, depth + 1)
+            elif depth + 1 >= MAX_DEPTH:
+                value[k] = "***"
             else:
-                _redact_secrets_strict(v, context)
+                _redact_secrets(v, context, depth + 1)
     elif isinstance(value, list):
-        for item in value:
-            _redact_secrets_strict(item, context)
+        for i, item in enumerate(value):
+            if depth + 1 >= MAX_DEPTH:
+                value[i] = "***"
+            else:
+                _redact_secrets(item, context, depth + 1)
 
 
 # ═══════════════════════════════════════════
@@ -425,13 +460,32 @@ def _redact_url_in_str(s: str, context: _RedactionContext) -> str | None:
     return f"{scheme}://{new_authority}{new_remainder}"
 
 
+def _redact_url_field_value(s: str, context: _RedactionContext) -> str:
+    redacted = _redact_url_in_str(s, context)
+    if redacted is not None:
+        return redacted
+    trimmed = s.strip()
+    if trimmed != s:
+        redacted = _redact_url_in_str(trimmed, context)
+        if redacted is not None:
+            return redacted
+    # Fail closed: a _url value we could not parse as a clean scheme-prefixed
+    # URL, yet which carries a credential sigil ('@' userinfo) or internal
+    # whitespace, is redacted wholesale rather than passed through. A schemeless
+    # connection string like user:pass@host/db has no scheme anchor for the
+    # surgical span logic above, so blanket redaction is the safe default.
+    if any(c.isspace() for c in s) or "@" in s:
+        return "***"
+    return s
+
+
 def _redact_userinfo_password(authority: str) -> str:
     """Replace the userinfo password (``user:pass@``) with ``***``.
 
     Preserves the username. Authority without ``@``, or userinfo without ``:``,
     is unchanged.
     """
-    at = authority.find("@")
+    at = authority.rfind("@")
     if at == -1:
         return authority
     userinfo = authority[:at]
@@ -516,14 +570,22 @@ def _is_number(value: Any) -> bool:
 
 
 def _number_str(value: int | float) -> str:
-    """Render a number canonically for YAML/plain output.
-
-    An integral-valued float drops its trailing ``.0`` (``3.0`` -> ``3``) so the
-    four language implementations stay byte-identical with Go/TS/Rust.
-    """
-    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+    """Render a number canonically for YAML/plain output."""
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer() and abs(value) < 1e21:
         return str(int(value))
-    return str(value)
+    s = repr(value) if isinstance(value, float) else str(value)
+    return _normalize_exponent(s)
+
+
+def _normalize_exponent(s: str) -> str:
+    if "e" not in s and "E" not in s:
+        return s
+    mantissa, exp = re.split("[eE]", s, maxsplit=1)
+    sign = ""
+    if exp.startswith(("+", "-")):
+        sign, exp = exp[0], exp[1:]
+    exp = exp.lstrip("0") or "0"
+    return f"{mantissa}e{sign}{exp}"
 
 
 def _as_int(value: Any) -> int | None:
@@ -553,19 +615,25 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
     if stripped is not None:
         n = _as_int(value)
         if n is not None:
-            return stripped, _format_rfc3339_ms(n)
+            formatted = _format_rfc3339_ms(n)
+            if formatted is not None:
+                return stripped, formatted
         return None
     stripped = _strip_suffix_ci(key, "_epoch_s")
     if stripped is not None:
         n = _as_int(value)
         if n is not None:
-            return stripped, _format_rfc3339_ms(n * 1000)
+            formatted = _format_rfc3339_ms(n * 1000)
+            if formatted is not None:
+                return stripped, formatted
         return None
     stripped = _strip_suffix_ci(key, "_epoch_ns")
     if stripped is not None:
         n = _as_int(value)
         if n is not None:
-            return stripped, _format_rfc3339_ms(n // 1_000_000)
+            formatted = _format_rfc3339_ms(n // 1_000_000)
+            if formatted is not None:
+                return stripped, formatted
         return None
 
     # Group 2: compound currency suffixes
@@ -633,10 +701,6 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
         if _is_number(value):
             return stripped, f"{_plain_scalar(value)}%"
         return None
-    stripped = _strip_suffix_ci(key, "_secret")
-    if stripped is not None:
-        return stripped, "***"
-
     # Group 5: short suffixes (last to avoid false positives)
     stripped = _strip_suffix_ci(key, "_btc")
     if stripped is not None:
@@ -681,6 +745,10 @@ def _process_object_fields(d: dict) -> list[tuple[str, Any, str | None]]:
     """
     entries: list[tuple[str, str, Any, str | None]] = []
     for k, v in d.items():
+        stripped_secret = _strip_suffix_ci(k, "_secret")
+        if stripped_secret is not None:
+            entries.append((stripped_secret, k, v, None))
+            continue
         result = _try_process_field(k, v)
         if result is not None:
             stripped, formatted = result
@@ -703,7 +771,7 @@ def _process_object_fields(d: dict) -> list[tuple[str, Any, str | None]]:
         result_list.append((display_key, value, formatted))
 
     # Sort by display key (JCS order = UTF-16 code unit order)
-    result_list.sort(key=lambda x: x[0].encode("utf-16-be"))
+    result_list.sort(key=lambda x: _utf16_sort_key(x[0]))
     return result_list
 
 
@@ -731,14 +799,14 @@ def _format_ms_value(value: Any) -> str | None:
     return f"{_plain_scalar(value)}ms"
 
 
-def _format_rfc3339_ms(ms: int) -> str:
-    # Build from an integer timedelta (not float ms/1000) so large values keep
-    # full precision and the second split matches Rust's div_euclid exactly.
+def _format_rfc3339_ms(ms: int) -> str | None:
+    if ms < MIN_RFC3339_MS or ms > MAX_RFC3339_MS:
+        return None
     try:
         dt = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=ms)
         return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms % 1000:03d}Z"
     except (OverflowError, ValueError):
-        return str(ms)
+        return None
 
 
 def _format_bytes_human(n: int) -> str:
@@ -777,6 +845,8 @@ def _extract_currency_code(key: str) -> str | None:
     code = without_cents[idx + 1 :]
     if not code:
         return None
+    if len(code) not in (3, 4) or not code.isascii() or not code.isalpha():
+        return None
     return code
 
 
@@ -793,18 +863,18 @@ def _render_yaml_processed(value: Any, indent: int, lines: list[str]) -> None:
 
     for display_key, v, formatted in _process_object_fields(value):
         if formatted is not None:
-            lines.append(f'{prefix}{display_key}: "{_escape_yaml_str(formatted)}"')
+            lines.append(f'{prefix}{_yaml_key(display_key)}: "{_escape_yaml_str(formatted)}"')
         elif isinstance(v, dict):
             if v:
-                lines.append(f"{prefix}{display_key}:")
+                lines.append(f"{prefix}{_yaml_key(display_key)}:")
                 _render_yaml_processed(v, indent + 1, lines)
             else:
-                lines.append(f"{prefix}{display_key}: {{}}")
+                lines.append(f"{prefix}{_yaml_key(display_key)}: {{}}")
         elif isinstance(v, list):
             if not v:
-                lines.append(f"{prefix}{display_key}: []")
+                lines.append(f"{prefix}{_yaml_key(display_key)}: []")
             else:
-                lines.append(f"{prefix}{display_key}:")
+                lines.append(f"{prefix}{_yaml_key(display_key)}:")
                 for item in v:
                     if isinstance(item, dict):
                         lines.append(f"{prefix}  -")
@@ -812,7 +882,7 @@ def _render_yaml_processed(value: Any, indent: int, lines: list[str]) -> None:
                     else:
                         lines.append(f"{prefix}  - {_yaml_scalar(item)}")
         else:
-            lines.append(f"{prefix}{display_key}: {_yaml_scalar(v)}")
+            lines.append(f"{prefix}{_yaml_key(display_key)}: {_yaml_scalar(v)}")
 
 
 def _render_yaml_raw(value: Any, indent: int, lines: list[str]) -> None:
@@ -829,18 +899,18 @@ def _render_yaml_raw(value: Any, indent: int, lines: list[str]) -> None:
 def _render_yaml_field_raw(prefix: str, key: str, value: Any, indent: int, lines: list[str]) -> None:
     if isinstance(value, dict):
         if value:
-            lines.append(f"{prefix}{key}:")
+            lines.append(f"{prefix}{_yaml_key(key)}:")
             _render_yaml_raw(value, indent + 1, lines)
         else:
-            lines.append(f"{prefix}{key}: {{}}")
+            lines.append(f"{prefix}{_yaml_key(key)}: {{}}")
     elif isinstance(value, list):
         if value:
-            lines.append(f"{prefix}{key}:")
+            lines.append(f"{prefix}{_yaml_key(key)}:")
             _render_yaml_array_raw(value, indent + 1, lines)
         else:
-            lines.append(f"{prefix}{key}: []")
+            lines.append(f"{prefix}{_yaml_key(key)}: []")
     else:
-        lines.append(f"{prefix}{key}: {_yaml_scalar(value)}")
+        lines.append(f"{prefix}{_yaml_key(key)}: {_yaml_scalar(value)}")
 
 
 def _render_yaml_array_raw(arr: list[Any], indent: int, lines: list[str]) -> None:
@@ -863,7 +933,21 @@ def _render_yaml_array_raw(arr: list[Any], indent: int, lines: list[str]) -> Non
 
 
 def _escape_yaml_str(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    return (
+        s.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+        .replace("\f", "\\f")
+        .replace("\v", "\\v")
+    )
+
+
+def _yaml_key(key: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", key):
+        return key
+    return f'"{_escape_yaml_str(key)}"'
 
 
 def _yaml_scalar(value: Any) -> str:
@@ -875,8 +959,9 @@ def _yaml_scalar(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return _number_str(value)
-    escaped = str(value).replace('"', '\\"')
-    return f'"{escaped}"'
+    if isinstance(value, (dict, list)):
+        return f'"{_escape_yaml_str(_canonical_json(value))}"'
+    return f'"{_escape_yaml_str(str(value))}"'
 
 
 # ═══════════════════════════════════════════
@@ -928,19 +1013,21 @@ def _plain_scalar(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return _number_str(value)
+    if isinstance(value, (dict, list)):
+        return _canonical_json(value)
     return str(value)
 
 
 def _plain_scalar_raw(value: Any) -> str:
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        return _canonical_json(value)
     return _plain_scalar(value)
 
 
 def _quote_logfmt_value(value: str) -> str:
     if value == "":
         return ""
-    needs_quote = any(c.isspace() or c in '="\\"' for c in value)
+    needs_quote = any(c.isspace() or c in '="\\' for c in value)
     if not needs_quote:
         return value
     escaped = (
@@ -949,9 +1036,33 @@ def _quote_logfmt_value(value: str) -> str:
         .replace("\n", "\\n")
         .replace("\r", "\\r")
         .replace("\t", "\\t")
+        .replace("\f", "\\f")
+        .replace("\v", "\\v")
     )
     return f'"{escaped}"'
 
 
+def _quote_logfmt_key(key: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", key):
+        return key
+    return _quote_logfmt_value(key)
+
+
 def _sorted_object_keys(d: dict) -> list[str]:
-    return sorted(d.keys(), key=lambda k: k.encode("utf-16-be"))
+    return sorted(d.keys(), key=_utf16_sort_key)
+
+
+def _utf16_sort_key(s: str) -> bytes:
+    return s.encode("utf-16-be", "surrogatepass")
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(_sort_json_value(value), ensure_ascii=False, separators=(",", ":"))
+
+
+def _sort_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _sort_json_value(value[k]) for k in _sorted_object_keys(value)}
+    if isinstance(value, list):
+        return [_sort_json_value(item) for item in value]
+    return value

@@ -1283,9 +1283,10 @@ mod tests {
     fn build_cli_error_structure() {
         let v = build_cli_error("--output: invalid value 'xml'", None);
         assert_eq!(v["code"], "error");
-        assert_eq!(v["error_code"], "invalid_request");
-        assert_eq!(v["retryable"], false);
-        assert_eq!(v["trace"]["duration_ms"], 0);
+        assert_eq!(v["error"], "--output: invalid value 'xml'");
+        assert!(v.get("error_code").is_none());
+        assert!(v.get("retryable").is_none());
+        assert!(v.get("trace").is_none());
     }
 
     #[test]

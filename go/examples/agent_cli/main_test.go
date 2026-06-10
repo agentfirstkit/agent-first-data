@@ -186,8 +186,8 @@ func TestBuildCliErrorStructure(t *testing.T) {
 	if v["code"] != "error" {
 		t.Errorf("code = %v", v["code"])
 	}
-	if v["retryable"] != false {
-		t.Errorf("retryable = %v", v["retryable"])
+	if _, ok := v["retryable"]; ok {
+		t.Errorf("unexpected retryable = %v", v["retryable"])
 	}
 }
 

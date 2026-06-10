@@ -64,10 +64,10 @@ def test_parse_log_filters_preserves_order():
 def test_build_cli_error_required_fields():
     v = build_cli_error("missing --sql")
     assert v["code"] == "error"
-    assert v["error_code"] == "invalid_request"
     assert v["error"] == "missing --sql"
-    assert v["retryable"] is False
-    assert v["trace"]["duration_ms"] == 0
+    assert "error_code" not in v
+    assert "retryable" not in v
+    assert "trace" not in v
 
 
 def test_build_cli_error_is_valid_json():

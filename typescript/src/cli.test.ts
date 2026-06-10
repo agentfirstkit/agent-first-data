@@ -73,10 +73,10 @@ describe("buildCliError", () => {
   it("has required fields", () => {
     const v = buildCliError("missing --sql") as Record<string, unknown>;
     assert.equal(v["code"], "error");
-    assert.equal(v["error_code"], "invalid_request");
     assert.equal(v["error"], "missing --sql");
-    assert.equal(v["retryable"], false);
-    assert.equal((v["trace"] as Record<string, unknown>)["duration_ms"], 0);
+    assert.equal(v["error_code"], undefined);
+    assert.equal(v["retryable"], undefined);
+    assert.equal(v["trace"], undefined);
   });
 
   it("produces valid JSONL", () => {

@@ -13,7 +13,7 @@
 //! use agent_first_data::afdata_tracing;
 //! use tracing_subscriber::EnvFilter;
 //!
-//! afdata_tracing::init_json(EnvFilter::new("info"));
+//! afdata_tracing::try_init_json(EnvFilter::new("info"))?;
 //! afdata_tracing::init_plain(EnvFilter::new("info"));
 //! afdata_tracing::init_yaml(EnvFilter::new("debug"));
 //! ```
@@ -25,6 +25,7 @@ use tracing::span;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::util::TryInitError;
 use tracing_subscriber::Layer;
 
 /// Output format for the AFDATA tracing layer.
@@ -38,31 +39,130 @@ pub enum LogFormat {
 /// A tracing Layer that outputs AFDATA-compliant log lines to stdout.
 pub struct AfdataLayer {
     format: LogFormat,
+    redaction: crate::RedactionOptions,
 }
 
 /// Initialize tracing with AFDATA JSON output (single-line JSONL).
 pub fn init_json(filter: tracing_subscriber::EnvFilter) {
-    init_with_format(filter, LogFormat::Json);
+    let _ = try_init_json(filter);
 }
 
 /// Initialize tracing with AFDATA plain/logfmt output (keys stripped, values formatted).
 pub fn init_plain(filter: tracing_subscriber::EnvFilter) {
-    init_with_format(filter, LogFormat::Plain);
+    let _ = try_init_plain(filter);
 }
 
 /// Initialize tracing with AFDATA YAML output (multi-line, keys stripped, values formatted).
 pub fn init_yaml(filter: tracing_subscriber::EnvFilter) {
-    init_with_format(filter, LogFormat::Yaml);
+    let _ = try_init_yaml(filter);
 }
 
-fn init_with_format(filter: tracing_subscriber::EnvFilter, format: LogFormat) {
+/// Initialize tracing with AFDATA JSON output and explicit redaction options.
+pub fn init_json_with_options(
+    filter: tracing_subscriber::EnvFilter,
+    redaction: crate::RedactionOptions,
+) {
+    let _ = try_init_json_with_options(filter, redaction);
+}
+
+/// Initialize tracing with AFDATA plain/logfmt output and explicit redaction options.
+pub fn init_plain_with_options(
+    filter: tracing_subscriber::EnvFilter,
+    redaction: crate::RedactionOptions,
+) {
+    let _ = try_init_plain_with_options(filter, redaction);
+}
+
+/// Initialize tracing with AFDATA YAML output and explicit redaction options.
+pub fn init_yaml_with_options(
+    filter: tracing_subscriber::EnvFilter,
+    redaction: crate::RedactionOptions,
+) {
+    let _ = try_init_yaml_with_options(filter, redaction);
+}
+
+/// Initialize tracing with AFDATA output and explicit format/redaction options.
+pub fn init_with_options(
+    filter: tracing_subscriber::EnvFilter,
+    format: LogFormat,
+    redaction: crate::RedactionOptions,
+) {
+    let _ = try_init_with_options(filter, format, redaction);
+}
+
+/// Try to initialize tracing with AFDATA JSON output (single-line JSONL).
+///
+/// Prefer this over [`init_json`] when startup code needs to know whether the
+/// redaction/formatting layer was actually installed.
+pub fn try_init_json(filter: tracing_subscriber::EnvFilter) -> Result<(), TryInitError> {
+    try_init_json_with_options(filter, crate::RedactionOptions::default())
+}
+
+/// Try to initialize tracing with AFDATA plain/logfmt output.
+pub fn try_init_plain(filter: tracing_subscriber::EnvFilter) -> Result<(), TryInitError> {
+    try_init_plain_with_options(filter, crate::RedactionOptions::default())
+}
+
+/// Try to initialize tracing with AFDATA YAML output.
+pub fn try_init_yaml(filter: tracing_subscriber::EnvFilter) -> Result<(), TryInitError> {
+    try_init_yaml_with_options(filter, crate::RedactionOptions::default())
+}
+
+/// Try to initialize tracing with AFDATA JSON output and explicit redaction options.
+pub fn try_init_json_with_options(
+    filter: tracing_subscriber::EnvFilter,
+    redaction: crate::RedactionOptions,
+) -> Result<(), TryInitError> {
+    try_init_with_options(filter, LogFormat::Json, redaction)
+}
+
+/// Try to initialize tracing with AFDATA plain/logfmt output and explicit redaction options.
+pub fn try_init_plain_with_options(
+    filter: tracing_subscriber::EnvFilter,
+    redaction: crate::RedactionOptions,
+) -> Result<(), TryInitError> {
+    try_init_with_options(filter, LogFormat::Plain, redaction)
+}
+
+/// Try to initialize tracing with AFDATA YAML output and explicit redaction options.
+pub fn try_init_yaml_with_options(
+    filter: tracing_subscriber::EnvFilter,
+    redaction: crate::RedactionOptions,
+) -> Result<(), TryInitError> {
+    try_init_with_options(filter, LogFormat::Yaml, redaction)
+}
+
+/// Try to initialize tracing with AFDATA output and explicit format/redaction options.
+pub fn try_init_with_options(
+    filter: tracing_subscriber::EnvFilter,
+    format: LogFormat,
+    redaction: crate::RedactionOptions,
+) -> Result<(), TryInitError> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let _ = tracing_subscriber::registry()
+    tracing_subscriber::registry()
         .with(filter)
-        .with(AfdataLayer { format })
-        .try_init();
+        .with(AfdataLayer { format, redaction })
+        .try_init()
+}
+
+impl AfdataLayer {
+    fn output_options(&self) -> crate::OutputOptions {
+        crate::OutputOptions {
+            redaction: self.redaction.clone(),
+            style: crate::OutputStyle::Readable,
+        }
+    }
+
+    fn format_value(&self, value: &serde_json::Value) -> String {
+        let options = self.output_options();
+        match self.format {
+            LogFormat::Json => crate::output_json_with_options(value, &options),
+            LogFormat::Plain => crate::output_plain_with_options(value, &options),
+            LogFormat::Yaml => crate::output_yaml_with_options(value, &options),
+        }
+    }
 }
 
 /// Stored in span extensions to carry structured fields.
@@ -105,8 +205,7 @@ where
         // Build output object with AFDATA field names
         let mut map = serde_json::Map::with_capacity(4 + visitor.fields.len());
 
-        // Default code from level; can be overridden by explicit code = "..." in the macro
-        let default_code = match *meta.level() {
+        let level = match *meta.level() {
             Level::TRACE => "trace",
             Level::DEBUG => "debug",
             Level::INFO => "info",
@@ -124,11 +223,6 @@ where
             map.insert("message".into(), serde_json::Value::String(msg));
         }
 
-        map.insert(
-            "target".into(),
-            serde_json::Value::String(meta.target().to_string()),
-        );
-
         // Flatten span fields from root to leaf (child overrides parent on collision)
         if let Some(scope) = ctx.event_scope(event) {
             for span in scope.from_root() {
@@ -141,29 +235,21 @@ where
             }
         }
 
-        // Append all event-level structured fields (override span fields on collision)
-        let mut has_code = false;
+        map.insert("code".into(), serde_json::Value::String("log".to_string()));
+        map.insert("level".into(), serde_json::Value::String(level.to_string()));
+
+        // Append event-level structured fields, except protocol code is always "log".
         for (k, v) in visitor.fields {
             if k == "code" {
-                has_code = true;
+                continue;
             }
             map.insert(k, v);
-        }
-        if !has_code {
-            map.insert(
-                "code".into(),
-                serde_json::Value::String(default_code.to_string()),
-            );
         }
 
         let value = serde_json::Value::Object(map);
 
-        // Format using the library's own output functions
-        let line = match self.format {
-            LogFormat::Json => crate::output_json(&value),
-            LogFormat::Plain => crate::output_plain(&value),
-            LogFormat::Yaml => crate::output_yaml(&value),
-        };
+        // Format using the library's own output functions.
+        let line = self.format_value(&value);
 
         let mut out = io::stdout().lock();
         let _ = out.write_all(line.as_bytes());
@@ -247,6 +333,7 @@ impl Visit for JsonVisitor {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use serde_json::json;
 
     // The tracing layer redacts log fields the same way every AFDATA surface
@@ -287,5 +374,63 @@ mod tests {
             "db_password_secret": 1234,
         }));
         assert!(line.contains("\"db_password_secret\":\"***\""), "{line}");
+    }
+
+    #[test]
+    fn legacy_secret_names_are_redacted_when_layer_has_options() {
+        let value = json!({
+            "timestamp_epoch_ms": 1,
+            "message": "authorization appears in message but is not name-redacted",
+            "code": "log",
+            "level": "info",
+            "authorization": "Bearer legacy",
+            "request_url": "https://example.test/path?authorization=legacy&ok=1",
+        });
+        let redaction = crate::RedactionOptions {
+            secret_names: vec!["authorization".to_string()],
+            ..crate::RedactionOptions::default()
+        };
+
+        for format in [LogFormat::Json, LogFormat::Plain, LogFormat::Yaml] {
+            let layer = AfdataLayer {
+                format,
+                redaction: redaction.clone(),
+            };
+            let line = layer.format_value(&value);
+            assert!(line.contains("***"), "{line}");
+            assert!(
+                !line.contains("Bearer legacy"),
+                "legacy field value should be redacted: {line}"
+            );
+            assert!(
+                !line.contains("authorization=legacy"),
+                "legacy URL query parameter should be redacted: {line}"
+            );
+            assert!(
+                line.contains("authorization appears in message"),
+                "message is free-form and should remain readable: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_secret_names_are_visible_without_layer_options() {
+        let value = json!({
+            "timestamp_epoch_ms": 1,
+            "message": "ready",
+            "code": "log",
+            "level": "info",
+            "authorization": "Bearer visible",
+        });
+        let layer = AfdataLayer {
+            format: LogFormat::Json,
+            redaction: crate::RedactionOptions::default(),
+        };
+
+        let line = layer.format_value(&value);
+        assert!(
+            line.contains("\"authorization\":\"Bearer visible\""),
+            "{line}"
+        );
     }
 }

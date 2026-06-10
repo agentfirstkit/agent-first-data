@@ -26,9 +26,10 @@ Agent-First Data has three parts:
 | **Timestamps** | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` | `created_at_epoch_ms: 1707868800000` → `created_at: 2024-02-14T...` |
 | **Size** | `_bytes` (output), `_size` (config input) | `file_size_bytes: 5242880` → `file_size: 5.0MB` |
 | **Currency** | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` | `price_usd_cents: 999` → `price: $9.99` |
+| **String formats** | `_bcp47`, `_utc_offset` | `language_bcp47: "zh-CN"`, `timezone_utc_offset: "+08:00"` |
 | **Other** | `_percent`, `_secret`, `_url` | `cpu_percent: 85` → `cpu: 85%` |
 
-**In default YAML and Plain:** suffixes are stripped from keys (value already encodes the unit) and values are formatted for readability. JSON preserves original keys and raw values. (`_url` is not stripped — the value stays a usable URL.)
+**In default YAML and Plain:** formatting suffixes are stripped from keys (value already encodes the unit) and values are formatted for readability. JSON preserves original keys and raw values. (`_url`, `_bcp47`, and `_utc_offset` are not stripped.)
 
 **Secret protection:** All three formats automatically redact `_secret` fields and scrub secret components (userinfo password, secret-named query params) inside `_url` field values.
 
@@ -73,6 +74,21 @@ Applies to all structured data: JSON, YAML, TOML, CLI arguments, environment var
 
 > **Precision note**: this is a property of the host's JSON number parsing, not of AFDATA. Any integer beyond 2⁵³ (≈ 9×10¹⁵) — most commonly `_epoch_ns` (~1.7×10¹⁸ near the current era), but also large `_msats`/`_sats` balances — loses precision wherever JSON numbers are parsed as IEEE-754 doubles. This affects **JavaScript** (`JSON.parse` always yields a double; use `BigInt` or a custom parser) and **Go** with the default `json.Unmarshal` into `any` (yields `float64`; decode with `json.Decoder` + `UseNumber()` to preserve exact integers — the library formats `json.Number` losslessly). Rust (`serde_json` i64/u64) and Python (arbitrary-precision `int`) preserve such integers exactly. When exact large integers must survive every language boundary, transport them as strings.
 
+### Strict string formats
+
+These suffixes identify strings with a strict external format. They are semantic field-name conventions, not YAML/Plain formatting suffixes: readable output keeps the full key and raw string value.
+
+| Suffix | Format | Example |
+|:-------|:-------|:--------|
+| `_bcp47` | BCP-47 language tag string | `language_bcp47: "zh-CN"` |
+| `_utc_offset` | fixed UTC offset string | `timezone_utc_offset: "+08:00"` |
+
+`*_bcp47` names a field whose string value is a BCP-47 language tag, such as `language_bcp47: "zh-CN"` or `content_language_bcp47: "en-US"`. AFDATA does not implement the full BCP-47 registry; tools may validate tags when they need stronger guarantees.
+
+`*_utc_offset` names a fixed offset from UTC. Canonical persisted and structured output values are `"UTC"` or `±HH:MM`, with `HH` in `00..23` and `MM` in `00..59`; zero offsets normalize to `"UTC"`. Examples: `timezone_utc_offset: "+08:00"`, `report_utc_offset: "-05:00"`. This is intentionally not an IANA timezone name: do not use `Asia/Shanghai`, `America/Los_Angeles`, DST rules, or timezone databases in this field. If a tool needs IANA timezone support, use a separate explicit field such as `timezone_name`.
+
+Tools should avoid magic string sentinels such as `"auto"` inside strict-format fields. If a tool needs auto/default behavior, define that in the tool's own config semantics rather than as an AFDATA-wide rule.
+
 ### Size
 
 | Suffix | Value type | Usage | Example |
@@ -97,7 +113,7 @@ Programs parse `_size` at load time using `parse_size()` and convert to bytes fo
 | `G` | 1024³ | `"2G"` → 2147483648 |
 | `T` | 1024⁴ | `"1T"` → 1099511627776 |
 
-Case-insensitive. Supports decimals (`"1.5M"`). Returns null for invalid, negative, or overflow/unrepresentable input.
+Case-insensitive. Supports decimals (`"1.5M"`). Returns null for invalid, negative, or overflow/unrepresentable input. To keep the helper byte-identical across all four ports, parsed sizes above JSON's safe integer ceiling (`2^53 - 1`) are rejected.
 
 **Example config file:**
 
@@ -142,10 +158,10 @@ Stablecoins follow the same `_{code}_cents` pattern: `deposit_usdt_cents: 1000`,
 
 | Suffix | Handling | Example |
 |:-------|:---------|:--------|
-| `_secret` | redact scalar values to `***`; for object/array values, recursively redact nested secrets | `api_key_secret: "sk-or-v1-abc..."` |
+| `_secret` | redact the entire value/subtree to `***` | `api_key_secret: "sk-or-v1-abc..."` |
 | `_url` | redact secret components **inside** the URL value (userinfo password, secret-named query params); the rest of the URL is preserved | `callback_url: "https://h/cb?code_secret=..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Scalar `_secret` values become `***`; object/array `_secret` values are traversed and nested `_secret` fields are redacted. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `OutputOptions.redaction.secret_names` (or `RedactionOptions.secret_names` in redaction helpers) at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction; suffix stripping is still controlled by AFDATA suffixes in the default readable style. Callers that need schema-preserving YAML/plain rendering can use `OutputOptions` with the `Raw` output style. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time. `RedactionStrict` is available when the entire `_secret` or listed secret subtree must be replaced with `***`.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Any `_secret` value — scalar, object, or array — becomes the scalar string `***`, so a secret-marked container never leaks through JSON, YAML, Plain, or collision fallback. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `OutputOptions.redaction.secret_names` (or `RedactionOptions.secret_names` in redaction helpers) at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction; formatting suffix stripping is still controlled by AFDATA suffixes in the default readable style. Callers that need schema-preserving YAML/plain rendering can use `OutputOptions` with the `Raw` output style. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time.
 
 #### Secrets inside URLs
 
@@ -155,13 +171,15 @@ Key-based redaction cannot reach a secret embedded **inside** a URL string — `
 
 The same secret decision as everywhere else applies, **to the URL's query-parameter names**: a parameter is redacted iff its (form-decoded) name ends in `_secret`/`_SECRET`, or matches an exact entry in `secret_names`. No built-in list of "sensitive" parameter names exists — a legacy parameter such as `?token=` is redacted only when the caller passes `secret_names: ["token"]`, exactly as for legacy field names. Consumers that own the URL should instead rename the parameter to follow the suffix convention (`?token_secret=`).
 
+> **⚠️ Common credential-bearing parameters are NOT redacted by default.** The userinfo password (`user:pass@host`) is always scrubbed structurally, but query parameters are matched by name only. Conventionally-named secret parameters such as `?access_token=`, `?api_key=`, `?code=`, `?id_token=`, `?sig=`, or `?sessionid=` pass through **unchanged** unless their name ends in `_secret` or is listed in `secret_names`. A `_url` field does not make an arbitrary URL safe to log — it scrubs the userinfo password and suffix-named/listed parameters, nothing more. When you own the URL, rename sensitive parameters to the `_secret` suffix (`?access_token_secret=`); when you do not, pass the parameter names via `secret_names`.
+
 Independently of the parameter convention, the **userinfo password** component is always redacted as a structural rule: `scheme://user:pass@host` → `scheme://user:***@host` (the username is preserved; a userinfo with no `:` is left untouched).
 
-**Input must be a single URL.** A string is processed iff it begins with a scheme (`^[A-Za-z][A-Za-z0-9+.-]*://`) and contains no whitespace; any other string — including a URL embedded in surrounding prose — is returned unchanged. Callers that build messages around a URL redact the URL **before** interpolating it: `format("connect {}: {}", redact_url_secrets(url), err)`.
+**Input must be a single URL.** The standalone helper processes a string iff it begins with a scheme (`^[A-Za-z][A-Za-z0-9+.-]*://`) and contains no whitespace; any other string — including a URL embedded in surrounding prose — is returned unchanged. Callers that build messages around a URL redact the URL **before** interpolating it: `format("connect {}: {}", redact_url_secrets(url), err)`.
 
-**Surgical replacement.** Only the secret spans (a secret parameter's value bytes after `=` up to the next `&`/`#`/end; the password bytes after the first `:` up to `@`) are replaced with the literal `***`. Every other byte — scheme, host, path, fragment, benign parameters, percent-encoding, ordering — is preserved exactly. Implementations parse with their URL library but must not re-serialize the whole URL (normalization differs across libraries and would break cross-language parity); output equals input outside the redacted spans.
+**Surgical replacement.** Only the secret spans (a secret parameter's value bytes after `=` up to the next `&`/`#`/end; the password bytes after the first `:` in userinfo up to the authority's last `@`) are replaced with the literal `***`. Every other byte — scheme, host, path, fragment, benign parameters, percent-encoding, ordering — is preserved exactly. Implementations parse with their URL library but must not re-serialize the whole URL (normalization differs across libraries and would break cross-language parity); output equals input outside the redacted spans.
 
-**Automatic application via the `_url` suffix.** Redaction (default policy and `RedactionStrict`) applies `redact_url_secrets` to the string value of any field whose name ends in `_url`/`_URL` — and **only** those fields. No payload string is scanned: the trigger is the field name, exactly like `_secret`. So `final_url` and `callback_url` are scrubbed automatically, while a free-form `error` or `message` field is never touched even if it contains a URL (redact such a URL with the helper before interpolating it). `RedactionNone` disables it along with all other redaction; `RedactionTraceOnly` scopes it to the `trace` subtree. A `_url` value that is not a single URL is left unchanged by the helper's own no-op rule. The `secret_names` list applies to query-parameter names inside `_url` values as well. (A field carrying both meanings, e.g. `token_url_secret`, ends in `_secret` and so its whole value is redacted to `***`.)
+**Automatic application via the `_url` suffix.** Redaction applies `redact_url_secrets` to the string value of any field whose name ends in `_url`/`_URL` — and **only** those fields. No payload string is scanned: the trigger is the field name, exactly like `_secret`. So `final_url` and `callback_url` are scrubbed automatically, while a free-form `error` or `message` field is never touched even if it contains a URL (redact such a URL with the helper before interpolating it). `RedactionNone` disables it along with all other redaction; `RedactionTraceOnly` scopes it to the `trace` subtree. A `_url` value with surrounding whitespace is trimmed before URL redaction. A `_url` value that cannot be parsed as a clean scheme-prefixed URL is replaced with `***` rather than silently passing through a likely malformed secret-bearing value when it carries either internal whitespace or an `@` credential sigil — for example a schemeless connection string `user:pass@host:5432/db`, which has no scheme anchor for the surgical span logic. A schemeless, `@`-free, whitespace-free value (e.g. a relative URL `/cb?page=2`) still passes through unchanged. The `secret_names` list applies to query-parameter names inside `_url` values as well. (A field carrying both meanings, e.g. `token_url_secret`, ends in `_secret` and so its whole value is redacted to `***`.)
 
 ### No suffix needed
 
@@ -203,12 +221,12 @@ myapp --cache-ttl-s 3600 --api-key-secret sk-xxx --max-size-bytes 1048576
 
 ```yaml
 ---
-code: "log"
-event: "startup"
 args:
   api_key: "***"
   cache_ttl: "3600s"
   max_size: "1.0MB"
+code: "log"
+event: "startup"
 ```
 
 The flag name, the JSON field name, and the formatted output all tell the same story. No mapping table, no `--help` prose explaining "timeout is in milliseconds" — the suffix is the documentation.
@@ -368,26 +386,26 @@ Default is tool-defined. Interactive CLIs default to `yaml`, scripting/logging c
 
 JSON is the canonical format. YAML and plain are derived from it.
 
-**All CLI output formats automatically redact `_secret` fields.** Matching recognizes `_secret` and `_SECRET` only. Scalar `_secret` values are replaced with `***`; object/array values are traversed and nested `_secret` fields are redacted. Legacy field names can be protected by passing `OutputOptions.redaction.secret_names` at serialization time; this opt-in list is exact field-name equality. The `Raw` output style disables YAML/plain suffix stripping while keeping the selected redaction policy.
+**All CLI output formats automatically redact `_secret` fields.** Matching recognizes `_secret` and `_SECRET` only. Any `_secret` value — scalar, object, or array — is replaced with `***`. Legacy field names can be protected by passing `OutputOptions.redaction.secret_names` at serialization time; this opt-in list is exact field-name equality. The `Raw` output style disables YAML/plain formatting suffix stripping while keeping the selected redaction policy.
 
 **Format characteristics:**
 - **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
-- **YAML** — multi-line, human-readable, keys stripped, values formatted, secrets redacted by default
-- **Plain** — single-line logfmt, human-readable, keys stripped, values formatted, secrets redacted by default
+- **YAML** — multi-line, human-readable, formatting suffixes stripped, values formatted, secrets redacted by default
+- **Plain** — single-line logfmt, human-readable, formatting suffixes stripped, values formatted, secrets redacted by default
 
 ### yaml
 
-Each JSON line becomes a YAML document, separated by `---`. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float). In the default readable style, **suffixes are stripped from keys** (value already encodes the unit). **Secrets automatically redacted.**
+Each JSON line becomes a YAML document, separated by `---`. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float). In the default readable style, **formatting suffixes are stripped from keys** (value already encodes the unit). **Secrets automatically redacted.**
 
 ```yaml
 ---
+args:
+  config_path: "config.yml"
 code: "log"
-event: "startup"
 config:
   api_key: "***"
   dns_ttl: "3600s"
-args:
-  config_path: "config.yml"
+event: "startup"
 ---
 code: "ok"
 result:
@@ -400,15 +418,15 @@ trace:
 
 ### plain
 
-Single-line [logfmt](https://brandur.org/logfmt) style. In the default readable style, **suffixes are stripped from keys.** **Secrets automatically redacted.**
+Single-line [logfmt](https://brandur.org/logfmt) style. In the default readable style, **formatting suffixes are stripped from keys.** **Secrets automatically redacted.**
 
 - Nested keys use dot notation: `trace.duration=1.28s`
-- Values containing whitespace, `=`, `"`, or `\` are quoted; `\`, `"`, newline, carriage return, and tab are escaped so each record stays one physical line
+- Values containing ASCII space, tab, newline, carriage return, form feed, vertical tab, NBSP, `=`, `"`, or `\` are quoted; `\`, `"`, newline, carriage return, tab, form feed, and vertical tab are escaped so each record stays one physical line
 - Arrays are comma-joined: `fields=email,age`
 - Null values are empty: `RUST_LOG=`
 
 ```
-args.config_path=config.yml code=log event=startup config.api_key=*** config.dns_ttl=3600s
+args.config_path=config.yml code=log config.api_key=*** config.dns_ttl=3600s event=startup
 code=ok result.hash=abc123 result.size=446.1KB trace.cost=2056msats trace.duration=1.28s
 ```
 
@@ -416,17 +434,19 @@ code=ok result.hash=abc123 result.size=446.1KB trace.cost=2056msats trace.durati
 
 YAML and plain apply two transformations:
 
-**1. Key stripping** — remove the suffix from the key name. The formatted value already encodes the unit, so the suffix is redundant for human readers.
+**1. Key stripping** — remove the recognized formatting suffix from the key name. The formatted value already encodes the unit, so the suffix is redundant for human readers.
 
 **Algorithm:** match the longest known suffix from the list below. Each suffix is recognized in two forms: lowercase (`_secret`) and uppercase (`_SECRET`). No other casing is matched. Remove the matched suffix from the key. If no suffix matches, keep the key unchanged. Match order (longest first):
 
 1. `_epoch_ms`, `_epoch_s`, `_epoch_ns` (compound timestamp suffixes)
-2. `_usd_cents`, `_eur_cents`, `_{code}_cents` (compound currency suffixes)
+2. `_usd_cents`, `_eur_cents`, `_{code}_cents` (compound currency suffixes; `code` is 3-4 ASCII letters)
 3. `_rfc3339`, `_minutes`, `_hours`, `_days` (multi-char suffixes)
 4. `_msats`, `_sats`, `_bytes`, `_percent`, `_secret` (single-unit suffixes)
 5. `_btc`, `_jpy`, `_ns`, `_us`, `_ms`, `_s` (short suffixes, matched last to avoid false positives)
 
-**Collision:** if two keys in the same object produce the same stripped key (e.g., `download_bytes` and `download_size` both → `download`), revert both to their original key AND raw value (no formatting).
+Strict string suffixes (`_bcp47`, `_utc_offset`) are not key-stripping suffixes. They keep the field's format contract visible in readable output.
+
+**Collision:** if two keys in the same object produce the same stripped key (e.g., `response_ms` and `response_bytes` both → `response`), revert both to their original key AND raw value (no formatting). Redaction happens before this step, so collision fallback can never restore a secret value.
 
 | JSON key | YAML/Plain key | Why |
 |:---------|:---------------|:----|
@@ -441,13 +461,15 @@ YAML and plain apply two transformations:
 | `DATABASE_URL_SECRET` | `DATABASE_URL` | uppercase `_SECRET` matched |
 | `CACHE_TTL_S` | `CACHE_TTL` | uppercase `_S` matched |
 | `buffer_size` | `buffer_size` | `_size` passes through, key unchanged |
+| `language_bcp47` | `language_bcp47` | strict string format, key unchanged |
+| `timezone_utc_offset` | `timezone_utc_offset` | fixed-offset string, key unchanged |
 | `config_path` | `config_path` | no suffix, unchanged |
 | `user_id` | `user_id` | no suffix, unchanged |
 
 **2. Value formatting** — transform the value for human readability. Same suffix matching as key stripping (lowercase or uppercase only):
 
 - `_ns`, `_us`, `_ms`, `_s` → append unit (`450000ns`, `830μs`, `42ms`, `3600s`)
-- `_ms` ≥ 1000 → convert to seconds (`1280` → `1.28s`)
+- `_ms` with absolute value ≥ 1000 → convert to seconds (`1280` → `1.28s`, `-1500` → `-1.5s`)
 - `_minutes`, `_hours`, `_days` → append unit (`30 minutes`, `24 hours`)
 - `_epoch_ms` / `_epoch_s` / `_epoch_ns` → RFC 3339 (`2024-02-14T00:00:00.000Z`), negative values produce pre-1970 dates
 - `_rfc3339` → pass through
@@ -459,13 +481,17 @@ YAML and plain apply two transformations:
 - `_btc` → append unit (`0.5 BTC`)
 - `_usd_cents` → dollars (`999` → `$9.99`), negative falls through
 - `_eur_cents` → euros (`850` → `€8.50`), negative falls through
-- other `_{code}_cents` → major unit with code (`15050` → `150.50 THB`), negative falls through
+- other `_{code}_cents` → major unit with code (`15050` → `150.50 THB`), where `code` is 3-4 ASCII letters; negative falls through
 - `_jpy` → yen (`1500` → `¥1,500`), negative falls through
-- `_secret` → `***`
+- `_secret` → `***` (already applied by the redaction phase; the formatter does not perform a second, divergent redaction pass)
+
+Strict string fields such as `_bcp47` and `_utc_offset` are not value-formatting suffixes; their string values pass through unchanged.
+
+A `_url` field value is preserved byte-for-byte in YAML and plain except for the redacted secret spans (userinfo password, `_secret`-suffixed/`secret_names` query parameters): the `_url` key is not stripped, and formatting suffixes that appear *inside* the URL — `?timeout_ms=5000`, `?size_bytes=1048576` — are **not** reformatted (`5s`, `1.0MB`) or stripped, because the URL must round-trip to its server exactly. URL key-stripping/value-formatting applies to JSON object keys, never to query parameters inside a string value. This is pinned by the `url_params_redacted_not_reformatted` case in [`spec/fixtures/output_formats.json`](fixtures/output_formats.json).
 
 **Type constraints**: `_bytes` and `_epoch_*` require integer values. `_usd_cents`, `_eur_cents`, `_jpy`, and `_{code}_cents` require non-negative integers. Duration, Bitcoin, and `_percent` suffixes accept any number. When the value type doesn't match, formatting falls through to the raw value with the original key preserved. An **integral-valued float** counts as an integer for the integer-required suffixes (`3.0` is treated as `3`): a JSON number's value, not its lexical form, decides, because JavaScript cannot distinguish `3` from `3.0` after parsing.
 
-**Number rendering**: a number is rendered for YAML/plain by its shortest round-trip decimal, and an integral-valued float drops its trailing `.0` — `3.0` → `3`, `0.5` → `0.5`. This keeps the four implementations byte-identical. Integers beyond 2⁵³ are preserved exactly by Rust, Go, and Python; JavaScript loses precision on them (see the `_epoch_ns` precision note above).
+**Number rendering**: a number is rendered for YAML/plain by the shared fixture-defined decimal form: integral-valued floats drop their trailing `.0` (`3.0` → `3`), exponent markers use lowercase `e`, and exponent signs/leading zeroes are normalized (`1e-07` → `1e-7`). Integers beyond 2⁵³ are preserved exactly by Rust, Go, and Python; JavaScript loses precision on them (see the `_epoch_ns` precision note above).
 
 ### Key ordering
 
@@ -524,8 +550,9 @@ Recommended enforcement:
 | tool-defined | Status / errors / progress |
 
 Minimum logging envelope across language integrations:
-- Required fields: `timestamp_epoch_ms`, `message`, `code`
-- Optional common field: `target`
+- Required fields: `timestamp_epoch_ms`, `message`, `code`, `level`
+- `code` is always `"log"` so log events never collide with terminal protocol codes such as `"error"`
+- `level` carries the logging level (`debug`, `info`, `warn`, `error`)
 - Additional tool/span fields are free-form and additive
 
 Log fields are redacted **by field name** at emit time — the same `_secret`/`_url` rule as all other output, applied by the formatter, not by scanning rendered values. Emit secrets as named fields (`api_key_secret`) so the rule can see them. Logging a whole object pre-rendered to a single string (e.g. a language's debug/inspect form) defeats redaction, because the inner field names are no longer visible: build a structured value and redact it before logging instead.
@@ -754,28 +781,28 @@ Field names encode semantics:
 {"code":"log","event":"startup","config":{"api_key_secret":"***","endpoint":"https://storage.example.com","timeout_s":30,"max_file_size_bytes":10737418240},"args":{"input_path":"/data/backup.tar.gz","compression_level":9}}
 ```
 
-**YAML** (structured, keys stripped, for human inspection):
+**YAML** (structured, formatting suffixes stripped, for human inspection):
 ```yaml
 ---
-code: "log"
-event: "startup"
 args:
   compression_level: 9
   input_path: "/data/backup.tar.gz"
+code: "log"
 config:
   api_key: "***"
   endpoint: "https://storage.example.com"
   max_file_size: "10.0GB"
   timeout: "30s"
+event: "startup"
 ```
 
-**Plain** (single-line logfmt, keys stripped, for compact scanning):
+**Plain** (single-line logfmt, formatting suffixes stripped, for compact scanning):
 ```
-args.compression_level=9 args.input_path=/data/backup.tar.gz code=log event=startup config.api_key=*** config.endpoint=https://storage.example.com config.max_file_size=10.0GB config.timeout=30s
+args.compression_level=9 args.input_path=/data/backup.tar.gz code=log config.api_key=*** config.endpoint=https://storage.example.com config.max_file_size=10.0GB config.timeout=30s event=startup
 ```
 
 Note:
-- **Key stripping**: `api_key_secret` → `api_key`, `timeout_s` → `timeout`, `max_file_size_bytes` → `max_file_size`
+- **Key stripping**: formatting suffixes such as `api_key_secret` → `api_key`, `timeout_s` → `timeout`, `max_file_size_bytes` → `max_file_size`
 - **Secret protection**: `api_key_secret` redacted in all three formats
 - **Suffix formatting**: `_bytes` → `10.0GB`, `_s` → `30s` in YAML and Plain
 
@@ -805,7 +832,7 @@ code=progress current=3 message="uploading chunks" total=10 trace.duration=5.42s
 ## Final Result
 
 ```json
-{"code": "ok", "result": {"url": "https://storage.example.com/backup.tar.gz", "size_bytes": 10485760, "checksum": "sha256:abc123...", "uploaded_at_epoch_ms": 1738886400000}, "trace": {"duration_ms": 15300, "chunks": 10, "retries": 2}}
+{"code": "ok", "result": {"backup_url": "https://storage.example.com/backup.tar.gz", "size_bytes": 10485760, "checksum": "sha256:abc123...", "uploaded_at_epoch_ms": 1738886400000}, "trace": {"duration_ms": 15300, "chunks": 10, "retries": 2}}
 ```
 
 YAML:
@@ -813,10 +840,10 @@ YAML:
 ---
 code: "ok"
 result:
+  backup_url: "https://storage.example.com/backup.tar.gz"
   checksum: "sha256:abc123..."
   size: "10.0MB"
   uploaded_at: "2025-02-07T00:00:00.000Z"
-  url: "https://storage.example.com/backup.tar.gz"
 trace:
   chunks: 10
   duration: "15.3s"
@@ -825,7 +852,7 @@ trace:
 
 Plain:
 ```
-code=ok result.checksum=sha256:abc123... result.size=10.0MB result.uploaded_at=2025-02-07T00:00:00.000Z result.url=https://storage.example.com/backup.tar.gz trace.chunks=10 trace.duration=15.3s trace.retries=2
+code=ok result.backup_url=https://storage.example.com/backup.tar.gz result.checksum=sha256:abc123... result.size=10.0MB result.uploaded_at=2025-02-07T00:00:00.000Z trace.chunks=10 trace.duration=15.3s trace.retries=2
 ```
 
 ## What This Demonstrates
@@ -834,8 +861,8 @@ code=ok result.checksum=sha256:abc123... result.size=10.0MB result.uploaded_at=2
 
 2. **Part 2 (Output Processing)**: Three formats for different needs
    - JSON: single-line, original keys, raw values, for programs and logs
-   - YAML: multi-line, keys stripped, values formatted, for human inspection
-   - Plain: single-line logfmt, keys stripped, values formatted, for compact scanning
+   - YAML: multi-line, formatting suffixes stripped, values formatted, for human inspection
+   - Plain: single-line logfmt, formatting suffixes stripped, values formatted, for compact scanning
    - All formats protect secrets automatically
 
 3. **Part 3 (Protocol)**: Consistent structure across all output — `code` identifies message type, `trace` provides execution context, other fields flexible

@@ -18,14 +18,15 @@ export {
   outputYamlWithOptions,
   outputPlain,
   outputPlainWithOptions,
-  internalRedactSecrets,
-  internalRedactSecretsWithOptions,
+  redactSecretsInPlace,
+  redactSecretsInPlaceWithOptions,
   redactedValue,
   redactedValueWith,
   redactedValueWithOptions,
   redactUrlSecrets,
   redactUrlSecretsWithOptions,
   parseSize,
+  normalizeUtcOffset,
 } from "./format.js";
 export { log, span, initJson, initPlain, initYaml } from "./afdata_logging.js";
 export {

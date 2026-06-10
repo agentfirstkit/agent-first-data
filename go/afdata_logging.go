@@ -2,7 +2,6 @@ package afdata
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -23,15 +22,16 @@ const (
 
 // AfdataHandler implements slog.Handler, outputting AFDATA-compliant log lines.
 //
-// Each log line contains: timestamp_epoch_ms, message, code, plus
-// any span-level (WithAttrs) and event-level fields.
+// Each log line contains timestamp_epoch_ms, message, code="log", level,
+// plus any span-level (WithAttrs) and event-level fields.
 // Output is formatted via the library's own OutputJson/OutputPlain/OutputYaml.
 type AfdataHandler struct {
-	out    io.Writer
-	mu     *sync.Mutex
-	attrs  []slog.Attr
-	format LogFormat
-	level  slog.Level
+	out       io.Writer
+	mu        *sync.Mutex
+	attrs     []slog.Attr
+	format    LogFormat
+	level     slog.Level
+	redaction RedactionOptions
 }
 
 // NewAfdataHandler creates a new AFDATA handler writing to w with the given format.
@@ -41,7 +41,18 @@ func NewAfdataHandler(w io.Writer, format LogFormat) *AfdataHandler {
 
 // NewAfdataHandlerWithLevel creates a new AFDATA handler with a minimum enabled level.
 func NewAfdataHandlerWithLevel(w io.Writer, format LogFormat, level slog.Level) *AfdataHandler {
-	return &AfdataHandler{out: w, mu: &sync.Mutex{}, format: format, level: level}
+	return NewAfdataHandlerWithOptions(w, format, level, RedactionOptions{})
+}
+
+// NewAfdataHandlerWithOptions creates a new AFDATA handler with explicit redaction options.
+func NewAfdataHandlerWithOptions(w io.Writer, format LogFormat, level slog.Level, redaction RedactionOptions) *AfdataHandler {
+	return &AfdataHandler{
+		out:       w,
+		mu:        &sync.Mutex{},
+		format:    format,
+		level:     level,
+		redaction: cloneRedactionOptions(redaction),
+	}
 }
 
 // InitJson sets up the default slog logger with AFDATA JSON output to stdout.
@@ -51,7 +62,17 @@ func InitJson() {
 
 // InitJsonLevel sets up the default slog logger with AFDATA JSON output and minimum level.
 func InitJsonLevel(level slog.Level) {
-	slog.SetDefault(slog.New(NewAfdataHandlerWithLevel(os.Stdout, FormatJson, level)))
+	InitJsonLevelWithOptions(level, RedactionOptions{})
+}
+
+// InitJsonWithOptions sets up the default slog logger with AFDATA JSON output and redaction options.
+func InitJsonWithOptions(redaction RedactionOptions) {
+	InitJsonLevelWithOptions(slog.LevelInfo, redaction)
+}
+
+// InitJsonLevelWithOptions sets up the default slog logger with AFDATA JSON output, level, and redaction options.
+func InitJsonLevelWithOptions(level slog.Level, redaction RedactionOptions) {
+	slog.SetDefault(slog.New(NewAfdataHandlerWithOptions(os.Stdout, FormatJson, level, redaction)))
 }
 
 // InitPlain sets up the default slog logger with AFDATA plain/logfmt output to stdout.
@@ -61,7 +82,17 @@ func InitPlain() {
 
 // InitPlainLevel sets up the default slog logger with AFDATA plain output and minimum level.
 func InitPlainLevel(level slog.Level) {
-	slog.SetDefault(slog.New(NewAfdataHandlerWithLevel(os.Stdout, FormatPlain, level)))
+	InitPlainLevelWithOptions(level, RedactionOptions{})
+}
+
+// InitPlainWithOptions sets up the default slog logger with AFDATA plain output and redaction options.
+func InitPlainWithOptions(redaction RedactionOptions) {
+	InitPlainLevelWithOptions(slog.LevelInfo, redaction)
+}
+
+// InitPlainLevelWithOptions sets up the default slog logger with AFDATA plain output, level, and redaction options.
+func InitPlainLevelWithOptions(level slog.Level, redaction RedactionOptions) {
+	slog.SetDefault(slog.New(NewAfdataHandlerWithOptions(os.Stdout, FormatPlain, level, redaction)))
 }
 
 // InitYaml sets up the default slog logger with AFDATA YAML output to stdout.
@@ -71,7 +102,17 @@ func InitYaml() {
 
 // InitYamlLevel sets up the default slog logger with AFDATA YAML output and minimum level.
 func InitYamlLevel(level slog.Level) {
-	slog.SetDefault(slog.New(NewAfdataHandlerWithLevel(os.Stdout, FormatYaml, level)))
+	InitYamlLevelWithOptions(level, RedactionOptions{})
+}
+
+// InitYamlWithOptions sets up the default slog logger with AFDATA YAML output and redaction options.
+func InitYamlWithOptions(redaction RedactionOptions) {
+	InitYamlLevelWithOptions(slog.LevelInfo, redaction)
+}
+
+// InitYamlLevelWithOptions sets up the default slog logger with AFDATA YAML output, level, and redaction options.
+func InitYamlLevelWithOptions(level slog.Level, redaction RedactionOptions) {
+	slog.SetDefault(slog.New(NewAfdataHandlerWithOptions(os.Stdout, FormatYaml, level, redaction)))
 }
 
 // Enabled returns whether the level is enabled for this handler.
@@ -85,37 +126,33 @@ func (h *AfdataHandler) Handle(_ context.Context, r slog.Record) error {
 
 	m["timestamp_epoch_ms"] = r.Time.UnixMilli()
 	m["message"] = r.Message
-
-	defaultCode := levelToCode(r.Level)
+	m["code"] = "log"
+	m["level"] = levelName(r.Level)
 
 	// Span-level fields (from WithAttrs)
 	for _, a := range h.attrs {
 		m[a.Key] = attrValue(a.Value)
 	}
 
-	// Event-level fields (override span fields on collision)
-	hasCode := false
+	// Event-level fields override span fields, except protocol code is always "log".
 	r.Attrs(func(a slog.Attr) bool {
 		if a.Key == "code" {
-			hasCode = true
+			return true
 		}
 		m[a.Key] = attrValue(a.Value)
 		return true
 	})
 
-	if !hasCode {
-		m["code"] = defaultCode
-	}
-
 	// Format using the library's own output functions
 	var line string
+	options := OutputOptions{Redaction: h.redaction}
 	switch h.format {
 	case FormatPlain:
-		line = OutputPlain(m)
+		line = OutputPlainWithOptions(m, options)
 	case FormatYaml:
-		line = OutputYaml(m)
+		line = OutputYamlWithOptions(m, options)
 	default:
-		line = OutputJson(m)
+		line = OutputJsonWithOptions(m, options)
 	}
 
 	h.mu.Lock()
@@ -129,7 +166,14 @@ func (h *AfdataHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	combined := make([]slog.Attr, len(h.attrs), len(h.attrs)+len(attrs))
 	copy(combined, h.attrs)
 	combined = append(combined, attrs...)
-	return &AfdataHandler{out: h.out, mu: h.mu, attrs: combined, format: h.format, level: h.level}
+	return &AfdataHandler{
+		out:       h.out,
+		mu:        h.mu,
+		attrs:     combined,
+		format:    h.format,
+		level:     h.level,
+		redaction: h.redaction,
+	}
 }
 
 // WithGroup returns the handler unchanged (groups are not used in AFDATA output).
@@ -137,7 +181,7 @@ func (h *AfdataHandler) WithGroup(_ string) slog.Handler {
 	return h
 }
 
-func levelToCode(l slog.Level) string {
+func levelName(l slog.Level) string {
 	switch {
 	case l < slog.LevelDebug:
 		return "trace"
@@ -187,6 +231,13 @@ func attrValue(v slog.Value) any {
 	}
 }
 
+func cloneRedactionOptions(redaction RedactionOptions) RedactionOptions {
+	if redaction.SecretNames != nil {
+		redaction.SecretNames = append([]string(nil), redaction.SecretNames...)
+	}
+	return redaction
+}
+
 // Span runs fn with a logger that carries the given fields.
 //
 // Deprecated: Span temporarily mutates slog.Default and is not suited for
@@ -226,6 +277,3 @@ func LoggerFromContext(ctx context.Context) *slog.Logger {
 
 // ensure AfdataHandler implements slog.Handler at compile time
 var _ slog.Handler = (*AfdataHandler)(nil)
-
-// ensure json is imported (used by OutputJson fallback)
-var _ = json.Marshal

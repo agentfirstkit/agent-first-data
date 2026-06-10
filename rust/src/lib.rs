@@ -5,11 +5,11 @@
 //! - 3 value-copy redactors: [`redacted_value`], [`redacted_value_with`], [`redacted_value_with_options`]
 //! - 7 output formatters: [`output_json`], [`output_json_with`], [`output_json_with_options`],
 //!   [`output_yaml`], [`output_yaml_with_options`], [`output_plain`], [`output_plain_with_options`]
-//! - 2 in-place value redactors: [`internal_redact_secrets`], [`internal_redact_secrets_with_options`]
+//! - 2 in-place value redactors: [`redact_secrets_in_place`], [`redact_secrets_in_place_with_options`]
 //!   (these redact `_secret` and `_url` fields in a JSON value)
 //! - 2 URL-string redactors: [`redact_url_secrets`], [`redact_url_secrets_with_options`]
 //!   (operate on one URL string; the value redactors above apply these to `_url` fields)
-//! - 1 parse utility: [`parse_size`]
+//! - 2 parse utilities: [`parse_size`], [`normalize_utc_offset`]
 //! - 5 CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`], [`cli_output`],
 //!   [`cli_output_with_options`], [`build_cli_error`]
 //! - 5 types: [`OutputFormat`], [`RedactionPolicy`], [`RedactionOptions`],
@@ -20,6 +20,8 @@
 //! - (feature `skill-admin`): [`skill::run_skill_admin`] — install/uninstall/status a spore's
 //!   embedded Agent Skill across Codex, Claude Code, and opencode; returns a typed
 //!   [`skill::SkillReport`]
+//! - (feature `tracing`): [`afdata_tracing::try_init_json`] / `try_init_plain` /
+//!   `try_init_yaml` initialize an AFDATA stdout logging layer and report initialization failures
 
 #[cfg(feature = "tracing")]
 pub mod afdata_tracing;
@@ -80,8 +82,6 @@ pub enum RedactionPolicy {
     RedactionTraceOnly,
     /// Do not redact any fields.
     RedactionNone,
-    /// Replace every `_secret` subtree with `"***"`.
-    RedactionStrict,
 }
 
 /// Redaction options for legacy secret field names.
@@ -180,7 +180,7 @@ pub fn output_plain_with_options(value: &Value, output_options: &OutputOptions) 
     pairs.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
     pairs
         .into_iter()
-        .map(|(k, v)| format!("{}={}", k, quote_logfmt_value(&v)))
+        .map(|(k, v)| format!("{}={}", quote_logfmt_key(&k), quote_logfmt_value(&v)))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -190,12 +190,12 @@ pub fn output_plain_with_options(value: &Value, output_options: &OutputOptions) 
 // ═══════════════════════════════════════════
 
 /// Redact `_secret` fields in-place.
-pub fn internal_redact_secrets(value: &mut Value) {
+pub fn redact_secrets_in_place(value: &mut Value) {
     redact_secrets(value);
 }
 
 /// Redact secret fields in-place using configurable redaction options.
-pub fn internal_redact_secrets_with_options(
+pub fn redact_secrets_in_place_with_options(
     value: &mut Value,
     redaction_options: &RedactionOptions,
 ) {
@@ -251,6 +251,7 @@ pub fn redact_url_secrets_with_options(url: &str, redaction_options: &RedactionO
 /// (`B`, `K`, `M`, `G`, `T`). Case-insensitive. Trims whitespace.
 /// Returns `None` for invalid or negative input.
 pub fn parse_size(s: &str) -> Option<u64> {
+    const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -265,11 +266,12 @@ pub fn parse_size(s: &str) -> Option<u64> {
         b'0'..=b'9' | b'.' => (s, 1),
         _ => return None,
     };
-    if num_str.is_empty() {
+    if num_str.is_empty() || !is_decimal_number(num_str) {
         return None;
     }
     if let Ok(n) = num_str.parse::<u64>() {
-        return n.checked_mul(mult);
+        let result = n.checked_mul(mult)?;
+        return (result <= MAX_SAFE_INTEGER).then_some(result);
     }
     // Integer overflow must not silently fall back to float parsing.
     if !num_str.contains('.') && !num_str.contains('e') && !num_str.contains('E') {
@@ -280,10 +282,97 @@ pub fn parse_size(s: &str) -> Option<u64> {
         return None;
     }
     let result = f * mult as f64;
-    if result >= u64::MAX as f64 {
+    if result > MAX_SAFE_INTEGER as f64 {
         return None;
     }
     Some(result as u64)
+}
+
+fn is_decimal_number(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut digits = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+        digits += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return false;
+    }
+    if i < bytes.len() && matches!(bytes[i], b'e' | b'E') {
+        i += 1;
+        if i < bytes.len() && matches!(bytes[i], b'+' | b'-') {
+            i += 1;
+        }
+        let exp_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == exp_start {
+            return false;
+        }
+    }
+    i == bytes.len()
+}
+
+/// Normalize a fixed UTC offset string to AFDATA canonical form.
+///
+/// Returns `"UTC"` for zero offset. Non-zero offsets return `+HH:MM` or
+/// `-HH:MM`. This helper handles fixed offsets only; IANA timezone names and
+/// DST rules are intentionally out of scope.
+pub fn normalize_utc_offset(s: &str) -> Option<String> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("utc") || s.eq_ignore_ascii_case("z") {
+        return Some("UTC".to_string());
+    }
+    let sign = match s.as_bytes().first()? {
+        b'+' => '+',
+        b'-' => '-',
+        _ => return None,
+    };
+    let body = &s[1..];
+    let (hours, minutes) = parse_utc_offset_body(body)?;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    if hours == 0 && minutes == 0 {
+        return Some("UTC".to_string());
+    }
+    Some(format!("{sign}{hours:02}:{minutes:02}"))
+}
+
+fn parse_utc_offset_body(body: &str) -> Option<(u8, u8)> {
+    if body.is_empty() {
+        return None;
+    }
+    if let Some((hours, minutes)) = body.split_once(':') {
+        if hours.is_empty() || hours.len() > 2 || minutes.len() != 2 {
+            return None;
+        }
+        return Some((parse_ascii_u8(hours)?, parse_ascii_u8(minutes)?));
+    }
+    if !body.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    match body.len() {
+        1 | 2 => Some((parse_ascii_u8(body)?, 0)),
+        4 => Some((parse_ascii_u8(&body[..2])?, parse_ascii_u8(&body[2..])?)),
+        _ => None,
+    }
+}
+
+fn parse_ascii_u8(s: &str) -> Option<u8> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 // ═══════════════════════════════════════════
@@ -380,22 +469,16 @@ pub fn cli_output_with_options(
 /// ```
 /// let err = agent_first_data::build_cli_error("--output: invalid value 'xml'", None);
 /// assert_eq!(err["code"], "error");
-/// assert_eq!(err["error_code"], "invalid_request");
-/// assert_eq!(err["retryable"], false);
+/// assert_eq!(err["error"], "--output: invalid value 'xml'");
+/// assert!(err.get("error_code").is_none());
 /// ```
 pub fn build_cli_error(message: &str, hint: Option<&str>) -> Value {
     let mut obj = serde_json::Map::new();
     obj.insert("code".to_string(), Value::String("error".to_string()));
-    obj.insert(
-        "error_code".to_string(),
-        Value::String("invalid_request".to_string()),
-    );
     obj.insert("error".to_string(), Value::String(message.to_string()));
     if let Some(h) = hint {
         obj.insert("hint".to_string(), Value::String(h.to_string()));
     }
-    obj.insert("retryable".to_string(), Value::Bool(false));
-    obj.insert("trace".to_string(), serde_json::json!({"duration_ms": 0}));
     Value::Object(obj)
 }
 
@@ -1201,49 +1284,22 @@ fn key_has_url_suffix(key: &str) -> bool {
     key.ends_with("_url") || key.ends_with("_URL")
 }
 
+const MAX_DEPTH: usize = 256;
+
 fn redact_secrets(value: &mut Value) {
     let context = RedactionContext::default();
     redact_secrets_with_context(value, &context);
 }
 
 fn redact_secrets_with_context(value: &mut Value, context: &RedactionContext) {
-    match value {
-        Value::Object(map) => {
-            let keys: Vec<String> = map.keys().cloned().collect();
-            for key in keys {
-                if context.is_secret_key(&key) {
-                    match map.get(&key) {
-                        Some(Value::Object(_)) | Some(Value::Array(_)) => {
-                            // Traverse containers, don't replace
-                        }
-                        _ => {
-                            map.insert(key.clone(), Value::String("***".into()));
-                            continue;
-                        }
-                    }
-                } else if key_has_url_suffix(&key) {
-                    if let Some(Value::String(s)) = map.get_mut(&key) {
-                        if let Some(redacted) = redact_url_in_str(s, context) {
-                            *s = redacted;
-                        }
-                        continue;
-                    }
-                }
-                if let Some(v) = map.get_mut(&key) {
-                    redact_secrets_with_context(v, context);
-                }
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr {
-                redact_secrets_with_context(v, context);
-            }
-        }
-        _ => {}
-    }
+    redact_secrets_with_context_depth(value, context, 0);
 }
 
-fn redact_secrets_strict_with_context(value: &mut Value, context: &RedactionContext) {
+fn redact_secrets_with_context_depth(value: &mut Value, context: &RedactionContext, depth: usize) {
+    if depth >= MAX_DEPTH {
+        *value = Value::String("***".into());
+        return;
+    }
     match value {
         Value::Object(map) => {
             let keys: Vec<String> = map.keys().cloned().collect();
@@ -1252,20 +1308,18 @@ fn redact_secrets_strict_with_context(value: &mut Value, context: &RedactionCont
                     map.insert(key, Value::String("***".into()));
                 } else if key_has_url_suffix(&key) {
                     if let Some(Value::String(s)) = map.get_mut(&key) {
-                        if let Some(redacted) = redact_url_in_str(s, context) {
-                            *s = redacted;
-                        }
+                        *s = redact_url_field_value(s, context);
                     } else if let Some(v) = map.get_mut(&key) {
-                        redact_secrets_strict_with_context(v, context);
+                        redact_secrets_with_context_depth(v, context, depth + 1);
                     }
                 } else if let Some(v) = map.get_mut(&key) {
-                    redact_secrets_strict_with_context(v, context);
+                    redact_secrets_with_context_depth(v, context, depth + 1);
                 }
             }
         }
         Value::Array(arr) => {
             for v in arr {
-                redact_secrets_strict_with_context(v, context);
+                redact_secrets_with_context_depth(v, context, depth + 1);
             }
         }
         _ => {}
@@ -1313,10 +1367,31 @@ fn redact_url_in_str(s: &str, context: &RedactionContext) -> Option<String> {
     Some(format!("{scheme}://{new_authority}{new_remainder}"))
 }
 
+fn redact_url_field_value(s: &str, context: &RedactionContext) -> String {
+    if let Some(redacted) = redact_url_in_str(s, context) {
+        return redacted;
+    }
+    let trimmed = s.trim();
+    if trimmed != s {
+        if let Some(redacted) = redact_url_in_str(trimmed, context) {
+            return redacted;
+        }
+    }
+    // Fail closed: a `_url` value we could not parse as a clean scheme-prefixed
+    // URL, yet which carries a credential sigil (`@` userinfo) or internal
+    // whitespace, is redacted wholesale rather than passed through. A schemeless
+    // connection string like `user:pass@host/db` has no scheme anchor for the
+    // surgical span logic above, so blanket redaction is the safe default.
+    if s.chars().any(char::is_whitespace) || s.contains('@') {
+        return "***".to_string();
+    }
+    s.to_string()
+}
+
 /// Replace the userinfo password (`user:pass@`) with `***`, preserving the
 /// username. Authority without `@`, or userinfo without `:`, is unchanged.
 fn redact_userinfo_password(authority: &str) -> String {
-    let Some(at) = authority.find('@') else {
+    let Some(at) = authority.rfind('@') else {
         return authority.to_string();
     };
     let userinfo = &authority[..at];
@@ -1398,9 +1473,6 @@ fn apply_redaction_policy_with_context(
             }
         }
         Some(RedactionPolicy::RedactionNone) => {}
-        Some(RedactionPolicy::RedactionStrict) => {
-            redact_secrets_strict_with_context(value, context)
-        }
         None => redact_secrets_with_context(value, context),
     }
 }
@@ -1468,15 +1540,18 @@ fn as_uint(value: &Value) -> Option<u64> {
 fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
     // Group 1: compound timestamp suffixes
     if let Some(stripped) = strip_suffix_ci(key, "_epoch_ms") {
-        return as_int(value).map(|ms| (stripped, format_rfc3339_ms(ms)));
+        return as_int(value)
+            .and_then(|ms| format_rfc3339_ms(ms).map(|formatted| (stripped, formatted)));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_epoch_s") {
         return as_int(value)
             .and_then(|s| s.checked_mul(1000))
-            .map(|ms| (stripped, format_rfc3339_ms(ms)));
+            .and_then(|ms| format_rfc3339_ms(ms).map(|formatted| (stripped, formatted)));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_epoch_ns") {
-        return as_int(value).map(|ns| (stripped, format_rfc3339_ms(ns.div_euclid(1_000_000))));
+        return as_int(value).and_then(|ns| {
+            format_rfc3339_ms(ns.div_euclid(1_000_000)).map(|formatted| (stripped, formatted))
+        });
     }
 
     // Group 2: compound currency suffixes
@@ -1534,10 +1609,6 @@ fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
             .is_number()
             .then(|| (stripped, format!("{}%", number_str(value))));
     }
-    if let Some(stripped) = strip_suffix_ci(key, "_secret") {
-        return Some((stripped, "***".to_string()));
-    }
-
     // Group 5: short suffixes (last to avoid false positives)
     if let Some(stripped) = strip_suffix_ci(key, "_btc") {
         return value
@@ -1575,6 +1646,10 @@ fn process_object_fields<'a>(
 ) -> Vec<(String, &'a Value, Option<String>)> {
     let mut entries: Vec<(String, &'a str, &'a Value, Option<String>)> = Vec::new();
     for (key, value) in map {
+        if let Some(stripped) = strip_suffix_ci(key, "_secret") {
+            entries.push((stripped, key.as_str(), value, None));
+            continue;
+        }
         match try_process_field(key, value) {
             Some((stripped, formatted)) => {
                 entries.push((stripped, key.as_str(), value, Some(formatted)));
@@ -1626,12 +1701,28 @@ fn number_str(value: &Value) -> String {
 fn format_number(n: &serde_json::Number) -> String {
     if n.is_f64() {
         if let Some(f) = n.as_f64() {
-            if f.is_finite() && f.fract() == 0.0 {
+            if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e21 {
                 return format!("{f:.0}");
             }
         }
     }
-    n.to_string()
+    normalize_exponent(&n.to_string())
+}
+
+fn normalize_exponent(s: &str) -> String {
+    let Some(e) = s.find(['e', 'E']) else {
+        return s.to_string();
+    };
+    let mantissa = &s[..e];
+    let mut exp = &s[e + 1..];
+    let mut sign = "";
+    if exp.starts_with(['+', '-']) {
+        sign = &exp[..1];
+        exp = &exp[1..];
+    }
+    let exp = exp.trim_start_matches('0');
+    let exp = if exp.is_empty() { "0" } else { exp };
+    format!("{mantissa}e{sign}{exp}")
 }
 
 /// Format ms as seconds: 3 decimal places, trim trailing zeros, min 1 decimal.
@@ -1658,16 +1749,20 @@ fn format_ms_value(value: &Value) -> Option<String> {
 }
 
 /// Convert unix milliseconds (signed) to RFC 3339 with UTC timezone.
-fn format_rfc3339_ms(ms: i64) -> String {
+const MIN_RFC3339_MS: i64 = -62135596800000;
+const MAX_RFC3339_MS: i64 = 253402300799999;
+
+fn format_rfc3339_ms(ms: i64) -> Option<String> {
     use chrono::{DateTime, Utc};
+    if !(MIN_RFC3339_MS..=MAX_RFC3339_MS).contains(&ms) {
+        return None;
+    }
     let secs = ms.div_euclid(1000);
     let nanos = (ms.rem_euclid(1000) * 1_000_000) as u32;
-    match DateTime::from_timestamp(secs, nanos) {
-        Some(dt) => dt
-            .with_timezone(&Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        None => ms.to_string(),
-    }
+    DateTime::from_timestamp(secs, nanos).map(|dt| {
+        dt.with_timezone(&Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    })
 }
 
 /// Format bytes as human-readable size (binary units). Handles negative values.
@@ -1712,7 +1807,10 @@ fn extract_currency_code(key: &str) -> Option<&str> {
         .or_else(|| key.strip_suffix("_CENTS"))?;
     let last_underscore = without_cents.rfind('_')?;
     let code = &without_cents[last_underscore + 1..];
-    if code.is_empty() {
+    if code.is_empty()
+        || !(3..=4).contains(&code.len())
+        || !code.bytes().all(|b| b.is_ascii_alphabetic())
+    {
         return None;
     }
     Some(code)
@@ -1732,23 +1830,23 @@ fn render_yaml_processed(value: &Value, indent: usize, lines: &mut Vec<String>) 
                     lines.push(format!(
                         "{}{}: \"{}\"",
                         prefix,
-                        display_key,
+                        yaml_key(&display_key),
                         escape_yaml_str(&fv)
                     ));
                 } else {
                     match v {
                         Value::Object(inner) if !inner.is_empty() => {
-                            lines.push(format!("{}{}:", prefix, display_key));
+                            lines.push(format!("{}{}:", prefix, yaml_key(&display_key)));
                             render_yaml_processed(v, indent + 1, lines);
                         }
                         Value::Object(_) => {
-                            lines.push(format!("{}{}: {{}}", prefix, display_key));
+                            lines.push(format!("{}{}: {{}}", prefix, yaml_key(&display_key)));
                         }
                         Value::Array(arr) => {
                             if arr.is_empty() {
-                                lines.push(format!("{}{}: []", prefix, display_key));
+                                lines.push(format!("{}{}: []", prefix, yaml_key(&display_key)));
                             } else {
-                                lines.push(format!("{}{}:", prefix, display_key));
+                                lines.push(format!("{}{}:", prefix, yaml_key(&display_key)));
                                 for item in arr {
                                     if item.is_object() {
                                         lines.push(format!("{}  -", prefix));
@@ -1760,7 +1858,12 @@ fn render_yaml_processed(value: &Value, indent: usize, lines: &mut Vec<String>) 
                             }
                         }
                         _ => {
-                            lines.push(format!("{}{}: {}", prefix, display_key, yaml_scalar(v)));
+                            lines.push(format!(
+                                "{}{}: {}",
+                                prefix,
+                                yaml_key(&display_key),
+                                yaml_scalar(v)
+                            ));
                         }
                     }
                 }
@@ -1776,8 +1879,8 @@ fn render_yaml_raw(value: &Value, indent: usize, lines: &mut Vec<String>) {
     let prefix = "  ".repeat(indent);
     match value {
         Value::Object(map) => {
-            for (key, v) in map {
-                render_yaml_field_raw(&prefix, key, v, indent, lines);
+            for key in sorted_value_keys(map) {
+                render_yaml_field_raw(&prefix, &key, &map[&key], indent, lines);
             }
         }
         Value::Array(arr) => {
@@ -1798,22 +1901,27 @@ fn render_yaml_field_raw(
 ) {
     match value {
         Value::Object(inner) if !inner.is_empty() => {
-            lines.push(format!("{}{}:", prefix, key));
+            lines.push(format!("{}{}:", prefix, yaml_key(key)));
             render_yaml_raw(value, indent + 1, lines);
         }
         Value::Object(_) => {
-            lines.push(format!("{}{}: {{}}", prefix, key));
+            lines.push(format!("{}{}: {{}}", prefix, yaml_key(key)));
         }
         Value::Array(arr) => {
             if arr.is_empty() {
-                lines.push(format!("{}{}: []", prefix, key));
+                lines.push(format!("{}{}: []", prefix, yaml_key(key)));
             } else {
-                lines.push(format!("{}{}:", prefix, key));
+                lines.push(format!("{}{}:", prefix, yaml_key(key)));
                 render_yaml_array_raw(arr, indent + 1, lines);
             }
         }
         _ => {
-            lines.push(format!("{}{}: {}", prefix, key, yaml_scalar(value)));
+            lines.push(format!(
+                "{}{}: {}",
+                prefix,
+                yaml_key(key),
+                yaml_scalar(value)
+            ));
         }
     }
 }
@@ -1849,17 +1957,42 @@ fn escape_yaml_str(s: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+        .replace('\x0c', "\\f")
+        .replace('\x0b', "\\v")
+}
+
+fn yaml_key(key: &str) -> String {
+    if is_safe_key(key) {
+        key.to_string()
+    } else {
+        format!("\"{}\"", escape_yaml_str(key))
+    }
+}
+
+fn quote_logfmt_key(key: &str) -> String {
+    if is_safe_key(key) {
+        key.to_string()
+    } else {
+        quote_logfmt_value(key)
+    }
+}
+
+fn is_safe_key(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
 fn yaml_scalar(value: &Value) -> String {
     match value {
-        Value::String(s) => {
-            format!("\"{}\"", escape_yaml_str(s))
-        }
+        Value::String(s) => format!("\"{}\"", escape_yaml_str(s)),
         Value::Null => "null".to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => format_number(n),
-        other => format!("\"{}\"", other.to_string().replace('"', "\\\"")),
+        Value::Object(_) | Value::Array(_) => {
+            format!("\"{}\"", escape_yaml_str(&canonical_json(value)))
+        }
     }
 }
 
@@ -1895,7 +2028,8 @@ fn collect_plain_pairs(value: &Value, prefix: &str, pairs: &mut Vec<(String, Str
 
 fn collect_plain_pairs_raw(value: &Value, prefix: &str, pairs: &mut Vec<(String, String)>) {
     if let Value::Object(map) = value {
-        for (key, v) in map {
+        for key in sorted_value_keys(map) {
+            let v = &map[&key];
             let full_key = if prefix.is_empty() {
                 key.clone()
             } else {
@@ -1920,7 +2054,7 @@ fn plain_scalar(value: &Value) -> String {
         Value::Null => "null".to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => format_number(n),
-        other => other.to_string(),
+        Value::Object(_) | Value::Array(_) => canonical_json(value),
     }
 }
 
@@ -1939,8 +2073,37 @@ fn quote_logfmt_value(value: &str) -> String {
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
-        .replace('\t', "\\t");
+        .replace('\t', "\\t")
+        .replace('\x0c', "\\f")
+        .replace('\x0b', "\\v");
     format!("\"{}\"", escaped)
+}
+
+fn canonical_json(value: &Value) -> String {
+    serde_json::to_string(&sort_json_value(value))
+        .unwrap_or_else(|_| "<unsupported:json>".to_string())
+}
+
+fn sort_json_value(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for key in sorted_value_keys(map) {
+                if let Some(v) = map.get(&key) {
+                    out.insert(key, sort_json_value(v));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sort_json_value).collect()),
+        _ => value.clone(),
+    }
+}
+
+fn sorted_value_keys(map: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut keys: Vec<String> = map.keys().cloned().collect();
+    keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+    keys
 }
 
 #[cfg(test)]

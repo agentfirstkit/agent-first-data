@@ -13,6 +13,8 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 const SKILL_FILE_NAME: &str = "SKILL.md";
+const FNV1A64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV1A64_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// Identity of the skill being managed and the tool that manages it.
 ///
@@ -203,6 +205,7 @@ pub fn run_skill_admin(
     action: SkillAction,
     options: &SkillOptions,
 ) -> Result<SkillReport, SkillError> {
+    validate_spec(spec)?;
     match action {
         SkillAction::Status => status(spec, options),
         SkillAction::Install => install(spec, options),
@@ -233,20 +236,33 @@ fn install(spec: &SkillSpec, options: &SkillOptions) -> Result<SkillReport, Skil
     for target in &targets {
         std::fs::create_dir_all(&target.skill_dir)
             .map_err(|e| SkillError::io("create skill dir", e))?;
-        if target.skill_path.exists()
-            && !is_managed_or_bundled_skill(spec, &target.skill_path)?
-            && !options.force
-        {
-            return Err(SkillError::invalid_request(
-                format!(
-                    "refusing to overwrite unmanaged skill at {}",
-                    target.skill_path.display()
-                ),
-                Some("pass --force to replace it, or choose another --skills-dir".to_string()),
-            ));
+        if let Some(kind) = skill_path_file_type(&target.skill_path)? {
+            if kind.is_symlink() && !options.force {
+                return Err(SkillError::invalid_request(
+                    format!(
+                        "refusing to overwrite symlinked skill at {}",
+                        target.skill_path.display()
+                    ),
+                    Some(
+                        "pass --force to replace the symlink itself, or choose another --skills-dir"
+                            .to_string(),
+                    ),
+                ));
+            }
+            if !kind.is_symlink()
+                && !is_managed_or_bundled_skill(spec, &target.skill_path)?
+                && !options.force
+            {
+                return Err(SkillError::invalid_request(
+                    format!(
+                        "refusing to overwrite unmanaged skill at {}",
+                        target.skill_path.display()
+                    ),
+                    Some("pass --force to replace it, or choose another --skills-dir".to_string()),
+                ));
+            }
         }
-        std::fs::write(&target.skill_path, &content)
-            .map_err(|e| SkillError::io("write skill", e))?;
+        write_skill_atomic(target, &content)?;
         validate_installed_skill(spec, &target.skill_path)?;
         installed.push(target_status(spec, target)?);
     }
@@ -262,11 +278,23 @@ fn uninstall(spec: &SkillSpec, options: &SkillOptions) -> Result<SkillReport, Sk
     let targets = resolve_targets(spec, options)?;
     let mut removed = Vec::with_capacity(targets.len());
     for target in &targets {
-        if !target.skill_path.exists() {
+        let Some(kind) = skill_path_file_type(&target.skill_path)? else {
             removed.push(target_uninstall_status(target, false));
             continue;
+        };
+        if kind.is_symlink() && !options.force {
+            return Err(SkillError::invalid_request(
+                format!(
+                    "refusing to remove symlinked skill at {}",
+                    target.skill_path.display()
+                ),
+                Some("pass --force to remove the symlink itself".to_string()),
+            ));
         }
-        if !is_managed_or_bundled_skill(spec, &target.skill_path)? && !options.force {
+        if !kind.is_symlink()
+            && !is_managed_or_bundled_skill(spec, &target.skill_path)?
+            && !options.force
+        {
             return Err(SkillError::invalid_request(
                 format!(
                     "refusing to remove unmanaged skill at {}",
@@ -402,20 +430,38 @@ fn project_skills_dir(agent_dir: &str) -> Result<PathBuf, SkillError> {
 }
 
 fn target_status(spec: &SkillSpec, target: &SkillTarget) -> Result<SkillTargetStatus, SkillError> {
-    let installed = target.skill_path.is_file();
+    let Some(kind) = skill_path_file_type(&target.skill_path)? else {
+        return Ok(SkillTargetStatus {
+            agent: target.agent,
+            scope: target.scope,
+            skills_dir: target.skills_dir.clone(),
+            skill_path: target.skill_path.clone(),
+            installed: false,
+            managed: false,
+            valid: false,
+            current: false,
+            validation_error: None,
+        });
+    };
+    let installed = true;
     let mut valid = false;
     let mut current = false;
     let mut validation_error = None;
     let mut managed = false;
-    if installed {
+    if kind.is_symlink() {
+        validation_error = Some("target SKILL.md is a symlink; refusing to follow it".to_string());
+    } else if kind.is_file() {
         let text = std::fs::read_to_string(&target.skill_path)
             .map_err(|e| SkillError::io("read skill", e))?;
         managed = skill_text_is_managed_or_bundled(spec, &text);
-        current = normalize_skill_text(spec, &text) == normalize_skill_text(spec, spec.source);
-        match validate_skill_frontmatter(&text) {
+        current = !skill_text_has_legacy_marker(spec, &text)
+            && normalize_skill_text(spec, &text) == normalize_skill_text(spec, spec.source);
+        match validate_skill_text(spec, &text) {
             Ok(()) => valid = true,
-            Err(err) => validation_error = Some(err),
+            Err(err) => validation_error = Some(err.message),
         }
+    } else {
+        validation_error = Some("target SKILL.md is not a regular file".to_string());
     }
     Ok(SkillTargetStatus {
         agent: target.agent,
@@ -448,9 +494,34 @@ fn marker(spec: &SkillSpec) -> String {
     format!("{}-managed-skill: true", spec.marker_slug)
 }
 
+fn source_hash(spec: &SkillSpec) -> String {
+    let mut hash = FNV1A64_OFFSET;
+    for byte in spec.source.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV1A64_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
+fn managed_marker_block(spec: &SkillSpec) -> String {
+    let slug = spec.marker_slug;
+    format!(
+        "<!--\n{}\n{}-managed-skill: true\n{}-managed-skill-name: {}\n{}-managed-skill-source-hash-fnv1a64: {}\n-->",
+        generated_by(spec),
+        slug,
+        slug,
+        spec.name,
+        slug,
+        source_hash(spec)
+    )
+}
+
+fn legacy_marker_block(spec: &SkillSpec) -> String {
+    format!("<!-- {} -->\n<!-- {} -->", generated_by(spec), marker(spec))
+}
+
 fn managed_skill_contents(spec: &SkillSpec) -> String {
-    let generated_by = generated_by(spec);
-    let marker = marker(spec);
+    let block = managed_marker_block(spec);
     let mut lines = spec.source.lines();
     let mut output = String::new();
     let mut inserted = false;
@@ -462,22 +533,14 @@ fn managed_skill_contents(spec: &SkillSpec) -> String {
         output.push_str(line);
         output.push('\n');
         if !inserted && line.trim() == "---" {
-            output.push_str("<!-- ");
-            output.push_str(&generated_by);
-            output.push_str(" -->\n");
-            output.push_str("<!-- ");
-            output.push_str(&marker);
-            output.push_str(" -->\n\n");
+            output.push_str(&block);
+            output.push_str("\n\n");
             inserted = true;
         }
     }
     if !inserted {
-        output.push_str("<!-- ");
-        output.push_str(&generated_by);
-        output.push_str(" -->\n");
-        output.push_str("<!-- ");
-        output.push_str(&marker);
-        output.push_str(" -->\n");
+        output.push_str(&block);
+        output.push('\n');
     }
     output
 }
@@ -489,15 +552,29 @@ fn validate_installed_skill(spec: &SkillSpec, path: &Path) -> Result<(), SkillEr
 }
 
 fn validate_skill_text(spec: &SkillSpec, text: &str) -> Result<(), SkillError> {
-    validate_skill_frontmatter(text).map_err(|err| {
+    let frontmatter = validate_skill_frontmatter(text).map_err(|err| {
         SkillError::invalid_request(
             format!("invalid {} skill front matter: {err}", spec.title),
             Some("quote scalar values that contain ': ', especially description".to_string()),
         )
-    })
+    })?;
+    if frontmatter.name != spec.name {
+        return Err(SkillError::invalid_request(
+            format!(
+                "invalid {} skill front matter: name {:?} does not match expected {:?}",
+                spec.title, frontmatter.name, spec.name
+            ),
+            Some(format!("set front matter name to {}", spec.name)),
+        ));
+    }
+    Ok(())
 }
 
-fn validate_skill_frontmatter(text: &str) -> Result<(), String> {
+struct SkillFrontmatter {
+    name: String,
+}
+
+fn validate_skill_frontmatter(text: &str) -> Result<SkillFrontmatter, String> {
     let mut lines = text.lines().enumerate();
     let Some((_, first)) = lines.next() else {
         return Err("missing YAML front matter".to_string());
@@ -506,7 +583,7 @@ fn validate_skill_frontmatter(text: &str) -> Result<(), String> {
         return Err("missing opening --- YAML front matter delimiter".to_string());
     }
     let mut found_end = false;
-    let mut has_name = false;
+    let mut name = None;
     let mut has_description = false;
     for (idx, line) in lines {
         let line_no = idx + 1;
@@ -530,7 +607,7 @@ fn validate_skill_frontmatter(text: &str) -> Result<(), String> {
         }
         let value = value.trim_start();
         if key == "name" {
-            has_name = true;
+            name = Some(parse_frontmatter_scalar(value));
         }
         if key == "description" {
             has_description = true;
@@ -547,48 +624,140 @@ fn validate_skill_frontmatter(text: &str) -> Result<(), String> {
     if !found_end {
         return Err("missing closing --- YAML front matter delimiter".to_string());
     }
-    if !has_name {
+    let Some(name) = name else {
         return Err("missing required name field".to_string());
-    }
+    };
     if !has_description {
         return Err("missing required description field".to_string());
     }
-    Ok(())
+    Ok(SkillFrontmatter { name })
+}
+
+fn parse_frontmatter_scalar(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+        {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
 }
 
 fn is_managed_or_bundled_skill(spec: &SkillSpec, path: &Path) -> Result<bool, SkillError> {
-    if !path.exists() {
+    let Some(kind) = skill_path_file_type(path)? else {
         return Ok(false);
+    };
+    if kind.is_symlink() {
+        return Err(SkillError::invalid_request(
+            format!("refusing to inspect symlinked skill at {}", path.display()),
+            Some("pass --force to replace or remove the symlink itself".to_string()),
+        ));
     }
     let text = std::fs::read_to_string(path).map_err(|e| SkillError::io("read skill", e))?;
     Ok(skill_text_is_managed_or_bundled(spec, &text))
 }
 
 fn skill_text_is_managed_or_bundled(spec: &SkillSpec, text: &str) -> bool {
-    let marker = marker(spec);
-    let generated_by = generated_by(spec);
-    (text.contains(&marker) && text.contains(&generated_by))
+    skill_text_has_current_marker(spec, text)
+        || skill_text_has_legacy_marker(spec, text)
         || normalize_skill_text(spec, text) == normalize_skill_text(spec, spec.source)
 }
 
+fn skill_text_has_current_marker(spec: &SkillSpec, text: &str) -> bool {
+    text.replace("\r\n", "\n")
+        .contains(&managed_marker_block(spec))
+}
+
+fn skill_text_has_legacy_marker(spec: &SkillSpec, text: &str) -> bool {
+    text.replace("\r\n", "\n")
+        .contains(&legacy_marker_block(spec))
+}
+
 fn normalize_skill_text(spec: &SkillSpec, text: &str) -> String {
-    let marker = marker(spec);
-    let generated_by = generated_by(spec);
-    // Drop the managed-marker lines, then collapse runs of blank lines to one so that the blank
+    let text = text
+        .replace("\r\n", "\n")
+        .replace(&managed_marker_block(spec), "")
+        .replace(&legacy_marker_block(spec), "");
+    // Drop the managed-marker blocks, then collapse runs of blank lines to one so that the blank
     // line `managed_skill_contents` inserts after the marker block does not make a managed install
     // compare unequal to the bundled source.
     let mut out: Vec<&str> = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.contains(&marker) || trimmed.contains(&generated_by) {
-            continue;
-        }
         if trimmed.is_empty() && out.last().is_some_and(|prev| prev.trim().is_empty()) {
             continue;
         }
         out.push(line);
     }
     out.join("\n").trim().to_string()
+}
+
+fn validate_spec(spec: &SkillSpec) -> Result<(), SkillError> {
+    validate_slug("skill name", spec.name)?;
+    validate_slug("marker slug", spec.marker_slug)?;
+    validate_skill_text(spec, spec.source)
+}
+
+fn validate_slug(field: &str, value: &str) -> Result<(), SkillError> {
+    if slug_is_valid(value) {
+        return Ok(());
+    }
+    Err(SkillError::invalid_request(
+        format!(
+            "invalid {field} {value:?}: expected a lowercase slug matching [a-z0-9][a-z0-9-]*[a-z0-9]"
+        ),
+        Some("use lowercase ASCII letters, digits, and single hyphen-separated words".to_string()),
+    ))
+}
+
+fn slug_is_valid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    fn is_lower_alnum(byte: u8) -> bool {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit()
+    }
+    if !is_lower_alnum(bytes[0]) || !is_lower_alnum(bytes[bytes.len() - 1]) {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|byte| is_lower_alnum(*byte) || *byte == b'-')
+}
+
+fn skill_path_file_type(path: &Path) -> Result<Option<std::fs::FileType>, SkillError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata.file_type())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(SkillError::io("inspect skill path", err)),
+    }
+}
+
+fn write_skill_atomic(target: &SkillTarget, content: &str) -> Result<(), SkillError> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_path = target.skill_dir.join(format!(
+        ".{SKILL_FILE_NAME}.{}.{}.tmp",
+        std::process::id(),
+        nanos
+    ));
+    let result = (|| {
+        std::fs::write(&tmp_path, content)
+            .map_err(|e| SkillError::io("write temporary skill", e))?;
+        std::fs::rename(&tmp_path, &target.skill_path)
+            .map_err(|e| SkillError::io("replace skill", e))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
 }
 
 fn home_dir() -> Result<PathBuf, SkillError> {
@@ -628,6 +797,13 @@ mod tests {
             title: "Agent-First Test",
             marker_slug: "aftest",
         }
+    }
+
+    fn legacy_managed_skill(body: &str) -> String {
+        format!(
+            "---\nname: agent-first-test\ndescription: test skill\n---\n{}\n\n{body}",
+            legacy_marker_block(&spec())
+        )
     }
 
     fn temp_skills_dir(name: &str) -> PathBuf {
@@ -671,7 +847,9 @@ mod tests {
         assert!(installed.is_ok());
         assert!(skill_path.is_file());
         let text = std::fs::read_to_string(&skill_path).unwrap_or_default();
-        assert!(text.contains(&marker(&spec())));
+        assert!(text.contains(&managed_marker_block(&spec())));
+        assert!(text.contains("aftest-managed-skill-name: agent-first-test"));
+        assert!(text.contains("aftest-managed-skill-source-hash-fnv1a64:"));
 
         let status = run_skill_admin(&spec(), SkillAction::Status, &opts);
         assert!(status.is_ok());
@@ -727,11 +905,7 @@ mod tests {
         let skill_path = skill_dir.join(SKILL_FILE_NAME);
         assert!(std::fs::create_dir_all(&skill_dir).is_ok());
         // A managed marker but stale body: valid + managed, but not current.
-        let stale = format!(
-            "---\nname: agent-first-test\ndescription: test skill\n---\n<!-- {} -->\n<!-- {} -->\n\n# Body\n\nOLD rules.\n",
-            generated_by(&spec()),
-            marker(&spec())
-        );
+        let stale = legacy_managed_skill("# Body\n\nOLD rules.\n");
         assert!(std::fs::write(&skill_path, stale).is_ok());
 
         let status = run_skill_admin(&spec(), SkillAction::Status, &opts);
@@ -752,11 +926,37 @@ mod tests {
 
         // Reinstall makes it current again.
         assert!(run_skill_admin(&spec(), SkillAction::Install, &opts).is_ok());
+        let refreshed = std::fs::read_to_string(&skill_path).unwrap_or_default();
+        assert!(refreshed.contains(&managed_marker_block(&spec())));
+        assert!(!refreshed.contains(&format!("<!-- {} -->", marker(&spec()))));
         if let Ok(SkillReport::Status { targets, .. }) =
             run_skill_admin(&spec(), SkillAction::Status, &opts)
         {
             assert_eq!(targets.first().map(|t| t.current), Some(true));
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn random_text_with_marker_words_is_not_managed() {
+        let dir = temp_skills_dir("marker-words");
+        let opts = options(SkillAgentSelection::Opencode, &dir, false);
+        let skill_dir = dir.join("agent-first-test");
+        let skill_path = skill_dir.join(SKILL_FILE_NAME);
+        assert!(std::fs::create_dir_all(&skill_dir).is_ok());
+        let random = format!(
+            "---\nname: agent-first-test\ndescription: test skill\n---\n\nThis mentions {} and {} but is not a generated block.\n",
+            generated_by(&spec()),
+            marker(&spec())
+        );
+        assert!(std::fs::write(&skill_path, random).is_ok());
+
+        if let Ok(SkillReport::Status { targets, .. }) =
+            run_skill_admin(&spec(), SkillAction::Status, &opts)
+        {
+            assert_eq!(targets.first().map(|t| t.managed), Some(false));
+        }
+        assert!(run_skill_admin(&spec(), SkillAction::Install, &opts).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -774,6 +974,102 @@ mod tests {
         assert!(run_skill_admin(&spec(), SkillAction::Install, &opts).is_err());
         assert!(run_skill_admin(&spec(), SkillAction::Uninstall, &opts).is_err());
         assert!(skill_path.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn invalid_spec_slugs_are_rejected_before_path_resolution() {
+        for name in ["", "../x", "x/y", ".hidden", "bad_name", "Bad"] {
+            let bad = SkillSpec {
+                name,
+                source: SKILL_SOURCE,
+                title: "Bad",
+                marker_slug: "aftest",
+            };
+            let opts = options(SkillAgentSelection::Codex, Path::new("/tmp/afdata"), false);
+            assert!(
+                run_skill_admin(&bad, SkillAction::Status, &opts).is_err(),
+                "{name:?}"
+            );
+        }
+
+        let bad_marker = SkillSpec {
+            name: "agent-first-test",
+            source: SKILL_SOURCE,
+            title: "Bad",
+            marker_slug: "../aftest",
+        };
+        let opts = options(SkillAgentSelection::Codex, Path::new("/tmp/afdata"), false);
+        assert!(run_skill_admin(&bad_marker, SkillAction::Status, &opts).is_err());
+    }
+
+    #[test]
+    fn frontmatter_name_must_match_spec_name() {
+        let bad = SkillSpec {
+            name: "agent-first-test",
+            source: "---\nname: other-skill\ndescription: test skill\n---\n",
+            title: "Bad",
+            marker_slug: "aftest",
+        };
+        let dir = temp_skills_dir("frontmatter-name");
+        let opts = options(SkillAgentSelection::Codex, &dir, false);
+        assert!(run_skill_admin(&bad, SkillAction::Install, &opts).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_target_is_rejected_by_default_and_force_does_not_follow() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_skills_dir("symlink-install");
+        let opts = options(SkillAgentSelection::Codex, &dir, false);
+        let force_opts = options(SkillAgentSelection::Codex, &dir, true);
+        let skill_dir = dir.join("agent-first-test");
+        let skill_path = skill_dir.join(SKILL_FILE_NAME);
+        let external = dir.join("external.md");
+        assert!(std::fs::create_dir_all(&skill_dir).is_ok());
+        assert!(std::fs::write(&external, "external").is_ok());
+        assert!(symlink(&external, &skill_path).is_ok());
+
+        assert!(run_skill_admin(&spec(), SkillAction::Install, &opts).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap_or_default(),
+            "external"
+        );
+        assert!(run_skill_admin(&spec(), SkillAction::Uninstall, &opts).is_err());
+        assert!(skill_path.is_symlink());
+
+        assert!(run_skill_admin(&spec(), SkillAction::Install, &force_opts).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap_or_default(),
+            "external"
+        );
+        assert!(skill_path.is_file());
+        assert!(!skill_path.is_symlink());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn force_uninstall_removes_symlink_without_following() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_skills_dir("symlink-uninstall");
+        let force_opts = options(SkillAgentSelection::Codex, &dir, true);
+        let skill_dir = dir.join("agent-first-test");
+        let skill_path = skill_dir.join(SKILL_FILE_NAME);
+        let external = dir.join("external.md");
+        assert!(std::fs::create_dir_all(&skill_dir).is_ok());
+        assert!(std::fs::write(&external, "external").is_ok());
+        assert!(symlink(&external, &skill_path).is_ok());
+
+        assert!(run_skill_admin(&spec(), SkillAction::Uninstall, &force_opts).is_ok());
+        assert!(!skill_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap_or_default(),
+            "external"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

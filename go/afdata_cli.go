@@ -88,11 +88,8 @@ func CliOutputWithOptions(value any, format OutputFormat, outputOptions OutputOp
 // Pass empty string for hint to omit it.
 func BuildCliError(message string, hint string) map[string]any {
 	m := map[string]any{
-		"code":       "error",
-		"error_code": "invalid_request",
-		"error":      message,
-		"retryable":  false,
-		"trace":      map[string]any{"duration_ms": 0},
+		"code":  "error",
+		"error": message,
 	}
 	if hint != "" {
 		m["hint"] = hint

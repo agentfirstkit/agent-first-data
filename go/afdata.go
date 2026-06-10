@@ -1,10 +1,10 @@
 // Package afdata implements Agent-First Data (AFDATA) output formatting
 // and protocol templates.
 //
-// 23 public APIs and 5 types: 3 protocol builders + 3 value-copy redactors +
+// 24 public APIs and 5 types: 3 protocol builders + 3 value-copy redactors +
 // 7 output formatters + 2 in-place value redactors (redact _secret and _url
 // fields) + 2 URL-string redactors (operate on one URL string; the value
-// redactors apply these to _url fields) + 1 utility + 5 CLI helpers +
+// redactors apply these to _url fields) + 2 utilities + 5 CLI helpers +
 // OutputFormat + RedactionPolicy + RedactionOptions + OutputStyle + OutputOptions.
 package afdata
 
@@ -22,6 +22,8 @@ import (
 	"time"
 	"unicode/utf16"
 )
+
+const maxSafeInteger = uint64(9007199254740991)
 
 // ═══════════════════════════════════════════
 // Public API: Protocol Builders
@@ -74,7 +76,6 @@ type RedactionPolicy string
 const (
 	RedactionTraceOnly RedactionPolicy = "RedactionTraceOnly"
 	RedactionNone      RedactionPolicy = "RedactionNone"
-	RedactionStrict    RedactionPolicy = "RedactionStrict"
 )
 
 // RedactionOptions controls scoped redaction and legacy secret field names.
@@ -169,7 +170,7 @@ func OutputPlainWithOptions(value any, outputOptions OutputOptions) string {
 	})
 	parts := make([]string, len(pairs))
 	for i, p := range pairs {
-		parts[i] = fmt.Sprintf("%s=%s", p[0], quoteLogfmtValue(p[1]))
+		parts[i] = fmt.Sprintf("%s=%s", quoteLogfmtKey(p[0]), quoteLogfmtValue(p[1]))
 	}
 	return strings.Join(parts, " ")
 }
@@ -178,15 +179,15 @@ func OutputPlainWithOptions(value any, outputOptions OutputOptions) string {
 // Public API: Redaction & Utility
 // ═══════════════════════════════════════════
 
-// InternalRedactSecrets redacts _secret fields in-place. Container roots
+// RedactSecretsInPlace redacts _secret fields in-place. Container roots
 // (objects, arrays) are mutated in place; a bare string root cannot be replaced
 // through this API — use RedactedValue or RedactURLSecrets for that.
-func InternalRedactSecrets(value any) {
+func RedactSecretsInPlace(value any) {
 	redactSecretsWithContext(value, redactionContext{})
 }
 
-// InternalRedactSecretsWithOptions redacts secret fields in-place using explicit options.
-func InternalRedactSecretsWithOptions(value any, redactionOptions RedactionOptions) {
+// RedactSecretsInPlaceWithOptions redacts secret fields in-place using explicit options.
+func RedactSecretsInPlaceWithOptions(value any, redactionOptions RedactionOptions) {
 	context := newRedactionContext(redactionOptions)
 	switch redactionOptions.Policy {
 	case RedactionTraceOnly:
@@ -197,8 +198,6 @@ func InternalRedactSecretsWithOptions(value any, redactionOptions RedactionOptio
 		}
 	case RedactionNone:
 		// Explicitly disabled.
-	case RedactionStrict:
-		redactSecretsStrictWithContext(value, context)
 	default:
 		redactSecretsWithContext(value, context)
 	}
@@ -272,12 +271,12 @@ func ParseSize(s string) (uint64, bool) {
 	default:
 		return 0, false
 	}
-	if numStr == "" {
+	if numStr == "" || !isDecimalNumber(numStr) {
 		return 0, false
 	}
 	if n, err := strconv.ParseUint(numStr, 10, 64); err == nil {
 		hi, lo := bits.Mul64(n, mult)
-		if hi != 0 {
+		if hi != 0 || lo > maxSafeInteger {
 			return 0, false
 		}
 		return lo, true
@@ -291,10 +290,125 @@ func ParseSize(s string) (uint64, bool) {
 		return 0, false
 	}
 	result := f * float64(mult)
-	if result >= float64(math.MaxUint64) {
+	if result > float64(maxSafeInteger) {
 		return 0, false
 	}
 	return uint64(result), true
+}
+
+func isDecimalNumber(s string) bool {
+	i := 0
+	digitsBefore := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+		digitsBefore++
+	}
+	digitsAfter := 0
+	if i < len(s) && s[i] == '.' {
+		i++
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+			digitsAfter++
+		}
+	}
+	if digitsBefore+digitsAfter == 0 {
+		return false
+	}
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		expDigits := 0
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+			expDigits++
+		}
+		if expDigits == 0 {
+			return false
+		}
+	}
+	return i == len(s)
+}
+
+// NormalizeUTCOffset normalizes a fixed UTC offset string to AFDATA canonical form.
+// It returns "UTC" for zero offset, or ±HH:MM for non-zero offsets. This helper
+// handles fixed offsets only; IANA timezone names and DST rules are out of scope.
+func NormalizeUTCOffset(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if strings.EqualFold(s, "UTC") || strings.EqualFold(s, "Z") {
+		return "UTC", true
+	}
+	if s == "" || (s[0] != '+' && s[0] != '-') {
+		return "", false
+	}
+	sign := s[0]
+	hours, minutes, ok := parseUTCOffsetBody(s[1:])
+	if !ok || hours > 23 || minutes > 59 {
+		return "", false
+	}
+	if hours == 0 && minutes == 0 {
+		return "UTC", true
+	}
+	return fmt.Sprintf("%c%02d:%02d", sign, hours, minutes), true
+}
+
+func parseUTCOffsetBody(body string) (int, int, bool) {
+	if body == "" {
+		return 0, 0, false
+	}
+	if strings.Contains(body, ":") {
+		parts := strings.Split(body, ":")
+		if len(parts) != 2 || parts[0] == "" || len(parts[0]) > 2 || len(parts[1]) != 2 {
+			return 0, 0, false
+		}
+		hours, ok := parseASCIIInt(parts[0])
+		if !ok {
+			return 0, 0, false
+		}
+		minutes, ok := parseASCIIInt(parts[1])
+		return hours, minutes, ok
+	}
+	if !isASCIIDigits(body) {
+		return 0, 0, false
+	}
+	switch len(body) {
+	case 1, 2:
+		hours, ok := parseASCIIInt(body)
+		return hours, 0, ok
+	case 4:
+		hours, ok := parseASCIIInt(body[:2])
+		if !ok {
+			return 0, 0, false
+		}
+		minutes, ok := parseASCIIInt(body[2:])
+		return hours, minutes, ok
+	default:
+		return 0, 0, false
+	}
+}
+
+func parseASCIIInt(s string) (int, bool) {
+	if !isASCIIDigits(s) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ═══════════════════════════════════════════
@@ -336,41 +450,16 @@ func keyHasURLSuffix(key string) bool {
 // returns the (possibly replaced) value. Containers are mutated in place. A
 // _secret field becomes "***"; a _url field has its URL secrets scrubbed in
 // place. No other string is scanned.
+const maxDepth = 256
+
 func redactSecretsWithContext(value any, context redactionContext) any {
-	switch v := value.(type) {
-	case map[string]any:
-		for k := range v {
-			switch {
-			case context.isSecretKey(k):
-				switch v[k].(type) {
-				case map[string]any, []any:
-					// Traverse containers, don't replace
-					v[k] = redactSecretsWithContext(v[k], context)
-				default:
-					v[k] = "***"
-				}
-			case keyHasURLSuffix(k):
-				if s, ok := v[k].(string); ok {
-					v[k] = maybeRedactURL(s, context)
-				} else {
-					v[k] = redactSecretsWithContext(v[k], context)
-				}
-			default:
-				v[k] = redactSecretsWithContext(v[k], context)
-			}
-		}
-		return v
-	case []any:
-		for i, item := range v {
-			v[i] = redactSecretsWithContext(item, context)
-		}
-		return v
-	default:
-		return value
-	}
+	return redactSecretsWithContextDepth(value, context, 0)
 }
 
-func redactSecretsStrictWithContext(value any, context redactionContext) any {
+func redactSecretsWithContextDepth(value any, context redactionContext, depth int) any {
+	if depth >= maxDepth {
+		return "***"
+	}
 	switch v := value.(type) {
 	case map[string]any:
 		for k := range v {
@@ -379,18 +468,18 @@ func redactSecretsStrictWithContext(value any, context redactionContext) any {
 				v[k] = "***"
 			case keyHasURLSuffix(k):
 				if s, ok := v[k].(string); ok {
-					v[k] = maybeRedactURL(s, context)
+					v[k] = redactURLFieldValue(s, context)
 				} else {
-					v[k] = redactSecretsStrictWithContext(v[k], context)
+					v[k] = redactSecretsWithContextDepth(v[k], context, depth+1)
 				}
 			default:
-				v[k] = redactSecretsStrictWithContext(v[k], context)
+				v[k] = redactSecretsWithContextDepth(v[k], context, depth+1)
 			}
 		}
 		return v
 	case []any:
 		for i, item := range v {
-			v[i] = redactSecretsStrictWithContext(item, context)
+			v[i] = redactSecretsWithContextDepth(item, context, depth+1)
 		}
 		return v
 	default:
@@ -415,8 +504,6 @@ func applyRedactionPolicyWithContext(value any, redactionPolicy RedactionPolicy,
 	case RedactionNone:
 		// Explicitly disabled.
 		return value
-	case RedactionStrict:
-		return redactSecretsStrictWithContext(value, context)
 	default:
 		// Empty/unknown policy falls back to default full redaction.
 		return redactSecretsWithContext(value, context)
@@ -427,11 +514,26 @@ func applyRedactionPolicyWithContext(value any, redactionPolicy RedactionPolicy,
 // URL Secret Redaction
 // ═══════════════════════════════════════════
 
-// maybeRedactURL scrubs the URL secrets in a _url field's value, returning the
-// original string when it is not a processable single URL.
-func maybeRedactURL(s string, context redactionContext) string {
+func redactURLFieldValue(s string, context redactionContext) string {
 	if redacted, ok := redactURLInStr(s, context); ok {
 		return redacted
+	}
+	trimmed := strings.TrimSpace(s)
+	if trimmed != s {
+		if redacted, ok := redactURLInStr(trimmed, context); ok {
+			return redacted
+		}
+	}
+	// Fail closed: a _url value we could not parse as a clean scheme-prefixed
+	// URL, yet which carries a credential sigil ('@' userinfo) or internal
+	// whitespace, is redacted wholesale rather than passed through. A schemeless
+	// connection string like user:pass@host/db has no scheme anchor for the
+	// surgical span logic above, so blanket redaction is the safe default.
+	hasWhitespace := strings.IndexFunc(s, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v'
+	}) >= 0
+	if hasWhitespace || strings.Contains(s, "@") {
+		return "***"
 	}
 	return s
 }
@@ -488,7 +590,7 @@ func redactURLInStr(s string, context redactionContext) (string, bool) {
 // preserving the username. Authority without '@', or userinfo without ':', is
 // unchanged.
 func redactUserinfoPassword(authority string) string {
-	at := strings.Index(authority, "@")
+	at := strings.LastIndex(authority, "@")
 	if at < 0 {
 		return authority
 	}
@@ -619,7 +721,9 @@ func tryProcessField(key string, value any) (string, string, bool) {
 	// Group 1: compound timestamp suffixes
 	if stripped, ok := stripSuffixCI(key, "_epoch_ms"); ok {
 		if n, ok := asInt64(value); ok {
-			return stripped, formatRFC3339Ms(n), true
+			if formatted, ok := formatRFC3339Ms(n); ok {
+				return stripped, formatted, true
+			}
 		}
 		return "", "", false
 	}
@@ -628,7 +732,9 @@ func tryProcessField(key string, value any) (string, string, bool) {
 			if n > math.MaxInt64/1000 || n < math.MinInt64/1000 {
 				return "", "", false // *1000 would overflow; fall through to raw
 			}
-			return stripped, formatRFC3339Ms(n * 1000), true
+			if formatted, ok := formatRFC3339Ms(n * 1000); ok {
+				return stripped, formatted, true
+			}
 		}
 		return "", "", false
 	}
@@ -638,7 +744,9 @@ func tryProcessField(key string, value any) (string, string, bool) {
 			if n%1_000_000 < 0 {
 				ms--
 			}
-			return stripped, formatRFC3339Ms(ms), true
+			if formatted, ok := formatRFC3339Ms(ms); ok {
+				return stripped, formatted, true
+			}
 		}
 		return "", "", false
 	}
@@ -714,10 +822,6 @@ func tryProcessField(key string, value any) (string, string, bool) {
 		}
 		return "", "", false
 	}
-	if stripped, ok := stripSuffixCI(key, "_secret"); ok {
-		return stripped, "***", true
-	}
-
 	// Group 5: short suffixes (last to avoid false positives)
 	if stripped, ok := stripSuffixCI(key, "_btc"); ok {
 		if _, ok := asFloat64(value); ok {
@@ -771,6 +875,10 @@ func processObjectFields(m map[string]any) []processedField {
 
 	entries := make([]entry, 0, len(m))
 	for k, v := range m {
+		if stripped, ok := stripSuffixCI(k, "_secret"); ok {
+			entries = append(entries, entry{stripped, k, v, "", false})
+			continue
+		}
 		if stripped, formatted, ok := tryProcessField(k, v); ok {
 			entries = append(entries, entry{stripped, k, v, formatted, true})
 		} else {
@@ -831,7 +939,13 @@ func formatMsValue(value any) (string, bool) {
 	return plainScalar(value) + "ms", true
 }
 
-func formatRFC3339Ms(ms int64) string {
+const minRFC3339Ms int64 = -62135596800000
+const maxRFC3339Ms int64 = 253402300799999
+
+func formatRFC3339Ms(ms int64) (string, bool) {
+	if ms < minRFC3339Ms || ms > maxRFC3339Ms {
+		return "", false
+	}
 	sec := ms / 1000
 	rem := ms % 1000
 	if rem < 0 {
@@ -840,7 +954,7 @@ func formatRFC3339Ms(ms int64) string {
 	}
 	nsec := rem * 1_000_000
 	t := time.Unix(sec, nsec).UTC()
-	return t.Format("2006-01-02T15:04:05.000Z")
+	return t.Format("2006-01-02T15:04:05.000Z"), true
 }
 
 func formatBytesHuman(bytes int64) string {
@@ -899,8 +1013,14 @@ func extractCurrencyCode(key string) string {
 		return ""
 	}
 	code := withoutCents[idx+1:]
-	if code == "" {
+	if code == "" || len(code) < 3 || len(code) > 4 {
 		return ""
+	}
+	for i := 0; i < len(code); i++ {
+		c := code[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			return ""
+		}
 	}
 	return code
 }
@@ -919,21 +1039,21 @@ func renderYamlProcessed(value any, indent int, lines *[]string) {
 
 	for _, pf := range processObjectFields(m) {
 		if pf.isFormatted {
-			*lines = append(*lines, fmt.Sprintf("%s%s: \"%s\"", prefix, pf.key, escapeYamlStr(pf.formatted)))
+			*lines = append(*lines, fmt.Sprintf("%s%s: \"%s\"", prefix, yamlKey(pf.key), escapeYamlStr(pf.formatted)))
 		} else {
 			switch v := pf.value.(type) {
 			case map[string]any:
 				if len(v) > 0 {
-					*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, pf.key))
+					*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, yamlKey(pf.key)))
 					renderYamlProcessed(v, indent+1, lines)
 				} else {
-					*lines = append(*lines, fmt.Sprintf("%s%s: {}", prefix, pf.key))
+					*lines = append(*lines, fmt.Sprintf("%s%s: {}", prefix, yamlKey(pf.key)))
 				}
 			case []any:
 				if len(v) == 0 {
-					*lines = append(*lines, fmt.Sprintf("%s%s: []", prefix, pf.key))
+					*lines = append(*lines, fmt.Sprintf("%s%s: []", prefix, yamlKey(pf.key)))
 				} else {
-					*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, pf.key))
+					*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, yamlKey(pf.key)))
 					for _, item := range v {
 						if _, ok := item.(map[string]any); ok {
 							*lines = append(*lines, fmt.Sprintf("%s  -", prefix))
@@ -944,7 +1064,7 @@ func renderYamlProcessed(value any, indent int, lines *[]string) {
 					}
 				}
 			default:
-				*lines = append(*lines, fmt.Sprintf("%s%s: %s", prefix, pf.key, yamlScalar(pf.value)))
+				*lines = append(*lines, fmt.Sprintf("%s%s: %s", prefix, yamlKey(pf.key), yamlScalar(pf.value)))
 			}
 		}
 	}
@@ -968,20 +1088,20 @@ func renderYamlFieldRaw(prefix, key string, value any, indent int, lines *[]stri
 	switch v := value.(type) {
 	case map[string]any:
 		if len(v) > 0 {
-			*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, key))
+			*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, yamlKey(key)))
 			renderYamlRaw(v, indent+1, lines)
 		} else {
-			*lines = append(*lines, fmt.Sprintf("%s%s: {}", prefix, key))
+			*lines = append(*lines, fmt.Sprintf("%s%s: {}", prefix, yamlKey(key)))
 		}
 	case []any:
 		if len(v) == 0 {
-			*lines = append(*lines, fmt.Sprintf("%s%s: []", prefix, key))
+			*lines = append(*lines, fmt.Sprintf("%s%s: []", prefix, yamlKey(key)))
 		} else {
-			*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, key))
+			*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, yamlKey(key)))
 			renderYamlArrayRaw(v, indent+1, lines)
 		}
 	default:
-		*lines = append(*lines, fmt.Sprintf("%s%s: %s", prefix, key, yamlScalar(value)))
+		*lines = append(*lines, fmt.Sprintf("%s%s: %s", prefix, yamlKey(key), yamlScalar(value)))
 	}
 }
 
@@ -1015,7 +1135,36 @@ func escapeYamlStr(s string) string {
 	s = strings.ReplaceAll(s, "\n", `\n`)
 	s = strings.ReplaceAll(s, "\r", `\r`)
 	s = strings.ReplaceAll(s, "\t", `\t`)
+	s = strings.ReplaceAll(s, "\f", `\f`)
+	s = strings.ReplaceAll(s, "\v", `\v`)
 	return s
+}
+
+func yamlKey(key string) string {
+	if isSafeKey(key) {
+		return key
+	}
+	return `"` + escapeYamlStr(key) + `"`
+}
+
+func quoteLogfmtKey(key string) string {
+	if isSafeKey(key) {
+		return key
+	}
+	return quoteLogfmtValue(key)
+}
+
+func isSafeKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func yamlScalar(value any) string {
@@ -1036,9 +1185,11 @@ func yamlScalar(value any) string {
 	case float64:
 		// 'f', -1 yields the shortest round-trip form and drops the trailing
 		// ".0" from integral floats (3.0 -> "3"), matching Rust/TS/Python.
-		return strconv.FormatFloat(v, 'f', -1, 64)
+		return formatFloatCanonical(v)
 	case json.Number:
 		return v.String()
+	case map[string]any, []any:
+		return fmt.Sprintf(`"%s"`, escapeYamlStr(canonicalJSON(value)))
 	default:
 		return fmt.Sprintf(`"<unsupported:%T>"`, value)
 	}
@@ -1124,9 +1275,11 @@ func plainScalar(value any) string {
 	case float64:
 		// 'f', -1 yields the shortest round-trip form and drops the trailing
 		// ".0" from integral floats (3.0 -> "3"), matching Rust/TS/Python.
-		return strconv.FormatFloat(v, 'f', -1, 64)
+		return formatFloatCanonical(v)
 	case json.Number:
 		return v.String()
+	case map[string]any, []any:
+		return canonicalJSON(value)
 	default:
 		return fmt.Sprintf("<unsupported:%T>", value)
 	}
@@ -1135,18 +1288,52 @@ func plainScalar(value any) string {
 func plainScalarRaw(value any) string {
 	switch value.(type) {
 	case map[string]any, []any:
-		if b, err := json.Marshal(value); err == nil {
-			return string(b)
-		}
+		return canonicalJSON(value)
 	}
 	return plainScalar(value)
+}
+
+func formatFloatCanonical(v float64) string {
+	if math.IsInf(v, 0) || math.IsNaN(v) {
+		return strconv.FormatFloat(v, 'g', -1, 64)
+	}
+	if math.Trunc(v) == v && math.Abs(v) < 1e21 {
+		return strconv.FormatFloat(v, 'f', 0, 64)
+	}
+	return normalizeExponent(strconv.FormatFloat(v, 'g', -1, 64))
+}
+
+func normalizeExponent(s string) string {
+	e := strings.IndexAny(s, "eE")
+	if e < 0 {
+		return s
+	}
+	mantissa := s[:e]
+	exp := s[e+1:]
+	sign := ""
+	if strings.HasPrefix(exp, "+") || strings.HasPrefix(exp, "-") {
+		sign = exp[:1]
+		exp = exp[1:]
+	}
+	exp = strings.TrimLeft(exp, "0")
+	if exp == "" {
+		exp = "0"
+	}
+	return mantissa + "e" + sign + exp
 }
 
 func quoteLogfmtValue(value string) string {
 	if value == "" {
 		return ""
 	}
-	if !strings.ContainsAny(value, " \t\n\r=\\\"") {
+	needsQuote := false
+	for _, r := range value {
+		if r == '=' || r == '"' || r == '\\' || r == '\u00a0' || r == '\v' || r == '\f' || r == '\n' || r == '\r' || r == '\t' || r == ' ' {
+			needsQuote = true
+			break
+		}
+	}
+	if !needsQuote {
 		return value
 	}
 	escaped := strings.ReplaceAll(value, `\`, `\\`)
@@ -1154,7 +1341,36 @@ func quoteLogfmtValue(value string) string {
 	escaped = strings.ReplaceAll(escaped, "\n", `\n`)
 	escaped = strings.ReplaceAll(escaped, "\r", `\r`)
 	escaped = strings.ReplaceAll(escaped, "\t", `\t`)
+	escaped = strings.ReplaceAll(escaped, "\f", `\f`)
+	escaped = strings.ReplaceAll(escaped, "\v", `\v`)
 	return `"` + escaped + `"`
+}
+
+func canonicalJSON(value any) string {
+	b, err := json.Marshal(sortJSONValue(value))
+	if err != nil {
+		return fmt.Sprintf("<unsupported:%T>", value)
+	}
+	return string(b)
+}
+
+func sortJSONValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for _, key := range sortedObjectKeys(v) {
+			out[key] = sortJSONValue(v[key])
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = sortJSONValue(item)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 // ═══════════════════════════════════════════
@@ -1226,7 +1442,7 @@ func normalize(value any) any {
 
 // sanitizeForJSON converts values into JSON-safe data while preserving map/array structure.
 func sanitizeForJSON(value any) any {
-	return sanitizeForJSONWithVisited(value, map[visitKey]struct{}{})
+	return sanitizeForJSONWithVisited(value, map[visitKey]struct{}{}, 0)
 }
 
 type visitKey struct {
@@ -1234,7 +1450,10 @@ type visitKey struct {
 	ptr  uintptr
 }
 
-func sanitizeForJSONWithVisited(value any, visited map[visitKey]struct{}) any {
+func sanitizeForJSONWithVisited(value any, visited map[visitKey]struct{}, depth int) any {
+	if depth >= maxDepth {
+		return "***"
+	}
 	switch v := value.(type) {
 	case map[string]any:
 		rv := reflect.ValueOf(v)
@@ -1249,7 +1468,7 @@ func sanitizeForJSONWithVisited(value any, visited map[visitKey]struct{}) any {
 
 		out := make(map[string]any, len(v))
 		for k, item := range v {
-			out[k] = sanitizeForJSONWithVisited(item, visited)
+			out[k] = sanitizeForJSONWithVisited(item, visited, depth+1)
 		}
 		return out
 	case []any:
@@ -1265,7 +1484,7 @@ func sanitizeForJSONWithVisited(value any, visited map[visitKey]struct{}) any {
 
 		out := make([]any, len(v))
 		for i, item := range v {
-			out[i] = sanitizeForJSONWithVisited(item, visited)
+			out[i] = sanitizeForJSONWithVisited(item, visited, depth+1)
 		}
 		return out
 	}

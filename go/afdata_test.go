@@ -36,8 +36,6 @@ func redactionOptionsFromCase(tc map[string]any) RedactionOptions {
 			redactionOptions.Policy = RedactionTraceOnly
 		case "RedactionNone":
 			redactionOptions.Policy = RedactionNone
-		case "RedactionStrict":
-			redactionOptions.Policy = RedactionStrict
 		default:
 			panic(fmt.Sprintf("unknown redaction policy: %s", policy))
 		}
@@ -81,7 +79,7 @@ func TestRedactFixtures(t *testing.T) {
 			b, _ := json.Marshal(tc["input"])
 			var inp any
 			json.Unmarshal(b, &inp)
-			InternalRedactSecrets(inp)
+			RedactSecretsInPlace(inp)
 
 			b2, _ := json.Marshal(tc["expected"])
 			var expected any
@@ -117,7 +115,7 @@ func TestRedactionOptionsFixtures(t *testing.T) {
 			b, _ := json.Marshal(tc["input"])
 			var inp any
 			json.Unmarshal(b, &inp)
-			InternalRedactSecretsWithOptions(inp, options)
+			RedactSecretsInPlaceWithOptions(inp, options)
 			gotJSON, _ = json.Marshal(inp)
 			if string(gotJSON) != string(expJSON) {
 				t.Errorf("in-place got %s, want %s", gotJSON, expJSON)
@@ -266,6 +264,24 @@ func TestHelperFixtures(t *testing.T) {
 						expected := uint64(pair[1].(float64))
 						if !ok || got != expected {
 							t.Errorf("ParseSize(%q) = (%d, %v), want %d", input, got, ok, expected)
+						}
+					}
+				})
+			}
+		case "normalize_utc_offset":
+			for _, c := range cases {
+				pair := c.([]any)
+				input := pair[0].(string)
+				t.Run(fmt.Sprintf("normalize_utc_offset_%s", input), func(t *testing.T) {
+					got, ok := NormalizeUTCOffset(input)
+					if pair[1] == nil {
+						if ok {
+							t.Errorf("NormalizeUTCOffset(%q) = %q, want error", input, got)
+						}
+					} else {
+						expected := pair[1].(string)
+						if !ok || got != expected {
+							t.Errorf("NormalizeUTCOffset(%q) = (%q, %v), want %q", input, got, ok, expected)
 						}
 					}
 				})
@@ -431,18 +447,13 @@ func TestRedactedValueReturnsSafeCopy(t *testing.T) {
 	}
 }
 
-func TestRedactedValueWithStrictRedactsSecretSubtree(t *testing.T) {
+func TestRedactedValueRedactsSecretSubtreeByDefault(t *testing.T) {
 	input := map[string]any{
 		"db_secret": map[string]any{"password_secret": "real", "host": "localhost"},
 	}
 	defaultValue := RedactedValue(input).(map[string]any)
-	strictValue := RedactedValueWith(input, RedactionStrict).(map[string]any)
-	defaultSecret := defaultValue["db_secret"].(map[string]any)
-	if defaultSecret["password_secret"] != "***" || defaultSecret["host"] != "localhost" {
-		t.Fatalf("default redaction = %#v", defaultSecret)
-	}
-	if strictValue["db_secret"] != "***" {
-		t.Fatalf("strict db_secret = %#v, want ***", strictValue["db_secret"])
+	if defaultValue["db_secret"] != "***" {
+		t.Fatalf("db_secret = %#v, want ***", defaultValue["db_secret"])
 	}
 }
 

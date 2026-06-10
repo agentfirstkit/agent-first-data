@@ -62,7 +62,11 @@
   {
     "name": "legacy param redacted via secret_names",
     "input": "wss://host:9222/cdp?token=abcdef",
-    "options": {"secret_names": ["token"]},
+    "options": {
+      "secret_names": [
+        "token"
+      ]
+    },
     "expected": "wss://host:9222/cdp?token=***"
   },
   {
@@ -89,5 +93,10 @@
     "name": "out-of-range port with userinfo, fragment and benign param",
     "input": "https://u:p@h:70000/p?x_secret=9&ok=1#frag",
     "expected": "https://u:***@h:70000/p?x_secret=***&ok=1#frag"
+  },
+  {
+    "name": "userinfo password containing at sign",
+    "input": "postgres://user:p@ss@host/db",
+    "expected": "postgres://user:***@host/db"
   }
 ]

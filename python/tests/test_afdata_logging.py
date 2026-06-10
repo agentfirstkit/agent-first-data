@@ -7,6 +7,7 @@ from io import StringIO
 from unittest.mock import patch
 
 from agent_first_data.afdata_logging import AfdataHandler, init_json, init_plain, init_yaml, span, get_logger
+from agent_first_data.format import RedactionOptions
 
 
 def capture_log(fn):
@@ -32,24 +33,28 @@ class TestBasicFields:
         logger = make_logger("test_basic")
         m = capture_log(lambda: logger.info("hello world"))
         assert m["message"] == "hello world"
-        assert m["code"] == "info"
+        assert m["code"] == "log"
+        assert m["level"] == "info"
         assert "timestamp_epoch_ms" in m
-        assert m["target"] == "test_basic"
+        assert "target" not in m
 
     def test_warning_code(self):
         logger = make_logger("test_warn")
         m = capture_log(lambda: logger.warning("something wrong"))
-        assert m["code"] == "warn"
+        assert m["code"] == "log"
+        assert m["level"] == "warn"
 
     def test_error_code(self):
         logger = make_logger("test_error")
         m = capture_log(lambda: logger.error("failure"))
-        assert m["code"] == "error"
+        assert m["code"] == "log"
+        assert m["level"] == "error"
 
     def test_debug_code(self):
         logger = make_logger("test_debug")
         m = capture_log(lambda: logger.debug("verbose"))
-        assert m["code"] == "debug"
+        assert m["code"] == "log"
+        assert m["level"] == "debug"
 
 
 class TestSpan:
@@ -108,8 +113,9 @@ class TestCodeOverride:
         logger = make_logger("test_code")
         adapter = get_logger("test_code")
 
-        m = capture_log(lambda: adapter.info("ready", extra={"code": "log", "event": "startup"}))
+        m = capture_log(lambda: adapter.info("ready", extra={"code": "ignored", "event": "startup"}))
         assert m["code"] == "log"
+        assert m["level"] == "info"
         assert m["event"] == "startup"
 
     def test_exception_field_is_readable(self):
@@ -117,6 +123,74 @@ class TestCodeOverride:
         adapter = get_logger("test_exc")
         m = capture_log(lambda: adapter.error("request failed", extra={"error": Exception("timeout")}))
         assert m["error"] == "timeout"
+
+
+class TestRedactionOptions:
+    def test_legacy_secret_names_apply_to_all_formats(self):
+        for format in ("json", "plain", "yaml"):
+            logger = logging.getLogger(f"test_redaction_{format}")
+            logger.handlers = [
+                AfdataHandler(
+                    format=format,
+                    redaction=RedactionOptions(secret_names=("authorization",)),
+                )
+            ]
+            logger.setLevel(logging.DEBUG)
+            logger.propagate = False
+            adapter = get_logger(f"test_redaction_{format}")
+
+            output = capture_raw(
+                lambda: adapter.info(
+                    "authorization appears in message but is not name-redacted",
+                    extra={
+                        "authorization": "Bearer legacy",
+                        "request_url": "https://example.test/path?authorization=legacy&ok=1",
+                    },
+                )
+            )
+            assert "***" in output
+            assert "Bearer legacy" not in output
+            assert "authorization=legacy" not in output
+            assert "authorization appears in message" in output
+
+    def test_legacy_secret_names_are_redacted(self):
+        logger = logging.getLogger("test_redaction")
+        logger.handlers = [
+            AfdataHandler(redaction=RedactionOptions(secret_names=("authorization",)))
+        ]
+        logger.setLevel(logging.DEBUG)
+        adapter = get_logger("test_redaction")
+
+        m = capture_log(
+            lambda: adapter.info(
+                "authorization appears in message but is not name-redacted",
+                extra={
+                    "authorization": "Bearer legacy",
+                    "request_url": "https://example.test/path?authorization=legacy&ok=1",
+                },
+            )
+        )
+        assert m["authorization"] == "***"
+        assert "authorization appears in message" in m["message"]
+        assert "authorization=***" in m["request_url"]
+        assert "authorization=legacy" not in m["request_url"]
+
+    def test_default_redaction_leaves_legacy_names_visible(self):
+        logger = make_logger("test_redaction_default")
+        adapter = get_logger("test_redaction_default")
+
+        m = capture_log(lambda: adapter.info("request", extra={"authorization": "Bearer visible"}))
+        assert m["authorization"] == "Bearer visible"
+
+    def test_init_accepts_secret_names(self):
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            init_json("DEBUG", secret_names=("authorization",))
+            adapter = get_logger("test_redaction_init")
+            adapter.info("request", extra={"authorization": "Bearer legacy"})
+
+        m = json.loads(buf.getvalue().strip())
+        assert m["authorization"] == "***"
 
 
 class TestGetLogger:
@@ -150,7 +224,8 @@ class TestPlainFormat:
         output = capture_raw(lambda: logger.info("hello"))
         # Plain format is single-line logfmt
         assert "message=" in output
-        assert "code=info" in output
+        assert "code=log" in output
+        assert "level=info" in output
 
     def test_init_plain(self):
         buf = StringIO()

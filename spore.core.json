@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,9 +13,17 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Unify cross-language number formatting: render integral-valued floats without a trailing .0 and accept them for integer-required suffixes (_bytes/_epoch_*/_cents/_jpy) across all four languages, gating on value integrality rather than lexical form; guard _epoch_s * 1000 against integer overflow and preserve >2^53 integer precision in Go",
-    "Redact structured-logging fields by name (_secret suffix, _url scrubbing) at emit time across every tracing record_* path, instead of substring-scanning rendered values, fixing a leak where info!(api_key_secret = %x) passed through unredacted",
-    "Fix _url secret leak where Rust and TypeScript silently left malformed URLs unredacted (userinfo passwords, secret query params) by dropping a redundant URL-library parse gate; round _bytes half-to-even in TypeScript to match the %.1f formatting used by Rust/Go/Python"
+    "Add _bcp47 and _utc_offset strict string-format suffixes: _bcp47 marks BCP-47 language tags and _utc_offset marks fixed UTC offsets (canonical \"UTC\" or ±HH:MM, zero normalizes to \"UTC\"); both pass through unchanged in YAML/Plain and are explicitly not IANA timezone names, with magic sentinels like \"auto\" discouraged in such fields",
+    "Change _secret redaction to replace the entire value or subtree with the scalar *** (scalar, object, or array alike), and run redaction before YAML/Plain key-collision fallback, so a secret-marked container can never leak through any output format",
+    "Fail closed in _url redaction: a _url value that is not a clean scheme-prefixed URL but carries internal whitespace or an @ credential sigil (e.g. schemeless user:pass@host/db) is now redacted wholesale to ***; whitespace is trimmed first and benign schemeless relative URLs still pass through",
+    "Pin that formatting suffixes inside _url query parameters (?timeout_ms=, ?size_bytes=) are byte-preserved, never reformatted or stripped, so URLs round-trip to their server exactly",
+    "Honor configured secret_names inside the logging/tracing modules so legacy field names are redacted by name in emitted log lines, matching the output helpers",
+    "Standardize the logging envelope: every log line carries code:\"log\" plus a separate level (debug/info/warn/error), so log events never collide with the reserved terminal code:\"error\"",
+    "Harden logfmt quoting and escaping to cover ASCII space, tab, newline, carriage return, form feed, vertical tab, NBSP, =, double-quote, and backslash so every record stays one physical line",
+    "Normalize cross-language number rendering to a shared decimal form (drop trailing .0, lowercase e, normalize exponent sign and zeroes such as 1e-07 to 1e-7), reject parse_size results above 2^53-1, and format negative _ms durations by absolute magnitude (-1500 to -1.5s)",
+    "Restrict the generic _{code}_cents currency suffix to match only 3-4 ASCII letters",
+    "Harden the skill installer: install, uninstall, and status refuse to follow, overwrite, or remove a symlinked SKILL.md without --force, writes are atomic, and the managed-marker block embeds an FNV-1a64 source hash for currency detection",
+    "Slim the skill file to behavioral naming, output, protocol, and logging rules, dropping per-language import snippets that drift across languages"
   ],
   "bonds": [],
   "tree": {

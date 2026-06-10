@@ -103,21 +103,17 @@ func TestBuildCliError_RequiredFields(t *testing.T) {
 	if v["code"] != "error" {
 		t.Errorf("code = %v", v["code"])
 	}
-	if v["error_code"] != "invalid_request" {
-		t.Errorf("error_code = %v", v["error_code"])
-	}
 	if v["error"] != "missing --sql" {
 		t.Errorf("error = %v", v["error"])
 	}
-	if v["retryable"] != false {
-		t.Errorf("retryable = %v", v["retryable"])
+	if _, ok := v["error_code"]; ok {
+		t.Errorf("unexpected error_code = %v", v["error_code"])
 	}
-	trace, ok := v["trace"].(map[string]any)
-	if !ok {
-		t.Fatalf("trace is not map[string]any: %T", v["trace"])
+	if _, ok := v["retryable"]; ok {
+		t.Errorf("unexpected retryable = %v", v["retryable"])
 	}
-	if trace["duration_ms"] != 0 {
-		t.Errorf("trace.duration_ms = %v", trace["duration_ms"])
+	if _, ok := v["trace"]; ok {
+		t.Errorf("unexpected trace = %v", v["trace"])
 	}
 }
 

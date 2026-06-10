@@ -547,9 +547,10 @@ if (process.env["NODE_TEST_CONTEXT"]) {
     it("build cli error structure", () => {
       const v = buildCliError("--output: invalid value 'xml'") as Record<string, unknown>;
       assert.equal(v["code"], "error");
-      assert.equal(v["error_code"], "invalid_request");
-      assert.equal(v["retryable"], false);
-      assert.equal((v["trace"] as Record<string, unknown>)["duration_ms"], 0);
+      assert.equal(v["error"], "--output: invalid value 'xml'");
+      assert.equal(v["error_code"], undefined);
+      assert.equal(v["retryable"], undefined);
+      assert.equal(v["trace"], undefined);
     });
 
     it("build cli error with hint", () => {

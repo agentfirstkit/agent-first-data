@@ -85,10 +85,7 @@ export function cliOutputWithOptions(value: JsonValue, format: OutputFormat, out
 export function buildCliError(message: string, hint?: string): JsonValue {
   const m: Record<string, JsonValue> = {
     code: "error",
-    error_code: "invalid_request",
     error: message,
-    retryable: false,
-    trace: { duration_ms: 0 },
   };
   if (hint !== undefined) m.hint = hint;
   return m;

@@ -1,10 +1,10 @@
 /**
  * AFDATA output formatting and protocol templates.
  *
- * 18 public APIs and 4 types: protocol builders, value redactors (copy and
+ * 19 public APIs and 4 types: protocol builders, value redactors (copy and
  * in-place; cover _secret and _url fields), output formatters, URL-string
- * redactors (redactUrlSecrets / WithOptions), parseSize, RedactionPolicy,
- * RedactionOptions, OutputStyle, and OutputOptions.
+ * redactors (redactUrlSecrets / WithOptions), parseSize, normalizeUtcOffset,
+ * RedactionPolicy, RedactionOptions, OutputStyle, and OutputOptions.
  */
 
 export type JsonValue =
@@ -49,7 +49,6 @@ export function buildJson(code: string, fields: JsonValue, trace?: JsonValue): J
 export enum RedactionPolicy {
   RedactionTraceOnly = "RedactionTraceOnly",
   RedactionNone = "RedactionNone",
-  RedactionStrict = "RedactionStrict",
 }
 
 export type RedactionOptions = {
@@ -124,7 +123,7 @@ export function outputPlainWithOptions(value: JsonValue, outputOptions: OutputOp
   }
   pairs.sort(([a], [b]) => jcsCompare(a, b));
   return pairs
-    .map(([k, v]) => `${k}=${quoteLogfmtValue(v)}`)
+    .map(([k, v]) => `${quoteLogfmtKey(k)}=${quoteLogfmtValue(v)}`)
     .join(" ");
 }
 
@@ -133,12 +132,12 @@ export function outputPlainWithOptions(value: JsonValue, outputOptions: OutputOp
 // ═══════════════════════════════════════════
 
 /** Redact _secret fields in-place. */
-export function internalRedactSecrets(value: JsonValue): void {
+export function redactSecretsInPlace(value: JsonValue): void {
   redactSecrets(value);
 }
 
 /** Redact secret fields in-place using explicit redaction options. */
-export function internalRedactSecretsWithOptions(value: JsonValue, redactionOptions: RedactionOptions): void {
+export function redactSecretsInPlaceWithOptions(value: JsonValue, redactionOptions: RedactionOptions): void {
   applyRedactionOptions(value, redactionOptions);
 }
 
@@ -211,12 +210,45 @@ export function parseSize(s: string): number | null {
   } else {
     return null;
   }
-  if (!numStr) return null;
+  if (!numStr || !/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(numStr)) return null;
   const n = Number(numStr);
   if (isNaN(n) || n < 0 || !isFinite(n)) return null;
   const result = Math.trunc(n * mult);
   if (!Number.isSafeInteger(result)) return null;
   return result;
+}
+
+/**
+ * Normalize a fixed UTC offset string to "UTC" or ±HH:MM.
+ * This helper handles fixed offsets only; IANA timezone names and DST rules
+ * are intentionally out of scope.
+ */
+export function normalizeUtcOffset(value: string): string | null {
+  const s = value.trim();
+  if (s.toLowerCase() === "utc" || s.toLowerCase() === "z") return "UTC";
+  if (!s || (s[0] !== "+" && s[0] !== "-")) return null;
+  const parsed = parseUtcOffsetBody(s.slice(1));
+  if (parsed === null) return null;
+  const [hours, minutes] = parsed;
+  if (hours > 23 || minutes > 59) return null;
+  if (hours === 0 && minutes === 0) return "UTC";
+  return `${s[0]}${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
+}
+
+function parseUtcOffsetBody(body: string): [number, number] | null {
+  if (!body) return null;
+  if (body.includes(":")) {
+    const parts = body.split(":");
+    if (parts.length !== 2) return null;
+    const [hours, minutes] = parts;
+    if (!hours || hours.length > 2 || minutes.length !== 2) return null;
+    if (!/^[0-9]+$/.test(hours) || !/^[0-9]+$/.test(minutes)) return null;
+    return [Number(hours), Number(minutes)];
+  }
+  if (!/^[0-9]+$/.test(body)) return null;
+  if (body.length === 1 || body.length === 2) return [Number(body), 0];
+  if (body.length === 4) return [Number(body.slice(0, 2)), Number(body.slice(2))];
+  return null;
 }
 
 // ═══════════════════════════════════════════
@@ -251,46 +283,29 @@ function isSecretKey(key: string, secretNames: ReadonlySet<string>): boolean {
   return keyHasSecretSuffix(key) || secretNames.has(key);
 }
 
-function redactSecrets(value: JsonValue, context: RedactionContext = DEFAULT_CONTEXT): void {
-  if (isObject(value)) {
-    for (const k of Object.keys(value)) {
-      const v = value[k];
-      if (isSecretKey(k, context.secretNames)) {
-        if (isObject(v) || Array.isArray(v)) {
-          redactSecrets(v, context);
-        } else {
-          value[k] = "***";
-        }
-      } else if (keyHasUrlSuffix(k) && typeof v === "string") {
-        const redacted = redactUrlInStr(v, context.secretNames);
-        if (redacted !== null) value[k] = redacted;
-      } else {
-        redactSecrets(v, context);
-      }
-    }
-  } else if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) {
-      redactSecrets(value[i], context);
-    }
-  }
-}
+const MAX_DEPTH = 256;
 
-function redactSecretsStrict(value: JsonValue, context: RedactionContext = DEFAULT_CONTEXT): void {
+function redactSecrets(value: JsonValue, context: RedactionContext = DEFAULT_CONTEXT, depth = 0): void {
+  if (depth >= MAX_DEPTH) return;
   if (isObject(value)) {
     for (const k of Object.keys(value)) {
       const v = value[k];
       if (isSecretKey(k, context.secretNames)) {
         value[k] = "***";
-      } else if (keyHasUrlSuffix(k) && typeof v === "string") {
-        const redacted = redactUrlInStr(v, context.secretNames);
-        if (redacted !== null) value[k] = redacted;
+      } else if (keyHasUrlSuffix(k)) {
+        if (typeof v === "string") {
+          value[k] = redactUrlFieldValue(v, context.secretNames);
+        } else {
+          value[k] = depth + 1 >= MAX_DEPTH ? "***" : (redactSecrets(v, context, depth + 1), v);
+        }
       } else {
-        redactSecretsStrict(v, context);
+        value[k] = depth + 1 >= MAX_DEPTH ? "***" : (redactSecrets(v, context, depth + 1), v);
       }
     }
   } else if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
-      redactSecretsStrict(value[i], context);
+      if (depth + 1 >= MAX_DEPTH) value[i] = "***";
+      else redactSecrets(value[i], context, depth + 1);
     }
   }
 }
@@ -315,9 +330,6 @@ function applyRedactionPolicyWithContext(
       }
       break;
     case RedactionPolicy.RedactionNone:
-      break;
-    case RedactionPolicy.RedactionStrict:
-      redactSecretsStrict(value, context);
       break;
     default:
       // Empty/unknown policy falls back to default full redaction.
@@ -387,12 +399,29 @@ function redactUrlInStr(s: string, secretNames: ReadonlySet<string>): string | n
   return `${scheme}://${newAuthority}${newRemainder}`;
 }
 
+function redactUrlFieldValue(s: string, secretNames: ReadonlySet<string>): string {
+  const redacted = redactUrlInStr(s, secretNames);
+  if (redacted !== null) return redacted;
+  const trimmed = s.trim();
+  if (trimmed !== s) {
+    const trimmedRedacted = redactUrlInStr(trimmed, secretNames);
+    if (trimmedRedacted !== null) return trimmedRedacted;
+  }
+  // Fail closed: a _url value we could not parse as a clean scheme-prefixed
+  // URL, yet which carries a credential sigil ('@' userinfo) or internal
+  // whitespace, is redacted wholesale rather than passed through. A schemeless
+  // connection string like user:pass@host/db has no scheme anchor for the
+  // surgical span logic above, so blanket redaction is the safe default.
+  if (/\s/.test(s) || s.includes("@")) return "***";
+  return s;
+}
+
 /**
  * Replace the userinfo password (user:pass@) with "***", preserving the
  * username. Authority without '@', or userinfo without ':', is unchanged.
  */
 function redactUserinfoPassword(authority: string): string {
-  const at = authority.indexOf("@");
+  const at = authority.lastIndexOf("@");
   if (at < 0) return authority;
   const userinfo = authority.slice(0, at);
   const colon = userinfo.indexOf(":");
@@ -500,17 +529,17 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   // Group 1: compound timestamp suffixes
   stripped = stripSuffixCI(key, "_epoch_ms");
   if (stripped !== null) {
-    if (isInt(value)) return [stripped, formatRfc3339Ms(value)];
+    if (isInt(value)) { const formatted = formatRfc3339Ms(value); if (formatted !== null) return [stripped, formatted]; }
     return null;
   }
   stripped = stripSuffixCI(key, "_epoch_s");
   if (stripped !== null) {
-    if (isInt(value)) return [stripped, formatRfc3339Ms(value * 1000)];
+    if (isInt(value)) { const formatted = formatRfc3339Ms(value * 1000); if (formatted !== null) return [stripped, formatted]; }
     return null;
   }
   stripped = stripSuffixCI(key, "_epoch_ns");
   if (stripped !== null) {
-    if (isInt(value)) return [stripped, formatRfc3339Ms(Math.floor(value / 1_000_000))];
+    if (isInt(value)) { const formatted = formatRfc3339Ms(Math.floor(value / 1_000_000)); if (formatted !== null) return [stripped, formatted]; }
     return null;
   }
 
@@ -575,9 +604,6 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
     if (isNum(value)) return [stripped, `${plainScalar(value)}%`];
     return null;
   }
-  stripped = stripSuffixCI(key, "_secret");
-  if (stripped !== null) return [stripped, "***"];
-
   // Group 5: short suffixes (last to avoid false positives)
   stripped = stripSuffixCI(key, "_btc");
   if (stripped !== null) {
@@ -623,6 +649,11 @@ type ProcessedField = {
 function processObjectFields(obj: { [key: string]: JsonValue }): ProcessedField[] {
   const entries: { stripped: string; original: string; value: JsonValue; formatted: string | null }[] = [];
   for (const [k, v] of Object.entries(obj)) {
+    const secretStripped = stripSuffixCI(k, "_secret");
+    if (secretStripped !== null) {
+      entries.push({ stripped: secretStripped, original: k, value: v, formatted: null });
+      continue;
+    }
     const result = tryProcessField(k, v);
     if (result !== null) {
       entries.push({ stripped: result[0], original: k, value: v, formatted: result[1] });
@@ -667,13 +698,14 @@ function formatMsValue(value: JsonValue): string | null {
   return `${plainScalar(value)}ms`;
 }
 
-function formatRfc3339Ms(ms: number): string {
-  try {
-    const d = new Date(ms);
-    return d.toISOString().replace(/(\.\d{3})\d*Z$/, "$1Z");
-  } catch {
-    return String(ms);
-  }
+const MIN_RFC3339_MS = -62135596800000;
+const MAX_RFC3339_MS = 253402300799999;
+
+function formatRfc3339Ms(ms: number): string | null {
+  if (ms < MIN_RFC3339_MS || ms > MAX_RFC3339_MS) return null;
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().replace(/(\.\d{3})\d*Z$/, "$1Z");
 }
 
 /**
@@ -728,7 +760,7 @@ function extractCurrencyCode(key: string): string | null {
   const idx = withoutCents.lastIndexOf("_");
   if (idx < 0) return null;
   const code = withoutCents.slice(idx + 1);
-  if (!code) return null;
+  if (!/^[A-Za-z]{3,4}$/.test(code)) return null;
   return code;
 }
 
@@ -745,19 +777,19 @@ function renderYamlProcessed(value: JsonValue, indent: number, lines: string[]):
 
   for (const pf of processObjectFields(value)) {
     if (pf.formatted !== null) {
-      lines.push(`${prefix}${pf.key}: "${escapeYamlStr(pf.formatted)}"`);
+      lines.push(`${prefix}${yamlKey(pf.key)}: "${escapeYamlStr(pf.formatted)}"`);
     } else if (isObject(pf.value)) {
       if (Object.keys(pf.value).length > 0) {
-        lines.push(`${prefix}${pf.key}:`);
+        lines.push(`${prefix}${yamlKey(pf.key)}:`);
         renderYamlProcessed(pf.value, indent + 1, lines);
       } else {
-        lines.push(`${prefix}${pf.key}: {}`);
+        lines.push(`${prefix}${yamlKey(pf.key)}: {}`);
       }
     } else if (Array.isArray(pf.value)) {
       if (pf.value.length === 0) {
-        lines.push(`${prefix}${pf.key}: []`);
+        lines.push(`${prefix}${yamlKey(pf.key)}: []`);
       } else {
-        lines.push(`${prefix}${pf.key}:`);
+        lines.push(`${prefix}${yamlKey(pf.key)}:`);
         for (const item of pf.value) {
           if (isObject(item)) {
             lines.push(`${prefix}  -`);
@@ -768,7 +800,7 @@ function renderYamlProcessed(value: JsonValue, indent: number, lines: string[]):
         }
       }
     } else {
-      lines.push(`${prefix}${pf.key}: ${yamlScalar(pf.value)}`);
+      lines.push(`${prefix}${yamlKey(pf.key)}: ${yamlScalar(pf.value)}`);
     }
   }
 }
@@ -789,20 +821,20 @@ function renderYamlRaw(value: JsonValue, indent: number, lines: string[]): void 
 function renderYamlFieldRaw(prefix: string, key: string, value: JsonValue, indent: number, lines: string[]): void {
   if (isObject(value)) {
     if (Object.keys(value).length > 0) {
-      lines.push(`${prefix}${key}:`);
+      lines.push(`${prefix}${yamlKey(key)}:`);
       renderYamlRaw(value, indent + 1, lines);
     } else {
-      lines.push(`${prefix}${key}: {}`);
+      lines.push(`${prefix}${yamlKey(key)}: {}`);
     }
   } else if (Array.isArray(value)) {
     if (value.length > 0) {
-      lines.push(`${prefix}${key}:`);
+      lines.push(`${prefix}${yamlKey(key)}:`);
       renderYamlArrayRaw(value, indent + 1, lines);
     } else {
-      lines.push(`${prefix}${key}: []`);
+      lines.push(`${prefix}${yamlKey(key)}: []`);
     }
   } else {
-    lines.push(`${prefix}${key}: ${yamlScalar(value)}`);
+    lines.push(`${prefix}${yamlKey(key)}: ${yamlScalar(value)}`);
   }
 }
 
@@ -830,7 +862,18 @@ function renderYamlArrayRaw(arr: JsonValue[], indent: number, lines: string[]): 
 }
 
 function escapeYamlStr(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t")
+    .replace(/\f/g, "\\f")
+    .replace(/\v/g, "\\v");
+}
+
+function yamlKey(key: string): string {
+  return /^[A-Za-z0-9_.-]+$/.test(key) ? key : `"${escapeYamlStr(key)}"`;
 }
 
 function yamlScalar(value: JsonValue): string {
@@ -838,8 +881,9 @@ function yamlScalar(value: JsonValue): string {
   if (value === null) return "null";
   if (typeof value === "boolean") return value.toString();
   if (typeof value === "number") return value.toString();
-  return `"${String(value).replace(/"/g, '\\"')}"`;
+  return `"${escapeYamlStr(JSON.stringify(sortJsonValue(value)))}"`;
 }
+
 
 // ═══════════════════════════════════════════
 // Plain Rendering (logfmt)
@@ -885,7 +929,7 @@ function plainScalar(value: JsonValue): string {
   if (value === null) return "null";
   if (typeof value === "boolean") return value.toString();
   if (typeof value === "number") return value.toString();
-  return String(value);
+  return JSON.stringify(sortJsonValue(value));
 }
 
 function plainScalarRaw(value: JsonValue): string {
@@ -903,15 +947,23 @@ function quoteLogfmtValue(value: string): string {
     .replace(/"/g, '\\"')
     .replace(/\n/g, "\\n")
     .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t");
+    .replace(/\t/g, "\\t")
+    .replace(/\f/g, "\\f")
+    .replace(/\v/g, "\\v");
   return `"${escaped}"`;
 }
+
+function quoteLogfmtKey(key: string): string {
+  return /^[A-Za-z0-9_.-]+$/.test(key) ? key : quoteLogfmtValue(key);
+}
+
 
 // ═══════════════════════════════════════════
 // Utilities
 // ═══════════════════════════════════════════
 
-function sanitizeForJson(value: unknown, stack = new WeakSet<object>()): JsonValue {
+function sanitizeForJson(value: unknown, stack = new WeakSet<object>(), depth = 0): JsonValue {
+  if (depth >= MAX_DEPTH) return "***";
   if (value === null) return null;
   const t = typeof value;
   if (t === "string") return value as string;
@@ -931,7 +983,7 @@ function sanitizeForJson(value: unknown, stack = new WeakSet<object>()): JsonVal
   if (Array.isArray(value)) {
     if (stack.has(value)) return "<unsupported:circular>";
     stack.add(value);
-    const out = value.map((item) => sanitizeForJson(item, stack));
+    const out = value.map((item) => sanitizeForJson(item, stack, depth + 1));
     stack.delete(value);
     return out;
   }
@@ -942,7 +994,7 @@ function sanitizeForJson(value: unknown, stack = new WeakSet<object>()): JsonVal
     stack.add(obj);
     const out: { [key: string]: JsonValue } = {};
     for (const [k, v] of Object.entries(obj)) {
-      out[k] = sanitizeForJson(v, stack);
+      out[k] = sanitizeForJson(v, stack, depth + 1);
     }
     stack.delete(obj);
     return out;

@@ -29,7 +29,10 @@ function lastLine(): Record<string, unknown> {
 }
 
 describe("afdata_logging", () => {
-  beforeEach(() => startCapture());
+  beforeEach(() => {
+    initJson();
+    startCapture();
+  });
   afterEach(() => stopCapture());
 
   describe("basic fields", () => {
@@ -37,28 +40,37 @@ describe("afdata_logging", () => {
       log.info("hello world");
       const m = lastLine();
       assert.equal(m["message"], "hello world");
-      assert.equal(m["code"], "info");
+      assert.equal(m["code"], "log");
+      assert.equal(m["level"], "info");
       assert.equal(typeof m["timestamp_epoch_ms"], "number");
     });
 
     it("maps warn level", () => {
       log.warn("caution");
-      assert.equal(lastLine()["code"], "warn");
+      const m = lastLine();
+      assert.equal(m["code"], "log");
+      assert.equal(m["level"], "warn");
     });
 
     it("maps error level", () => {
       log.error("failure");
-      assert.equal(lastLine()["code"], "error");
+      const m = lastLine();
+      assert.equal(m["code"], "log");
+      assert.equal(m["level"], "error");
     });
 
     it("maps debug level", () => {
       log.debug("verbose");
-      assert.equal(lastLine()["code"], "debug");
+      const m = lastLine();
+      assert.equal(m["code"], "log");
+      assert.equal(m["level"], "debug");
     });
 
     it("maps trace level", () => {
       log.trace("finest");
-      assert.equal(lastLine()["code"], "trace");
+      const m = lastLine();
+      assert.equal(m["code"], "log");
+      assert.equal(m["level"], "trace");
     });
   });
 
@@ -70,10 +82,11 @@ describe("afdata_logging", () => {
       assert.equal(m["status"], 200);
     });
 
-    it("allows code override", () => {
-      log.info("ready", { code: "log", event: "startup" });
+    it("ignores code override", () => {
+      log.info("ready", { code: "ignored", event: "startup" });
       const m = lastLine();
       assert.equal(m["code"], "log");
+      assert.equal(m["level"], "info");
       assert.equal(m["event"], "startup");
     });
 
@@ -87,6 +100,35 @@ describe("afdata_logging", () => {
       log.info("bigint event", { amount: 1n });
       const m = lastLine();
       assert.equal(m["amount"], "<unsupported:bigint>");
+    });
+
+    it("redacts configured legacy secret names in every format", () => {
+      const formats = [
+        () => initJson({ secretNames: ["authorization"] }),
+        () => initPlain({ secretNames: ["authorization"] }),
+        () => initYaml({ secretNames: ["authorization"] }),
+      ];
+
+      for (const init of formats) {
+        captured = [];
+        init();
+        log.info("authorization appears in message but is not name-redacted", {
+          authorization: "Bearer legacy",
+          request_url: "https://example.test/path?authorization=legacy&ok=1",
+        });
+        const raw = captured.join("");
+        assert.ok(raw.includes("***"), `expected redacted marker, got: ${raw}`);
+        assert.ok(!raw.includes("Bearer legacy"), `legacy field value should be redacted: ${raw}`);
+        assert.ok(!raw.includes("authorization=legacy"), `legacy URL query should be redacted: ${raw}`);
+        assert.ok(raw.includes("authorization appears in message"), `message should stay readable: ${raw}`);
+      }
+    });
+
+    it("leaves legacy field names unredacted by default", () => {
+      initJson();
+      log.info("request", { authorization: "Bearer abc123" });
+      const m = lastLine();
+      assert.equal(m["authorization"], "Bearer abc123");
     });
   });
 
@@ -145,7 +187,7 @@ describe("afdata_logging", () => {
       log.info("hello");
       const raw = captured.join("");
       assert.ok(raw.includes("message="), `expected logfmt, got: ${raw}`);
-      assert.ok(raw.includes("code=info"), `expected code=info, got: ${raw}`);
+      assert.ok(raw.includes("code=log"), `expected code=log, got: ${raw}`);
       initJson(); // restore
     });
   });
