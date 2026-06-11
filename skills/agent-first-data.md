@@ -254,8 +254,9 @@ Required cross-language behavior to rely on:
 - Output helpers redact before formatting.
 - Use `redacted_value` for raw HTTP/MCP/SSE serialization paths that bypass `output_json`.
 - Use `redact_secrets_in_place` only when mutating an existing JSON value is intentional; otherwise prefer copy-returning redactors.
-- Use `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, and `build_cli_error` for CLI tools instead of custom parsing/error envelopes.
+- Use `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `build_cli_error`, and the version helper for CLI tools instead of custom parsing/error envelopes.
 - `build_cli_error(message, hint?)` returns `{code:"error", error: message, hint?}` only.
+- Rust CLIs should call `cli_handle_version_or_continue()` before clap parsing so `--version --output json|yaml|plain` emits `{code:"version", version}` instead of clap's plain text. Use `VersionConfig::conventional_default()` so bare `--version` stays human text while explicit `--output` remains structured.
 
 ## AFDATA Logging
 
@@ -332,4 +333,4 @@ When reviewing code that produces structured output:
 8. Environment variables follow `UPPER_SNAKE_CASE` with the same suffixes
 9. Logging uses AFDATA init functions (`init_json`/`init_plain`/`init_yaml`) — not raw `println!`/`fmt.Println`/`console.log` for structured output
 10. Database columns use AFDATA suffixes on generic types (`duration_ms INTEGER`, not `duration INTEGER`); native types like `TIMESTAMPTZ` don't need suffixes
-11. CLI flag parsing uses `cli_parse_output`/`cli_parse_log_filters`/`build_cli_error` — not custom reimplementations; uses `try_parse()` not `parse()` in Rust so clap errors go to stdout as JSONL
+11. CLI flag parsing uses `cli_parse_output`/`cli_parse_log_filters`/`build_cli_error`/version helpers — not custom reimplementations; uses `try_parse()` not `parse()` in Rust so clap errors go to stdout as JSONL

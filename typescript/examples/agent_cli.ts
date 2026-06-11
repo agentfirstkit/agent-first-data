@@ -9,6 +9,7 @@
  *       npx tsx examples/agent_cli.ts --help --recursive
  *       npx tsx examples/agent_cli.ts --help --recursive --output json
  *       npx tsx examples/agent_cli.ts --help --recursive --output markdown
+ *       npx tsx examples/agent_cli.ts --version --output json
  *       npx tsx examples/agent_cli.ts echo --help
  *       npx tsx examples/agent_cli.ts echo --output json
  *       npx tsx examples/agent_cli.ts echo --dry-run --output yaml
@@ -34,6 +35,7 @@ import {
   buildJsonError,
   buildJsonOk,
   cliOutput,
+  cliHandleVersionOrContinue,
   cliParseLogFilters,
   cliParseOutput,
   outputJson,
@@ -50,6 +52,7 @@ const WIDGET_SPEC: SkillSpec = {
   title: "Agent-First Widget",
   markerSlug: "afwidget",
 };
+const AGENT_CLI_VERSION = "0.13.0";
 
 interface Subcommand {
   name: string;
@@ -252,6 +255,17 @@ function positionalArgs(args: string[]): string[] {
 
 function main(): void {
   const args = process.argv.slice(2);
+  try {
+    const version = cliHandleVersionOrContinue(args, "agent-cli", AGENT_CLI_VERSION);
+    if (version !== undefined) {
+      process.stdout.write(version);
+      return;
+    }
+  } catch (e) {
+    console.log(outputJson(buildCliError((e as Error).message, "valid version output formats: json, yaml, plain")));
+    process.exit(2);
+  }
+
   const showHelp = args.includes("--help") || args.includes("-h");
   // A help modifier only: consulted just below when showHelp is true, so a bare
   // --recursive never affects normal command parsing.

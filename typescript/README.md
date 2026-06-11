@@ -20,7 +20,7 @@ console.log(outputJson(value));
 console.log(outputPlain(value));
 ```
 
-Useful names use TypeScript casing: `outputJson`, `outputYaml`, `outputPlain`, `outputJsonWithOptions`, `redactedValue`, `redactSecretsInPlace`, `redactUrlSecrets`, `parseSize`, `normalizeUtcOffset`, `cliParseOutput`, `cliOutput`, and `buildCliError`.
+Useful names use TypeScript casing: `outputJson`, `outputYaml`, `outputPlain`, `outputJsonWithOptions`, `redactedValue`, `redactSecretsInPlace`, `redactUrlSecrets`, `parseSize`, `normalizeUtcOffset`, `cliParseOutput`, `cliOutput`, `buildCliError`, `buildCliVersion`, and `cliHandleVersionOrContinue`.
 
 Logging is available through `initJson`, `initPlain`, `initYaml`, `span`, and `log`.
 
@@ -37,6 +37,7 @@ initJson({ secretNames: ["authorization"] });
 - YAML/plain quote and escape keys as well as values, sort by UTF-16 code unit order, and render nested objects in arrays as canonical JSON.
 - Logging records use `code: "log"` plus a separate `level` field, so error-level logs are not terminal protocol errors.
 - `build_cli_error(message, hint?)` returns `{code:"error", error: message, hint?}` only.
+- Use `cliHandleVersionOrContinue()` before argument parsing so bare `--version` stays conventional and `--version --output json|yaml|plain` stays structured.
 
 ## Reference
 

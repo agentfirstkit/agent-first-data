@@ -1,6 +1,6 @@
 {
   "name": "agent-first-data",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "A naming convention that lets AI agents understand your data without being told what it means.",
   "license": "MIT",
   "repository": {

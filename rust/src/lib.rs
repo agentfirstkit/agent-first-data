@@ -10,10 +10,11 @@
 //! - 2 URL-string redactors: [`redact_url_secrets`], [`redact_url_secrets_with_options`]
 //!   (operate on one URL string; the value redactors above apply these to `_url` fields)
 //! - 2 parse utilities: [`parse_size`], [`normalize_utc_offset`]
-//! - 5 CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`], [`cli_output`],
-//!   [`cli_output_with_options`], [`build_cli_error`]
-//! - 5 types: [`OutputFormat`], [`RedactionPolicy`], [`RedactionOptions`],
-//!   [`OutputStyle`], [`OutputOptions`]
+//! - CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`], [`cli_output`],
+//!   [`cli_output_with_options`], [`build_cli_error`], [`build_cli_version`],
+//!   [`cli_render_version`], [`cli_handle_version_or_continue`]
+//! - 6 types: [`OutputFormat`], [`VersionConfig`], [`RedactionPolicy`],
+//!   [`RedactionOptions`], [`OutputStyle`], [`OutputOptions`]
 //! - (feature `cli-help`): configurable clap help rendering via [`cli_render_help_with_options`]
 //!   and [`cli_handle_help_or_continue`]
 //! - (feature `cli-help-markdown`): [`cli_render_help_markdown`] — recursive Markdown help
@@ -387,6 +388,87 @@ pub enum OutputFormat {
     Plain,
 }
 
+/// Configuration for pre-parser `--version` handling.
+///
+/// This helper scans raw argv before the application's argument parser so
+/// `--version --output json` can return an AFDATA event instead of letting
+/// clap or another parser print conventional plain text and exit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionConfig {
+    /// Format used for `--version` when no explicit output flag is present.
+    ///
+    /// `Some(format)` renders an AFDATA `{code:"version", ...}` event in that
+    /// format. `None` preserves conventional CLI output: `<name> <version>`.
+    pub default_output: Option<OutputFormat>,
+    /// Optional long output flag to read, for example `--output`.
+    pub output_flag: Option<&'static str>,
+    /// Optional short output flag to read, for example `-o`.
+    pub output_short: Option<char>,
+    /// Whether an explicit output flag can override `default_output`.
+    pub allow_output_format: bool,
+}
+
+impl VersionConfig {
+    /// Construct a custom version handler configuration.
+    pub const fn new(default_output: Option<OutputFormat>) -> Self {
+        Self {
+            default_output,
+            output_flag: None,
+            output_short: None,
+            allow_output_format: false,
+        }
+    }
+
+    /// Structured bare-version preset.
+    ///
+    /// A bare `--version` is a JSON AFDATA event. Most CLIs should prefer
+    /// [`Self::conventional_default`] so human `--version` stays familiar while
+    /// explicit `--output json|yaml|plain` remains structured.
+    pub const fn agent_cli_default() -> Self {
+        Self {
+            default_output: Some(OutputFormat::Json),
+            output_flag: Some("--output"),
+            output_short: None,
+            allow_output_format: true,
+        }
+    }
+
+    /// Recommended preset: keep conventional bare version text while still
+    /// honoring explicit `--output json|yaml|plain`.
+    pub const fn conventional_default() -> Self {
+        Self {
+            default_output: None,
+            output_flag: Some("--output"),
+            output_short: None,
+            allow_output_format: true,
+        }
+    }
+
+    /// Return a copy with a different default output.
+    pub const fn with_default_output(mut self, default_output: Option<OutputFormat>) -> Self {
+        self.default_output = default_output;
+        self
+    }
+
+    /// Return a copy with a different long output flag.
+    pub const fn with_output_flag(mut self, flag: Option<&'static str>) -> Self {
+        self.output_flag = flag;
+        self
+    }
+
+    /// Return a copy with a different short output flag.
+    pub const fn with_output_short(mut self, flag: Option<char>) -> Self {
+        self.output_short = flag;
+        self
+    }
+
+    /// Return a copy that enables or disables explicit output overrides.
+    pub const fn with_output_format_override(mut self, enabled: bool) -> Self {
+        self.allow_output_format = enabled;
+        self
+    }
+}
+
 /// Parse `--output` flag value into [`OutputFormat`].
 ///
 /// Returns `Err` with a message suitable for passing to [`build_cli_error`] on unknown values.
@@ -459,6 +541,138 @@ pub fn cli_output_with_options(
         OutputFormat::Yaml => output_yaml_with_options(value, output_options),
         OutputFormat::Plain => output_plain_with_options(value, output_options),
     }
+}
+
+/// Build a standard CLI version value.
+pub fn build_cli_version(version: &str) -> Value {
+    build_json("version", serde_json::json!({ "version": version }), None)
+}
+
+/// Render a CLI version response.
+///
+/// Pass `Some(format)` for an AFDATA event in JSON/YAML/plain. Pass `None` to
+/// preserve conventional `<name> <version>` output.
+pub fn cli_render_version(name: &str, version: &str, format: Option<OutputFormat>) -> String {
+    let mut rendered = match format {
+        Some(format) => cli_output(&build_cli_version(version), format),
+        None => format!("{name} {version}"),
+    };
+    while rendered.ends_with('\n') {
+        rendered.pop();
+    }
+    rendered.push('\n');
+    rendered
+}
+
+/// Render version output from raw argv if `--version` or `-V` is present.
+///
+/// `raw_args` should be the full argv vector, including argv[0], as produced by
+/// `std::env::args()`. The helper intentionally runs before clap or another
+/// parser so explicit `--output json|yaml|plain` is honored instead of being
+/// bypassed by built-in version handling.
+///
+/// Returns a standard [`build_cli_error`] value when the version request is
+/// malformed, for example `--version --output xml`.
+pub fn cli_handle_version_or_continue(
+    raw_args: &[String],
+    name: &str,
+    version: &str,
+    config: &VersionConfig,
+) -> Result<Option<String>, Value> {
+    let parsed = parse_version_request(raw_args, config);
+    if !parsed.version_requested {
+        return Ok(None);
+    }
+    if let Some(error) = parsed.output_error {
+        return Err(build_cli_error(
+            &error,
+            Some("valid version output formats: json, yaml, plain"),
+        ));
+    }
+    let format = if config.allow_output_format {
+        parsed.output_format.or(config.default_output)
+    } else {
+        config.default_output
+    };
+    Ok(Some(cli_render_version(name, version, format)))
+}
+
+struct ParsedVersionRequest {
+    version_requested: bool,
+    output_format: Option<OutputFormat>,
+    output_error: Option<String>,
+}
+
+fn parse_version_request(raw_args: &[String], config: &VersionConfig) -> ParsedVersionRequest {
+    let args = raw_args.get(1..).unwrap_or(&[]);
+    let mut version_requested = false;
+    let mut output_format = None;
+    let mut output_error = None;
+    let output_flag = config.output_flag.map(normalize_long_flag);
+
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--" {
+            break;
+        }
+
+        let (flag_name, inline_value) = split_flag(arg);
+        if matches!(arg, "--version" | "-V") {
+            version_requested = true;
+            i += 1;
+            continue;
+        }
+
+        if config.allow_output_format
+            && version_output_flag_matches(flag_name, output_flag, config.output_short)
+        {
+            let value = inline_value.or_else(|| {
+                args.get(i + 1)
+                    .map(String::as_str)
+                    .filter(|next| !next.starts_with('-'))
+            });
+            if let Some(value) = value {
+                match cli_parse_output(value) {
+                    Ok(format) => output_format = Some(format),
+                    Err(err) => output_error = Some(err),
+                }
+            } else {
+                output_error = Some(format!(
+                    "missing value for --{}: expected json, yaml, or plain",
+                    output_flag.unwrap_or("output")
+                ));
+            }
+            i += if inline_value.is_some() || value.is_none() {
+                1
+            } else {
+                2
+            };
+            continue;
+        }
+        i += 1;
+    }
+
+    ParsedVersionRequest {
+        version_requested,
+        output_format,
+        output_error,
+    }
+}
+
+fn version_output_flag_matches(
+    flag_name: Option<&str>,
+    output_flag: Option<&str>,
+    output_short: Option<char>,
+) -> bool {
+    let Some(seen) = flag_name else {
+        return false;
+    };
+    output_flag.is_some_and(|expected| seen == expected)
+        || output_short.is_some_and(|short| {
+            let mut chars = seen.chars();
+            chars.next().is_some_and(|seen_short| seen_short == short) && chars.next().is_none()
+        })
 }
 
 /// Build a standard CLI parse error value.
@@ -1103,12 +1317,10 @@ fn parse_help_request(
     }
 }
 
-#[cfg(feature = "cli-help")]
 fn normalize_long_flag(flag: &str) -> &str {
     flag.trim_start_matches('-')
 }
 
-#[cfg(feature = "cli-help")]
 fn split_flag(arg: &str) -> (Option<&str>, Option<&str>) {
     if let Some(stripped) = arg.strip_prefix("--") {
         if let Some((name, value)) = stripped.split_once('=') {

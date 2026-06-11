@@ -11,6 +11,7 @@
 //	go run ./examples/agent_cli --help --recursive
 //	go run ./examples/agent_cli --help --recursive --output json
 //	go run ./examples/agent_cli --help --recursive --output markdown
+//	go run ./examples/agent_cli --version --output json
 //	go run ./examples/agent_cli echo --help
 //	go run ./examples/agent_cli echo
 //	go run ./examples/agent_cli echo --dry-run
@@ -38,6 +39,8 @@ var widgetSpec = afdata.SkillSpec{
 	Title:      "Agent-First Widget",
 	MarkerSlug: "afwidget",
 }
+
+const agentCliVersion = "0.13.0"
 
 type subcommand struct {
 	name  string
@@ -266,6 +269,15 @@ func main() {
 	var positionals []string
 
 	args := os.Args[1:]
+	if out, handled, err := afdata.CliHandleVersionOrContinue(args, "agent-cli", agentCliVersion, ""); handled {
+		if err != nil {
+			fmt.Println(afdata.OutputJson(afdata.BuildCliError(err.Error(), "valid version output formats: json, yaml, plain")))
+			os.Exit(2)
+		}
+		fmt.Print(out)
+		return
+	}
+
 	for i := 0; i < len(args); i++ {
 		if strings.HasPrefix(args[i], "--output=") {
 			output = strings.TrimPrefix(args[i], "--output=")

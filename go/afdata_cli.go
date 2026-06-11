@@ -82,6 +82,80 @@ func CliOutputWithOptions(value any, format OutputFormat, outputOptions OutputOp
 	}
 }
 
+// BuildCliVersion builds a standard CLI version value.
+func BuildCliVersion(version string) map[string]any {
+	return BuildJson("version", map[string]any{"version": version}, nil)
+}
+
+// CliRenderVersion renders CLI version output.
+// Pass an OutputFormat for AFDATA JSON/YAML/plain. Pass the empty string to
+// preserve conventional "<name> <version>" text.
+func CliRenderVersion(name string, version string, format OutputFormat) string {
+	var rendered string
+	if format == "" {
+		rendered = fmt.Sprintf("%s %s", name, version)
+	} else {
+		rendered = CliOutput(BuildCliVersion(version), format)
+	}
+	return strings.TrimRight(rendered, "\n") + "\n"
+}
+
+// CliHandleVersionOrContinue renders version output if --version/-V is present.
+// It returns handled=false when no version flag was present. defaultOutput
+// controls the bare --version format; pass OutputFormatJson for AFDATA-first
+// CLIs or the empty string for conventional text.
+func CliHandleVersionOrContinue(args []string, name string, version string, defaultOutput OutputFormat) (out string, handled bool, err error) {
+	versionRequested := false
+	outputFormat := OutputFormat("")
+	outputExplicit := false
+
+	for i := 0; i < len(args); {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if arg == "--version" || arg == "-V" {
+			versionRequested = true
+			i++
+			continue
+		}
+		if arg == "--output" || strings.HasPrefix(arg, "--output=") {
+			var value string
+			if strings.HasPrefix(arg, "--output=") {
+				value = strings.TrimPrefix(arg, "--output=")
+				i++
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				value = args[i+1]
+				i += 2
+			} else {
+				err = fmt.Errorf("missing value for --output: expected json, yaml, or plain")
+				i++
+				continue
+			}
+			parsed, parseErr := CliParseOutput(value)
+			if parseErr != nil {
+				err = parseErr
+			} else {
+				outputFormat = parsed
+				outputExplicit = true
+			}
+			continue
+		}
+		i++
+	}
+
+	if !versionRequested {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", true, err
+	}
+	if outputExplicit {
+		return CliRenderVersion(name, version, outputFormat), true, nil
+	}
+	return CliRenderVersion(name, version, defaultOutput), true, nil
+}
+
 // BuildCliError builds a standard CLI parse error value.
 // Use when flag parsing fails or a flag value is invalid.
 // Print with OutputJson and exit with code 2.

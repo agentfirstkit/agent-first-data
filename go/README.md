@@ -28,7 +28,7 @@ func main() {
 }
 ```
 
-Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `RedactedValue`, `RedactSecretsInPlace`, `RedactURLSecrets`, `ParseSize`, `NormalizeUTCOffset`, `CliParseOutput`, `CliOutput`, and `BuildCliError`.
+Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `RedactedValue`, `RedactSecretsInPlace`, `RedactURLSecrets`, `ParseSize`, `NormalizeUTCOffset`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, and `CliHandleVersionOrContinue`.
 
 Logging is available through the `log/slog` integration: `InitJson`, `InitPlain`, `InitYaml`, `InitJsonWithOptions`, `WithSpan`, and `LoggerFromContext`.
 
@@ -45,6 +45,7 @@ afdata.InitJsonWithOptions(afdata.RedactionOptions{
 - YAML/plain quote and escape keys as well as values, sort by UTF-16 code unit order, and render nested objects in arrays as canonical JSON.
 - Logging records use `code: "log"` plus a separate `level` field, so error-level logs are not terminal protocol errors.
 - `build_cli_error(message, hint?)` returns `{code:"error", error: message, hint?}` only.
+- Use `CliHandleVersionOrContinue()` before argument parsing so bare `--version` stays conventional and `--version --output json|yaml|plain` stays structured.
 
 ## Reference
 

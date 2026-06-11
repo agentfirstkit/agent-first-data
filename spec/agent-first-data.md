@@ -235,6 +235,8 @@ The flag name, the JSON field name, and the formatted output all tell the same s
 
 **Human help vs export surface.** Help scope and help format are orthogonal. Scope is controlled by `--recursive`: `--help` is one-level (and `myapp sub --help` is one-level for that subcommand), while `--help --recursive` expands the selected command subtree. Format is controlled by `--output`: plain by default, or `json|yaml|markdown`. So human-facing CLIs use plain one-level `--help`; agent/doc flows use `--help --recursive` (recursive plain), `--help --recursive --output json|yaml` (recursive export), or `--help --recursive --output markdown` (recursive docs). A bare `--recursive` without `--help` is a no-op for help and MUST NOT be consumed by the help layer — it falls through to the application's own parser. Help `markdown` is help-only and SHOULD NOT become a general business output format.
 
+**Version output.** Agent-first CLIs should handle `--version` before the argument parser's built-in plain-text exit. A bare `--version` should keep conventional human text, while `--version --output json|yaml|plain` MUST honor the requested AFDATA renderer. JSON version output uses `{"code":"version","version":"<semver>"}`. Compatibility wrappers may keep conventional bare text (for example `tool 1.2.3`) as long as an explicit structured `--output` is honored.
+
 ### Environment variables
 
 Same suffixes, `UPPER_SNAKE_CASE`:
@@ -264,7 +266,7 @@ storage:
 
 cache:
   dns_ttl_s: 3600
-  cmn_ttl_s: 300
+  manifest_ttl_s: 300
 
 pricing:
   input_msats: 2
@@ -276,7 +278,7 @@ pricing:
 ```toml
 [cache]
 dns_ttl_s = 3600
-cmn_ttl_s = 300
+manifest_ttl_s = 300
 
 [openrouter]
 api_key_secret = "sk-or-v1-actual-key"

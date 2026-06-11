@@ -174,10 +174,27 @@ enum ServiceAction {
 }
 
 fn main() {
+    let raw: Vec<String> = std::env::args().collect();
+    match agent_first_data::cli_handle_version_or_continue(
+        &raw,
+        "agent-cli",
+        env!("CARGO_PKG_VERSION"),
+        &agent_first_data::VersionConfig::conventional_default(),
+    ) {
+        Ok(Some(version)) => {
+            print!("{version}");
+            std::process::exit(0);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            println!("{}", agent_first_data::output_json(&err));
+            std::process::exit(2);
+        }
+    }
+
     // Handle help before clap so `--help --output markdown` can work.
     #[cfg(feature = "cli-help")]
     {
-        let raw: Vec<String> = std::env::args().collect();
         match agent_first_data::cli_handle_help_or_continue(
             &raw,
             &Cli::command(),

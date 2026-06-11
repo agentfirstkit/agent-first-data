@@ -36,6 +36,9 @@ export {
   cliOutput,
   cliOutputWithOptions,
   buildCliError,
+  buildCliVersion,
+  cliRenderVersion,
+  cliHandleVersionOrContinue,
 } from "./cli.js";
 export {
   type SkillSpec,

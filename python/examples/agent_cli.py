@@ -8,6 +8,7 @@ Run:  PYTHONPATH=. python3 examples/agent_cli.py --help
       PYTHONPATH=. python3 examples/agent_cli.py --help --recursive
       PYTHONPATH=. python3 examples/agent_cli.py --help --recursive --output json
       PYTHONPATH=. python3 examples/agent_cli.py --help --recursive --output markdown
+      PYTHONPATH=. python3 examples/agent_cli.py --version --output json
       PYTHONPATH=. python3 examples/agent_cli.py echo --help
       PYTHONPATH=. python3 examples/agent_cli.py echo --output json
       PYTHONPATH=. python3 examples/agent_cli.py echo --dry-run --output yaml
@@ -34,11 +35,14 @@ from agent_first_data import (
     build_json_error,
     build_json_ok,
     cli_output,
+    cli_handle_version_or_continue,
     cli_parse_log_filters,
     cli_parse_output,
     output_json,
     run_skill_admin,
 )
+
+AGENT_CLI_VERSION = "0.13.0"
 
 # A fictional spore's embedded Agent Skill, used by the `skill` subcommand to
 # demonstrate run_skill_admin.
@@ -261,6 +265,15 @@ def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
 def main() -> None:
     parser = build_parser()
     raw = sys.argv[1:]
+    try:
+        version = cli_handle_version_or_continue(raw, "agent-cli", AGENT_CLI_VERSION)
+    except ValueError as e:
+        print(output_json(build_cli_error(str(e), hint="valid version output formats: json, yaml, plain")))
+        sys.exit(2)
+    if version is not None:
+        print(version, end="")
+        return
+
     if help_requested(raw) and output_explicit(raw) and output_value(raw) is None:
         print(output_json(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml")))
         sys.exit(2)

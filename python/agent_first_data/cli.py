@@ -7,6 +7,7 @@ from typing import Any
 
 from agent_first_data.format import (
     OutputOptions,
+    build_json,
     output_json,
     output_json_with_options,
     output_yaml,
@@ -91,6 +92,89 @@ def cli_output_with_options(
     if format is OutputFormat.PLAIN:
         return output_plain_with_options(value, output_options)
     return output_json_with_options(value, output_options)
+
+
+def build_cli_version(version: str) -> dict:
+    """Build a standard CLI version value."""
+    return build_json("version", {"version": version})
+
+
+def cli_render_version(
+    name: str,
+    version: str,
+    format: OutputFormat | None = None,
+) -> str:
+    """Render CLI version output.
+
+    Pass an OutputFormat for AFDATA JSON/YAML/plain. Pass None to preserve
+    conventional "<name> <version>" text.
+    """
+    rendered = (
+        f"{name} {version}" if format is None else cli_output(build_cli_version(version), format)
+    )
+    return rendered.rstrip("\n") + "\n"
+
+
+def cli_handle_version_or_continue(
+    raw_args: list[str],
+    name: str,
+    version: str,
+    default_output: OutputFormat | None = None,
+    output_flag: str = "--output",
+    allow_output_format: bool = True,
+) -> str | None:
+    """Render version output if --version/-V is present; otherwise return None.
+
+    Raises ValueError for malformed version requests, for example
+    ``--version --output xml``. The caller should convert that to a CLI error
+    with ``build_cli_error``.
+    """
+    version_requested = False
+    output_format: OutputFormat | None = None
+    output_error: ValueError | None = None
+
+    i = 0
+    while i < len(raw_args):
+        arg = raw_args[i]
+        if arg == "--":
+            break
+        if arg in ("--version", "-V"):
+            version_requested = True
+            i += 1
+            continue
+        if allow_output_format and (arg == output_flag or arg.startswith(f"{output_flag}=")):
+            value: str | None
+            if arg.startswith(f"{output_flag}="):
+                value = arg.split("=", 1)[1]
+                step = 1
+            elif i + 1 < len(raw_args) and not raw_args[i + 1].startswith("-"):
+                value = raw_args[i + 1]
+                step = 2
+            else:
+                value = None
+                step = 1
+            if value is None:
+                output_error = ValueError(
+                    f"missing value for {output_flag}: expected json, yaml, or plain"
+                )
+            else:
+                try:
+                    output_format = cli_parse_output(value)
+                except ValueError as e:
+                    output_error = e
+            i += step
+            continue
+        i += 1
+
+    if not version_requested:
+        return None
+    if output_error is not None:
+        raise output_error
+    return cli_render_version(
+        name,
+        version,
+        output_format if allow_output_format and output_format is not None else default_output,
+    )
 
 
 def build_cli_error(message: str, hint: str | None = None) -> dict:

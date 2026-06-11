@@ -1465,6 +1465,140 @@ fn cli_output_dispatches_plain() {
     assert!(out.contains("size=1.0KB")); // plain: suffix processed
 }
 
+#[test]
+fn build_cli_version_has_standard_shape() {
+    let v = build_cli_version("1.2.3");
+    assert_eq!(v["code"], "version");
+    assert_eq!(v["version"], "1.2.3");
+    assert!(v.get("trace").is_none());
+}
+
+#[test]
+fn cli_handle_version_defaults_to_json_for_agent_cli() {
+    let raw = vec!["agent-cli".to_string(), "--version".to_string()];
+    let out = cli_handle_version_or_continue(
+        &raw,
+        "agent-cli",
+        "1.2.3",
+        &VersionConfig::agent_cli_default(),
+    )
+    .expect("valid version request")
+    .expect("version should render");
+    let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
+    assert_eq!(parsed["code"], "version");
+    assert_eq!(parsed["version"], "1.2.3");
+}
+
+#[test]
+fn cli_handle_version_honors_explicit_output_formats() {
+    let raw = vec![
+        "agent-cli".to_string(),
+        "--version".to_string(),
+        "--output".to_string(),
+        "plain".to_string(),
+    ];
+    let out = cli_handle_version_or_continue(
+        &raw,
+        "agent-cli",
+        "1.2.3",
+        &VersionConfig::agent_cli_default(),
+    )
+    .expect("valid version request")
+    .expect("version should render");
+    assert!(out.contains("code=version"), "{out}");
+    assert!(out.contains("version=1.2.3"), "{out}");
+}
+
+#[test]
+fn cli_handle_version_supports_inline_output_format() {
+    let raw = vec![
+        "agent-cli".to_string(),
+        "--output=yaml".to_string(),
+        "--version".to_string(),
+    ];
+    let out = cli_handle_version_or_continue(
+        &raw,
+        "agent-cli",
+        "1.2.3",
+        &VersionConfig::agent_cli_default(),
+    )
+    .expect("valid version request")
+    .expect("version should render");
+    assert!(out.starts_with("---\n"), "{out}");
+    assert!(out.contains("code: \"version\""), "{out}");
+    assert!(out.contains("version: \"1.2.3\""), "{out}");
+}
+
+#[test]
+fn cli_handle_version_reports_invalid_output_as_cli_error() {
+    let raw = vec![
+        "agent-cli".to_string(),
+        "--version".to_string(),
+        "--output".to_string(),
+        "xml".to_string(),
+    ];
+    let err = cli_handle_version_or_continue(
+        &raw,
+        "agent-cli",
+        "1.2.3",
+        &VersionConfig::agent_cli_default(),
+    )
+    .expect_err("invalid version output must return error");
+    assert_eq!(err["code"], "error");
+    assert!(
+        err["error"].as_str().is_some_and(|s| s.contains("xml")),
+        "error should mention invalid value: {err}"
+    );
+}
+
+#[test]
+fn cli_handle_version_can_preserve_conventional_bare_text() {
+    let raw = vec!["agent-cli".to_string(), "--version".to_string()];
+    let out = cli_handle_version_or_continue(
+        &raw,
+        "agent-cli",
+        "1.2.3",
+        &VersionConfig::conventional_default(),
+    )
+    .expect("valid version request")
+    .expect("version should render");
+    assert_eq!(out, "agent-cli 1.2.3\n");
+}
+
+#[test]
+fn cli_handle_version_conventional_mode_still_honors_json_output() {
+    let raw = vec![
+        "agent-cli".to_string(),
+        "--version".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ];
+    let out = cli_handle_version_or_continue(
+        &raw,
+        "agent-cli",
+        "1.2.3",
+        &VersionConfig::conventional_default(),
+    )
+    .expect("valid version request")
+    .expect("version should render");
+    let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
+    assert_eq!(parsed["code"], "version");
+    assert_eq!(parsed["version"], "1.2.3");
+}
+
+#[test]
+fn cli_handle_version_without_version_returns_none() {
+    let raw = vec!["agent-cli".to_string(), "ping".to_string()];
+    assert!(cli_handle_version_or_continue(
+        &raw,
+        "agent-cli",
+        "1.2.3",
+        &VersionConfig::agent_cli_default(),
+    )
+    .expect("valid non-version request")
+    .is_none());
+}
+
 // ═══════════════════════════════════════════
 // Complete integration: README examples
 // ═══════════════════════════════════════════

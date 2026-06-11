@@ -20,7 +20,7 @@ print(output_json(value))
 print(output_plain(value))
 ```
 
-Useful names use Python casing: `output_json`, `output_yaml`, `output_plain`, `output_json_with_options`, `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `parse_size`, `normalize_utc_offset`, `cli_parse_output`, `cli_output`, and `build_cli_error`.
+Useful names use Python casing: `output_json`, `output_yaml`, `output_plain`, `output_json_with_options`, `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `parse_size`, `normalize_utc_offset`, `cli_parse_output`, `cli_output`, `build_cli_error`, `build_cli_version`, and `cli_handle_version_or_continue`.
 
 Logging is available through `init_logging_json`, `init_logging_plain`, `init_logging_yaml`, `span`, and `get_logger`.
 
@@ -37,6 +37,7 @@ init_logging_json("INFO", secret_names=("authorization",))
 - YAML/plain quote and escape keys as well as values, sort by UTF-16 code unit order, and render nested objects in arrays as canonical JSON.
 - Logging records use `code: "log"` plus a separate `level` field, so error-level logs are not terminal protocol errors.
 - `build_cli_error(message, hint?)` returns `{code:"error", error: message, hint?}` only.
+- Use `cli_handle_version_or_continue()` before argument parsing so bare `--version` stays conventional and `--version --output json|yaml|plain` stays structured.
 
 ## Reference
 

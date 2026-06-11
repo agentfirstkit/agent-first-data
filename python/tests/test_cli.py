@@ -9,6 +9,9 @@ from agent_first_data import (
     cli_output,
     cli_output_with_options,
     build_cli_error,
+    build_cli_version,
+    cli_render_version,
+    cli_handle_version_or_continue,
     output_json,
 )
 
@@ -120,3 +123,51 @@ def test_cli_output_with_options_dispatches_raw_yaml():
     )
     assert "size_bytes: 1024" in out
     assert "size:" not in out
+
+
+# ── version helpers ───────────────────────────────────────────────────────────
+
+def test_build_cli_version_standard_shape():
+    v = build_cli_version("1.2.3")
+    assert v["code"] == "version"
+    assert v["version"] == "1.2.3"
+    assert "trace" not in v
+
+
+def test_cli_render_version_is_conventional_by_default():
+    assert cli_render_version("agent-cli", "1.2.3") == "agent-cli 1.2.3\n"
+
+
+def test_cli_render_version_can_render_json():
+    out = cli_render_version("agent-cli", "1.2.3", OutputFormat.JSON)
+    assert out.endswith("\n")
+    assert '"code":"version"' in out
+    assert '"version":"1.2.3"' in out
+
+
+def test_cli_handle_version_is_conventional_by_default():
+    assert cli_handle_version_or_continue(["--version"], "agent-cli", "1.2.3") == "agent-cli 1.2.3\n"
+
+
+def test_cli_handle_version_honors_output_flag():
+    out = cli_handle_version_or_continue(
+        ["--version", "--output", "plain"],
+        "agent-cli",
+        "1.2.3",
+    )
+    assert out is not None
+    assert "code=version" in out
+    assert "version=1.2.3" in out
+
+
+def test_cli_handle_version_returns_none_without_version():
+    assert cli_handle_version_or_continue(["ping"], "agent-cli", "1.2.3") is None
+
+
+def test_cli_handle_version_rejects_invalid_output():
+    with pytest.raises(ValueError, match="xml"):
+        cli_handle_version_or_continue(
+            ["--version", "--output", "xml"],
+            "agent-cli",
+            "1.2.3",
+        )

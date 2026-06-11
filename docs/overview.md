@@ -63,12 +63,14 @@ Language names follow each ecosystem's casing. The shared contract is:
 | Output | `output_json`, `output_json_with`, `output_json_with_options`, `output_yaml`, `output_yaml_with_options`, `output_plain`, `output_plain_with_options` |
 | Redaction | `redacted_value`, `redacted_value_with`, `redacted_value_with_options`, `redact_secrets_in_place`, `redact_secrets_in_place_with_options` |
 | URL redaction | `redact_url_secrets`, `redact_url_secrets_with_options` |
-| CLI helpers | `parse_size`, `normalize_utc_offset`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `cli_output_with_options`, `build_cli_error` |
-| Types | `OutputFormat`, `RedactionPolicy`, `RedactionOptions`, `OutputStyle`, `OutputOptions` |
+| CLI helpers | `parse_size`, `normalize_utc_offset`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `cli_output_with_options`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue` |
+| Types | `OutputFormat`, `VersionConfig` (Rust), `RedactionPolicy`, `RedactionOptions`, `OutputStyle`, `OutputOptions` |
 
 `RedactionPolicy` has two explicit overrides: `RedactionTraceOnly` and `RedactionNone`. The default policy is full redaction: every `_secret` or configured secret-name field is replaced by `***`, including object and array subtrees. `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed, and internal whitespace causes the whole URL field to become `***`.
 
 `build_cli_error(message, hint?)` returns only the protocol error shape: `{code:"error", error: message, hint?}`. It does not invent retry metadata or fake traces.
+
+Version helpers should run before the app parser so bare `--version` stays conventional and `--version --output json|yaml|plain` emits a structured `{code:"version", version}` event instead of being intercepted by parser built-ins.
 
 The Rust `cli-help` and `skill-admin` features are implementation utilities for spore binaries. They are intentionally separate from the cross-language AFDATA formatting contract; language README files point back here instead of duplicating the full reference.
 

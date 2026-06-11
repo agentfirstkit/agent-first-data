@@ -25,7 +25,7 @@ fn main() {
 }
 ```
 
-Useful names use Rust casing: `output_json`, `output_yaml`, `output_plain`, `output_json_with_options`, `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `parse_size`, `normalize_utc_offset`, `cli_parse_output`, `cli_output`, and `build_cli_error`.
+Useful names use Rust casing: `output_json`, `output_yaml`, `output_plain`, `output_json_with_options`, `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `parse_size`, `normalize_utc_offset`, `cli_parse_output`, `cli_output`, `build_cli_error`, `build_cli_version`, and `cli_handle_version_or_continue`.
 
 Tracing integration is behind the `tracing` feature: `afdata_tracing::try_init_json`, `try_init_plain`, and `try_init_yaml` return initialization errors; the older `init_*` helpers remain for fire-and-forget setup. CLI help rendering is behind `cli-help`; skill administration is behind `skill-admin`.
 
@@ -52,6 +52,7 @@ fn init_logging() -> Result<(), tracing_subscriber::util::TryInitError> {
 - Logging records use `code: "log"` plus a separate `level` field, so error-level logs are not terminal protocol errors.
 - Prefer `try_init_*` for Rust tracing startup so failures, such as another global subscriber already being installed, are visible to the caller.
 - `build_cli_error(message, hint?)` returns `{code:"error", error: message, hint?}` only.
+- Use `cli_handle_version_or_continue()` before clap parsing so `--version --output json|yaml|plain` stays structured; use `VersionConfig::conventional_default()` so bare `--version` stays human text while explicit `--output` remains structured.
 
 ## Reference
 

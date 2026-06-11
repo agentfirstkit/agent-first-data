@@ -192,6 +192,106 @@ func TestCliOutputWithOptions_DispatchesRawYaml(t *testing.T) {
 }
 
 // ═══════════════════════════════════════════
+// Version helpers
+// ═══════════════════════════════════════════
+
+func TestBuildCliVersion_StandardShape(t *testing.T) {
+	v := BuildCliVersion("1.2.3")
+	if v["code"] != "version" {
+		t.Errorf("code = %v", v["code"])
+	}
+	if v["version"] != "1.2.3" {
+		t.Errorf("version = %v", v["version"])
+	}
+	if _, ok := v["trace"]; ok {
+		t.Errorf("unexpected trace = %v", v["trace"])
+	}
+}
+
+func TestCliRenderVersion_DefaultJson(t *testing.T) {
+	out := CliRenderVersion("agent-cli", "1.2.3", OutputFormatJson)
+	if !contains(out, "\"code\":\"version\"") {
+		t.Errorf("json version missing code: %s", out)
+	}
+	if !contains(out, "\"version\":\"1.2.3\"") {
+		t.Errorf("json version missing version: %s", out)
+	}
+}
+
+func TestCliRenderVersion_ConventionalText(t *testing.T) {
+	got := CliRenderVersion("agent-cli", "1.2.3", "")
+	if got != "agent-cli 1.2.3\n" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestCliHandleVersionOrContinue_HonorsOutputFlag(t *testing.T) {
+	out, handled, err := CliHandleVersionOrContinue(
+		[]string{"--version", "--output", "plain"},
+		"agent-cli",
+		"1.2.3",
+		OutputFormatJson,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	if !contains(out, "code=version") || !contains(out, "version=1.2.3") {
+		t.Errorf("plain version output = %s", out)
+	}
+}
+
+func TestCliHandleVersionOrContinue_ConventionalDefault(t *testing.T) {
+	out, handled, err := CliHandleVersionOrContinue(
+		[]string{"--version"},
+		"agent-cli",
+		"1.2.3",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	if out != "agent-cli 1.2.3\n" {
+		t.Errorf("out = %q", out)
+	}
+}
+
+func TestCliHandleVersionOrContinue_ReturnsNoneWithoutVersion(t *testing.T) {
+	_, handled, err := CliHandleVersionOrContinue(
+		[]string{"ping"},
+		"agent-cli",
+		"1.2.3",
+		OutputFormatJson,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if handled {
+		t.Fatal("expected handled=false")
+	}
+}
+
+func TestCliHandleVersionOrContinue_RejectsInvalidOutput(t *testing.T) {
+	_, handled, err := CliHandleVersionOrContinue(
+		[]string{"--version", "--output", "xml"},
+		"agent-cli",
+		"1.2.3",
+		OutputFormatJson,
+	)
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	if err == nil || !contains(err.Error(), "xml") {
+		t.Fatalf("expected xml error, got %v", err)
+	}
+}
+
+// ═══════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════
 

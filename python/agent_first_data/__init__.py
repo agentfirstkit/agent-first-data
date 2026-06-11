@@ -42,6 +42,9 @@ from agent_first_data.cli import (
     cli_output,
     cli_output_with_options,
     build_cli_error,
+    build_cli_version,
+    cli_render_version,
+    cli_handle_version_or_continue,
 )
 
 from agent_first_data.skill import (
@@ -96,6 +99,9 @@ __all__ = [
     "cli_output",
     "cli_output_with_options",
     "build_cli_error",
+    "build_cli_version",
+    "cli_render_version",
+    "cli_handle_version_or_continue",
     "SkillSpec",
     "SkillAction",
     "SkillScope",

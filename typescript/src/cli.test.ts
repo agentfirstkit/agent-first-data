@@ -7,6 +7,9 @@ import {
   cliOutputWithOptions,
   OutputStyle,
   buildCliError,
+  buildCliVersion,
+  cliRenderVersion,
+  cliHandleVersionOrContinue,
   outputJson,
 } from "./index.js";
 
@@ -128,5 +131,48 @@ describe("cliOutput", () => {
     const out = cliOutputWithOptions(v, "yaml", { style: OutputStyle.Raw });
     assert.ok(out.includes("size_bytes: 1024"));
     assert.ok(!out.includes("size:"));
+  });
+});
+
+// ── version helpers ──────────────────────────────────────────────────────────
+
+describe("version helpers", () => {
+  it("builds the standard version shape", () => {
+    const v = buildCliVersion("1.2.3") as Record<string, unknown>;
+    assert.equal(v["code"], "version");
+    assert.equal(v["version"], "1.2.3");
+    assert.equal(v["trace"], undefined);
+  });
+
+  it("renders conventional bare text by default", () => {
+    assert.equal(cliRenderVersion("agent-cli", "1.2.3"), "agent-cli 1.2.3\n");
+  });
+
+  it("can render JSON", () => {
+    const out = cliRenderVersion("agent-cli", "1.2.3", "json");
+    assert.ok(out.endsWith("\n"));
+    assert.ok(out.includes('"code":"version"'));
+    assert.ok(out.includes('"version":"1.2.3"'));
+  });
+
+  it("uses conventional bare text by default", () => {
+    assert.equal(cliHandleVersionOrContinue(["--version"], "agent-cli", "1.2.3"), "agent-cli 1.2.3\n");
+  });
+
+  it("honors explicit output flags", () => {
+    const out = cliHandleVersionOrContinue(["--version", "--output", "plain"], "agent-cli", "1.2.3");
+    assert.ok(out?.includes("code=version"));
+    assert.ok(out?.includes("version=1.2.3"));
+  });
+
+  it("returns undefined without a version flag", () => {
+    assert.equal(cliHandleVersionOrContinue(["ping"], "agent-cli", "1.2.3"), undefined);
+  });
+
+  it("rejects invalid output values", () => {
+    assert.throws(
+      () => cliHandleVersionOrContinue(["--version", "--output", "xml"], "agent-cli", "1.2.3"),
+      /xml/
+    );
   });
 });
