@@ -1,10 +1,10 @@
 """AFDATA output formatting and protocol templates.
 
-19 public APIs and 4 types: protocol builders, value redactors (copy and
+21 public APIs and 4 types: protocol builders, value redactors (copy and
 in-place; cover _secret and _url fields), output formatters, URL-string
 redactors (redact_url_secrets / _with_options), parse_size,
-normalize_utc_offset, RedactionPolicy, RedactionOptions, OutputStyle, and
-OutputOptions.
+normalize_utc_offset, is_valid_rfc3339_date, is_valid_rfc3339_time,
+RedactionPolicy, RedactionOptions, OutputStyle, and OutputOptions.
 """
 
 from __future__ import annotations
@@ -293,6 +293,38 @@ def normalize_utc_offset(value: str) -> str | None:
     return f"{s[0]}{hours:02d}:{minutes:02d}"
 
 
+def is_valid_rfc3339_date(value: str) -> bool:
+    """Return true when value is an RFC 3339 full-date (YYYY-MM-DD)."""
+    if not isinstance(value, str):
+        return False
+    if len(value) != 10 or value[4] != "-" or value[7] != "-":
+        return False
+    year = _parse_ascii_int(value[0:4])
+    month = _parse_ascii_int(value[5:7])
+    day = _parse_ascii_int(value[8:10])
+    if year is None or month is None or day is None:
+        return False
+    return 1 <= month <= 12 and 1 <= day <= _days_in_month(year, month)
+
+
+def is_valid_rfc3339_time(value: str) -> bool:
+    """Return true when value is an RFC 3339 partial-time (HH:MM:SS[.fraction])."""
+    if not isinstance(value, str):
+        return False
+    if len(value) < 8 or value[2] != ":" or value[5] != ":":
+        return False
+    hour = _parse_ascii_int(value[0:2])
+    minute = _parse_ascii_int(value[3:5])
+    second = _parse_ascii_int(value[6:8])
+    if hour is None or minute is None or second is None:
+        return False
+    if hour > 23 or minute > 59 or second > 59:
+        return False
+    if len(value) == 8:
+        return True
+    return value[8] == "." and len(value) > 9 and value[9:].isdigit()
+
+
 def _parse_utc_offset_body(body: str) -> tuple[int, int] | None:
     if not body:
         return None
@@ -313,6 +345,26 @@ def _parse_utc_offset_body(body: str) -> tuple[int, int] | None:
     if len(body) == 4:
         return int(body[:2]), int(body[2:])
     return None
+
+
+def _parse_ascii_int(value: str) -> int | None:
+    if not value or not (value.isascii() and value.isdigit()):
+        return None
+    return int(value)
+
+
+def _days_in_month(year: int, month: int) -> int:
+    if month in (1, 3, 5, 7, 8, 10, 12):
+        return 31
+    if month in (4, 6, 9, 11):
+        return 30
+    if month == 2:
+        return 29 if _is_leap_year(year) else 28
+    return 0
+
+
+def _is_leap_year(year: int) -> bool:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
 
 
 # ═══════════════════════════════════════════

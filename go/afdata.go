@@ -1,10 +1,10 @@
 // Package afdata implements Agent-First Data (AFDATA) output formatting
 // and protocol templates.
 //
-// 27 public APIs and 5 types: 3 protocol builders + 3 value-copy redactors +
+// 29 public APIs and 5 types: 3 protocol builders + 3 value-copy redactors +
 // 7 output formatters + 2 in-place value redactors (redact _secret and _url
 // fields) + 2 URL-string redactors (operate on one URL string; the value
-// redactors apply these to _url fields) + 2 utilities + 8 CLI helpers +
+// redactors apply these to _url fields) + 4 utilities + 8 CLI helpers +
 // OutputFormat + RedactionPolicy + RedactionOptions + OutputStyle + OutputOptions.
 package afdata
 
@@ -353,6 +353,55 @@ func NormalizeUTCOffset(s string) (string, bool) {
 	return fmt.Sprintf("%c%02d:%02d", sign, hours, minutes), true
 }
 
+// IsValidRFC3339Date reports whether s is an RFC 3339 full-date (YYYY-MM-DD).
+func IsValidRFC3339Date(s string) bool {
+	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
+		return false
+	}
+	year, ok := parseASCIIInt(s[0:4])
+	if !ok {
+		return false
+	}
+	month, ok := parseASCIIInt(s[5:7])
+	if !ok {
+		return false
+	}
+	day, ok := parseASCIIInt(s[8:10])
+	if !ok {
+		return false
+	}
+	return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month)
+}
+
+// IsValidRFC3339Time reports whether s is an RFC 3339 partial-time (HH:MM:SS[.fraction]).
+func IsValidRFC3339Time(s string) bool {
+	if len(s) < 8 || s[2] != ':' || s[5] != ':' {
+		return false
+	}
+	hour, ok := parseASCIIInt(s[0:2])
+	if !ok {
+		return false
+	}
+	minute, ok := parseASCIIInt(s[3:5])
+	if !ok {
+		return false
+	}
+	second, ok := parseASCIIInt(s[6:8])
+	if !ok {
+		return false
+	}
+	if hour > 23 || minute > 59 || second > 59 {
+		return false
+	}
+	if len(s) == 8 {
+		return true
+	}
+	if s[8] != '.' || len(s) == 9 {
+		return false
+	}
+	return isASCIIDigits(s[9:])
+}
+
 func parseUTCOffsetBody(body string) (int, int, bool) {
 	if body == "" {
 		return 0, 0, false
@@ -409,6 +458,26 @@ func isASCIIDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+func daysInMonth(year int, month int) int {
+	switch month {
+	case 1, 3, 5, 7, 8, 10, 12:
+		return 31
+	case 4, 6, 9, 11:
+		return 30
+	case 2:
+		if isLeapYear(year) {
+			return 29
+		}
+		return 28
+	default:
+		return 0
+	}
+}
+
+func isLeapYear(year int) bool {
+	return year%4 == 0 && (year%100 != 0 || year%400 == 0)
 }
 
 // ═══════════════════════════════════════════

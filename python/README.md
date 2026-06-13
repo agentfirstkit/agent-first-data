@@ -20,7 +20,7 @@ print(output_json(value))
 print(output_plain(value))
 ```
 
-Useful names use Python casing: `output_json`, `output_yaml`, `output_plain`, `output_json_with_options`, `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `parse_size`, `normalize_utc_offset`, `cli_parse_output`, `cli_output`, `build_cli_error`, `build_cli_version`, and `cli_handle_version_or_continue`.
+Useful names use Python casing: `output_json`, `output_yaml`, `output_plain`, `output_json_with_options`, `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `parse_size`, `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `cli_parse_output`, `cli_output`, `build_cli_error`, `build_cli_version`, and `cli_handle_version_or_continue`.
 
 Logging is available through `init_logging_json`, `init_logging_plain`, `init_logging_yaml`, `span`, and `get_logger`.
 

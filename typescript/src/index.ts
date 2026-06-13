@@ -27,6 +27,8 @@ export {
   redactUrlSecretsWithOptions,
   parseSize,
   normalizeUtcOffset,
+  isValidRfc3339Date,
+  isValidRfc3339Time,
 } from "./format.js";
 export { log, span, initJson, initPlain, initYaml } from "./afdata_logging.js";
 export {

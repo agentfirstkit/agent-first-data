@@ -24,6 +24,8 @@ from agent_first_data.format import (
     redact_url_secrets_with_options,
     parse_size,
     normalize_utc_offset,
+    is_valid_rfc3339_date,
+    is_valid_rfc3339_time,
 )
 
 from agent_first_data.afdata_logging import (
@@ -87,6 +89,8 @@ __all__ = [
     "redact_url_secrets_with_options",
     "parse_size",
     "normalize_utc_offset",
+    "is_valid_rfc3339_date",
+    "is_valid_rfc3339_time",
     "AfdataHandler",
     "init_logging_json",
     "init_logging_plain",

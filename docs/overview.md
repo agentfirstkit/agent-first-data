@@ -63,7 +63,7 @@ Language names follow each ecosystem's casing. The shared contract is:
 | Output | `output_json`, `output_json_with`, `output_json_with_options`, `output_yaml`, `output_yaml_with_options`, `output_plain`, `output_plain_with_options` |
 | Redaction | `redacted_value`, `redacted_value_with`, `redacted_value_with_options`, `redact_secrets_in_place`, `redact_secrets_in_place_with_options` |
 | URL redaction | `redact_url_secrets`, `redact_url_secrets_with_options` |
-| CLI helpers | `parse_size`, `normalize_utc_offset`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `cli_output_with_options`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue` |
+| CLI helpers | `parse_size`, `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `cli_output_with_options`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue` |
 | Types | `OutputFormat`, `VersionConfig` (Rust), `RedactionPolicy`, `RedactionOptions`, `OutputStyle`, `OutputOptions` |
 
 `RedactionPolicy` has two explicit overrides: `RedactionTraceOnly` and `RedactionNone`. The default policy is full redaction: every `_secret` or configured secret-name field is replaced by `***`, including object and array subtrees. `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed, and internal whitespace causes the whole URL field to become `***`.
@@ -103,7 +103,7 @@ Name secret log fields explicitly (`api_key_secret`, `db_url`) so redaction can 
 | Timestamps | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` |
 | Size | `_bytes` for numeric output, `_size` for config input strings |
 | Currency | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` where `code` is 3-4 ASCII letters |
-| Strict strings | `_bcp47`, `_utc_offset` |
+| Strict strings | `_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time` |
 | Other | `_percent`, `_secret`, `_url` |
 
 YAML and plain output sort keys by UTF-16 code unit order after key stripping. Plain output escapes both keys and values so every record stays one physical line.

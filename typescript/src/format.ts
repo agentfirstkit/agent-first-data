@@ -1,10 +1,11 @@
 /**
  * AFDATA output formatting and protocol templates.
  *
- * 19 public APIs and 4 types: protocol builders, value redactors (copy and
+ * 21 public APIs and 4 types: protocol builders, value redactors (copy and
  * in-place; cover _secret and _url fields), output formatters, URL-string
  * redactors (redactUrlSecrets / WithOptions), parseSize, normalizeUtcOffset,
- * RedactionPolicy, RedactionOptions, OutputStyle, and OutputOptions.
+ * isValidRfc3339Date, isValidRfc3339Time, RedactionPolicy, RedactionOptions,
+ * OutputStyle, and OutputOptions.
  */
 
 export type JsonValue =
@@ -235,6 +236,28 @@ export function normalizeUtcOffset(value: string): string | null {
   return `${s[0]}${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
 }
 
+/** Return true when value is an RFC 3339 full-date (YYYY-MM-DD). */
+export function isValidRfc3339Date(value: string): boolean {
+  if (value.length !== 10 || value[4] !== "-" || value[7] !== "-") return false;
+  const year = parseFixedDigits(value.slice(0, 4));
+  const month = parseFixedDigits(value.slice(5, 7));
+  const day = parseFixedDigits(value.slice(8, 10));
+  if (year === null || month === null || day === null) return false;
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month);
+}
+
+/** Return true when value is an RFC 3339 partial-time (HH:MM:SS[.fraction]). */
+export function isValidRfc3339Time(value: string): boolean {
+  if (value.length < 8 || value[2] !== ":" || value[5] !== ":") return false;
+  const hour = parseFixedDigits(value.slice(0, 2));
+  const minute = parseFixedDigits(value.slice(3, 5));
+  const second = parseFixedDigits(value.slice(6, 8));
+  if (hour === null || minute === null || second === null) return false;
+  if (hour > 23 || minute > 59 || second > 59) return false;
+  if (value.length === 8) return true;
+  return value[8] === "." && value.length > 9 && /^[0-9]+$/.test(value.slice(9));
+}
+
 function parseUtcOffsetBody(body: string): [number, number] | null {
   if (!body) return null;
   if (body.includes(":")) {
@@ -249,6 +272,22 @@ function parseUtcOffsetBody(body: string): [number, number] | null {
   if (body.length === 1 || body.length === 2) return [Number(body), 0];
   if (body.length === 4) return [Number(body.slice(0, 2)), Number(body.slice(2))];
   return null;
+}
+
+function parseFixedDigits(value: string): number | null {
+  if (!/^[0-9]+$/.test(value)) return null;
+  return Number(value);
+}
+
+function daysInMonth(year: number, month: number): number {
+  if ([1, 3, 5, 7, 8, 10, 12].includes(month)) return 31;
+  if ([4, 6, 9, 11].includes(month)) return 30;
+  if (month === 2) return isLeapYear(year) ? 29 : 28;
+  return 0;
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
 
 // ═══════════════════════════════════════════

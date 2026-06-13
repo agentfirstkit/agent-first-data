@@ -20,7 +20,7 @@ console.log(outputJson(value));
 console.log(outputPlain(value));
 ```
 
-Useful names use TypeScript casing: `outputJson`, `outputYaml`, `outputPlain`, `outputJsonWithOptions`, `redactedValue`, `redactSecretsInPlace`, `redactUrlSecrets`, `parseSize`, `normalizeUtcOffset`, `cliParseOutput`, `cliOutput`, `buildCliError`, `buildCliVersion`, and `cliHandleVersionOrContinue`.
+Useful names use TypeScript casing: `outputJson`, `outputYaml`, `outputPlain`, `outputJsonWithOptions`, `redactedValue`, `redactSecretsInPlace`, `redactUrlSecrets`, `parseSize`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `cliParseOutput`, `cliOutput`, `buildCliError`, `buildCliVersion`, and `cliHandleVersionOrContinue`.
 
 Logging is available through `initJson`, `initPlain`, `initYaml`, `span`, and `log`.
 

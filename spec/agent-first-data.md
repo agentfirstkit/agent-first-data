@@ -26,10 +26,10 @@ Agent-First Data has three parts:
 | **Timestamps** | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` | `created_at_epoch_ms: 1707868800000` → `created_at: 2024-02-14T...` |
 | **Size** | `_bytes` (output), `_size` (config input) | `file_size_bytes: 5242880` → `file_size: 5.0MB` |
 | **Currency** | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` | `price_usd_cents: 999` → `price: $9.99` |
-| **String formats** | `_bcp47`, `_utc_offset` | `language_bcp47: "zh-CN"`, `timezone_utc_offset: "+08:00"` |
+| **String formats** | `_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time` | `language_bcp47: "zh-CN"`, `invoice_due_rfc3339_date: "2026-06-13"` |
 | **Other** | `_percent`, `_secret`, `_url` | `cpu_percent: 85` → `cpu: 85%` |
 
-**In default YAML and Plain:** formatting suffixes are stripped from keys (value already encodes the unit) and values are formatted for readability. JSON preserves original keys and raw values. (`_url`, `_bcp47`, and `_utc_offset` are not stripped.)
+**In default YAML and Plain:** formatting suffixes are stripped from keys (value already encodes the unit) and values are formatted for readability. JSON preserves original keys and raw values. (`_url`, `_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are not stripped.)
 
 **Secret protection:** All three formats automatically redact `_secret` fields and scrub secret components (userinfo password, secret-named query params) inside `_url` field values.
 
@@ -70,7 +70,7 @@ Applies to all structured data: JSON, YAML, TOML, CLI arguments, environment var
 | `_epoch_ns` | nanoseconds since Unix epoch | `created_epoch_ns: 1707868800000000000` |
 | `_epoch_ms` | milliseconds since Unix epoch | `created_at_epoch_ms: 1707868800000` |
 | `_epoch_s` | seconds since Unix epoch | `cached_epoch_s: 1707868800` |
-| `_rfc3339` | RFC 3339 string | `expires_rfc3339: "2026-02-14T10:30:00Z"` |
+| `_rfc3339` | RFC 3339 date-time string | `expires_rfc3339: "2026-02-14T10:30:00Z"` |
 
 > **Precision note**: this is a property of the host's JSON number parsing, not of AFDATA. Any integer beyond 2⁵³ (≈ 9×10¹⁵) — most commonly `_epoch_ns` (~1.7×10¹⁸ near the current era), but also large `_msats`/`_sats` balances — loses precision wherever JSON numbers are parsed as IEEE-754 doubles. This affects **JavaScript** (`JSON.parse` always yields a double; use `BigInt` or a custom parser) and **Go** with the default `json.Unmarshal` into `any` (yields `float64`; decode with `json.Decoder` + `UseNumber()` to preserve exact integers — the library formats `json.Number` losslessly). Rust (`serde_json` i64/u64) and Python (arbitrary-precision `int`) preserve such integers exactly. When exact large integers must survive every language boundary, transport them as strings.
 
@@ -82,10 +82,18 @@ These suffixes identify strings with a strict external format. They are semantic
 |:-------|:-------|:--------|
 | `_bcp47` | BCP-47 language tag string | `language_bcp47: "zh-CN"` |
 | `_utc_offset` | fixed UTC offset string | `timezone_utc_offset: "+08:00"` |
+| `_rfc3339_date` | RFC 3339 full-date string | `invoice_due_rfc3339_date: "2026-06-13"` |
+| `_rfc3339_time` | RFC 3339 partial-time string | `market_open_rfc3339_time: "09:30:00"` |
 
 `*_bcp47` names a field whose string value is a BCP-47 language tag, such as `language_bcp47: "zh-CN"` or `content_language_bcp47: "en-US"`. AFDATA does not implement the full BCP-47 registry; tools may validate tags when they need stronger guarantees.
 
-`*_utc_offset` names a fixed offset from UTC. Canonical persisted and structured output values are `"UTC"` or `±HH:MM`, with `HH` in `00..23` and `MM` in `00..59`; zero offsets normalize to `"UTC"`. Examples: `timezone_utc_offset: "+08:00"`, `report_utc_offset: "-05:00"`. This is intentionally not an IANA timezone name: do not use `Asia/Shanghai`, `America/Los_Angeles`, DST rules, or timezone databases in this field. If a tool needs IANA timezone support, use a separate explicit field such as `timezone_name`.
+`*_utc_offset` names a fixed offset from UTC. Canonical persisted and structured output values are `"UTC"` or `±HH:MM`, with `HH` in `00..23` and `MM` in `00..59`; zero offsets normalize to `"UTC"`. Examples: `timezone_utc_offset: "+08:00"`, `report_utc_offset: "-05:00"`. This is intentionally not an IANA timezone name: do not use `Asia/Shanghai`, `America/Los_Angeles`, DST rules, or timezone databases in this field.
+
+`*_rfc3339_date` names an RFC 3339 `full-date` string: exactly `YYYY-MM-DD`, such as `invoice_due_rfc3339_date: "2026-06-13"`. It is a calendar date, not an instant, and it does not imply any time, offset, or timezone.
+
+`*_rfc3339_time` names an RFC 3339 `partial-time` string: exactly `HH:MM:SS` with optional fractional seconds, such as `market_open_rfc3339_time: "09:30:00"` or `"09:30:00.123"`. It is a time-of-day, not an instant. It MUST NOT include `Z`, `±HH:MM`, an IANA timezone, or any other timezone annotation; a time without a date cannot be resolved through timezone/DST rules. Use `_rfc3339` or `_epoch_*` for instants.
+
+AFDATA core does not define a companion timezone-name field. If a future tool needs to preserve IANA timezone semantics with a timestamp, prefer a self-contained standard value such as RFC 9557 rather than pairing a date/time field with a separate timezone-name field.
 
 Tools should avoid magic string sentinels such as `"auto"` inside strict-format fields. If a tool needs auto/default behavior, define that in the tool's own config semantics rather than as an AFDATA-wide rule.
 
@@ -446,7 +454,7 @@ YAML and plain apply two transformations:
 4. `_msats`, `_sats`, `_bytes`, `_percent`, `_secret` (single-unit suffixes)
 5. `_btc`, `_jpy`, `_ns`, `_us`, `_ms`, `_s` (short suffixes, matched last to avoid false positives)
 
-Strict string suffixes (`_bcp47`, `_utc_offset`) are not key-stripping suffixes. They keep the field's format contract visible in readable output.
+Strict string suffixes (`_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time`) are not key-stripping suffixes. They keep the field's format contract visible in readable output.
 
 **Collision:** if two keys in the same object produce the same stripped key (e.g., `response_ms` and `response_bytes` both → `response`), revert both to their original key AND raw value (no formatting). Redaction happens before this step, so collision fallback can never restore a secret value.
 
@@ -465,6 +473,8 @@ Strict string suffixes (`_bcp47`, `_utc_offset`) are not key-stripping suffixes.
 | `buffer_size` | `buffer_size` | `_size` passes through, key unchanged |
 | `language_bcp47` | `language_bcp47` | strict string format, key unchanged |
 | `timezone_utc_offset` | `timezone_utc_offset` | fixed-offset string, key unchanged |
+| `invoice_due_rfc3339_date` | `invoice_due_rfc3339_date` | RFC 3339 full-date string, key unchanged |
+| `market_open_rfc3339_time` | `market_open_rfc3339_time` | RFC 3339 partial-time string, key unchanged |
 | `config_path` | `config_path` | no suffix, unchanged |
 | `user_id` | `user_id` | no suffix, unchanged |
 
@@ -487,7 +497,7 @@ Strict string suffixes (`_bcp47`, `_utc_offset`) are not key-stripping suffixes.
 - `_jpy` → yen (`1500` → `¥1,500`), negative falls through
 - `_secret` → `***` (already applied by the redaction phase; the formatter does not perform a second, divergent redaction pass)
 
-Strict string fields such as `_bcp47` and `_utc_offset` are not value-formatting suffixes; their string values pass through unchanged.
+Strict string fields such as `_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are not value-formatting suffixes; their string values pass through unchanged.
 
 A `_url` field value is preserved byte-for-byte in YAML and plain except for the redacted secret spans (userinfo password, `_secret`-suffixed/`secret_names` query parameters): the `_url` key is not stripped, and formatting suffixes that appear *inside* the URL — `?timeout_ms=5000`, `?size_bytes=1048576` — are **not** reformatted (`5s`, `1.0MB`) or stripped, because the URL must round-trip to its server exactly. URL key-stripping/value-formatting applies to JSON object keys, never to query parameters inside a string value. This is pinned by the `url_params_redacted_not_reformatted` case in [`spec/fixtures/output_formats.json`](fixtures/output_formats.json).
 

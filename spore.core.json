@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,9 +13,8 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Add cross-language CLI version helpers that run before application parsers so explicit --version --output json|yaml|plain emits a standardized {code:\"version\", version} AFDATA event",
-    "Preserve conventional bare --version text by default while documenting VersionConfig::conventional_default() as the recommended Rust preset for first-party CLIs",
-    "Document the Agent-First CLI version-output contract across the spec, skill, overview, and language READMEs so downstream afdata users can adopt the same behavior"
+    "Add strict _rfc3339_date and _rfc3339_time suffixes with cross-language validators for RFC3339 full-date and partial-time strings while keeping them as non-stripped strict string fields",
+    "Remove legacy Agent Skill marker compatibility so skill install/status/uninstall only trusts the current managed marker format"
   ],
   "bonds": [],
   "tree": {

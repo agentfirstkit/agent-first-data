@@ -28,7 +28,7 @@ func main() {
 }
 ```
 
-Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `RedactedValue`, `RedactSecretsInPlace`, `RedactURLSecrets`, `ParseSize`, `NormalizeUTCOffset`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, and `CliHandleVersionOrContinue`.
+Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `RedactedValue`, `RedactSecretsInPlace`, `RedactURLSecrets`, `ParseSize`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, and `CliHandleVersionOrContinue`.
 
 Logging is available through the `log/slog` integration: `InitJson`, `InitPlain`, `InitYaml`, `InitJsonWithOptions`, `WithSpan`, and `LoggerFromContext`.
 

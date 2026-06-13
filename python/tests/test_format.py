@@ -25,6 +25,8 @@ from agent_first_data import (
     output_plain,
     output_plain_with_options,
     normalize_utc_offset,
+    is_valid_rfc3339_date,
+    is_valid_rfc3339_time,
 )
 from agent_first_data.format import (
     _format_bytes_human,
@@ -148,6 +150,12 @@ def test_helper_fixtures():
                 assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
             elif name == "normalize_utc_offset":
                 got = normalize_utc_offset(inp)
+                assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
+            elif name == "is_valid_rfc3339_date":
+                got = is_valid_rfc3339_date(inp)
+                assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
+            elif name == "is_valid_rfc3339_time":
+                got = is_valid_rfc3339_time(inp)
                 assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
 
 

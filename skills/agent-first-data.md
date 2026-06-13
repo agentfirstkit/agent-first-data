@@ -41,7 +41,7 @@ The field name is the schema. Always encode units and semantics in the field nam
 | `_epoch_ms` | milliseconds since Unix epoch | `created_at_epoch_ms: 1707868800000` |
 | `_epoch_s` | seconds since Unix epoch | `cached_epoch_s: 1707868800` |
 | `_epoch_ns` | nanoseconds since Unix epoch | `created_epoch_ns: 1707868800000000000` |
-| `_rfc3339` | RFC 3339 string | `expires_rfc3339: "2026-02-14T10:30:00Z"` |
+| `_rfc3339` | RFC 3339 date-time string | `expires_rfc3339: "2026-02-14T10:30:00Z"` |
 
 ### Strict string formats
 
@@ -49,10 +49,18 @@ The field name is the schema. Always encode units and semantics in the field nam
 |:-------|:-------|:--------|
 | `_bcp47` | BCP-47 language tag string | `language_bcp47: "zh-CN"` |
 | `_utc_offset` | fixed UTC offset string | `timezone_utc_offset: "+08:00"` |
+| `_rfc3339_date` | RFC 3339 full-date string | `invoice_due_rfc3339_date: "2026-06-13"` |
+| `_rfc3339_time` | RFC 3339 partial-time string | `market_open_rfc3339_time: "09:30:00"` |
 
 `*_bcp47` identifies a BCP-47 language tag string. AFDATA does not implement the full BCP-47 registry; tools may validate tags when needed.
 
-`*_utc_offset` identifies a fixed UTC offset. Canonical persisted and structured output values are `"UTC"` or `±HH:MM`, with `HH` in `00..23` and `MM` in `00..59`; zero offsets normalize to `"UTC"`. This is not an IANA timezone name, DST rule, or timezone database field. If a tool needs IANA timezone names, use a separate explicit field such as `timezone_name`.
+`*_utc_offset` identifies a fixed UTC offset. Canonical persisted and structured output values are `"UTC"` or `±HH:MM`, with `HH` in `00..23` and `MM` in `00..59`; zero offsets normalize to `"UTC"`. This is not an IANA timezone name, DST rule, or timezone database field.
+
+`*_rfc3339_date` identifies an RFC 3339 `full-date` string (`YYYY-MM-DD`). It is a calendar date, not an instant, and has no time, offset, or timezone.
+
+`*_rfc3339_time` identifies an RFC 3339 `partial-time` string (`HH:MM:SS[.fraction]`). It is a time-of-day, not an instant, and MUST NOT include `Z`, `±HH:MM`, IANA timezone names, or other timezone annotations. Use `_rfc3339` or `_epoch_*` for instants.
+
+Do not create companion timezone-name fields as an AFDATA core pattern. If a future tool needs IANA timezone semantics with a timestamp, prefer a self-contained standard value such as RFC 9557.
 
 Avoid magic string sentinels such as `"auto"` inside strict-format fields. If a tool needs auto/default behavior, define it in that tool's own config semantics, not as an AFDATA-wide rule.
 
@@ -167,7 +175,7 @@ Remove recognized formatting suffix from key. Longest match first, exact lowerca
 4. `_msats`, `_sats`, `_bytes`, `_percent`, `_secret`
 5. `_btc`, `_jpy`, `_ns`, `_us`, `_ms`, `_s`
 
-`_size`, `_bcp47`, and `_utc_offset` are NOT stripped (pass through). If two keys collide after stripping, both revert to original key AND raw value (no formatting). Redaction runs before collision handling, so fallback never restores a secret.
+`_size`, `_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are NOT stripped (pass through). If two keys collide after stripping, both revert to original key AND raw value (no formatting). Redaction runs before collision handling, so fallback never restores a secret.
 
 ### Value formatting (YAML and Plain)
 
@@ -182,7 +190,7 @@ Remove recognized formatting suffix from key. Longest match first, exact lowerca
 - `_msats` → `{n}msats`, `_sats` → `{n}sats`, `_btc` → `{n} BTC`
 - `_usd_cents` → `$X.XX`, `_eur_cents` → `€X.XX`, `_jpy` → `¥X,XXX`, `_{code}_cents` → `X.XX CODE` where `code` is 3-4 ASCII letters
 - `_secret` → `***` (the redaction phase already replaced the subtree)
-- `_bcp47`, `_utc_offset` → pass through unchanged
+- `_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time` → pass through unchanged
 
 **Type constraints**: `_bytes`/`_epoch_*` require integer. `_usd_cents`/`_eur_cents`/`_jpy`/`_{code}_cents` require non-negative integer. Duration/Bitcoin/`_percent` accept any number. Wrong type → raw value + original key.
 
@@ -324,7 +332,7 @@ CLI tools that use AFDATA should support output and logging flags:
 When reviewing code that produces structured output:
 
 1. Every numeric field with a unit has the correct suffix (`_ms`, `_bytes`, `_sats`, `_percent`, etc.)
-2. Timestamps use `_epoch_ms` / `_epoch_s` / `_rfc3339` — never bare `timestamp: 1707868800`
+2. Timestamps use `_epoch_ms` / `_epoch_s` / `_rfc3339`; date-only/time-only strings use `_rfc3339_date` / `_rfc3339_time`
 3. Sensitive values end in `_secret` and are redacted in all output paths
 4. Transport payloads / CLI output use `code` / `result` / `error` / `trace` structure
 5. Config files use the same suffixes as output

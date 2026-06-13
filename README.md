@@ -2,6 +2,8 @@
 
 A naming convention that lets AI agents understand your data without being told what it means.
 
+> **Ask your agent:** "Apply the Agent-First Data convention across my project's fields, config, and logs."
+
 ## The problem: data doesn't say what it means
 
 An agent reads `{"timeout": 5000}` from a tool. Seconds or milliseconds? It guesses — and a 5-second timeout silently becomes 83 minutes. The same trap is everywhere: `{"price": 1200}` gets charged as $1,200 instead of $12.00; `{"created": 1738886400}` is treated as an ID instead of a date.

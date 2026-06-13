@@ -258,6 +258,30 @@ fn test_helper_fixtures() {
                     );
                 }
             }
+            "is_valid_rfc3339_date" => {
+                for tc in test_cases {
+                    let arr = tc.as_array().expect("case must be [input, expected]");
+                    let input = arr[0].as_str().expect("input must be string");
+                    let expected = arr[1].as_bool().expect("expected must be bool");
+                    assert_eq!(
+                        is_valid_rfc3339_date(input),
+                        expected,
+                        "[helpers/is_valid_rfc3339_date({input:?})]"
+                    );
+                }
+            }
+            "is_valid_rfc3339_time" => {
+                for tc in test_cases {
+                    let arr = tc.as_array().expect("case must be [input, expected]");
+                    let input = arr[0].as_str().expect("input must be string");
+                    let expected = arr[1].as_bool().expect("expected must be bool");
+                    assert_eq!(
+                        is_valid_rfc3339_time(input),
+                        expected,
+                        "[helpers/is_valid_rfc3339_time({input:?})]"
+                    );
+                }
+            }
             other => panic!("unknown helper: {other}"),
         }
     }

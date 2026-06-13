@@ -31,6 +31,8 @@ import {
   type JsonValue,
   parseSize,
   normalizeUtcOffset,
+  isValidRfc3339Date,
+  isValidRfc3339Time,
 } from "./format.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -172,6 +174,20 @@ describe("helper fixtures", () => {
       for (const [input, expected] of tc.cases) {
         it(`normalizeUtcOffset ${JSON.stringify(input)} → ${expected}`, () => {
           assert.equal(normalizeUtcOffset(input), expected);
+        });
+      }
+    }
+    if (tc.name === "is_valid_rfc3339_date") {
+      for (const [input, expected] of tc.cases) {
+        it(`isValidRfc3339Date ${JSON.stringify(input)} → ${expected}`, () => {
+          assert.equal(isValidRfc3339Date(input), expected);
+        });
+      }
+    }
+    if (tc.name === "is_valid_rfc3339_time") {
+      for (const [input, expected] of tc.cases) {
+        it(`isValidRfc3339Time ${JSON.stringify(input)} → ${expected}`, () => {
+          assert.equal(isValidRfc3339Time(input), expected);
         });
       }
     }

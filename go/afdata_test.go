@@ -286,6 +286,30 @@ func TestHelperFixtures(t *testing.T) {
 					}
 				})
 			}
+		case "is_valid_rfc3339_date":
+			for _, c := range cases {
+				pair := c.([]any)
+				input := pair[0].(string)
+				expected := pair[1].(bool)
+				t.Run(fmt.Sprintf("is_valid_rfc3339_date_%s", input), func(t *testing.T) {
+					got := IsValidRFC3339Date(input)
+					if got != expected {
+						t.Errorf("IsValidRFC3339Date(%q) = %v, want %v", input, got, expected)
+					}
+				})
+			}
+		case "is_valid_rfc3339_time":
+			for _, c := range cases {
+				pair := c.([]any)
+				input := pair[0].(string)
+				expected := pair[1].(bool)
+				t.Run(fmt.Sprintf("is_valid_rfc3339_time_%s", input), func(t *testing.T) {
+					got := IsValidRFC3339Time(input)
+					if got != expected {
+						t.Errorf("IsValidRFC3339Time(%q) = %v, want %v", input, got, expected)
+					}
+				})
+			}
 		}
 	}
 }

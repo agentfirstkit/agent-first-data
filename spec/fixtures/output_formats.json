@@ -138,8 +138,8 @@
       "fee_jpy": 1500.0,
       "created_at_epoch_ms": 1738886400000.0
     },
-    "expected_yaml": "---\ncreated_at: \"2025-02-07T00:00:00.000Z\"\nfee: \"¥1,500\"\nfile_size: \"5.0MB\"\nprice: \"$9.99\"",
-    "expected_plain": "created_at=2025-02-07T00:00:00.000Z fee=¥1,500 file_size=5.0MB price=$9.99"
+    "expected_yaml": "---\ncreated_at: \"2025-02-07T00:00:00.000Z\"\nfee: \"\u00a51,500\"\nfile_size: \"5.0MB\"\nprice: \"$9.99\"",
+    "expected_plain": "created_at=2025-02-07T00:00:00.000Z fee=\u00a51,500 file_size=5.0MB price=$9.99"
   },
   {
     "name": "fractional_floats_render_shortest_round_trip",
@@ -181,6 +181,34 @@
     },
     "expected_yaml": "---\nlanguage_bcp47: \"zh-CN\"\ntimezone_utc_offset: \"+08:00\"",
     "expected_plain": "language_bcp47=zh-CN timezone_utc_offset=+08:00"
+  },
+  {
+    "name": "rfc3339_date_time_are_strict_strings",
+    "input": {
+      "created_at_rfc3339": "2026-06-13T09:30:00+08:00",
+      "invoice_due_rfc3339_date": "2026-06-13",
+      "market_open_rfc3339_time": "09:30:00"
+    },
+    "expected_json": {
+      "created_at_rfc3339": "2026-06-13T09:30:00+08:00",
+      "invoice_due_rfc3339_date": "2026-06-13",
+      "market_open_rfc3339_time": "09:30:00"
+    },
+    "expected_yaml": "---\ncreated_at: \"2026-06-13T09:30:00+08:00\"\ninvoice_due_rfc3339_date: \"2026-06-13\"\nmarket_open_rfc3339_time: \"09:30:00\"",
+    "expected_plain": "created_at=2026-06-13T09:30:00+08:00 invoice_due_rfc3339_date=2026-06-13 market_open_rfc3339_time=09:30:00"
+  },
+  {
+    "name": "rfc3339_date_time_non_strings_pass_through",
+    "input": {
+      "bad_date_rfc3339_date": 20260613,
+      "bad_time_rfc3339_time": false
+    },
+    "expected_json": {
+      "bad_date_rfc3339_date": 20260613,
+      "bad_time_rfc3339_time": false
+    },
+    "expected_yaml": "---\nbad_date_rfc3339_date: 20260613\nbad_time_rfc3339_time: false",
+    "expected_plain": "bad_date_rfc3339_date=20260613 bad_time_rfc3339_time=false"
   },
   {
     "name": "container_secret_collision_never_leaks",
