@@ -67,7 +67,7 @@ const SUBCOMMANDS: Subcommand[] = [
     name: "skill",
     about: "Manage this tool's embedded Agent Skill",
     flags:
-      "  status|install|uninstall  Skill action\n  --agent      all, codex, claude-code, opencode (default: all)\n  --scope      personal, project (default: personal)\n  --skills-dir Skills directory (requires a single concrete --agent)\n  --force      Overwrite or remove a skill this tool did not manage",
+      "  status|install|uninstall  Skill action\n  --agent      all, codex, claude-code, opencode, hermes (default: all)\n  --scope      personal, workspace (default: personal)\n  --skills-dir Skills directory (requires a single concrete --agent)\n  --force      Overwrite or remove a skill this tool did not manage",
   },
 ];
 
@@ -416,15 +416,16 @@ function buildSkillOptions(
     codex: "codex",
     "claude-code": "claude-code",
     opencode: "opencode",
+    hermes: "hermes",
   };
   const agent = agents[agentArg];
   if (agent === undefined) {
-    return { error: `invalid --agent '${agentArg}'`, hint: "valid values: all, codex, claude-code, opencode" };
+    return { error: `invalid --agent '${agentArg}'`, hint: "valid values: all, codex, claude-code, opencode, hermes" };
   }
-  const scopes: Record<string, SkillScope> = { personal: "personal", project: "project" };
+  const scopes: Record<string, SkillScope> = { personal: "personal", workspace: "workspace" };
   const scope = scopes[scopeArg];
   if (scope === undefined) {
-    return { error: `invalid --scope '${scopeArg}'`, hint: "valid values: personal, project" };
+    return { error: `invalid --scope '${scopeArg}'`, hint: "valid values: personal, workspace" };
   }
   return { options: { agent, scope, skillsDir, force } };
 }

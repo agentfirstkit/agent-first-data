@@ -56,7 +56,7 @@ fn init_logging() -> Result<(), tracing_subscriber::util::TryInitError> {
 
 ## Reference
 
-- Full convention and API groups: [../docs/overview.md](../docs/overview.md)
-- Formal cross-language contract: [../spec/agent-first-data.md](../spec/agent-first-data.md)
-- Conformance fixtures: [../spec/fixtures](../spec/fixtures)
-- Agent skill: [../skills/agent-first-data.md](../skills/agent-first-data.md)
+- Full convention and API groups: [docs/overview.md](https://github.com/agentfirstkit/agent-first-data/blob/main/docs/overview.md)
+- Formal cross-language contract: [spec/agent-first-data.md](https://github.com/agentfirstkit/agent-first-data/blob/main/spec/agent-first-data.md)
+- Conformance fixtures: [spec/fixtures](https://github.com/agentfirstkit/agent-first-data/tree/main/spec/fixtures)
+- Agent skill: [skills/agent-first-data.md](https://github.com/agentfirstkit/agent-first-data/blob/main/skills/agent-first-data.md)

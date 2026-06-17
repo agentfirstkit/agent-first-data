@@ -84,8 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
     skill_p = subs.add_parser("skill", add_help=False, help="Manage this tool's embedded Agent Skill")
     skill_p.add_argument("--help", "-h", action="store_true", help="Show help for skill")
     skill_p.add_argument("verb", nargs="?", help="status, install, or uninstall")
-    skill_p.add_argument("--agent", default="all", help="all, codex, claude-code, opencode")
-    skill_p.add_argument("--scope", default="personal", help="personal, project")
+    skill_p.add_argument("--agent", default="all", help="all, codex, claude-code, opencode, hermes")
+    skill_p.add_argument("--scope", default="personal", help="personal, workspace")
     skill_p.add_argument("--skills-dir", dest="skills_dir", default=None, help="Skills directory (requires a single concrete --agent)")
     skill_p.add_argument("--force", action="store_true", help="Overwrite or remove a skill this tool did not manage")
 
@@ -342,14 +342,18 @@ def build_skill_options(args):
         "codex": SkillAgentSelection.CODEX,
         "claude-code": SkillAgentSelection.CLAUDE_CODE,
         "opencode": SkillAgentSelection.OPENCODE,
+        "hermes": SkillAgentSelection.HERMES,
     }
     agent = agents.get(args.agent)
     if agent is None:
-        return None, (f"invalid --agent '{args.agent}'", "valid values: all, codex, claude-code, opencode")
-    scopes = {"personal": SkillScope.PERSONAL, "project": SkillScope.PROJECT}
+        return None, (f"invalid --agent '{args.agent}'", "valid values: all, codex, claude-code, opencode, hermes")
+    scopes = {
+        "personal": SkillScope.PERSONAL,
+        "workspace": SkillScope.WORKSPACE,
+    }
     scope = scopes.get(args.scope)
     if scope is None:
-        return None, (f"invalid --scope '{args.scope}'", "valid values: personal, project")
+        return None, (f"invalid --scope '{args.scope}'", "valid values: personal, workspace")
     return SkillOptions(agent=agent, scope=scope, skills_dir=args.skills_dir, force=args.force), None
 
 

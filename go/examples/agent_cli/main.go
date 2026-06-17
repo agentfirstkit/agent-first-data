@@ -4,7 +4,7 @@
 // --output json|yaml|markdown format for full surface export,
 // CliParseOutput, CliParseLogFilters, CliOutput, BuildCliError,
 // --dry-run, error hints, and a `skill` subcommand that installs/uninstalls/
-// reports status of an embedded Agent Skill across Codex, Claude Code, and opencode.
+// reports status of an embedded Agent Skill across Codex, Claude Code, opencode, and Hermes.
 //
 // Run: go run ./examples/agent_cli --help
 //
@@ -51,7 +51,7 @@ type subcommand struct {
 var subcommands = []subcommand{
 	{name: "echo", about: "Echo back the input as structured output", flags: "  --dry-run    Preview without executing"},
 	{name: "ping", about: "Ping a remote target", flags: "  --host       Target host to ping"},
-	{name: "skill", about: "Manage this tool's embedded Agent Skill", flags: "  status|install|uninstall  Skill action\n  --agent      all, codex, claude-code, opencode (default: all)\n  --scope      personal, project (default: personal)\n  --skills-dir Skills directory (requires a single concrete --agent)\n  --force      Overwrite or remove a skill this tool did not manage"},
+	{name: "skill", about: "Manage this tool's embedded Agent Skill", flags: "  status|install|uninstall  Skill action\n  --agent      all, codex, claude-code, opencode, hermes (default: all)\n  --scope      personal, workspace (default: personal)\n  --skills-dir Skills directory (requires a single concrete --agent)\n  --force      Overwrite or remove a skill this tool did not manage"},
 }
 
 // formatRootHelp returns one-level help for the root command.
@@ -466,17 +466,19 @@ func buildSkillOptions(agentStr, scopeStr, skillsDir string, force bool) (afdata
 		agent = afdata.SkillAgentClaudeCode
 	case "opencode":
 		agent = afdata.SkillAgentOpencode
+	case "hermes":
+		agent = afdata.SkillAgentHermes
 	default:
-		return afdata.SkillOptions{}, fmt.Sprintf("invalid --agent '%s'", agentStr), "valid values: all, codex, claude-code, opencode"
+		return afdata.SkillOptions{}, fmt.Sprintf("invalid --agent '%s'", agentStr), "valid values: all, codex, claude-code, opencode, hermes"
 	}
 	var sc afdata.SkillScope
 	switch scopeStr {
 	case "personal":
 		sc = afdata.SkillScopePersonal
-	case "project":
-		sc = afdata.SkillScopeProject
+	case "workspace":
+		sc = afdata.SkillScopeWorkspace
 	default:
-		return afdata.SkillOptions{}, fmt.Sprintf("invalid --scope '%s'", scopeStr), "valid values: personal, project"
+		return afdata.SkillOptions{}, fmt.Sprintf("invalid --scope '%s'", scopeStr), "valid values: personal, workspace"
 	}
 	return afdata.SkillOptions{Agent: agent, Scope: sc, SkillsDir: skillsDir, Force: force}, "", ""
 }

@@ -101,6 +101,10 @@ func TestSkillInstallStatusUninstallOpencode(t *testing.T) {
 	installStatusUninstallFor(t, SkillAgentOpencode, "opencode")
 }
 
+func TestSkillInstallStatusUninstallHermes(t *testing.T) {
+	installStatusUninstallFor(t, SkillAgentHermes, "hermes")
+}
+
 func TestSkillStatusReportsStaleInstallAsNotCurrent(t *testing.T) {
 	dir := t.TempDir()
 	opts := testOptions(SkillAgentOpencode, dir, false)
@@ -294,16 +298,16 @@ func TestSkillForceUninstallRemovesSymlinkWithoutFollowing(t *testing.T) {
 	}
 }
 
-func TestSkillAllPersonalResolvesThreeTargets(t *testing.T) {
+func TestSkillAllPersonalResolvesFourTargets(t *testing.T) {
 	opts := SkillOptions{Agent: SkillAgentAll, Scope: SkillScopePersonal}
 	targets, err := skillResolveTargets(testSpec(), opts)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if len(targets) != 3 {
-		t.Fatalf("len = %d, want 3", len(targets))
+	if len(targets) != 4 {
+		t.Fatalf("len = %d, want 4", len(targets))
 	}
-	want := []skillAgent{agentCodex, agentClaudeCode, agentOpencode}
+	want := []skillAgent{agentCodex, agentClaudeCode, agentOpencode, agentHermes}
 	for i, w := range want {
 		if targets[i].agent != w {
 			t.Fatalf("targets[%d].agent = %q, want %q", i, targets[i].agent, w)
@@ -311,24 +315,53 @@ func TestSkillAllPersonalResolvesThreeTargets(t *testing.T) {
 	}
 }
 
-func TestSkillAllProjectSkipsCodex(t *testing.T) {
-	opts := SkillOptions{Agent: SkillAgentAll, Scope: SkillScopeProject}
+func TestSkillAllWorkspaceResolvesFourTargets(t *testing.T) {
+	opts := SkillOptions{Agent: SkillAgentAll, Scope: SkillScopeWorkspace}
 	targets, err := skillResolveTargets(testSpec(), opts)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if len(targets) != 2 {
-		t.Fatalf("len = %d, want 2", len(targets))
+	if len(targets) != 4 {
+		t.Fatalf("len = %d, want 4", len(targets))
 	}
-	if targets[0].agent != agentClaudeCode || targets[1].agent != agentOpencode {
-		t.Fatalf("unexpected agents: %q, %q", targets[0].agent, targets[1].agent)
+	for i, target := range targets {
+		if target.scope != SkillScopeWorkspace {
+			t.Fatalf("targets[%d].scope = %q, want %q", i, target.scope, SkillScopeWorkspace)
+		}
 	}
 }
 
-func TestSkillCodexProjectScopeRejected(t *testing.T) {
-	opts := SkillOptions{Agent: SkillAgentCodex, Scope: SkillScopeProject}
-	if _, err := skillResolveTargets(testSpec(), opts); err == nil {
-		t.Fatal("expected Codex project scope to be rejected")
+func TestSkillCodexWorkspaceScopeUsesCodexDir(t *testing.T) {
+	opts := SkillOptions{Agent: SkillAgentCodex, Scope: SkillScopeWorkspace}
+	targets, err := skillResolveTargets(testSpec(), opts)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("len = %d, want 1", len(targets))
+	}
+	if targets[0].agent != agentCodex || targets[0].scope != SkillScopeWorkspace {
+		t.Fatalf("target = (%q, %q), want (%q, %q)", targets[0].agent, targets[0].scope, agentCodex, SkillScopeWorkspace)
+	}
+	if filepath.Base(filepath.Dir(targets[0].skillsDir)) != ".codex" {
+		t.Fatalf("skillsDir = %q, want .codex/skills", targets[0].skillsDir)
+	}
+}
+
+func TestSkillHermesWorkspaceScopeUsesHermesDir(t *testing.T) {
+	opts := SkillOptions{Agent: SkillAgentHermes, Scope: SkillScopeWorkspace}
+	targets, err := skillResolveTargets(testSpec(), opts)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("len = %d, want 1", len(targets))
+	}
+	if targets[0].agent != agentHermes || targets[0].scope != SkillScopeWorkspace {
+		t.Fatalf("target = (%q, %q), want (%q, %q)", targets[0].agent, targets[0].scope, agentHermes, SkillScopeWorkspace)
+	}
+	if filepath.Base(filepath.Dir(targets[0].skillsDir)) != ".hermes" {
+		t.Fatalf("skillsDir = %q, want .hermes/skills", targets[0].skillsDir)
 	}
 }
 

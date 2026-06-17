@@ -16,7 +16,7 @@ import (
 // Reusable Agent Skill installer for spore CLIs. A spore that embeds its SKILL.md
 // describes itself with a SkillSpec and calls RunSkillAdmin to install, uninstall,
 // or report status of that skill across supported coding agents (Codex, Claude
-// Code, opencode). The function performs the filesystem work and returns the
+// Code, opencode, Hermes). The function performs the filesystem work and returns the
 // protocol map (rendered by the caller with CliOutput) or a *SkillError. It never
 // writes to stdout/stderr itself.
 
@@ -62,8 +62,8 @@ type SkillScope string
 const (
 	// SkillScopePersonal is the user-level skills directory.
 	SkillScopePersonal SkillScope = "personal"
-	// SkillScopeProject is the current project's skills directory.
-	SkillScopeProject SkillScope = "project"
+	// SkillScopeWorkspace is the current workspace's skills directory.
+	SkillScopeWorkspace SkillScope = "workspace"
 )
 
 // SkillAgentSelection selects which agent target(s) to manage.
@@ -72,12 +72,14 @@ type SkillAgentSelection string
 const (
 	// SkillAgentAll targets every agent that supports the requested scope.
 	SkillAgentAll SkillAgentSelection = "all"
-	// SkillAgentCodex targets Codex (personal scope only).
+	// SkillAgentCodex targets Codex.
 	SkillAgentCodex SkillAgentSelection = "codex"
 	// SkillAgentClaudeCode targets Claude Code.
 	SkillAgentClaudeCode SkillAgentSelection = "claude-code"
 	// SkillAgentOpencode targets opencode.
 	SkillAgentOpencode SkillAgentSelection = "opencode"
+	// SkillAgentHermes targets Hermes Agent.
+	SkillAgentHermes SkillAgentSelection = "hermes"
 )
 
 // SkillOptions are the options shared by every skill action.
@@ -110,6 +112,7 @@ const (
 	agentCodex      skillAgent = "codex"
 	agentClaudeCode skillAgent = "claude-code"
 	agentOpencode   skillAgent = "opencode"
+	agentHermes     skillAgent = "hermes"
 )
 
 // SkillTargetStatus is the per-target outcome of status / install.
@@ -350,17 +353,11 @@ func skillResolveTargets(spec SkillSpec, opts SkillOptions) ([]skillTarget, *Ski
 	}
 	switch {
 	case opts.Agent == SkillAgentAll && opts.Scope == SkillScopePersonal:
-		return skillResolveMany(spec, SkillScopePersonal, agentCodex, agentClaudeCode, agentOpencode)
-	// Codex has no project scope, so --agent all --scope project skips it.
-	case opts.Agent == SkillAgentAll && opts.Scope == SkillScopeProject:
-		return skillResolveMany(spec, SkillScopeProject, agentClaudeCode, agentOpencode)
-	case opts.Agent == SkillAgentCodex && opts.Scope == SkillScopeProject:
-		return nil, &SkillError{
-			Message: "Codex project skill scope is not supported",
-			Hint:    "use personal scope for Codex, or --agent claude-code/opencode --scope project",
-		}
+		return skillResolveMany(spec, SkillScopePersonal, agentCodex, agentClaudeCode, agentOpencode, agentHermes)
+	case opts.Agent == SkillAgentAll && opts.Scope == SkillScopeWorkspace:
+		return skillResolveMany(spec, SkillScopeWorkspace, agentCodex, agentClaudeCode, agentOpencode, agentHermes)
 	case opts.Agent == SkillAgentCodex:
-		t, e := skillResolveTarget(spec, agentCodex, SkillScopePersonal, opts.SkillsDir)
+		t, e := skillResolveTarget(spec, agentCodex, opts.Scope, opts.SkillsDir)
 		if e != nil {
 			return nil, e
 		}
@@ -373,6 +370,12 @@ func skillResolveTargets(spec SkillSpec, opts SkillOptions) ([]skillTarget, *Ski
 		return []skillTarget{t}, nil
 	case opts.Agent == SkillAgentOpencode:
 		t, e := skillResolveTarget(spec, agentOpencode, opts.Scope, opts.SkillsDir)
+		if e != nil {
+			return nil, e
+		}
+		return []skillTarget{t}, nil
+	case opts.Agent == SkillAgentHermes:
+		t, e := skillResolveTarget(spec, agentHermes, opts.Scope, opts.SkillsDir)
 		if e != nil {
 			return nil, e
 		}
@@ -422,8 +425,8 @@ func skillResolveTarget(spec SkillSpec, agent skillAgent, scope SkillScope, skil
 func skillDefaultDir(agent skillAgent, scope SkillScope) (string, *SkillError) {
 	switch agent {
 	case agentCodex:
-		if scope == SkillScopeProject {
-			return "", &SkillError{Message: "Codex project skill scope is not supported"}
+		if scope != SkillScopePersonal {
+			return skillWorkspaceDir(".codex")
 		}
 		if ch, ok := os.LookupEnv("CODEX_HOME"); ok {
 			return filepath.Join(ch, "skills"), nil
@@ -434,8 +437,8 @@ func skillDefaultDir(agent skillAgent, scope SkillScope) (string, *SkillError) {
 		}
 		return filepath.Join(h, ".codex", "skills"), nil
 	case agentClaudeCode:
-		if scope == SkillScopeProject {
-			return skillProjectDir(".claude")
+		if scope != SkillScopePersonal {
+			return skillWorkspaceDir(".claude")
 		}
 		h, e := skillHomeDir()
 		if e != nil {
@@ -443,8 +446,8 @@ func skillDefaultDir(agent skillAgent, scope SkillScope) (string, *SkillError) {
 		}
 		return filepath.Join(h, ".claude", "skills"), nil
 	case agentOpencode:
-		if scope == SkillScopeProject {
-			return skillProjectDir(".opencode")
+		if scope != SkillScopePersonal {
+			return skillWorkspaceDir(".opencode")
 		}
 		if xdg, ok := os.LookupEnv("XDG_CONFIG_HOME"); ok {
 			return filepath.Join(xdg, "opencode", "skills"), nil
@@ -454,12 +457,24 @@ func skillDefaultDir(agent skillAgent, scope SkillScope) (string, *SkillError) {
 			return "", e
 		}
 		return filepath.Join(h, ".config", "opencode", "skills"), nil
+	case agentHermes:
+		if scope != SkillScopePersonal {
+			return skillWorkspaceDir(".hermes")
+		}
+		if hh, ok := os.LookupEnv("HERMES_HOME"); ok {
+			return filepath.Join(hh, "skills"), nil
+		}
+		h, e := skillHomeDir()
+		if e != nil {
+			return "", e
+		}
+		return filepath.Join(h, ".hermes", "skills"), nil
 	default:
 		return "", &SkillError{Message: fmt.Sprintf("unknown agent %q", agent)}
 	}
 }
 
-func skillProjectDir(agentDir string) (string, *SkillError) {
+func skillWorkspaceDir(agentDir string) (string, *SkillError) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", &SkillError{Message: fmt.Sprintf("resolve current directory failed: %v", err)}

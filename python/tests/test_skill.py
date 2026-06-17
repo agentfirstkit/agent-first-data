@@ -62,6 +62,7 @@ def test_rejects_unquoted_colon_space():
         (SkillAgentSelection.CODEX, "codex"),
         (SkillAgentSelection.CLAUDE_CODE, "claude-code"),
         (SkillAgentSelection.OPENCODE, "opencode"),
+        (SkillAgentSelection.HERMES, "hermes"),
     ],
 )
 def test_install_status_uninstall(agent, expect, tmp_path):
@@ -218,22 +219,48 @@ def test_force_uninstall_removes_symlink_without_following(tmp_path):
     assert external.read_text(encoding="utf-8") == "external"
 
 
-def test_all_personal_resolves_three_targets():
+def test_all_personal_resolves_four_targets():
     opts = SkillOptions(agent=SkillAgentSelection.ALL, scope=SkillScope.PERSONAL)
     targets = _resolve_targets(spec(), opts)
-    assert [t.agent for t in targets] == [SkillAgent.CODEX, SkillAgent.CLAUDE_CODE, SkillAgent.OPENCODE]
+    assert [t.agent for t in targets] == [
+        SkillAgent.CODEX,
+        SkillAgent.CLAUDE_CODE,
+        SkillAgent.OPENCODE,
+        SkillAgent.HERMES,
+    ]
 
 
-def test_all_project_skips_codex():
-    opts = SkillOptions(agent=SkillAgentSelection.ALL, scope=SkillScope.PROJECT)
+def test_all_workspace_resolves_four_targets():
+    opts = SkillOptions(agent=SkillAgentSelection.ALL, scope=SkillScope.WORKSPACE)
     targets = _resolve_targets(spec(), opts)
-    assert [t.agent for t in targets] == [SkillAgent.CLAUDE_CODE, SkillAgent.OPENCODE]
+    assert [t.agent for t in targets] == [
+        SkillAgent.CODEX,
+        SkillAgent.CLAUDE_CODE,
+        SkillAgent.OPENCODE,
+        SkillAgent.HERMES,
+    ]
+    assert [t.scope for t in targets] == [
+        SkillScope.WORKSPACE,
+        SkillScope.WORKSPACE,
+        SkillScope.WORKSPACE,
+        SkillScope.WORKSPACE,
+    ]
 
 
-def test_codex_project_scope_rejected():
-    opts = SkillOptions(agent=SkillAgentSelection.CODEX, scope=SkillScope.PROJECT)
-    with pytest.raises(SkillError):
-        _resolve_targets(spec(), opts)
+def test_codex_workspace_scope_uses_codex_skills_dir():
+    opts = SkillOptions(agent=SkillAgentSelection.CODEX, scope=SkillScope.WORKSPACE)
+    targets = _resolve_targets(spec(), opts)
+    assert [t.agent for t in targets] == [SkillAgent.CODEX]
+    assert targets[0].scope is SkillScope.WORKSPACE
+    assert str(targets[0].skills_dir).endswith(".codex/skills")
+
+
+def test_hermes_workspace_scope_uses_hermes_skills_dir():
+    opts = SkillOptions(agent=SkillAgentSelection.HERMES, scope=SkillScope.WORKSPACE)
+    targets = _resolve_targets(spec(), opts)
+    assert [t.agent for t in targets] == [SkillAgent.HERMES]
+    assert targets[0].scope is SkillScope.WORKSPACE
+    assert str(targets[0].skills_dir).endswith(".hermes/skills")
 
 
 def test_skills_dir_requires_single_agent():

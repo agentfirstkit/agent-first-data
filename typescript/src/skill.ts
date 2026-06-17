@@ -3,7 +3,7 @@
  *
  * A spore that embeds its `SKILL.md` describes itself with a {@link SkillSpec} and calls
  * {@link runSkillAdmin} to install, uninstall, or report status of that skill across
- * supported coding agents (Codex, Claude Code, opencode).
+ * supported coding agents (Codex, Claude Code, opencode, Hermes).
  *
  * The function performs the filesystem work and returns the protocol value (rendered by
  * the caller with `cliOutput`) or throws a {@link SkillError}. It never writes to
@@ -37,13 +37,13 @@ export interface SkillSpec {
 export type SkillAction = "status" | "install" | "uninstall";
 
 /** Where to install the skill. */
-export type SkillScope = "personal" | "project";
+export type SkillScope = "personal" | "workspace";
 
 /** Which agent target(s) to manage. */
-export type SkillAgentSelection = "all" | "codex" | "claude-code" | "opencode";
+export type SkillAgentSelection = "all" | "codex" | "claude-code" | "opencode" | "hermes";
 
 /** A concrete agent a skill is installed for (no `all`). */
-export type SkillAgent = "codex" | "claude-code" | "opencode";
+export type SkillAgent = "codex" | "claude-code" | "opencode" | "hermes";
 
 /** Options shared by every skill action. */
 export interface SkillOptions {
@@ -242,29 +242,28 @@ function resolveTargets(spec: SkillSpec, options: SkillOptions): SkillTarget[] {
       resolveTarget(spec, "codex", "personal", undefined),
       resolveTarget(spec, "claude-code", "personal", undefined),
       resolveTarget(spec, "opencode", "personal", undefined),
+      resolveTarget(spec, "hermes", "personal", undefined),
     ];
   }
-  // Codex has no project scope, so --agent all --scope project skips it.
-  if (agent === "all" && scope === "project") {
+  if (agent === "all" && scope === "workspace") {
     return [
-      resolveTarget(spec, "claude-code", "project", undefined),
-      resolveTarget(spec, "opencode", "project", undefined),
+      resolveTarget(spec, "codex", "workspace", undefined),
+      resolveTarget(spec, "claude-code", "workspace", undefined),
+      resolveTarget(spec, "opencode", "workspace", undefined),
+      resolveTarget(spec, "hermes", "workspace", undefined),
     ];
-  }
-  if (agent === "codex" && scope === "project") {
-    throw new SkillError(
-      "Codex project skill scope is not supported",
-      "use personal scope for Codex, or --agent claude-code/opencode --scope project",
-    );
   }
   if (agent === "codex") {
-    return [resolveTarget(spec, "codex", "personal", options.skillsDir)];
+    return [resolveTarget(spec, "codex", scope, options.skillsDir)];
   }
   if (agent === "claude-code") {
     return [resolveTarget(spec, "claude-code", scope, options.skillsDir)];
   }
   if (agent === "opencode") {
     return [resolveTarget(spec, "opencode", scope, options.skillsDir)];
+  }
+  if (agent === "hermes") {
+    return [resolveTarget(spec, "hermes", scope, options.skillsDir)];
   }
   throw new SkillError(`invalid --agent '${agent as string}'`);
 }
@@ -288,8 +287,8 @@ function resolveTarget(
 
 function defaultSkillsDir(agent: SkillAgent, scope: SkillScope): string {
   if (agent === "codex") {
-    if (scope === "project") {
-      throw new SkillError("Codex project skill scope is not supported");
+    if (scope !== "personal") {
+      return join(process.cwd(), ".codex", "skills");
     }
     const codexHome = process.env["CODEX_HOME"];
     if (codexHome !== undefined) {
@@ -298,20 +297,30 @@ function defaultSkillsDir(agent: SkillAgent, scope: SkillScope): string {
     return join(homeDir(), ".codex", "skills");
   }
   if (agent === "claude-code") {
-    if (scope === "project") {
+    if (scope !== "personal") {
       return join(process.cwd(), ".claude", "skills");
     }
     return join(homeDir(), ".claude", "skills");
   }
-  // opencode
-  if (scope === "project") {
-    return join(process.cwd(), ".opencode", "skills");
+  if (agent === "opencode") {
+    if (scope !== "personal") {
+      return join(process.cwd(), ".opencode", "skills");
+    }
+    const xdg = process.env["XDG_CONFIG_HOME"];
+    if (xdg !== undefined) {
+      return join(xdg, "opencode", "skills");
+    }
+    return join(homeDir(), ".config", "opencode", "skills");
   }
-  const xdg = process.env["XDG_CONFIG_HOME"];
-  if (xdg !== undefined) {
-    return join(xdg, "opencode", "skills");
+  // hermes
+  if (scope !== "personal") {
+    return join(process.cwd(), ".hermes", "skills");
   }
-  return join(homeDir(), ".config", "opencode", "skills");
+  const hermesHome = process.env["HERMES_HOME"];
+  if (hermesHome !== undefined) {
+    return join(hermesHome, "skills");
+  }
+  return join(homeDir(), ".hermes", "skills");
 }
 
 function targetStatus(spec: SkillSpec, target: SkillTarget): SkillTargetStatus {

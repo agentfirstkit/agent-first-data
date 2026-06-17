@@ -20,7 +20,7 @@
 //!   and [`cli_handle_help_or_continue`]
 //! - (feature `cli-help-markdown`): [`cli_render_help_markdown`] — recursive Markdown help
 //! - (feature `skill-admin`): [`skill::run_skill_admin`] — install/uninstall/status a spore's
-//!   embedded Agent Skill across Codex, Claude Code, and opencode; returns a typed
+//!   embedded Agent Skill across Codex, Claude Code, opencode, and Hermes; returns a typed
 //!   [`skill::SkillReport`]
 //! - (feature `tracing`): [`afdata_tracing::try_init_json`] / `try_init_plain` /
 //!   `try_init_yaml` initialize an AFDATA stdout logging layer and report initialization failures

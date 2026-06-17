@@ -42,6 +42,7 @@ describe("skill admin", () => {
       ["codex", "codex"],
       ["claude-code", "claude-code"],
       ["opencode", "opencode"],
+      ["hermes", "hermes"],
     ] as const) {
       const dir = tempDir();
       const opts = options(agent, dir);
@@ -207,20 +208,33 @@ describe("skill admin", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("--agent all --scope personal resolves three targets", () => {
+  it("--agent all --scope personal resolves four targets", () => {
     const report = runSkillAdmin(spec(), "status", { agent: "all", scope: "personal" });
     if (report.code !== "skill_status") throw new Error("unreachable");
-    assert.deepEqual(report.targets.map((t) => t.agent), ["codex", "claude-code", "opencode"]);
+    assert.deepEqual(report.targets.map((t) => t.agent), ["codex", "claude-code", "opencode", "hermes"]);
   });
 
-  it("--agent all --scope project skips codex", () => {
-    const report = runSkillAdmin(spec(), "status", { agent: "all", scope: "project" });
+  it("--agent all --scope workspace resolves four targets", () => {
+    const report = runSkillAdmin(spec(), "status", { agent: "all", scope: "workspace" });
     if (report.code !== "skill_status") throw new Error("unreachable");
-    assert.deepEqual(report.targets.map((t) => t.agent), ["claude-code", "opencode"]);
+    assert.deepEqual(report.targets.map((t) => t.agent), ["codex", "claude-code", "opencode", "hermes"]);
+    assert.deepEqual(report.targets.map((t) => t.scope), ["workspace", "workspace", "workspace", "workspace"]);
   });
 
-  it("rejects codex project scope", () => {
-    assert.throws(() => runSkillAdmin(spec(), "status", { agent: "codex", scope: "project" }), SkillError);
+  it("uses the codex workspace skills dir", () => {
+    const report = runSkillAdmin(spec(), "status", { agent: "codex", scope: "workspace" });
+    if (report.code !== "skill_status") throw new Error("unreachable");
+    assert.deepEqual(report.targets.map((t) => t.agent), ["codex"]);
+    assert.deepEqual(report.targets.map((t) => t.scope), ["workspace"]);
+    assert.match(report.targets[0].skills_dir, /\.codex\/skills$/);
+  });
+
+  it("uses the hermes workspace skills dir", () => {
+    const report = runSkillAdmin(spec(), "status", { agent: "hermes", scope: "workspace" });
+    if (report.code !== "skill_status") throw new Error("unreachable");
+    assert.deepEqual(report.targets.map((t) => t.agent), ["hermes"]);
+    assert.deepEqual(report.targets.map((t) => t.scope), ["workspace"]);
+    assert.match(report.targets[0].skills_dir, /\.hermes\/skills$/);
   });
 
   it("rejects --skills-dir with --agent all", () => {

@@ -2,7 +2,7 @@
 //!
 //! A spore that embeds its `SKILL.md` describes itself with a [`SkillSpec`] and calls
 //! [`run_skill_admin`] to install, uninstall, or report status of that skill across supported
-//! coding agents (Codex, Claude Code, opencode).
+//! coding agents (Codex, Claude Code, opencode, Hermes).
 //!
 //! The function performs the filesystem work and returns a typed [`SkillReport`] (the caller
 //! serializes it for output) or a [`SkillError`]. It never writes to stdout/stderr itself.
@@ -39,24 +39,28 @@ pub struct SkillSpec<'a> {
 pub enum SkillAgentSelection {
     /// Every agent that supports the requested scope.
     All,
-    /// Codex (personal scope only).
+    /// Codex.
     Codex,
     /// Claude Code.
     ClaudeCode,
     /// opencode.
     Opencode,
+    /// Hermes Agent.
+    Hermes,
 }
 
 /// A concrete agent a skill is installed for (no `All`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SkillAgent {
-    /// Codex (`$CODEX_HOME/skills` or `~/.codex/skills`).
+    /// Codex (`$CODEX_HOME/skills`, `~/.codex/skills`, or `.codex/skills`).
     Codex,
     /// Claude Code (`~/.claude/skills` or `.claude/skills`).
     ClaudeCode,
     /// opencode (`~/.config/opencode/skills` or `.opencode/skills`).
     Opencode,
+    /// Hermes Agent (`$HERMES_HOME/skills`, `~/.hermes/skills`, or `.hermes/skills`).
+    Hermes,
 }
 
 /// Where to install the skill.
@@ -65,8 +69,8 @@ pub enum SkillAgent {
 pub enum SkillScope {
     /// User-level skills directory.
     Personal,
-    /// Current project's skills directory.
-    Project,
+    /// Current workspace's skills directory.
+    Workspace,
 }
 
 /// Options shared by every skill action.
@@ -340,19 +344,20 @@ fn resolve_targets(
             resolve_target(spec, SkillAgent::Codex, SkillScope::Personal, None)?,
             resolve_target(spec, SkillAgent::ClaudeCode, SkillScope::Personal, None)?,
             resolve_target(spec, SkillAgent::Opencode, SkillScope::Personal, None)?,
+            resolve_target(spec, SkillAgent::Hermes, SkillScope::Personal, None)?,
         ]),
-        // Codex has no project scope, so --agent all --scope project skips it.
-        (SkillAgentSelection::All, SkillScope::Project) => Ok(vec![
-            resolve_target(spec, SkillAgent::ClaudeCode, SkillScope::Project, None)?,
-            resolve_target(spec, SkillAgent::Opencode, SkillScope::Project, None)?,
+        (SkillAgentSelection::All, SkillScope::Workspace) => Ok(vec![
+            resolve_target(spec, SkillAgent::Codex, SkillScope::Workspace, None)?,
+            resolve_target(spec, SkillAgent::ClaudeCode, SkillScope::Workspace, None)?,
+            resolve_target(spec, SkillAgent::Opencode, SkillScope::Workspace, None)?,
+            resolve_target(spec, SkillAgent::Hermes, SkillScope::Workspace, None)?,
         ]),
-        (SkillAgentSelection::Codex, SkillScope::Project) => Err(SkillError::invalid_request(
-            "Codex project skill scope is not supported".to_string(),
-            Some(
-                "use personal scope for Codex, or --agent claude-code/opencode --scope project"
-                    .to_string(),
-            ),
-        )),
+        (SkillAgentSelection::Codex, SkillScope::Workspace) => Ok(vec![resolve_target(
+            spec,
+            SkillAgent::Codex,
+            SkillScope::Workspace,
+            options.skills_dir.as_deref(),
+        )?]),
         (SkillAgentSelection::Codex, SkillScope::Personal) => Ok(vec![resolve_target(
             spec,
             SkillAgent::Codex,
@@ -368,6 +373,12 @@ fn resolve_targets(
         (SkillAgentSelection::Opencode, scope) => Ok(vec![resolve_target(
             spec,
             SkillAgent::Opencode,
+            scope,
+            options.skills_dir.as_deref(),
+        )?]),
+        (SkillAgentSelection::Hermes, scope) => Ok(vec![resolve_target(
+            spec,
+            SkillAgent::Hermes,
             scope,
             options.skills_dir.as_deref(),
         )?]),
@@ -404,14 +415,11 @@ fn default_skills_dir(agent: SkillAgent, scope: SkillScope) -> Result<PathBuf, S
                 Ok(home_dir()?.join(".codex").join("skills"))
             }
         }
-        (SkillAgent::Codex, SkillScope::Project) => Err(SkillError::invalid_request(
-            "Codex project skill scope is not supported".to_string(),
-            None,
-        )),
+        (SkillAgent::Codex, SkillScope::Workspace) => workspace_skills_dir(".codex"),
         (SkillAgent::ClaudeCode, SkillScope::Personal) => {
             Ok(home_dir()?.join(".claude").join("skills"))
         }
-        (SkillAgent::ClaudeCode, SkillScope::Project) => project_skills_dir(".claude"),
+        (SkillAgent::ClaudeCode, SkillScope::Workspace) => workspace_skills_dir(".claude"),
         (SkillAgent::Opencode, SkillScope::Personal) => {
             if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
                 Ok(PathBuf::from(xdg).join("opencode").join("skills"))
@@ -419,11 +427,19 @@ fn default_skills_dir(agent: SkillAgent, scope: SkillScope) -> Result<PathBuf, S
                 Ok(home_dir()?.join(".config").join("opencode").join("skills"))
             }
         }
-        (SkillAgent::Opencode, SkillScope::Project) => project_skills_dir(".opencode"),
+        (SkillAgent::Opencode, SkillScope::Workspace) => workspace_skills_dir(".opencode"),
+        (SkillAgent::Hermes, SkillScope::Personal) => {
+            if let Some(hermes_home) = std::env::var_os("HERMES_HOME") {
+                Ok(PathBuf::from(hermes_home).join("skills"))
+            } else {
+                Ok(home_dir()?.join(".hermes").join("skills"))
+            }
+        }
+        (SkillAgent::Hermes, SkillScope::Workspace) => workspace_skills_dir(".hermes"),
     }
 }
 
-fn project_skills_dir(agent_dir: &str) -> Result<PathBuf, SkillError> {
+fn workspace_skills_dir(agent_dir: &str) -> Result<PathBuf, SkillError> {
     std::env::current_dir()
         .map(|dir| dir.join(agent_dir).join("skills"))
         .map_err(|e| SkillError::io("resolve current directory", e))
@@ -882,6 +898,11 @@ mod tests {
     }
 
     #[test]
+    fn install_status_uninstall_hermes() {
+        install_status_uninstall_for(SkillAgentSelection::Hermes, SkillAgent::Hermes, "hermes");
+    }
+
+    #[test]
     fn status_reports_stale_install_as_not_current() {
         let dir = temp_skills_dir("stale");
         let opts = options(SkillAgentSelection::Opencode, &dir, false);
@@ -1072,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn all_personal_resolves_three_targets() {
+    fn all_personal_resolves_four_targets() {
         let opts = SkillOptions {
             agent: SkillAgentSelection::All,
             scope: SkillScope::Personal,
@@ -1082,38 +1103,70 @@ mod tests {
         let targets = resolve_targets(&spec(), &opts);
         assert!(targets.is_ok());
         if let Ok(targets) = targets {
-            assert_eq!(targets.len(), 3);
+            assert_eq!(targets.len(), 4);
             assert_eq!(targets[0].agent, SkillAgent::Codex);
             assert_eq!(targets[1].agent, SkillAgent::ClaudeCode);
             assert_eq!(targets[2].agent, SkillAgent::Opencode);
+            assert_eq!(targets[3].agent, SkillAgent::Hermes);
         }
     }
 
     #[test]
-    fn all_project_skips_codex() {
+    fn all_workspace_resolves_four_targets() {
         let opts = SkillOptions {
             agent: SkillAgentSelection::All,
-            scope: SkillScope::Project,
+            scope: SkillScope::Workspace,
             skills_dir: None,
             force: false,
         };
         let targets = resolve_targets(&spec(), &opts);
         assert!(targets.is_ok());
         if let Ok(targets) = targets {
-            assert_eq!(targets.len(), 2);
-            assert_eq!(targets[0].agent, SkillAgent::ClaudeCode);
-            assert_eq!(targets[1].agent, SkillAgent::Opencode);
+            assert_eq!(targets.len(), 4);
+            assert_eq!(targets[0].agent, SkillAgent::Codex);
+            assert_eq!(targets[0].scope, SkillScope::Workspace);
+            assert_eq!(targets[1].agent, SkillAgent::ClaudeCode);
+            assert_eq!(targets[1].scope, SkillScope::Workspace);
+            assert_eq!(targets[2].agent, SkillAgent::Opencode);
+            assert_eq!(targets[2].scope, SkillScope::Workspace);
+            assert_eq!(targets[3].agent, SkillAgent::Hermes);
+            assert_eq!(targets[3].scope, SkillScope::Workspace);
         }
     }
 
     #[test]
-    fn codex_project_scope_is_rejected() {
+    fn codex_workspace_scope_uses_codex_skills_dir() {
         let opts = SkillOptions {
             agent: SkillAgentSelection::Codex,
-            scope: SkillScope::Project,
+            scope: SkillScope::Workspace,
             skills_dir: None,
             force: false,
         };
-        assert!(resolve_targets(&spec(), &opts).is_err());
+        let targets = resolve_targets(&spec(), &opts);
+        assert!(targets.is_ok());
+        if let Ok(targets) = targets {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].agent, SkillAgent::Codex);
+            assert_eq!(targets[0].scope, SkillScope::Workspace);
+            assert!(targets[0].skills_dir.ends_with(".codex/skills"));
+        }
+    }
+
+    #[test]
+    fn hermes_workspace_scope_uses_hermes_skills_dir() {
+        let opts = SkillOptions {
+            agent: SkillAgentSelection::Hermes,
+            scope: SkillScope::Workspace,
+            skills_dir: None,
+            force: false,
+        };
+        let targets = resolve_targets(&spec(), &opts);
+        assert!(targets.is_ok());
+        if let Ok(targets) = targets {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].agent, SkillAgent::Hermes);
+            assert_eq!(targets[0].scope, SkillScope::Workspace);
+            assert!(targets[0].skills_dir.ends_with(".hermes/skills"));
+        }
     }
 }

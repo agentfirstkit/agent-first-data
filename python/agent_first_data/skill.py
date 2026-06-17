@@ -2,7 +2,7 @@
 
 A spore that embeds its ``SKILL.md`` describes itself with a :class:`SkillSpec` and
 calls :func:`run_skill_admin` to install, uninstall, or report status of that skill
-across supported coding agents (Codex, Claude Code, opencode).
+across supported coding agents (Codex, Claude Code, opencode, Hermes).
 
 The function performs the filesystem work and returns the protocol ``dict`` (rendered
 by the caller with ``cli_output``) or raises :class:`SkillError`. It never writes to
@@ -52,7 +52,7 @@ class SkillScope(enum.Enum):
     """Where to install the skill."""
 
     PERSONAL = "personal"
-    PROJECT = "project"
+    WORKSPACE = "workspace"
 
 
 class SkillAgentSelection(enum.Enum):
@@ -62,6 +62,7 @@ class SkillAgentSelection(enum.Enum):
     CODEX = "codex"
     CLAUDE_CODE = "claude-code"
     OPENCODE = "opencode"
+    HERMES = "hermes"
 
 
 class SkillAgent(enum.Enum):
@@ -70,6 +71,7 @@ class SkillAgent(enum.Enum):
     CODEX = "codex"
     CLAUDE_CODE = "claude-code"
     OPENCODE = "opencode"
+    HERMES = "hermes"
 
 
 @dataclass
@@ -310,24 +312,23 @@ def _resolve_targets(spec: SkillSpec, options: SkillOptions) -> list[_SkillTarge
             _resolve_target(spec, SkillAgent.CODEX, SkillScope.PERSONAL, None),
             _resolve_target(spec, SkillAgent.CLAUDE_CODE, SkillScope.PERSONAL, None),
             _resolve_target(spec, SkillAgent.OPENCODE, SkillScope.PERSONAL, None),
+            _resolve_target(spec, SkillAgent.HERMES, SkillScope.PERSONAL, None),
         ]
-    # Codex has no project scope, so --agent all --scope project skips it.
-    if agent is SkillAgentSelection.ALL and scope is SkillScope.PROJECT:
+    if agent is SkillAgentSelection.ALL and scope is SkillScope.WORKSPACE:
         return [
-            _resolve_target(spec, SkillAgent.CLAUDE_CODE, SkillScope.PROJECT, None),
-            _resolve_target(spec, SkillAgent.OPENCODE, SkillScope.PROJECT, None),
+            _resolve_target(spec, SkillAgent.CODEX, SkillScope.WORKSPACE, None),
+            _resolve_target(spec, SkillAgent.CLAUDE_CODE, SkillScope.WORKSPACE, None),
+            _resolve_target(spec, SkillAgent.OPENCODE, SkillScope.WORKSPACE, None),
+            _resolve_target(spec, SkillAgent.HERMES, SkillScope.WORKSPACE, None),
         ]
-    if agent is SkillAgentSelection.CODEX and scope is SkillScope.PROJECT:
-        raise SkillError(
-            "Codex project skill scope is not supported",
-            "use personal scope for Codex, or --agent claude-code/opencode --scope project",
-        )
     if agent is SkillAgentSelection.CODEX:
-        return [_resolve_target(spec, SkillAgent.CODEX, SkillScope.PERSONAL, options.skills_dir)]
+        return [_resolve_target(spec, SkillAgent.CODEX, scope, options.skills_dir)]
     if agent is SkillAgentSelection.CLAUDE_CODE:
         return [_resolve_target(spec, SkillAgent.CLAUDE_CODE, scope, options.skills_dir)]
     if agent is SkillAgentSelection.OPENCODE:
         return [_resolve_target(spec, SkillAgent.OPENCODE, scope, options.skills_dir)]
+    if agent is SkillAgentSelection.HERMES:
+        return [_resolve_target(spec, SkillAgent.HERMES, scope, options.skills_dir)]
     raise SkillError(f"invalid --agent {agent!r}")
 
 
@@ -350,23 +351,30 @@ def _resolve_target(
 
 def _default_skills_dir(agent: SkillAgent, scope: SkillScope) -> Path:
     if agent is SkillAgent.CODEX:
-        if scope is SkillScope.PROJECT:
-            raise SkillError("Codex project skill scope is not supported")
+        if scope is not SkillScope.PERSONAL:
+            return Path.cwd() / ".codex" / "skills"
         codex_home = os.environ.get("CODEX_HOME")
         if codex_home is not None:
             return Path(codex_home) / "skills"
         return _home_dir() / ".codex" / "skills"
     if agent is SkillAgent.CLAUDE_CODE:
-        if scope is SkillScope.PROJECT:
+        if scope is not SkillScope.PERSONAL:
             return Path.cwd() / ".claude" / "skills"
         return _home_dir() / ".claude" / "skills"
     if agent is SkillAgent.OPENCODE:
-        if scope is SkillScope.PROJECT:
+        if scope is not SkillScope.PERSONAL:
             return Path.cwd() / ".opencode" / "skills"
         xdg = os.environ.get("XDG_CONFIG_HOME")
         if xdg is not None:
             return Path(xdg) / "opencode" / "skills"
         return _home_dir() / ".config" / "opencode" / "skills"
+    if agent is SkillAgent.HERMES:
+        if scope is not SkillScope.PERSONAL:
+            return Path.cwd() / ".hermes" / "skills"
+        hermes_home = os.environ.get("HERMES_HOME")
+        if hermes_home is not None:
+            return Path(hermes_home) / "skills"
+        return _home_dir() / ".hermes" / "skills"
     raise SkillError(f"unknown agent {agent!r}")
 
 

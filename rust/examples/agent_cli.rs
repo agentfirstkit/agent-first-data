@@ -13,7 +13,7 @@
 // _secret flags, nested subcommands, cli_parse_output, cli_parse_log_filters,
 // opt-in startup diagnostics, cli_output, build_cli_error, error hints, and
 // (with the `skill-admin` feature) a `skill` subcommand that installs/uninstalls/
-// reports status of an embedded Agent Skill across Codex, Claude Code, and opencode.
+// reports status of an embedded Agent Skill across Codex, Claude Code, opencode, and Hermes.
 //
 // Run:  cargo run --example agent_cli --features cli-help,cli-help-markdown -- --help
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown -- service --help
@@ -98,7 +98,7 @@ enum Command {
         #[arg(long, default_value = "5000")]
         timeout_ms: u64,
     },
-    /// Manage this tool's embedded Agent Skill (Codex, Claude Code, opencode)
+    /// Manage this tool's embedded Agent Skill (Codex, Claude Code, opencode, Hermes)
     #[cfg(feature = "skill-admin")]
     Skill {
         #[command(subcommand)]
@@ -120,10 +120,10 @@ enum SkillCmd {
 #[cfg(feature = "skill-admin")]
 #[derive(clap::Args)]
 struct SkillTargetArgs {
-    /// Agent to manage: all, codex, claude-code, opencode
+    /// Agent to manage: all, codex, claude-code, opencode, hermes
     #[arg(long, default_value = "all")]
     agent: String,
-    /// Skill scope: personal, project
+    /// Skill scope: personal, workspace
     #[arg(long, default_value = "personal")]
     scope: String,
     /// Skills directory (requires a single concrete --agent)
@@ -440,20 +440,21 @@ fn build_skill_options(
         "codex" => SkillAgentSelection::Codex,
         "claude-code" => SkillAgentSelection::ClaudeCode,
         "opencode" => SkillAgentSelection::Opencode,
+        "hermes" => SkillAgentSelection::Hermes,
         other => {
             return Err((
                 format!("invalid --agent '{other}'"),
-                "valid values: all, codex, claude-code, opencode".to_string(),
+                "valid values: all, codex, claude-code, opencode, hermes".to_string(),
             ))
         }
     };
     let scope = match target.scope.as_str() {
         "personal" => SkillScope::Personal,
-        "project" => SkillScope::Project,
+        "workspace" => SkillScope::Workspace,
         other => {
             return Err((
                 format!("invalid --scope '{other}'"),
-                "valid values: personal, project".to_string(),
+                "valid values: personal, workspace".to_string(),
             ))
         }
     };
@@ -1388,13 +1389,22 @@ mod tests {
         fn build_options_parses_agents_and_scopes() {
             let target = SkillTargetArgs {
                 agent: "opencode".to_string(),
-                scope: "project".to_string(),
+                scope: "workspace".to_string(),
                 skills_dir: Some("/tmp/x".to_string()),
             };
             let options = build_skill_options(target, true).expect("valid options");
             assert_eq!(options.agent, SkillAgentSelection::Opencode);
-            assert_eq!(options.scope, SkillScope::Project);
+            assert_eq!(options.scope, SkillScope::Workspace);
             assert!(options.force);
+
+            let workspace = SkillTargetArgs {
+                agent: "codex".to_string(),
+                scope: "workspace".to_string(),
+                skills_dir: None,
+            };
+            let options = build_skill_options(workspace, false).expect("valid options");
+            assert_eq!(options.agent, SkillAgentSelection::Codex);
+            assert_eq!(options.scope, SkillScope::Workspace);
         }
 
         #[test]
