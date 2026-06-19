@@ -116,19 +116,49 @@ def format_complete_help(parser: argparse.ArgumentParser) -> str:
     return "\n".join(lines)
 
 
+def subcommand_about(parser: argparse.ArgumentParser, name: str) -> str:
+    """Return the one-line `about` (the add_parser help=) for a subcommand."""
+    for action in parser._subparsers._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for choice in action._choices_actions:
+                if choice.dest == name:
+                    return choice.help or ""
+    return ""
+
+
+def help_without_description(parser: argparse.ArgumentParser) -> str:
+    """argparse's format_help() with the description omitted. The Markdown
+    heading already carries the about, so the fenced block must not repeat it."""
+    saved = parser.description
+    parser.description = None
+    try:
+        return parser.format_help()
+    finally:
+        parser.description = saved
+
+
+def markdown_heading(prefix: str, prog: str, command: str | None, about: str) -> str:
+    """`# prog [command] - about`, dropping the `- about` tail when empty."""
+    title = f"{prog} {command}" if command else prog
+    return f"{prefix} {title} - {about}" if about else f"{prefix} {title}"
+
+
 def format_markdown_help(parser: argparse.ArgumentParser, command: str | None, recursive: bool) -> str:
     """Format Markdown docs for the selected command; expand the tree if recursive."""
     sub = find_subparser(parser, command)
     if sub is not None:
-        return f"# {parser.prog} {command}\n\n```text\n{sub.format_help()}{leaf_global_options_note()}```\n"
+        heading = markdown_heading("#", parser.prog, command, subcommand_about(parser, command))
+        return f"{heading}\n\n```text\n{sub.format_help()}{leaf_global_options_note()}```\n"
 
-    lines = [f"# {parser.prog} - Minimal agent-first CLI example", "", "```text", parser.format_help().rstrip(), "```"]
+    root_heading = markdown_heading("#", parser.prog, None, parser.description or "")
+    lines = [root_heading, "", "```text", help_without_description(parser).rstrip(), "```"]
     if not recursive:
         return "\n".join(lines) + "\n"
     for action in parser._subparsers._actions:
         if isinstance(action, argparse._SubParsersAction):
             for name, choice in action.choices.items():
-                lines.extend(["", f"## {parser.prog} {name}", "", "```text", choice.format_help().rstrip(), "```"])
+                sub_heading = markdown_heading("##", parser.prog, name, subcommand_about(parser, name))
+                lines.extend(["", sub_heading, "", "```text", choice.format_help().rstrip(), "```"])
     return "\n".join(lines) + "\n"
 
 
@@ -420,6 +450,16 @@ def test_one_level_markdown_omits_descendant_details():
     assert "# agent-cli" in md, "one-level markdown must include root heading"
     assert "--dry-run" not in md, "one-level markdown must not expand echo's --dry-run"
     assert "--host" not in md, "one-level markdown must not expand ping's --host"
+
+
+def test_markdown_about_appears_once():
+    """The about lives in the heading only, never repeated in the fenced block."""
+    parser = build_parser()
+    root = format_markdown_help(parser, None, False)
+    assert root.count("Minimal agent-first CLI example") == 1, "root about must appear once (heading only)"
+    echo = format_markdown_help(parser, "echo", False)
+    assert echo.startswith("# agent-cli echo - Echo back the input as structured output"), "subcommand heading must carry the about"
+    assert echo.count("Echo back the input as structured output") == 1, "subcommand about must appear once (heading only)"
 
 
 def test_one_level_help_schema_omits_child_flags():

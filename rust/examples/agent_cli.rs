@@ -55,8 +55,21 @@ const WIDGET_SPEC: agent_first_data::skill::SkillSpec = agent_first_data::skill:
 #[derive(Parser)]
 #[command(
     name = "agent-cli",
-    version,
-    about = "Minimal agent-first CLI example",
+    version = env!("CARGO_PKG_VERSION"),
+    about = env!("CARGO_PKG_DESCRIPTION"),
+    long_about = r#"### Interface Policy
+
+- Agent-facing CLI surfaces should keep stdout structured.
+- Human help remains conventional unless `--output markdown|json|yaml` is requested.
+- Binary names are command-specific, so this example sets `name = "agent-cli"` explicitly.
+
+### Example Usage
+
+```text
+agent-cli ping --host example.com
+agent-cli --help --recursive --output markdown
+```
+"#,
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -938,8 +951,17 @@ mod tests {
         )
         .expect("valid help request")
         .expect("markdown help should render");
-        assert!(help.contains("# agent-cli"), "markdown must have heading");
+        assert!(
+            help.contains(&format!("# agent-cli - {}", env!("CARGO_PKG_DESCRIPTION"))),
+            "markdown heading must use Cargo package description"
+        );
         assert!(help.contains("```text"), "markdown must wrap clap help");
+        assert_eq!(
+            help.matches("Agent-facing CLI surfaces should keep stdout structured.")
+                .count(),
+            1,
+            "long_about should render once, outside the fenced clap help block"
+        );
         assert!(
             !help.contains("--api-key-secret"),
             "one-level markdown must not expand nested leaf flags"
@@ -966,6 +988,12 @@ mod tests {
         .expect("markdown help should render");
         assert!(help.contains("# agent-cli"), "markdown must have heading");
         assert!(help.contains("```text"), "markdown must wrap clap help");
+        assert_eq!(
+            help.matches("Agent-facing CLI surfaces should keep stdout structured.")
+                .count(),
+            1,
+            "recursive markdown should not repeat root long_about in fenced help"
+        );
         assert!(
             help.contains("--api-key-secret"),
             "recursive markdown export must include nested flags"
@@ -1154,6 +1182,29 @@ mod tests {
             !md.contains("--api-key-secret"),
             "one-level markdown must not include nested flags"
         );
+    }
+
+    #[cfg(feature = "cli-help")]
+    #[test]
+    fn help_markdown_strips_about_from_leading_long_about() {
+        let cmd = clap::Command::new("sample")
+            .about("Shared summary")
+            .long_about("Shared summary\n\nDetailed policy.");
+        let md = agent_first_data::cli_render_help_with_options(
+            &cmd,
+            &[],
+            &agent_first_data::HelpOptions {
+                scope: agent_first_data::HelpScope::OneLevel,
+                format: agent_first_data::HelpFormat::Markdown,
+            },
+        );
+        assert!(md.contains("# sample - Shared summary"));
+        assert_eq!(
+            md.matches("Shared summary").count(),
+            1,
+            "about should live in the heading, not repeat at the start of long_about"
+        );
+        assert!(md.contains("Detailed policy."));
     }
 
     #[cfg(feature = "cli-help-markdown")]

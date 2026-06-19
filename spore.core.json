@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,10 +13,8 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Fix absolute GitHub URLs in per-language READMEs so links to shared docs resolve correctly when published to crates.io, PyPI, npm, and pkg.go.dev",
-    "Rename skill installer scope from project to workspace across all four language ports so the scope name matches its semantics",
-    "Allow Codex workspace scope for skill installer, placing skills under .codex/skills in the current directory",
-    "Add Hermes Agent as a skill installer target across all four language ports, with personal scope at $HERMES_HOME/skills or ~/.hermes/skills and workspace scope at .hermes/skills"
+    "Fix CLI --help --output markdown rendering across all four language ports so a command's summary appears once in the heading instead of being duplicated inside the fenced help block, and add a regression test asserting single occurrence",
+    "Refresh TypeScript dev dependencies (@types/node, tsx) and hold typescript at the 5.x line because 6.0 cannot resolve node: imports against @types/node 25"
   ],
   "bonds": [],
   "tree": {

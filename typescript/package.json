@@ -1,6 +1,6 @@
 {
   "name": "agent-first-data",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "A naming convention that lets AI agents understand your data without being told what it means.",
   "license": "MIT",
   "repository": {
@@ -30,8 +30,8 @@
     "test": "tsx --test src/*.test.ts examples/agent_cli.ts"
   },
   "devDependencies": {
-    "@types/node": "^25.2.3",
-    "tsx": "^4.20.6",
-    "typescript": "^5.0"
+    "@types/node": "^25.9.3",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
   }
 }

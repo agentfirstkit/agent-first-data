@@ -1254,22 +1254,57 @@ fn render_markdown_command(
     } else {
         let _ = writeln!(buf, "{heading_level} {path}");
     }
-    if let Some(long_about) = cmd.get_long_about() {
+    if let Some(long_about) = markdown_long_about(cmd) {
         let _ = writeln!(buf);
-        let _ = writeln!(buf, "{long_about}");
+        write_trimmed_help(buf, &long_about);
     }
     let _ = writeln!(buf);
     let _ = writeln!(buf, "```text");
-    let help = if enrich {
-        enriched_help_command(cmd).render_long_help()
-    } else {
-        cmd.clone().render_long_help()
-    };
+    let help = markdown_help_block_command(cmd, enrich).render_long_help();
     write_trimmed_help(buf, &help.to_string());
     if !buf.ends_with('\n') {
         let _ = writeln!(buf);
     }
     let _ = writeln!(buf, "```");
+}
+
+#[cfg(feature = "cli-help")]
+fn markdown_long_about(cmd: &clap::Command) -> Option<String> {
+    let long_about = cmd.get_long_about()?.to_string();
+    let rendered = match cmd.get_about() {
+        Some(about) => strip_leading_about_paragraph(&long_about, &about.to_string()),
+        None => long_about.as_str(),
+    };
+    let rendered = rendered.trim_matches(['\r', '\n']);
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered.to_string())
+    }
+}
+
+#[cfg(feature = "cli-help")]
+fn strip_leading_about_paragraph<'a>(long_about: &'a str, about: &str) -> &'a str {
+    let long_about = long_about.trim_start_matches(['\r', '\n']);
+    let Some(rest) = long_about.strip_prefix(about) else {
+        return long_about;
+    };
+    if rest.is_empty() {
+        return "";
+    }
+    rest.strip_prefix("\r\n\r\n")
+        .or_else(|| rest.strip_prefix("\n\n"))
+        .unwrap_or(long_about)
+}
+
+#[cfg(feature = "cli-help")]
+fn markdown_help_block_command(cmd: &clap::Command, enrich: bool) -> clap::Command {
+    let cmd = if enrich {
+        enriched_help_command(cmd)
+    } else {
+        cmd.clone()
+    };
+    cmd.about(None::<&str>).long_about(None::<&str>)
 }
 
 #[cfg(feature = "cli-help")]

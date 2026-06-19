@@ -8,7 +8,7 @@ import (
 )
 
 func TestRootHelpIsOneLevel(t *testing.T) {
-	help := formatRootHelp()
+	help := formatRootHelp(true)
 	for _, want := range []string{"echo", "ping", "--output", "--help"} {
 		if !containsStr(help, want) {
 			t.Errorf("root --help missing %q", want)
@@ -39,6 +39,19 @@ func TestOneLevelMarkdownOmitsDescendantDetails(t *testing.T) {
 		if containsStr(help, notWant) {
 			t.Errorf("one-level markdown should not expand %q", notWant)
 		}
+	}
+}
+
+// The about lives in the markdown heading only; it must never be repeated as
+// the first line of the fenced help block.
+func TestMarkdownAboutAppearsOnce(t *testing.T) {
+	root := formatMarkdownHelp("", false)
+	if n := strings.Count(root, "Minimal agent-first CLI example"); n != 1 {
+		t.Errorf("root about must appear once (heading only), got %d:\n%s", n, root)
+	}
+	echo := formatMarkdownHelp("echo", false)
+	if n := strings.Count(echo, "Echo back the input as structured output"); n != 1 {
+		t.Errorf("subcommand about must appear once (heading only), got %d:\n%s", n, echo)
 	}
 }
 
@@ -80,7 +93,7 @@ func TestHelpSchemaOneLevelOmitsChildFlags(t *testing.T) {
 }
 
 func TestSubcommandHelpScoped(t *testing.T) {
-	echoHelp := formatSubcommandHelp("echo", true)
+	echoHelp := formatSubcommandHelp("echo", true, true)
 	if !containsStr(echoHelp, "--dry-run") {
 		t.Error("echo --help missing --dry-run")
 	}
@@ -92,13 +105,13 @@ func TestSubcommandHelpScoped(t *testing.T) {
 // A leaf --help target must still advertise the --output formats; a descendant
 // rendering (withGlobals=false) must not, to keep recursive dumps lean.
 func TestLeafHelpTargetDocumentsFormats(t *testing.T) {
-	target := formatSubcommandHelp("echo", true)
+	target := formatSubcommandHelp("echo", true, true)
 	for _, want := range []string{"--output", "markdown"} {
 		if !containsStr(target, want) {
 			t.Errorf("leaf --help target missing %q:\n%s", want, target)
 		}
 	}
-	descendant := formatSubcommandHelp("echo", false)
+	descendant := formatSubcommandHelp("echo", false, false)
 	if containsStr(descendant, "Global options") {
 		t.Errorf("descendant rendering must not repeat global options:\n%s", descendant)
 	}
@@ -118,7 +131,7 @@ func TestHelpAlwaysDocumentsFormats(t *testing.T) {
 		t.Errorf("leaf help schema must document --output formats:\n%s", leaf)
 	}
 	// Plain and markdown root help.
-	if !containsStr(formatRootHelp(), "markdown") {
+	if !containsStr(formatRootHelp(true), "markdown") {
 		t.Error("root plain help must mention the markdown format")
 	}
 }

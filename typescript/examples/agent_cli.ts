@@ -71,11 +71,17 @@ const SUBCOMMANDS: Subcommand[] = [
   },
 ];
 
-/** Format one-level help for the root command. */
-function formatRootHelp(): string {
-  const lines = [
-    "agent-cli — Minimal agent-first CLI example",
-    "",
+/**
+ * Format one-level help for the root command. Markdown rendering passes
+ * withTitle=false: the `# agent-cli - <about>` heading already carries the
+ * summary, so repeating it as the first line of the fenced block is duplication.
+ */
+function formatRootHelp(withTitle = true): string {
+  const lines: string[] = [];
+  if (withTitle) {
+    lines.push("agent-cli — Minimal agent-first CLI example", "");
+  }
+  lines.push(
     "Usage: agent-cli [OPTIONS] <COMMAND>",
     "",
     "Options:",
@@ -86,7 +92,7 @@ function formatRootHelp(): string {
     "  --recursive        With --help, expand the full command tree; --output picks the format",
     "",
     "Commands:",
-  ];
+  );
   for (const sc of SUBCOMMANDS) {
     lines.push(`  ${sc.name.padEnd(8)} ${sc.about}`);
   }
@@ -110,10 +116,12 @@ function formatCompleteHelp(): string {
  * withGlobals=false: the root already documented the modifiers once, so
  * repeating them per command would be pure noise.
  */
-function formatSubcommandHelp(name: string, withGlobals = false): string {
+function formatSubcommandHelp(name: string, withGlobals = false, withTitle = true): string {
   const sc = SUBCOMMANDS.find((s) => s.name === name);
   if (!sc) return "";
-  let help = `agent-cli ${sc.name} — ${sc.about}\n\nFlags:\n${sc.flags}\n`;
+  // Markdown rendering passes withTitle=false: the heading already shows the
+  // `agent-cli <name> - <about>` summary, so the fenced block skips it.
+  let help = withTitle ? `agent-cli ${sc.name} — ${sc.about}\n\nFlags:\n${sc.flags}\n` : `Flags:\n${sc.flags}\n`;
   if (withGlobals) {
     help += "\nGlobal options:\n  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n";
   }
@@ -124,7 +132,7 @@ function formatMarkdownHelp(command: string | undefined, recursive: boolean): st
   if (command) {
     const sc = SUBCOMMANDS.find((s) => s.name === command);
     if (sc) {
-      return `# agent-cli ${sc.name} - ${sc.about}\n\n\`\`\`text\n${formatSubcommandHelp(sc.name, true)}\`\`\`\n`;
+      return `# agent-cli ${sc.name} - ${sc.about}\n\n\`\`\`text\n${formatSubcommandHelp(sc.name, true, false)}\`\`\`\n`;
     }
   }
 
@@ -132,12 +140,12 @@ function formatMarkdownHelp(command: string | undefined, recursive: boolean): st
     "# agent-cli - Minimal agent-first CLI example",
     "",
     "```text",
-    formatRootHelp().trimEnd(),
+    formatRootHelp(false).trimEnd(),
     "```",
   ];
   if (!recursive) return `${lines.join("\n")}\n`;
   for (const sc of SUBCOMMANDS) {
-    lines.push("", `## agent-cli ${sc.name} - ${sc.about}`, "", "```text", formatSubcommandHelp(sc.name, false).trimEnd(), "```");
+    lines.push("", `## agent-cli ${sc.name} - ${sc.about}`, "", "```text", formatSubcommandHelp(sc.name, false, false).trimEnd(), "```");
   }
   return `${lines.join("\n")}\n`;
 }
@@ -456,6 +464,21 @@ if (process.env["NODE_TEST_CONTEXT"]) {
       assert.ok(help.includes("# agent-cli"), "one-level markdown must include root heading");
       assert.ok(!help.includes("--dry-run"), "one-level markdown must not expand echo's --dry-run");
       assert.ok(!help.includes("--host"), "one-level markdown must not expand ping's --host");
+    });
+
+    it("markdown about appears once — heading only, never repeated in the fenced block", () => {
+      const root = formatMarkdownHelp(undefined, false);
+      assert.equal(
+        (root.match(/Minimal agent-first CLI example/g) ?? []).length,
+        1,
+        "root about must live in the heading, not also in the fenced help block",
+      );
+      const echo = formatMarkdownHelp("echo", false);
+      assert.equal(
+        (echo.match(/Echo back the input as structured output/g) ?? []).length,
+        1,
+        "subcommand about must live in the heading, not also in the fenced help block",
+      );
     });
 
     it("recursive help contains subcommand details", () => {

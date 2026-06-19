@@ -54,10 +54,15 @@ var subcommands = []subcommand{
 	{name: "skill", about: "Manage this tool's embedded Agent Skill", flags: "  status|install|uninstall  Skill action\n  --agent      all, codex, claude-code, opencode, hermes (default: all)\n  --scope      personal, workspace (default: personal)\n  --skills-dir Skills directory (requires a single concrete --agent)\n  --force      Overwrite or remove a skill this tool did not manage"},
 }
 
-// formatRootHelp returns one-level help for the root command.
-func formatRootHelp() string {
+// formatRootHelp returns one-level help for the root command. Markdown
+// rendering passes withTitle=false: the `# agent-cli - <about>` heading already
+// carries the summary, so repeating it as the first line of the fenced block is
+// duplication.
+func formatRootHelp(withTitle bool) string {
 	var b strings.Builder
-	b.WriteString("agent-cli — Minimal agent-first CLI example\n\n")
+	if withTitle {
+		b.WriteString("agent-cli — Minimal agent-first CLI example\n\n")
+	}
 	b.WriteString("Usage: agent-cli [OPTIONS] <COMMAND>\n\n")
 	b.WriteString("Options:\n")
 	b.WriteString("  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n")
@@ -75,7 +80,7 @@ func formatRootHelp() string {
 // formatCompleteHelp returns recursive help for the root command and all subcommands.
 func formatCompleteHelp() string {
 	var b strings.Builder
-	b.WriteString(formatRootHelp())
+	b.WriteString(formatRootHelp(true))
 	for _, sc := range subcommands {
 		fmt.Fprintf(&b, "\n%s\n%s\n\n", strings.Repeat("=", 60), "agent-cli "+sc.name)
 		fmt.Fprintf(&b, "%s\n%s\n\nFlags:\n%s\n", strings.Repeat("=", 60), sc.about, sc.flags)
@@ -88,11 +93,17 @@ func formatCompleteHelp() string {
 // --output formats so even a leaf `--help` advertises the format options.
 // Descendants in a recursive dump pass withGlobals=false: the root already
 // documented the modifiers once, so repeating them per command is pure noise.
-func formatSubcommandHelp(name string, withGlobals bool) string {
+func formatSubcommandHelp(name string, withGlobals, withTitle bool) string {
 	for _, sc := range subcommands {
 		if sc.name == name {
 			var b strings.Builder
-			fmt.Fprintf(&b, "agent-cli %s — %s\n\nFlags:\n%s\n", sc.name, sc.about, sc.flags)
+			// Markdown rendering passes withTitle=false: the heading already
+			// shows the `agent-cli <name> - <about>` summary, so the fenced
+			// block skips it.
+			if withTitle {
+				fmt.Fprintf(&b, "agent-cli %s — %s\n\n", sc.name, sc.about)
+			}
+			fmt.Fprintf(&b, "Flags:\n%s\n", sc.flags)
 			if withGlobals {
 				b.WriteString("\nGlobal options:\n")
 				b.WriteString("  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n")
@@ -110,7 +121,7 @@ func formatMarkdownHelp(command string, recursive bool) string {
 			if sc.name == command {
 				fmt.Fprintf(&b, "# agent-cli %s - %s\n\n", sc.name, sc.about)
 				b.WriteString("```text\n")
-				b.WriteString(formatSubcommandHelp(command, true))
+				b.WriteString(formatSubcommandHelp(command, true, false))
 				b.WriteString("```\n")
 				return b.String()
 			}
@@ -118,7 +129,7 @@ func formatMarkdownHelp(command string, recursive bool) string {
 	}
 	b.WriteString("# agent-cli - Minimal agent-first CLI example\n\n")
 	b.WriteString("```text\n")
-	b.WriteString(formatRootHelp())
+	b.WriteString(formatRootHelp(false))
 	b.WriteString("```\n")
 	if !recursive {
 		return b.String()
@@ -126,7 +137,7 @@ func formatMarkdownHelp(command string, recursive bool) string {
 	for _, sc := range subcommands {
 		fmt.Fprintf(&b, "\n## agent-cli %s - %s\n\n", sc.name, sc.about)
 		b.WriteString("```text\n")
-		b.WriteString(formatSubcommandHelp(sc.name, false))
+		b.WriteString(formatSubcommandHelp(sc.name, false, false))
 		b.WriteString("```\n")
 	}
 	return b.String()
@@ -203,11 +214,11 @@ func printHelp(command, output string, outputExplicit bool, outputMissing bool, 
 	if !outputExplicit || output == "plain" {
 		switch {
 		case command != "":
-			fmt.Print(formatSubcommandHelp(command, true))
+			fmt.Print(formatSubcommandHelp(command, true, true))
 		case recursive:
 			fmt.Print(formatCompleteHelp())
 		default:
-			fmt.Print(formatRootHelp())
+			fmt.Print(formatRootHelp(true))
 		}
 		return 0
 	}
