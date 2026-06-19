@@ -106,6 +106,8 @@ pub struct SkillTargetStatus {
     pub scope: SkillScope,
     /// Directory that holds skill folders.
     pub skills_dir: PathBuf,
+    /// Directory for this skill under `skills_dir`.
+    pub skill_dir: PathBuf,
     /// Full path to the target `SKILL.md`.
     pub skill_path: PathBuf,
     /// Whether a skill file exists at `skill_path`.
@@ -129,6 +131,8 @@ pub struct SkillUninstallStatus {
     pub scope: SkillScope,
     /// Directory that holds skill folders.
     pub skills_dir: PathBuf,
+    /// Directory for this skill under `skills_dir`.
+    pub skill_dir: PathBuf,
     /// Full path to the target `SKILL.md`.
     pub skill_path: PathBuf,
     /// Whether a file was removed (false if nothing was installed).
@@ -451,6 +455,7 @@ fn target_status(spec: &SkillSpec, target: &SkillTarget) -> Result<SkillTargetSt
             agent: target.agent,
             scope: target.scope,
             skills_dir: target.skills_dir.clone(),
+            skill_dir: target.skill_dir.clone(),
             skill_path: target.skill_path.clone(),
             installed: false,
             managed: false,
@@ -482,6 +487,7 @@ fn target_status(spec: &SkillSpec, target: &SkillTarget) -> Result<SkillTargetSt
         agent: target.agent,
         scope: target.scope,
         skills_dir: target.skills_dir.clone(),
+        skill_dir: target.skill_dir.clone(),
         skill_path: target.skill_path.clone(),
         installed,
         managed,
@@ -496,6 +502,7 @@ fn target_uninstall_status(target: &SkillTarget, removed: bool) -> SkillUninstal
         agent: target.agent,
         scope: target.scope,
         skills_dir: target.skills_dir.clone(),
+        skill_dir: target.skill_dir.clone(),
         skill_path: target.skill_path.clone(),
         removed,
     }
@@ -1088,6 +1095,10 @@ mod tests {
             assert_eq!(value["installed"], true);
             assert_eq!(value["targets"][0]["agent"], "opencode");
             assert_eq!(value["targets"][0]["current"], true);
+            assert_eq!(
+                value["targets"][0]["skill_dir"],
+                serde_json::json!(dir.join("agent-first-test").to_string_lossy().to_string())
+            );
         }
         let _ = std::fs::remove_dir_all(dir);
     }

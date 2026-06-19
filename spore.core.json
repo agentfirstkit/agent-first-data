@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,8 +13,8 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Fix CLI --help --output markdown rendering across all four language ports so a command's summary appears once in the heading instead of being duplicated inside the fenced help block, and add a regression test asserting single occurrence",
-    "Refresh TypeScript dev dependencies (@types/node, tsx) and hold typescript at the 5.x line because 6.0 cannot resolve node: imports against @types/node 25"
+    "Expose skill_dir on SkillTargetStatus and SkillUninstallStatus so callers can read the per-skill directory path without reconstructing it from skills_dir and the skill name",
+    "Upgrade TypeScript dev dependency to 6.0 and add types:[node] to tsconfig so Node built-ins resolve without explicit @types/node imports in consuming projects"
   ],
   "bonds": [],
   "tree": {
