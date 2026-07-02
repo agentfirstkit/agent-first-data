@@ -224,6 +224,14 @@ Channel policy:
 - runtime protocol events MUST NOT be emitted on `stderr`
 - `stderr` is reserved for unrecoverable pre-protocol startup failures only
 
+Optional stream redirection:
+- use `--stdout-file <PATH>` to redirect stdout bytes to a file
+- use `--stderr-file <PATH>` to redirect stderr bytes to a file
+- keep `--output` reserved for stdout format selection (`json`, `yaml`, `plain`, and help-specific `markdown`)
+- do not convert stderr diagnostics to JSON; Rust panics, Python tracebacks, and runtime errors stay native stderr bytes
+- treat this as stream destination control, not a second protocol stream and not stream copying
+- do not implement application-level rotation
+
 Recommended enforcement:
 - Rust: enable clippy `print_stderr = "deny"` and disallow `std::eprintln` / `std::io::stderr`
 - Go/Python/TypeScript: add source-policy tests that fail if runtime sources reference stderr APIs

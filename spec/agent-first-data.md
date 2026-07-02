@@ -550,6 +550,18 @@ Channel policy:
 - runtime protocol events MUST NOT be emitted on `stderr`
 - `stderr` may be used only for unrecoverable pre-protocol startup failures where structured output cannot be produced
 
+Optional stream redirection:
+- CLI tools and services MAY expose `--stdout-file <PATH>` and `--stderr-file <PATH>`
+- unset file flags leave the corresponding stream unchanged
+- when enabled, stdout bytes are appended to the `--stdout-file` path instead of the original stdout destination
+- when enabled, stderr bytes are appended to the `--stderr-file` path instead of the original stderr destination
+- `--output` continues to select stdout format (`json`, `yaml`, `plain`, and help-specific `markdown`); it does not select stream destinations
+- implementations SHOULD install stream redirection before version/help handling, logging/tracing initialization, and other early output
+- startup failures to create/open the files SHOULD fail startup with a structured stdout error when stdout is still available
+- stderr MUST NOT be converted to AFDATA JSON; native diagnostics such as Rust panics, Python tracebacks, and runtime errors remain stderr bytes
+- no application-level rotation is implied; rotate with external tooling
+- this is stream redirection, not a second AFDATA protocol channel and not stream copying
+
 Recommended enforcement:
 - Rust: clippy `print_stderr = "deny"` plus disallow `std::eprintln` / `std::io::stderr`
 - Go/Python/TypeScript: source-policy tests or lint rules that fail on stderr API usage in runtime code

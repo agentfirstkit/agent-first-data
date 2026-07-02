@@ -15,6 +15,7 @@ describe("stderr policy", () => {
   it("runtime TypeScript sources must not use stderr", () => {
     const files = readdirSync(dir)
       .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"))
+      .filter((name) => name !== "stream_redirect.ts")
       .sort();
 
     assert.ok(files.length > 0, "no TypeScript runtime source files found");

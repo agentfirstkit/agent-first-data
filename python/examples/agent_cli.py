@@ -15,6 +15,7 @@ Run:  PYTHONPATH=. python3 examples/agent_cli.py --help
       PYTHONPATH=. python3 examples/agent_cli.py ping --output json
       PYTHONPATH=. python3 examples/agent_cli.py echo --output yaml --log startup,request
       PYTHONPATH=. python3 examples/agent_cli.py --log all ping   # or --verbose
+      PYTHONPATH=. python3 examples/agent_cli.py --stdout-file /tmp/agent-cli.out --stderr-file /tmp/agent-cli.err ping
 Test: PYTHONPATH=. python3 -m pytest examples/agent_cli.py -v
 """
 
@@ -39,6 +40,7 @@ from agent_first_data import (
     cli_parse_log_filters,
     cli_parse_output,
     output_json,
+    install_stream_redirect_from_raw_args,
     run_skill_admin,
 )
 
@@ -70,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", default="json", help="Output format: json, yaml, plain; help also accepts markdown")
     parser.add_argument("--log", default="", help="Log categories (comma-separated); --log all (or --verbose) enables every category")
     parser.add_argument("--verbose", action="store_true", help="Enable all log categories (shorthand for --log all)")
+    parser.add_argument("--stdout-file", dest="stdout_file", help="Redirect stdout to a file")
+    parser.add_argument("--stderr-file", dest="stderr_file", help="Redirect stderr to a file")
 
     subs = parser.add_subparsers(dest="command")
 
@@ -218,6 +222,8 @@ def global_help_options(include_recursive: bool) -> list[dict]:
         {"name": "--output", "help": "Output format: json, yaml, plain; help also accepts markdown"},
         {"name": "--log", "help": "Log categories (comma-separated); --log all (or --verbose) enables every category"},
         {"name": "--verbose", "help": "Enable all log categories (shorthand for --log all)"},
+        {"name": "--stdout-file", "help": "Redirect stdout to a file"},
+        {"name": "--stderr-file", "help": "Redirect stderr to a file"},
     ]
     if include_recursive:
         opts.append({"name": "--recursive", "help": "With --help, expand the full command tree (a bare --recursive is ignored)"})
@@ -295,6 +301,12 @@ def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
 def main() -> None:
     parser = build_parser()
     raw = sys.argv[1:]
+    try:
+        _stream_redirect = install_stream_redirect_from_raw_args(raw)
+    except (OSError, ValueError) as e:
+        print(output_json(build_cli_error(str(e))))
+        sys.exit(2)
+
     try:
         version = cli_handle_version_or_continue(raw, "agent-cli", AGENT_CLI_VERSION)
     except ValueError as e:

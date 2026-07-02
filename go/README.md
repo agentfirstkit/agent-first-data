@@ -28,7 +28,7 @@ func main() {
 }
 ```
 
-Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `RedactedValue`, `RedactSecretsInPlace`, `RedactURLSecrets`, `ParseSize`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, and `CliHandleVersionOrContinue`.
+Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `RedactedValue`, `RedactSecretsInPlace`, `RedactURLSecrets`, `ParseSize`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, `CliHandleVersionOrContinue`, `ParseStreamRedirectArgs`, and `InstallStreamRedirectFromArgs`.
 
 Logging is available through the `log/slog` integration: `InitJson`, `InitPlain`, `InitYaml`, `InitJsonWithOptions`, `WithSpan`, and `LoggerFromContext`.
 
@@ -46,6 +46,7 @@ afdata.InitJsonWithOptions(afdata.RedactionOptions{
 - Logging records use `code: "log"` plus a separate `level` field, so error-level logs are not terminal protocol errors.
 - `build_cli_error(message, hint?)` returns `{code:"error", error: message, hint?}` only.
 - Use `CliHandleVersionOrContinue()` before argument parsing so bare `--version` stays conventional and `--version --output json|yaml|plain` stays structured.
+- Use `InstallStreamRedirectFromArgs()` before version/help handling if a CLI exposes `--stdout-file` or `--stderr-file`; stderr is redirected as native diagnostics, not JSON.
 
 ## Reference
 

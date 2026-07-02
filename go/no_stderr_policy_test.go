@@ -21,6 +21,9 @@ func TestNoStderrUsageInRuntimeSources(t *testing.T) {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
 		}
+		if strings.HasPrefix(path, "afdata_stream_redirect") {
+			continue
+		}
 
 		data, err := os.ReadFile(path)
 		if err != nil {

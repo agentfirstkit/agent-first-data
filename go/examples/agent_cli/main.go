@@ -16,6 +16,7 @@
 //	go run ./examples/agent_cli echo
 //	go run ./examples/agent_cli echo --dry-run
 //	go run ./examples/agent_cli --log all ping   # or --verbose
+//	go run ./examples/agent_cli --stdout-file /tmp/agent-cli.out --stderr-file /tmp/agent-cli.err ping
 //	go run ./examples/agent_cli ping
 //	go run ./examples/agent_cli skill status --agent opencode --skills-dir /tmp/ex
 //	go run ./examples/agent_cli skill install --agent opencode --skills-dir /tmp/ex
@@ -68,6 +69,8 @@ func formatRootHelp(withTitle bool) string {
 	b.WriteString("  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n")
 	b.WriteString("  --log <FILTERS>    Log categories (comma-separated); --log all (or --verbose) enables every category\n")
 	b.WriteString("  --verbose          Enable all log categories (shorthand for --log all)\n")
+	b.WriteString("  --stdout-file <PATH> Redirect stdout to a file\n")
+	b.WriteString("  --stderr-file <PATH> Redirect stderr to a file\n")
 	b.WriteString("  --help             Show this help (one-level); add --recursive to expand all subcommands\n")
 	b.WriteString("  --recursive        With --help, expand the full command tree; --output picks the format\n\n")
 	b.WriteString("Commands:\n")
@@ -153,6 +156,8 @@ func globalHelpOptions(includeRecursive bool) []map[string]any {
 		{"name": "--output", "help": "Output format: json, yaml, plain (default: json); help also accepts markdown"},
 		{"name": "--log", "help": "Log categories (comma-separated); --log all (or --verbose) enables every category"},
 		{"name": "--verbose", "help": "Enable all log categories (shorthand for --log all)"},
+		{"name": "--stdout-file", "help": "Redirect stdout to a file"},
+		{"name": "--stderr-file", "help": "Redirect stderr to a file"},
 	}
 	if includeRecursive {
 		opts = append(opts, map[string]any{"name": "--recursive", "help": "With --help, expand the full command tree (a bare --recursive is ignored)"})
@@ -280,6 +285,11 @@ func main() {
 	var positionals []string
 
 	args := os.Args[1:]
+	if _, err := afdata.InstallStreamRedirectFromArgs(args); err != nil {
+		fmt.Println(afdata.OutputJson(afdata.BuildCliError(err.Error(), "")))
+		os.Exit(2)
+	}
+
 	if out, handled, err := afdata.CliHandleVersionOrContinue(args, "agent-cli", agentCliVersion, ""); handled {
 		if err != nil {
 			fmt.Println(afdata.OutputJson(afdata.BuildCliError(err.Error(), "valid version output formats: json, yaml, plain")))
@@ -342,6 +352,8 @@ func main() {
 			force = true
 		case "--verbose":
 			verbose = true
+		case "--stdout-file", "--stderr-file":
+			i++
 		default:
 			if !strings.HasPrefix(args[i], "--") {
 				positionals = append(positionals, args[i])

@@ -16,6 +16,7 @@
  *       npx tsx examples/agent_cli.ts ping --output json
  *       npx tsx examples/agent_cli.ts echo --output yaml --log startup,request
  *       npx tsx examples/agent_cli.ts --log all ping   # or --verbose
+ *       npx tsx examples/agent_cli.ts --stdout-file /tmp/agent-cli.out --stderr-file /tmp/agent-cli.err ping
  * Test: npx tsx --test examples/agent_cli.ts
  */
 
@@ -39,6 +40,7 @@ import {
   cliParseLogFilters,
   cliParseOutput,
   outputJson,
+  installStreamRedirectFromRawArgs,
   runSkillAdmin,
 } from "../src/index.js";
 
@@ -88,6 +90,8 @@ function formatRootHelp(withTitle = true): string {
     "  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown",
     "  --log <FILTERS>    Log categories (comma-separated); --log all (or --verbose) enables every category",
     "  --verbose          Enable all log categories (shorthand for --log all)",
+    "  --stdout-file <PATH> Redirect stdout to a file",
+    "  --stderr-file <PATH> Redirect stderr to a file",
     "  --help             Show this help (one-level); add --recursive to expand all subcommands",
     "  --recursive        With --help, expand the full command tree; --output picks the format",
     "",
@@ -161,6 +165,8 @@ function globalHelpOptions(includeRecursive: boolean): JsonValue[] {
     { name: "--output", help: "Output format: json, yaml, plain (default: json); help also accepts markdown" },
     { name: "--log", help: "Log categories (comma-separated); --log all (or --verbose) enables every category" },
     { name: "--verbose", help: "Enable all log categories (shorthand for --log all)" },
+    { name: "--stdout-file", help: "Redirect stdout to a file" },
+    { name: "--stderr-file", help: "Redirect stderr to a file" },
   ];
   if (includeRecursive) {
     opts.push({ name: "--recursive", help: "With --help, expand the full command tree (a bare --recursive is ignored)" });
@@ -234,7 +240,7 @@ function renderHelpOutput(
 }
 
 // Flags that consume the following token as their value.
-const VALUE_FLAGS = new Set(["--output", "--log", "--host", "--agent", "--scope", "--skills-dir"]);
+const VALUE_FLAGS = new Set(["--output", "--log", "--host", "--agent", "--scope", "--skills-dir", "--stdout-file", "--stderr-file"]);
 
 /** `all` / `*` (what --verbose expands to) enable every diagnostic category. */
 function logEnabled(filters: string[], category: string): boolean {
@@ -263,6 +269,13 @@ function positionalArgs(args: string[]): string[] {
 
 function main(): void {
   const args = process.argv.slice(2);
+  try {
+    installStreamRedirectFromRawArgs(args);
+  } catch (e) {
+    console.log(outputJson(buildCliError((e as Error).message)));
+    process.exit(2);
+  }
+
   try {
     const version = cliHandleVersionOrContinue(args, "agent-cli", AGENT_CLI_VERSION);
     if (version !== undefined) {

@@ -20,7 +20,7 @@ console.log(outputJson(value));
 console.log(outputPlain(value));
 ```
 
-Useful names use TypeScript casing: `outputJson`, `outputYaml`, `outputPlain`, `outputJsonWithOptions`, `redactedValue`, `redactSecretsInPlace`, `redactUrlSecrets`, `parseSize`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `cliParseOutput`, `cliOutput`, `buildCliError`, `buildCliVersion`, and `cliHandleVersionOrContinue`.
+Useful names use TypeScript casing: `outputJson`, `outputYaml`, `outputPlain`, `outputJsonWithOptions`, `redactedValue`, `redactSecretsInPlace`, `redactUrlSecrets`, `parseSize`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `cliParseOutput`, `cliOutput`, `buildCliError`, `buildCliVersion`, `cliHandleVersionOrContinue`, `streamRedirectConfigFromRawArgs`, and `installStreamRedirectFromRawArgs`.
 
 Logging is available through `initJson`, `initPlain`, `initYaml`, `span`, and `log`.
 
@@ -38,6 +38,7 @@ initJson({ secretNames: ["authorization"] });
 - Logging records use `code: "log"` plus a separate `level` field, so error-level logs are not terminal protocol errors.
 - `build_cli_error(message, hint?)` returns `{code:"error", error: message, hint?}` only.
 - Use `cliHandleVersionOrContinue()` before argument parsing so bare `--version` stays conventional and `--version --output json|yaml|plain` stays structured.
+- Use `installStreamRedirectFromRawArgs()` before version/help handling if a CLI exposes `--stdout-file` or `--stderr-file`; stderr is redirected as native diagnostics, not JSON. Node fd-level redirection is process-lifetime because the standard library does not expose `dup2` restoration.
 
 ## Reference
 

@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.14.2",
+  "version": "0.15.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,8 +13,8 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Expose skill_dir on SkillTargetStatus and SkillUninstallStatus so callers can read the per-skill directory path without reconstructing it from skills_dir and the skill name",
-    "Upgrade TypeScript dev dependency to 6.0 and add types:[node] to tsconfig so Node built-ins resolve without explicit @types/node imports in consuming projects"
+    "Add cross-language stdout and stderr file redirection helpers for CLI output using --stdout-file and --stderr-file.",
+    "Improve Rust CLI help rendering to use display names and avoid duplicated name/about markdown headings."
   ],
   "bonds": [],
   "tree": {

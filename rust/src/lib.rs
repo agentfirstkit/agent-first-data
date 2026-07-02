@@ -28,6 +28,9 @@
 #[cfg(feature = "tracing")]
 pub mod afdata_tracing;
 
+#[cfg(feature = "stream-redirect")]
+pub mod stream_redirect;
+
 #[cfg(feature = "skill-admin")]
 pub mod skill;
 
@@ -1272,7 +1275,13 @@ fn render_markdown_command(
 fn markdown_long_about(cmd: &clap::Command) -> Option<String> {
     let long_about = cmd.get_long_about()?.to_string();
     let rendered = match cmd.get_about() {
-        Some(about) => strip_leading_about_paragraph(&long_about, &about.to_string()),
+        Some(about) => {
+            let about_str = about.to_string();
+            if long_about.trim() == format!("{} - {}", cmd.get_name(), about_str) {
+                return None;
+            }
+            strip_leading_about_paragraph(&long_about, &about_str)
+        }
         None => long_about.as_str(),
     };
     let rendered = rendered.trim_matches(['\r', '\n']);

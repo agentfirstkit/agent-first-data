@@ -16,6 +16,8 @@ def test_no_stderr_usage_in_runtime_sources() -> None:
 
     violations: list[str] = []
     for path in files:
+        if path.name == "stream_redirect.py":
+            continue
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if DISALLOWED.search(line):
                 violations.append(f"{path.name}:{lineno}: {line.strip()}")

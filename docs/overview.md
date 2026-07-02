@@ -9,6 +9,7 @@ Agent-First Data (AFDATA) is a convention plus four small libraries:
 3. **Protocol** - optional JSONL objects with `code`, `result`/`error`, and `trace`
 4. **Logging** - structured logs that use the same redaction and suffix formatting rules
 5. **Channel discipline** - machine-readable events go to `stdout`; `stderr` is not a protocol stream
+6. **Stream redirection** - optional CLI helper to send stdout and stderr to separate files without changing their formats
 
 See the full [specification](../spec/agent-first-data.md) and the [agent skill](../skills/agent-first-data.md).
 
@@ -73,6 +74,15 @@ Language names follow each ecosystem's casing. The shared contract is:
 Version helpers should run before the app parser so bare `--version` stays conventional and `--version --output json|yaml|plain` emits a structured `{code:"version", version}` event instead of being intercepted by parser built-ins.
 
 The Rust `cli-help` and `skill-admin` features are implementation utilities for spore binaries. They are intentionally separate from the cross-language AFDATA formatting contract; language README files point back here instead of duplicating the full reference.
+
+Optional stream redirection uses canonical CLI names:
+
+```text
+--stdout-file <PATH>
+--stderr-file <PATH>
+```
+
+When enabled, stdout bytes are appended to the stdout file and stderr bytes are appended to the stderr file. This is a stream destination override, not a second protocol stream: stdout keeps the selected AFDATA format, and stderr keeps native diagnostics such as Rust panics, Python tracebacks, or runtime errors. Rotation is left to external tooling.
 
 ## Logging Contract
 

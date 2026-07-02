@@ -55,3 +55,12 @@ export {
   SkillError,
   runSkillAdmin,
 } from "./skill.js";
+export {
+  STDOUT_FILE_ARG,
+  STDERR_FILE_ARG,
+  type StreamRedirectConfig,
+  type InstalledStreamRedirect,
+  configFromRawArgs as streamRedirectConfigFromRawArgs,
+  installStreamRedirect,
+  installStreamRedirectFromRawArgs,
+} from "./stream_redirect.js";

@@ -65,6 +65,16 @@ from agent_first_data.skill import (
     run_skill_admin,
 )
 
+from agent_first_data.stream_redirect import (
+    STDOUT_FILE_ARG,
+    STDERR_FILE_ARG,
+    StreamRedirectConfig,
+    InstalledStreamRedirect,
+    config_from_raw_args as stream_redirect_config_from_raw_args,
+    install as install_stream_redirect,
+    install_from_raw_args as install_stream_redirect_from_raw_args,
+)
+
 __all__ = [
     "build_json_ok",
     "build_json_error",
@@ -119,4 +129,11 @@ __all__ = [
     "SkillInstallReport",
     "SkillUninstallReport",
     "run_skill_admin",
+    "STDOUT_FILE_ARG",
+    "STDERR_FILE_ARG",
+    "StreamRedirectConfig",
+    "InstalledStreamRedirect",
+    "stream_redirect_config_from_raw_args",
+    "install_stream_redirect",
+    "install_stream_redirect_from_raw_args",
 ]

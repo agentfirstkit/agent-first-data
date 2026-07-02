@@ -23,6 +23,7 @@
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown -- ping --timeout-ms 5000
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown -- --log startup ping --host example.com
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown -- --log all ping   # or --verbose
+//       cargo run --example agent_cli --features cli-help,cli-help-markdown,stream-redirect -- --stdout-file /tmp/agent-cli.out --stderr-file /tmp/agent-cli.err ping
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown,skill-admin -- skill status --agent opencode --skills-dir /tmp/ex
 //       cargo run --example agent_cli --features cli-help,cli-help-markdown,skill-admin -- skill install --agent opencode --skills-dir /tmp/ex
 // Test: cargo test --examples --features cli-help,cli-help-markdown
@@ -54,7 +55,8 @@ const WIDGET_SPEC: agent_first_data::skill::SkillSpec = agent_first_data::skill:
 
 #[derive(Parser)]
 #[command(
-    name = "agent-cli",
+    name = env!("DISPLAY_NAME"),
+    bin_name = "agent-cli",
     version = env!("CARGO_PKG_VERSION"),
     about = env!("CARGO_PKG_DESCRIPTION"),
     long_about = r#"### Interface Policy
@@ -85,6 +87,16 @@ struct Cli {
     /// Enable all log categories (shorthand for `--log all`)
     #[arg(long)]
     verbose: bool,
+
+    /// Redirect stdout to this file
+    #[cfg(feature = "stream-redirect")]
+    #[arg(long, value_name = "PATH", global = true)]
+    stdout_file: Option<std::path::PathBuf>,
+
+    /// Redirect stderr to this file
+    #[cfg(feature = "stream-redirect")]
+    #[arg(long, value_name = "PATH", global = true)]
+    stderr_file: Option<std::path::PathBuf>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -188,6 +200,20 @@ enum ServiceAction {
 
 fn main() {
     let raw: Vec<String> = std::env::args().collect();
+
+    #[cfg(feature = "stream-redirect")]
+    let _stream_redirect =
+        match agent_first_data::stream_redirect::install_from_raw_args(raw.clone()) {
+            Ok(installed) => installed,
+            Err(err) => {
+                println!(
+                    "{}",
+                    agent_first_data::output_json(&build_cli_error(&err.to_string(), None))
+                );
+                std::process::exit(2);
+            }
+        };
+
     match agent_first_data::cli_handle_version_or_continue(
         &raw,
         "agent-cli",
@@ -242,6 +268,8 @@ fn main() {
         );
         std::process::exit(2);
     });
+    #[cfg(feature = "stream-redirect")]
+    let _stream_redirect_args = (&cli.stdout_file, &cli.stderr_file);
 
     // Parse --output and --log
     let format = cli_parse_output(&cli.output).unwrap_or_else(|e| {
@@ -952,8 +980,12 @@ mod tests {
         .expect("valid help request")
         .expect("markdown help should render");
         assert!(
-            help.contains(&format!("# agent-cli - {}", env!("CARGO_PKG_DESCRIPTION"))),
-            "markdown heading must use Cargo package description"
+            help.contains(&format!(
+                "# {} - {}",
+                env!("DISPLAY_NAME"),
+                env!("CARGO_PKG_DESCRIPTION")
+            )),
+            "markdown heading must use display name and Cargo package description"
         );
         assert!(help.contains("```text"), "markdown must wrap clap help");
         assert_eq!(
@@ -986,7 +1018,10 @@ mod tests {
         )
         .expect("valid help request")
         .expect("markdown help should render");
-        assert!(help.contains("# agent-cli"), "markdown must have heading");
+        assert!(
+            help.contains(&format!("# {}", env!("DISPLAY_NAME"))),
+            "markdown must have heading"
+        );
         assert!(help.contains("```text"), "markdown must wrap clap help");
         assert_eq!(
             help.matches("Agent-facing CLI surfaces should keep stdout structured.")
@@ -1020,7 +1055,7 @@ mod tests {
             serde_json::from_str(&help).expect("inline json help must parse");
         assert_eq!(parsed["code"], "help");
         assert_eq!(parsed["scope"], "one_level");
-        assert_eq!(parsed["name"], "agent-cli");
+        assert_eq!(parsed["name"], env!("DISPLAY_NAME"));
     }
 
     #[cfg(feature = "cli-help")]
@@ -1177,7 +1212,10 @@ mod tests {
                 format: agent_first_data::HelpFormat::Markdown,
             },
         );
-        assert!(md.contains("# agent-cli"), "markdown must include root");
+        assert!(
+            md.contains(&format!("# {}", env!("DISPLAY_NAME"))),
+            "markdown must include root"
+        );
         assert!(
             !md.contains("--api-key-secret"),
             "one-level markdown must not include nested flags"
@@ -1205,6 +1243,31 @@ mod tests {
             "about should live in the heading, not repeat at the start of long_about"
         );
         assert!(md.contains("Detailed policy."));
+    }
+
+    #[cfg(feature = "cli-help")]
+    #[test]
+    fn help_markdown_suppresses_name_dash_about_body() {
+        let cmd = clap::Command::new("Agent CLI")
+            .about("Brief summary")
+            .long_about("Agent CLI - Brief summary");
+        let md = agent_first_data::cli_render_help_with_options(
+            &cmd,
+            &[],
+            &agent_first_data::HelpOptions {
+                scope: agent_first_data::HelpScope::OneLevel,
+                format: agent_first_data::HelpFormat::Markdown,
+            },
+        );
+        assert!(
+            md.contains("# Agent CLI - Brief summary"),
+            "heading must include name and about"
+        );
+        assert_eq!(
+            md.matches("Brief summary").count(),
+            1,
+            "when long_about equals 'name - about', body is suppressed to avoid duplication"
+        );
     }
 
     #[cfg(feature = "cli-help-markdown")]
@@ -1252,7 +1315,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("help json must parse");
         assert_eq!(parsed["code"], "help");
         assert_eq!(parsed["scope"], "one_level");
-        assert_eq!(parsed["name"], "agent-cli");
+        assert_eq!(parsed["name"], env!("DISPLAY_NAME"));
         assert_eq!(parsed["subcommands"][0]["arguments"], serde_json::json!([]));
     }
 
