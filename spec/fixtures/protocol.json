@@ -1,44 +1,108 @@
 [
   {
-    "name": "ok",
-    "type": "ok",
+    "name": "result",
+    "type": "result",
     "args": {"result": {"hash": "abc"}},
-    "expected": {"code": "ok", "result": {"hash": "abc"}}
+    "expected": {"kind": "result", "result": {"hash": "abc"}, "trace": {}}
   },
   {
-    "name": "ok_trace",
-    "type": "ok_trace",
+    "name": "result_trace",
+    "type": "result_trace",
     "args": {"result": {"hash": "abc"}, "trace": {"duration_ms": 12}},
-    "expected": {"code": "ok", "result": {"hash": "abc"}, "trace": {"duration_ms": 12}}
+    "expected": {"kind": "result", "result": {"hash": "abc"}, "trace": {"duration_ms": 12}}
   },
   {
     "name": "error",
     "type": "error",
-    "args": {"message": "not found"},
-    "expected": {"code": "error", "error": "not found"}
+    "args": {"code": "not_found", "message": "not found"},
+    "expected": {"kind": "error", "error": {"code": "not_found", "message": "not found", "retryable": false}, "trace": {}}
   },
   {
     "name": "error_trace",
     "type": "error_trace",
-    "args": {"message": "fail", "trace": {"duration_ms": 3}},
-    "expected": {"code": "error", "error": "fail", "trace": {"duration_ms": 3}}
+    "args": {"code": "failed", "message": "fail", "trace": {"duration_ms": 3}},
+    "expected": {"kind": "error", "error": {"code": "failed", "message": "fail", "retryable": false}, "trace": {"duration_ms": 3}}
   },
   {
     "name": "error_hint",
     "type": "error_hint",
-    "args": {"message": "connection timeout", "hint": "increase --timeout-s"},
-    "expected": {"code": "error", "error": "connection timeout", "hint": "increase --timeout-s"}
+    "args": {"code": "timeout", "message": "connection timeout", "hint": "increase --timeout-s"},
+    "expected": {"kind": "error", "error": {"code": "timeout", "message": "connection timeout", "hint": "increase --timeout-s", "retryable": false}, "trace": {}}
   },
   {
-    "name": "error_hint_trace",
-    "type": "error_hint_trace",
-    "args": {"message": "too slow", "hint": "increase --timeout-s", "trace": {"duration_ms": 30000}},
-    "expected": {"code": "error", "error": "too slow", "hint": "increase --timeout-s", "trace": {"duration_ms": 30000}}
+    "name": "error_retryable",
+    "type": "error_retryable",
+    "args": {"code": "network_error", "message": "connection reset", "retryable": true},
+    "expected": {"kind": "error", "error": {"code": "network_error", "message": "connection reset", "retryable": true}, "trace": {}}
   },
   {
-    "name": "status",
-    "type": "status",
-    "args": {"code": "progress", "fields": {"current": 3, "total": 10}},
-    "expected_contains": {"code": "progress", "current": 3, "total": 10}
+    "name": "error_extension_fields",
+    "type": "error_extension_fields",
+    "args": {
+      "code": "validation_failed",
+      "message": "invalid input",
+      "fields": {"field": "email", "rule_id": "format"}
+    },
+    "expected": {
+      "kind": "error",
+      "error": {
+        "code": "validation_failed",
+        "message": "invalid input",
+        "retryable": false,
+        "field": "email",
+        "rule_id": "format"
+      },
+      "trace": {}
+    }
+  },
+  {
+    "name": "progress",
+    "type": "progress",
+    "args": {"message": "working", "fields": {"current": 3, "total": 10}},
+    "expected": {"kind": "progress", "progress": {"message": "working", "current": 3, "total": 10}, "trace": {}}
+  },
+  {
+    "name": "progress_message_only",
+    "type": "progress",
+    "args": {"message": "uploading files"},
+    "expected": {"kind": "progress", "progress": {"message": "uploading files"}, "trace": {}}
+  },
+  {
+    "name": "log",
+    "type": "log",
+    "args": {"level": "info", "message": "startup"},
+    "expected": {"kind": "log", "log": {"level": "info", "message": "startup"}, "trace": {}}
+  },
+  {
+    "name": "log_extension_fields",
+    "type": "log",
+    "args": {"level": "warn", "message": "retrying request", "fields": {"attempt": 2, "timestamp_epoch_ms": 1710000000000}},
+    "expected": {"kind": "log", "log": {"level": "warn", "message": "retrying request", "attempt": 2, "timestamp_epoch_ms": 1710000000000}, "trace": {}}
+  },
+  {
+    "name": "arbitrary_json_result",
+    "type": "result",
+    "args": {"result": ["a", 1, true, null, {"nested": {"ok": true}}]},
+    "expected": {"kind": "result", "result": ["a", 1, true, null, {"nested": {"ok": true}}], "trace": {}}
+  },
+  {
+    "name": "kind_payload_mismatch",
+    "invalid": {"kind": "result", "error": {"code": "x", "message": "wrong payload"}}
+  },
+  {
+    "name": "illegal_top_level_field",
+    "invalid": {"kind": "result", "result": {}, "extra": true}
+  },
+  {
+    "name": "trace_must_be_object",
+    "invalid": {"kind": "result", "result": {}, "trace": "duration=1ms"}
+  },
+  {
+    "name": "error_requires_code",
+    "invalid": {"kind": "error", "error": {"message": "missing code"}}
+  },
+  {
+    "name": "error_requires_message",
+    "invalid": {"kind": "error", "error": {"code": "missing_message"}}
   }
 ]

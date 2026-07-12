@@ -4,26 +4,27 @@ import json
 import os
 
 from agent_first_data import (
-    build_json_ok,
-    build_json_error,
-    build_json,
+    json_result,
+    json_error,
+    json_progress,
+    json_log,
+    LogLevel,
+    validate_protocol_event,
+    validate_protocol_stream,
+    EventDecodeError,
+    DecodedResult,
+    DecodedError,
+    DecodedProgress,
+    DecodedLog,
+    decode_protocol_event,
     RedactionPolicy,
-    RedactionOptions,
     OutputStyle,
     OutputOptions,
-    redact_secrets_in_place,
-    redact_secrets_in_place_with_options,
     redacted_value,
-    redacted_value_with,
-    redacted_value_with_options,
-    redact_url_secrets_with_options,
+    redact_url_secrets,
     output_json,
-    output_json_with,
-    output_json_with_options,
     output_yaml,
-    output_yaml_with_options,
     output_plain,
-    output_plain_with_options,
     normalize_utc_offset,
     is_valid_rfc3339_date,
     is_valid_rfc3339_time,
@@ -46,10 +47,7 @@ def _load(name):
 def _redaction_options(case):
     opts = case.get("options", {})
     policy = RedactionPolicy(opts["policy"]) if "policy" in opts else None
-    return RedactionOptions(
-        policy=policy,
-        secret_names=opts.get("secret_names", ()),
-    )
+    return OutputOptions(policy=policy, secret_names=opts.get("secret_names", ()))
 
 
 # --- Redact fixtures ---
@@ -59,73 +57,135 @@ def test_redact_url_fixtures():
     for case in _load("redact_url.json"):
         name = case["name"]
         options = _redaction_options(case)
-        got = redact_url_secrets_with_options(case["input"], options)
+        got = redact_url_secrets(case["input"], secret_names=options.secret_names)
         assert got == case["expected"], f"[redact_url/{name}] got {got!r}"
-
-
-def test_redact_fixtures():
-    for case in _load("redact.json"):
-        name = case["name"]
-        inp = json.loads(json.dumps(case["input"]))  # deep copy
-        redact_secrets_in_place(inp)
-        assert inp == case["expected"], f"[redact/{name}] got {inp}"
 
 
 def test_redaction_options_fixtures():
     for case in _load("redaction_options.json"):
         name = case["name"]
-        options = _redaction_options(case)
-        output_options = OutputOptions(redaction=options, style=OutputStyle.Readable)
+        output_options = _redaction_options(case)
         expected = case["expected"]
 
-        got = redacted_value_with_options(case["input"], options)
+        got = redacted_value(case["input"], secret_names=output_options.secret_names, policy=output_options.policy)
         assert got == expected, f"[redaction_options/{name}] value mismatch: {got}"
 
-        inp = json.loads(json.dumps(case["input"]))
-        redact_secrets_in_place_with_options(inp, options)
-        assert inp == expected, f"[redaction_options/{name}] in-place mismatch: {inp}"
-
-        got_json = json.loads(output_json_with_options(case["input"], output_options))
+        got_json = json.loads(output_json(case["input"], options=output_options))
         assert got_json == expected, f"[redaction_options/{name}] json mismatch: {got_json}"
 
         if "expected_yaml" in case:
-            got_yaml = output_yaml_with_options(case["input"], output_options)
+            got_yaml = output_yaml(case["input"], options=output_options)
             assert got_yaml == case["expected_yaml"], f"[redaction_options/{name}] yaml mismatch: {got_yaml!r}"
         if "expected_plain" in case:
-            got_plain = output_plain_with_options(case["input"], output_options)
+            got_plain = output_plain(case["input"], options=output_options)
             assert got_plain == case["expected_plain"], f"[redaction_options/{name}] plain mismatch: {got_plain!r}"
+
+
+def test_security_fixtures():
+    fixture = _load("security.json")
+    for case in fixture["redaction_cases"]:
+        name = case["name"]
+        output_options = _redaction_options(case)
+        assert redacted_value(case["input"], secret_names=output_options.secret_names, policy=output_options.policy) == case["expected"]
+        outputs = (
+            output_json(case["input"], options=output_options),
+            output_yaml(case["input"], options=output_options),
+            output_plain(case["input"], options=output_options),
+        )
+        for output in outputs:
+            for needle in case["must_contain"]:
+                assert needle in output, f"[security/{name}] output missing {needle!r}: {output}"
+            for needle in case["must_not_contain"]:
+                assert needle not in output, f"[security/{name}] output leaked {needle!r}: {output}"
 
 
 # --- Protocol fixtures ---
 
 
+def _build_protocol_case_event(typ, args):
+    """Build an Event from a protocol.json builder case.
+
+    args vocabulary: "result" (payload), "code"+"message" (error),
+    "hint" (-> .hint()), "retryable" (bool -> .retryable_if()),
+    "fields" (object -> .fields()), "trace" (object -> .trace()),
+    "message" alone (progress), "level"+"message" (log).
+    """
+    kind = typ.split("_", 1)[0]
+
+    if kind == "result":
+        builder = json_result(args["result"])
+    elif kind == "error":
+        builder = json_error(args["code"], args["message"])
+        if "hint" in args:
+            builder = builder.hint(args["hint"])
+        if "retryable" in args:
+            builder = builder.retryable_if(args["retryable"])
+    elif kind == "progress":
+        builder = json_progress(args["message"])
+    elif kind == "log":
+        builder = json_log(LogLevel(args["level"]), args["message"])
+    else:
+        raise ValueError(f"unknown fixture type: {typ}")
+
+    if "fields" in args:
+        builder = builder.fields(args["fields"])
+    if "trace" in args:
+        builder = builder.trace(args["trace"])
+    return builder.build()
+
+
 def test_protocol_fixtures():
     for case in _load("protocol.json"):
         name = case["name"]
-        typ = case["type"]
-        args = case["args"]
-        if typ == "ok":
-            result = build_json_ok(args["result"])
-        elif typ == "ok_trace":
-            result = build_json_ok(args["result"], args["trace"])
-        elif typ == "error":
-            result = build_json_error(args["message"])
-        elif typ == "error_trace":
-            result = build_json_error(args["message"], trace=args["trace"])
-        elif typ == "error_hint":
-            result = build_json_error(args["message"], hint=args.get("hint"))
-        elif typ == "error_hint_trace":
-            result = build_json_error(args["message"], hint=args.get("hint"), trace=args["trace"])
-        elif typ == "status":
-            result = build_json(args["code"], args.get("fields"))
-        else:
-            raise ValueError(f"unknown type: {typ}")
+        if "invalid" in case:
+            try:
+                validate_protocol_event(case["invalid"], strict=False)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"[protocol/{name}] invalid event unexpectedly passed")
+            continue
 
-        if "expected" in case:
-            assert result == case["expected"], f"[protocol/{name}] got {result}"
-        if "expected_contains" in case:
-            for k, v in case["expected_contains"].items():
-                assert result[k] == v, f"[protocol/{name}] key {k}: got {result.get(k)}"
+        result = _build_protocol_case_event(case["type"], case["args"]).to_dict()
+        validate_protocol_event(result, strict=False)
+        validate_protocol_event(result, strict=True)
+        expected = case["expected"]
+        assert result == expected, (
+            f"[protocol/{name}] deep equality failed:\n"
+            f"  got:      {result}\n"
+            f"  expected: {expected}"
+        )
+
+
+def test_protocol_stream_fixtures():
+    for case in _load("protocol_streams.json"):
+        name = case["name"]
+        valid = case["valid"]
+        try:
+            validate_protocol_stream(case["events"], strict=False)
+        except ValueError as exc:
+            assert not valid, f"[protocol_streams/{name}] unexpected error: {exc}"
+        else:
+            assert valid, f"[protocol_streams/{name}] invalid stream unexpectedly passed"
+
+
+def test_protocol_strict_fixtures():
+    for case in _load("protocol_strict.json"):
+        try:
+            validate_protocol_stream(case["events"], strict=True)
+        except ValueError:
+            assert not case["valid"], case["name"]
+        else:
+            assert case["valid"], case["name"]
+
+
+def test_error_builder_rejects_reserved_extension_fields():
+    # 0.16 spec: reserved fields must not be writable, errors are collected at build()
+    try:
+        json_error("explicit", "message").fields({"code": "wrong", "message": "wrong", "hint": "wrong", "detail": 1}).build()
+        assert False, "should have raised EventBuildError"
+    except Exception as e:
+        assert "cannot override reserved field" in str(e)
 
 
 # --- Helper fixtures ---
@@ -176,16 +236,16 @@ def test_output_format_fixtures():
 
 def test_output_yaml_raw_keeps_suffix_keys_and_structure():
     options = OutputOptions(
-        redaction=RedactionOptions(policy=RedactionPolicy.RedactionTraceOnly),
+        policy=RedactionPolicy.RedactionTraceOnly,
         style=OutputStyle.Raw,
     )
-    out = output_yaml_with_options(
+    out = output_yaml(
         {
             "code": "result",
             "rows": [{"api_key_secret": "sk-live-1", "duration_ms": 42}],
             "trace": {"request_secret": "top-secret"},
         },
-        options,
+        options=options,
     )
 
     assert "rows:\n  -" in out
@@ -197,15 +257,15 @@ def test_output_yaml_raw_keeps_suffix_keys_and_structure():
 
 def test_output_plain_raw_keeps_suffix_keys_and_redacts_trace():
     options = OutputOptions(
-        redaction=RedactionOptions(policy=RedactionPolicy.RedactionTraceOnly),
+        policy=RedactionPolicy.RedactionTraceOnly,
         style=OutputStyle.Raw,
     )
-    out = output_plain_with_options(
+    out = output_plain(
         {
             "duration_ms": 42,
             "trace": {"request_secret": "top-secret"},
         },
-        options,
+        options=options,
     )
 
     assert "duration_ms=42" in out
@@ -214,10 +274,10 @@ def test_output_plain_raw_keeps_suffix_keys_and_redacts_trace():
 
 
 def test_output_with_options_defaults_to_readable_style():
-    out = output_yaml_with_options(
+    out = output_yaml(
         {"duration_ms": 42},
-        OutputOptions(
-            redaction=RedactionOptions(policy=RedactionPolicy.RedactionNone),
+        options=OutputOptions(
+            policy=RedactionPolicy.RedactionNone,
             style=OutputStyle.Readable,
         ),
     )
@@ -252,13 +312,13 @@ def test_output_json_circular_reference():
 
 
 def test_output_json_with_trace_only_redacts_only_trace():
-    out = output_json_with(
+    out = output_json(
         {
             "code": "ok",
             "result": {"api_key_secret": "sk-live-123"},
             "trace": {"request_secret": "top-secret"},
         },
-        RedactionPolicy.RedactionTraceOnly,
+        options=OutputOptions.for_policy(RedactionPolicy.RedactionTraceOnly),
     )
     parsed = json.loads(out)
     assert parsed["trace"]["request_secret"] == "***"
@@ -266,12 +326,19 @@ def test_output_json_with_trace_only_redacts_only_trace():
 
 
 def test_output_json_with_none_keeps_secrets():
-    out = output_json_with(
+    out = output_json(
         {"api_key_secret": "sk-live-123"},
-        RedactionPolicy.RedactionNone,
+        options=OutputOptions.for_policy(RedactionPolicy.RedactionNone),
     )
     parsed = json.loads(out)
     assert parsed["api_key_secret"] == "sk-live-123"
+
+
+def test_output_options_for_policy_sets_only_redaction_policy():
+    options = OutputOptions.for_policy(RedactionPolicy.RedactionNone)
+    assert options.policy == RedactionPolicy.RedactionNone
+    assert options.secret_names == ()
+    assert options.style == OutputStyle.Readable
 
 
 def test_redacted_value_returns_safe_copy():
@@ -286,3 +353,76 @@ def test_redacted_value_redacts_secret_subtree_by_default():
     inp = {"db_secret": {"password_secret": "real", "host": "localhost"}}
     default = redacted_value(inp)
     assert default["db_secret"] == "***"
+
+
+def test_max_depth_marker_is_not_secret_redaction_marker():
+    inp = "leaf"
+    for _ in range(300):
+        inp = {"next": inp}
+    out = output_json(inp)
+    assert "<afdata:max-depth>" in out
+    assert "***" not in out
+
+
+# --- decode_protocol_event ---
+
+
+def test_decode_protocol_event_result():
+    event = json_result({"rows": 2}).build()
+    decoded = decode_protocol_event(output_json(event.to_dict()))
+    assert isinstance(decoded, DecodedResult)
+    assert decoded.result == {"rows": 2}
+    assert decoded.trace == {}
+
+
+def test_decode_protocol_event_error():
+    event = json_error("not_found", "missing").hint("check the id").field("id", "abc").retryable().build()
+    decoded = decode_protocol_event(output_json(event.to_dict()))
+    assert isinstance(decoded, DecodedError)
+    assert decoded.code == "not_found"
+    assert decoded.message == "missing"
+    assert decoded.retryable is True
+    assert decoded.hint == "check the id"
+    assert decoded.fields == {"id": "abc"}
+    assert decoded.trace == {}
+
+
+def test_decode_protocol_event_progress():
+    event = json_progress("halfway").field("percent", 50).build()
+    decoded = decode_protocol_event(output_json(event.to_dict()))
+    assert isinstance(decoded, DecodedProgress)
+    assert decoded.message == "halfway"
+    assert decoded.fields == {"percent": 50}
+    assert decoded.trace == {}
+
+
+def test_decode_protocol_event_log():
+    event = json_log(LogLevel.WARN, "slow query").field("duration_ms", 900).build()
+    decoded = decode_protocol_event(output_json(event.to_dict()))
+    assert isinstance(decoded, DecodedLog)
+    assert decoded.level == LogLevel.WARN
+    assert decoded.message == "slow query"
+    assert decoded.fields == {"duration_ms": 900}
+    assert decoded.trace == {}
+
+
+def test_decode_protocol_event_invalid_json_raises():
+    import pytest
+
+    with pytest.raises(EventDecodeError):
+        decode_protocol_event("not json")
+
+
+def test_decode_protocol_event_invalid_envelope_raises():
+    import pytest
+
+    with pytest.raises(EventDecodeError):
+        decode_protocol_event(json.dumps({"kind": "result"}))
+
+
+def test_decode_protocol_event_fails_strict_validation():
+    import pytest
+
+    # Missing trace fails the strict profile even though the shape is otherwise valid.
+    with pytest.raises(EventDecodeError):
+        decode_protocol_event(json.dumps({"kind": "result", "result": {}}))

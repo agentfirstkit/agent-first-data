@@ -7,25 +7,24 @@ cargo add agent-first-data --features tracing
 ```
 
 ```rust
-use agent_first_data::{output_json, output_plain};
+use agent_first_data::{json_result, output_json, output_plain};
 use serde_json::json;
 
 fn main() {
-    let value = json!({
-        "code": "ok",
-        "result": {
-            "api_key_secret": "sk-123",
-            "latency_ms": 1280,
-            "db_url": "postgres://user:p@ss@db/app?token_secret=abc"
-        }
-    });
+    let value = json_result(json!({
+        "api_key_secret": "sk-123",
+        "latency_ms": 1280,
+        "db_url": "postgres://user:p@ss@db/app?token_secret=abc"
+    }))
+    .build()
+    .expect("valid afdata event");
 
     println!("{}", output_json(&value));
     println!("{}", output_plain(&value));
 }
 ```
 
-Useful names use Rust casing: `output_json`, `output_yaml`, `output_plain`, `output_json_with_options`, `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `parse_size`, `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `cli_parse_output`, `cli_output`, `build_cli_error`, `build_cli_version`, and `cli_handle_version_or_continue`.
+Useful names use Rust casing: `output_json`, `output_yaml`, `output_plain`, `output_json_with_options`, `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `parse_size`, `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `cli_parse_output`, `cli_output`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue`, and `decode_protocol_event`.
 
 Tracing integration is behind the `tracing` feature: `afdata_tracing::try_init_json`, `try_init_plain`, and `try_init_yaml` return initialization errors; the older `init_*` helpers remain for fire-and-forget setup. CLI help rendering is behind `cli-help`; skill administration is behind `skill-admin`; stdout/stderr file redirection is behind `stream-redirect`.
 
@@ -58,9 +57,9 @@ Canonical flags are `--stdout-file` and `--stderr-file`. They redirect the corre
 - Default redaction replaces every `_secret` or configured secret-name subtree with `***`, including objects and arrays.
 - `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed and internal whitespace redacts the whole field.
 - YAML/plain quote and escape keys as well as values, sort by UTF-16 code unit order, and render nested objects in arrays as canonical JSON.
-- Logging records use `code: "log"` plus a separate `level` field, so error-level logs are not terminal protocol errors.
+- Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - Prefer `try_init_*` for Rust tracing startup so failures, such as another global subscriber already being installed, are visible to the caller.
-- `build_cli_error(message, hint?)` returns `{code:"error", error: message, hint?}` only.
+- `build_cli_error(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
 - Use `cli_handle_version_or_continue()` before clap parsing so `--version --output json|yaml|plain` stays structured; use `VersionConfig::conventional_default()` so bare `--version` stays human text while explicit `--output` remains structured.
 - `stream-redirect` is Unix fd-level redirection where supported. It is stream destination control, not a second AFDATA protocol stream, and it does not implement rotation.
 
@@ -69,4 +68,4 @@ Canonical flags are `--stdout-file` and `--stderr-file`. They redirect the corre
 - Full convention and API groups: [docs/overview.md](https://github.com/agentfirstkit/agent-first-data/blob/main/docs/overview.md)
 - Formal cross-language contract: [spec/agent-first-data.md](https://github.com/agentfirstkit/agent-first-data/blob/main/spec/agent-first-data.md)
 - Conformance fixtures: [spec/fixtures](https://github.com/agentfirstkit/agent-first-data/tree/main/spec/fixtures)
-- Agent skill: [skills/agent-first-data.md](https://github.com/agentfirstkit/agent-first-data/blob/main/skills/agent-first-data.md)
+- Agent skill: [skills/agent-first-data/SKILL.md](https://github.com/agentfirstkit/agent-first-data/blob/main/skills/agent-first-data/SKILL.md)

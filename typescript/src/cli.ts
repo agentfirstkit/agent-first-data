@@ -5,13 +5,13 @@
 import {
   JsonValue,
   type OutputOptions,
-  buildJson,
+  Event,
+  jsonError,
+  jsonResult,
   outputJson,
-  outputJsonWithOptions,
   outputYaml,
-  outputYamlWithOptions,
   outputPlain,
-  outputPlainWithOptions,
+  validateProtocolEvent,
 } from "./format.js";
 
 /** Output format for CLI and pipe/MCP modes. */
@@ -33,49 +33,137 @@ export function cliParseOutput(s: string): OutputFormat {
 }
 
 /**
+ * Normalized log filter result with enabled() matching and readonly filters property.
+ */
+export class LogFilters {
+  readonly filters: readonly string[];
+
+  constructor(entries: readonly string[]) {
+    const out: string[] = [];
+    for (const entry of entries) {
+      const s = entry.trim().toLowerCase();
+      if (s && !out.includes(s)) {
+        out.push(s);
+      }
+    }
+    this.filters = Object.freeze([...out]);
+  }
+
+  /**
+   * Check if an event matches the filter set.
+   * Returns false for empty filters, true if "all" or "*" is present,
+   * otherwise checks if event.toLowerCase() starts with any filter.
+   *
+   * @example
+   * const lf = new LogFilters(["query", "error"]);
+   * lf.enabled("QueryStarted") // → true (starts with "query")
+   * lf.enabled("debug") // → false
+   *
+   * const all = new LogFilters([]);
+   * all.enabled("anything") // → false (empty)
+   *
+   * const wild = new LogFilters(["*"]);
+   * wild.enabled("anything") // → true
+   */
+  enabled(event: string): boolean {
+    if (this.filters.length === 0) return false;
+    if (this.filters.includes("all") || this.filters.includes("*")) return true;
+    const eventLower = event.toLowerCase();
+    for (const filter of this.filters) {
+      if (eventLower.startsWith(filter)) {
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
+/**
  * Normalize --output flag entries: trim, lowercase, deduplicate, remove empty.
  * Accepts pre-split entries (e.g. after splitting on comma).
  *
  * @example
- * cliParseLogFilters(["Query", " error ", "query"]) // → ["query", "error"]
+ * const lf = cliParseLogFilters(["Query", " error ", "query"]);
+ * lf.enabled("QueryStarted") // → true
+ * lf.filters // → ["query", "error"]
  */
-export function cliParseLogFilters(entries: string[]): string[] {
-  const out: string[] = [];
-  for (const entry of entries) {
-    const s = entry.trim().toLowerCase();
-    if (s && !out.includes(s)) {
-      out.push(s);
-    }
-  }
-  return out;
+export function cliParseLogFilters(entries: string[]): LogFilters {
+  return new LogFilters(entries);
 }
 
 /**
- * Dispatch output formatting by OutputFormat.
- * Equivalent to calling outputJson, outputYaml, or outputPlain directly.
+ * Dispatch output formatting by OutputFormat, with optional explicit redaction and style.
+ * JSON ignores OutputStyle and preserves original keys and values after redaction.
  *
  * @example
- * cliOutput({ code: "ok" }, "plain") // → "code=ok"
+ * cliOutput(jsonResult({ ok: true }).build(), "plain") // → "kind=result result.ok=true"
  */
-export function cliOutput(value: JsonValue, format: OutputFormat): string {
-  if (format === "yaml") return outputYaml(value);
-  if (format === "plain") return outputPlain(value);
-  return outputJson(value);
+export function cliOutput(value: JsonValue | Event, format: OutputFormat, options: OutputOptions = {}): string {
+  const jsonValue = value instanceof Event ? (value.toJSON() as JsonValue) : value;
+  if (format === "yaml") return outputYaml(jsonValue, options);
+  if (format === "plain") return outputPlain(jsonValue, options);
+  return outputJson(jsonValue, options);
 }
 
-/**
- * Dispatch output formatting with explicit redaction and style.
- * JSON ignores OutputStyle and preserves original keys and values after redaction.
- */
-export function cliOutputWithOptions(value: JsonValue, format: OutputFormat, outputOptions: OutputOptions): string {
-  if (format === "yaml") return outputYamlWithOptions(value, outputOptions);
-  if (format === "plain") return outputPlainWithOptions(value, outputOptions);
-  return outputJsonWithOptions(value, outputOptions);
+export type CliEventWriter = (line: string) => void;
+
+/** Stateful emitter for finite structured CLI executions. */
+export class CliEmitter {
+  private terminalEmitted = false;
+  private logFieldsProvider?: () => Record<string, JsonValue>;
+
+  constructor(
+    private readonly writer: CliEventWriter,
+    private readonly format: OutputFormat,
+    private readonly outputOptions: OutputOptions = {},
+  ) {}
+
+  withLogFields(provider: () => Record<string, JsonValue>): this {
+    this.logFieldsProvider = provider;
+    return this;
+  }
+
+  emit(event: Event): void {
+    const jsonValue = event.toJSON() as Record<string, JsonValue>;
+    validateProtocolEvent(jsonValue);
+    const kind = jsonValue.kind as string;
+    if (kind === "log" || kind === "progress") {
+      if (this.terminalEmitted) {
+        throw new Error("cannot emit non-terminal event after terminal event");
+      }
+    } else if (kind === "result" || kind === "error") {
+      if (this.terminalEmitted) {
+        throw new Error("cannot emit duplicate terminal event");
+      }
+    } else {
+      throw new Error(`unsupported event kind ${JSON.stringify(kind)}`);
+    }
+    this.writer(`${cliOutput(jsonValue, this.format, this.outputOptions)}\n`);
+    if (kind === "result" || kind === "error") this.terminalEmitted = true;
+  }
+
+  emitValidatedValue(value: JsonValue): void {
+    validateProtocolEvent(value);
+    const kind = (value as Record<string, JsonValue>).kind;
+    if (kind === "log" || kind === "progress") {
+      if (this.terminalEmitted) {
+        throw new Error("cannot emit non-terminal event after terminal event");
+      }
+    } else if (kind === "result" || kind === "error") {
+      if (this.terminalEmitted) {
+        throw new Error("cannot emit duplicate terminal event");
+      }
+    } else {
+      throw new Error(`unsupported event kind ${JSON.stringify(kind)}`);
+    }
+    this.writer(`${cliOutput(value, this.format, this.outputOptions)}\n`);
+    if (kind === "result" || kind === "error") this.terminalEmitted = true;
+  }
 }
 
 /** Build a standard CLI version value. */
-export function buildCliVersion(version: string): JsonValue {
-  return buildJson("version", { version });
+export function buildCliVersion(version: string): Event {
+  return jsonResult({ version }).build();
 }
 
 /**
@@ -112,6 +200,15 @@ export function cliHandleVersionOrContinue(
       i += 1;
       continue;
     }
+    if (allowOutputFormat && arg === "--json") {
+      if (outputFormat !== undefined && outputFormat !== "json") {
+        outputError = new Error("conflicting output formats: --json conflicts with previous output format");
+      } else {
+        outputFormat = "json";
+      }
+      i += 1;
+      continue;
+    }
     if (allowOutputFormat && (arg === outputFlag || arg.startsWith(`${outputFlag}=`))) {
       let value: string | undefined;
       let step = 1;
@@ -125,7 +222,12 @@ export function cliHandleVersionOrContinue(
         outputError = new Error(`missing value for ${outputFlag}: expected json, yaml, or plain`);
       } else {
         try {
-          outputFormat = cliParseOutput(value);
+          const parsedOutput = cliParseOutput(value);
+          if (outputFormat !== undefined && outputFormat !== parsedOutput) {
+            outputError = new Error(`conflicting output formats: ${outputFlag} ${value} conflicts with previous output format`);
+          } else {
+            outputFormat = parsedOutput;
+          }
         } catch (e) {
           outputError = e as Error;
         }
@@ -151,11 +253,6 @@ export function cliHandleVersionOrContinue(
  * console.log(outputJson(err));
  * process.exit(2);
  */
-export function buildCliError(message: string, hint?: string): JsonValue {
-  const m: Record<string, JsonValue> = {
-    code: "error",
-    error: message,
-  };
-  if (hint !== undefined) m.hint = hint;
-  return m;
+export function buildCliError(message: string, hint?: string): Event {
+  return jsonError("cli_error", message).hintIfSome(hint).build();
 }

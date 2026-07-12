@@ -22,27 +22,42 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+
+process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EPIPE") {
+    process.exit(0);
+  }
+  throw err;
+});
+
 import {
   type JsonValue,
   type OutputFormat,
+  buildCliError,
+  jsonLog,
+  jsonError,
+  jsonResult,
+  cliOutput,
+  cliHandleVersionOrContinue,
+  cliParseLogFilters,
+  cliParseOutput,
+  outputJson,
+  LogFilters,
+} from "../src/index.js";
+import {
   type SkillAction,
   type SkillAgentSelection,
   type SkillOptions,
   type SkillScope,
   type SkillSpec,
   SkillError,
-  buildCliError,
-  buildJson,
-  buildJsonError,
-  buildJsonOk,
-  cliOutput,
-  cliHandleVersionOrContinue,
-  cliParseLogFilters,
-  cliParseOutput,
-  outputJson,
-  installStreamRedirectFromRawArgs,
   runSkillAdmin,
-} from "../src/index.js";
+} from "../src/skill.js";
+import { installStreamRedirectFromRawArgs } from "../src/stream_redirect.js";
 
 // A fictional spore's embedded Agent Skill, used by the `skill` subcommand to
 // demonstrate runSkillAdmin.
@@ -55,6 +70,9 @@ const WIDGET_SPEC: SkillSpec = {
   markerSlug: "afwidget",
 };
 const AGENT_CLI_VERSION = "0.13.0";
+const AFDATA_VERSION = "0.15.0";
+const HELP_DEFAULT_API_KEY_SECRET = "sk-help-default";
+const PING_HOST_ENV = "PING_HOST";
 
 interface Subcommand {
   name: string;
@@ -65,6 +83,7 @@ interface Subcommand {
 const SUBCOMMANDS: Subcommand[] = [
   { name: "echo", about: "Echo back the input as structured output", flags: "  --dry-run    Preview without executing" },
   { name: "ping", about: "Ping a remote target", flags: "  --host       Target host to ping" },
+  { name: "cancel", about: "Return a tool-defined cancellation error", flags: "  (no flags)" },
   {
     name: "skill",
     about: "Manage this tool's embedded Agent Skill",
@@ -88,8 +107,10 @@ function formatRootHelp(withTitle = true): string {
     "",
     "Options:",
     "  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown",
+    "  --json             Equivalent to --output json",
     "  --log <FILTERS>    Log categories (comma-separated); --log all (or --verbose) enables every category",
     "  --verbose          Enable all log categories (shorthand for --log all)",
+    `  --api-key-secret <VALUE> API key used by examples (default: ${redactHelpDefault("--api-key-secret", HELP_DEFAULT_API_KEY_SECRET)})`,
     "  --stdout-file <PATH> Redirect stdout to a file",
     "  --stderr-file <PATH> Redirect stderr to a file",
     "  --help             Show this help (one-level); add --recursive to expand all subcommands",
@@ -100,7 +121,7 @@ function formatRootHelp(withTitle = true): string {
   for (const sc of SUBCOMMANDS) {
     lines.push(`  ${sc.name.padEnd(8)} ${sc.about}`);
   }
-  return lines.join("\n") + "\n";
+  return `${lines.join("\n")}\n\nAFDATA: ${AFDATA_VERSION}\n`;
 }
 
 /** Format recursive help for root command and all subcommands. */
@@ -128,6 +149,10 @@ function formatSubcommandHelp(name: string, withGlobals = false, withTitle = tru
   let help = withTitle ? `agent-cli ${sc.name} — ${sc.about}\n\nFlags:\n${sc.flags}\n` : `Flags:\n${sc.flags}\n`;
   if (withGlobals) {
     help += "\nGlobal options:\n  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n";
+    help += "  --json             Equivalent to --output json\n";
+  }
+  if (withGlobals || withTitle) {
+    help += `\nAFDATA: ${AFDATA_VERSION}\n`;
   }
   return help;
 }
@@ -163,8 +188,14 @@ function formatMarkdownHelp(command: string | undefined, recursive: boolean): st
 function globalHelpOptions(includeRecursive: boolean): JsonValue[] {
   const opts: JsonValue[] = [
     { name: "--output", help: "Output format: json, yaml, plain (default: json); help also accepts markdown" },
+    { name: "--json", help: "Equivalent to --output json" },
     { name: "--log", help: "Log categories (comma-separated); --log all (or --verbose) enables every category" },
     { name: "--verbose", help: "Enable all log categories (shorthand for --log all)" },
+    {
+      name: "--api-key-secret",
+      help: "API key used by examples",
+      default_values: [redactHelpDefault("--api-key-secret", HELP_DEFAULT_API_KEY_SECRET)],
+    },
     { name: "--stdout-file", help: "Redirect stdout to a file" },
     { name: "--stderr-file", help: "Redirect stderr to a file" },
   ];
@@ -183,6 +214,7 @@ function helpSchema(command: string | undefined, scope: "one_level" | "recursive
       return {
         code: "help",
         scope,
+        versions: { afdata: AFDATA_VERSION },
         command_path: commandPath,
         name: sc.name,
         about: sc.about,
@@ -194,6 +226,7 @@ function helpSchema(command: string | undefined, scope: "one_level" | "recursive
   return {
     code: "help",
     scope,
+    versions: { afdata: AFDATA_VERSION },
     command_path: commandPath,
     name: "agent-cli",
     about: "Minimal agent-first CLI example",
@@ -207,7 +240,17 @@ function helpSchema(command: string | undefined, scope: "one_level" | "recursive
 }
 
 function hasExplicitOutput(args: string[]): boolean {
-  return args.includes("--output") || args.some((a) => a.startsWith("--output="));
+  return args.includes("--json") || args.includes("--output") || args.some((a) => a.startsWith("--output="));
+}
+
+function outputFlagMissing(args: string[]): boolean {
+  return args.some((arg, idx) => {
+    if (arg === "--output") {
+      const value = args[idx + 1];
+      return value === undefined || value.startsWith("-");
+    }
+    return arg.startsWith("--output=") && arg.slice("--output=".length) === "";
+  });
 }
 
 function argValue(args: string[], flag: string): string | undefined {
@@ -216,6 +259,25 @@ function argValue(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
   const value = idx !== -1 ? args[idx + 1] : undefined;
   return value !== undefined && !value.startsWith("-") ? value : undefined;
+}
+
+function outputConflict(args: string[]): string | undefined {
+  if (!args.includes("--json")) return undefined;
+  const explicit = argValue(args.filter((arg) => arg !== "--json"), "--output");
+  if (explicit !== undefined && explicit !== "json") {
+    return `conflicting output formats: --json conflicts with --output ${explicit}`;
+  }
+  return undefined;
+}
+
+function resolveOutputArg(args: string[]): string | undefined {
+  if (outputFlagMissing(args)) {
+    throw new Error("missing value for --output: expected json, yaml, or plain");
+  }
+  const conflict = outputConflict(args);
+  if (conflict !== undefined) throw new Error(conflict);
+  if (args.includes("--json")) return "json";
+  return argValue(args, "--output") ?? (hasExplicitOutput(args) ? "" : "json");
 }
 
 function renderHelpOutput(
@@ -239,32 +301,120 @@ function renderHelpOutput(
   return `${cliOutput(helpSchema(command, scope), fmt)}\n`;
 }
 
-// Flags that consume the following token as their value.
-const VALUE_FLAGS = new Set(["--output", "--log", "--host", "--agent", "--scope", "--skills-dir", "--stdout-file", "--stderr-file"]);
+function redactHelpDefault(name: string, value: string): string {
+  const normalized = name.replace(/^-+/, "").replaceAll("-", "_");
+  return normalized.endsWith("_secret") || normalized.endsWith("_SECRET") ? "***" : value;
+}
 
 /** `all` / `*` (what --verbose expands to) enable every diagnostic category. */
-function logEnabled(filters: string[], category: string): boolean {
-  return filters.some((f) => f === category || f === "all" || f === "*");
+function logEnabled(filters: LogFilters, category: string): boolean {
+  return filters.enabled(category);
 }
 
 function buildRequestLog(command: string | undefined): JsonValue {
-  return buildJson("log", { category: "request", command: command ?? "none" });
+  return jsonLog("info", "request")
+    .field("category", "request")
+    .field("command", command ?? "none")
+    .build()
+    .toJSON();
 }
 
-function buildStartupLog(): JsonValue {
-  return buildJson("log", { category: "startup", event: "startup" });
+function buildStartupLog(args: string[], command: string | undefined, output: string, log: LogFilters, verbose: boolean): JsonValue {
+  return jsonLog("info", "startup")
+    .field("category", "startup")
+    .field("event", "startup")
+    .field("argv", args)
+    .field("parsed", {
+      command: command ?? "none",
+      output,
+      log: Array.from(log.filters),
+      verbose,
+    })
+    .field("effective_config", {
+      output,
+      log: Array.from(log.filters),
+    })
+    .field("env", startupEnvSnapshot())
+    .build()
+    .toJSON();
 }
 
-/** Collect positional arguments, skipping flags and the values they consume. */
-function positionalArgs(args: string[]): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (a.startsWith("--")) continue;
-    if (i > 0 && VALUE_FLAGS.has(args[i - 1]!)) continue;
-    out.push(a);
+function startupEnvSnapshot(): JsonValue {
+  const value = process.env[PING_HOST_ENV];
+  const item: Record<string, JsonValue> = { key: PING_HOST_ENV, present: value !== undefined };
+  if (value !== undefined) item.value = value;
+  return [item];
+}
+
+function strictParseArgs(args: string[]) {
+  const parsed = parseArgs({
+    args,
+    allowPositionals: true,
+    strict: true,
+    options: {
+      help: { type: "boolean", short: "h" },
+      recursive: { type: "boolean" },
+      output: { type: "string" },
+      json: { type: "boolean" },
+      log: { type: "string" },
+      verbose: { type: "boolean" },
+      "api-key-secret": { type: "string" },
+      "stdout-file": { type: "string" },
+      "stderr-file": { type: "string" },
+      "dry-run": { type: "boolean" },
+      host: { type: "string" },
+      agent: { type: "string" },
+      scope: { type: "string" },
+      "skills-dir": { type: "string" },
+      force: { type: "boolean" },
+    },
+  });
+  const command = parsed.positionals[0];
+  const values = parsed.values;
+  const has = (name: string) => Object.prototype.hasOwnProperty.call(values, name);
+  const helpRequested = values.help === true;
+  if (command === undefined) return parsed;
+  switch (command) {
+    case "echo":
+      if (parsed.positionals.length > 1) throw new Error(`unexpected positional argument: ${parsed.positionals[1]}`);
+      if (has("host") || has("agent") || has("scope") || has("skills-dir") || has("force")) {
+        throw new Error("option is not valid for echo");
+      }
+      break;
+    case "ping":
+      if (parsed.positionals.length > 1) throw new Error(`unexpected positional argument: ${parsed.positionals[1]}`);
+      if (has("dry-run") || has("agent") || has("scope") || has("skills-dir") || has("force")) {
+        throw new Error("option is not valid for ping");
+      }
+      break;
+    case "cancel":
+      if (parsed.positionals.length > 1) throw new Error(`unexpected positional argument: ${parsed.positionals[1]}`);
+      if (has("dry-run") || has("host") || has("agent") || has("scope") || has("skills-dir") || has("force")) {
+        throw new Error("option is not valid for cancel");
+      }
+      break;
+    case "skill":
+      if (parsed.positionals.length < 2 && !helpRequested) throw new Error("skill requires a subcommand: status, install, uninstall");
+      if (parsed.positionals.length > 2) throw new Error(`unexpected positional argument: ${parsed.positionals[2]}`);
+      if (has("dry-run") || has("host")) {
+        throw new Error("option is not valid for skill");
+      }
+      break;
+    default:
+      throw new Error(`unknown command: ${command}`);
   }
-  return out;
+  return parsed;
+}
+
+function renderCliParseError(args: string[], message: string, hint = "try: agent-cli --help"): string {
+  const err = buildCliError(message, hint);
+  try {
+    const outputArg = resolveOutputArg(args);
+    const fmt = cliParseOutput(outputArg ?? "json");
+    return cliOutput(err, fmt);
+  } catch {
+    return outputJson(err);
+  }
 }
 
 function main(): void {
@@ -291,15 +441,21 @@ function main(): void {
   // A help modifier only: consulted just below when showHelp is true, so a bare
   // --recursive never affects normal command parsing.
   const recursive = args.includes("--recursive");
-  const argsWithoutHelp = args.filter((a) => a !== "--help" && a !== "-h");
-  const positionals = positionalArgs(argsWithoutHelp);
+  let parsedArgs: ReturnType<typeof strictParseArgs>;
+  try {
+    parsedArgs = strictParseArgs(args);
+  } catch (e) {
+    console.log(renderCliParseError(args, (e as Error).message));
+    process.exit(2);
+  }
+  const positionals = parsedArgs.positionals;
   const command = positionals[0];
 
   // --help is one-level plain; --recursive expands the tree and --output picks
   // the format. A bare --recursive (no --help) falls through to normal parsing.
   if (showHelp) {
     try {
-      process.stdout.write(renderHelpOutput(command, argValue(args, "--output"), hasExplicitOutput(args), recursive));
+      process.stdout.write(renderHelpOutput(command, resolveOutputArg(args), hasExplicitOutput(args), recursive));
     } catch (e) {
       console.log(outputJson(buildCliError((e as Error).message)));
       process.exit(2);
@@ -307,12 +463,17 @@ function main(): void {
     return;
   }
 
-  const logIdx = args.indexOf("--log");
-  const dryRun = args.includes("--dry-run");
-  const hostIdx = args.indexOf("--host");
-  const outputArg = argValue(args, "--output") ?? (hasExplicitOutput(args) ? "" : "json");
-  const logArg = logIdx !== -1 ? args[logIdx + 1] : "";
-  const host = hostIdx !== -1 ? args[hostIdx + 1] : undefined;
+  const values = parsedArgs.values;
+  const dryRun = values["dry-run"] === true;
+  let outputArg: string | undefined;
+  try {
+    outputArg = resolveOutputArg(args);
+  } catch (e) {
+    console.log(outputJson(buildCliError((e as Error).message, "valid output formats: json, yaml, plain")));
+    process.exit(2);
+  }
+  const logArg = typeof values.log === "string" ? values.log : "";
+  const host = typeof values.host === "string" ? values.host : undefined;
 
   // Step 1: parse --output with shared helper
   let fmt: OutputFormat;
@@ -324,11 +485,12 @@ function main(): void {
   }
 
   // Step 2: parse --log with shared helper (trim + lowercase + dedup)
-  const log = cliParseLogFilters(logArg ? logArg.split(",") : []);
-  if (args.includes("--verbose")) {
+  let logArgsForVerbose = logArg ? logArg.split(",") : [];
+  if (values.verbose === true) {
     // --verbose is shorthand for --log all.
-    log.push("all");
+    logArgsForVerbose = [...logArgsForVerbose, "all"];
   }
+  const log = cliParseLogFilters(logArgsForVerbose);
 
   // Each diagnostic line self-tags with its `category`, so `--log all` reveals
   // the full set from real output rather than a static help list.
@@ -336,12 +498,12 @@ function main(): void {
     console.log(cliOutput(buildRequestLog(command), fmt));
   }
   if (logEnabled(log, "startup")) {
-    console.log(cliOutput(buildStartupLog(), fmt));
+    console.log(cliOutput(buildStartupLog(args, command, outputArg ?? "json", log, values.verbose === true), fmt));
   }
 
   // Step 3: no subcommand → error with hint
   if (!command) {
-    console.log(outputJson(buildCliError("no subcommand provided", "try: agent-cli --help")));
+    console.log(cliOutput(buildCliError("no subcommand provided", "try: agent-cli --help"), fmt));
     process.exit(2);
   }
 
@@ -349,37 +511,52 @@ function main(): void {
     case "echo": {
       // Step 4: --dry-run → preview without executing
       if (dryRun) {
-        const preview = buildJson("dry_run", { action: "echo", log }, { duration_ms: 0 });
+        const preview = jsonResult({ action: "echo", log }).trace({ duration_ms: 0 }).build();
         console.log(cliOutput(preview, fmt));
         return;
       }
-      const result = buildJsonOk({ action: "echo", log });
+      const result = jsonResult({ action: "echo", log }).build();
       console.log(cliOutput(result, fmt));
       break;
     }
     case "ping": {
-      // Step 5: demonstrate buildJsonError with hint on failure
-      if (!host) {
-        const err = buildJsonError("ping target not configured", "set PING_HOST or pass --host", { duration_ms: 0 });
+      // Step 5: demonstrate a protocol v1 error with hint on failure
+      const effectiveHost = host ?? process.env[PING_HOST_ENV];
+      if (!effectiveHost) {
+        const err = jsonError(
+          "ping_target_not_configured",
+          "ping target not configured"
+        )
+          .hint("set PING_HOST or pass --host")
+          .trace({ duration_ms: 0 })
+          .build();
         console.log(cliOutput(err, fmt));
         process.exit(1);
       }
       break;
     }
+    case "cancel": {
+      const err = jsonError(
+        "cancelled",
+        "operation cancelled"
+      )
+        .hint("the operation was cancelled before completion")
+        .trace({ duration_ms: 0 })
+        .build();
+      console.log(cliOutput(err, fmt));
+      process.exit(1);
+    }
     case "skill": {
       // Step 6: wire the embedded Agent Skill installer to the library.
-      const agentIdx = args.indexOf("--agent");
-      const scopeIdx = args.indexOf("--scope");
-      const skillsDirIdx = args.indexOf("--skills-dir");
-      const agentArg = agentIdx !== -1 ? args[agentIdx + 1] : "all";
-      const scopeArg = scopeIdx !== -1 ? args[scopeIdx + 1] : "personal";
-      const skillsDir = skillsDirIdx !== -1 ? args[skillsDirIdx + 1] : undefined;
-      const force = args.includes("--force");
+      const agentArg = typeof values.agent === "string" ? values.agent : "all";
+      const scopeArg = typeof values.scope === "string" ? values.scope : "personal";
+      const skillsDir = typeof values["skills-dir"] === "string" ? values["skills-dir"] : undefined;
+      const force = values.force === true;
       process.exit(runSkill(positionals[1], agentArg ?? "all", scopeArg ?? "personal", skillsDir, force, fmt));
       break;
     }
     default: {
-      console.log(outputJson(buildCliError(`unknown command: ${command}`, "valid commands: echo, ping, skill")));
+      console.log(cliOutput(buildCliError(`unknown command: ${command}`, "valid commands: echo, ping, skill"), fmt));
       process.exit(2);
     }
   }
@@ -454,15 +631,38 @@ function buildSkillOptions(
 // ── Tests (run via: npx tsx --test examples/agent_cli.ts) ────────────────────
 
 if (process.env["NODE_TEST_CONTEXT"]) {
+  interface SecurityHelpDefaultCase {
+    default: string;
+    expected: string;
+  }
+
+  function securityHelpDefaultCase(): SecurityHelpDefaultCase {
+    const fixturePath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "..",
+      "spec",
+      "fixtures",
+      "security.json"
+    );
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
+      help_default_cases: SecurityHelpDefaultCase[];
+    };
+    return fixture.help_default_cases[0];
+  }
+
   describe("help", () => {
     it("root help is one-level", () => {
       const help = formatRootHelp();
       assert.ok(help.includes("echo"), "root --help must include echo");
       assert.ok(help.includes("ping"), "root --help must include ping");
       assert.ok(help.includes("--output"), "root --help must include --output");
+      assert.ok(help.includes(`AFDATA: ${AFDATA_VERSION}`), "root --help must include AFDATA version");
       assert.ok(!help.includes("--help-all"), "root --help must not include removed --help-all");
       assert.ok(!help.includes("--dry-run"), "root --help must NOT include echo's --dry-run");
       assert.ok(!help.includes("--host"), "root --help must NOT include ping's --host");
+      assert.ok(!help.includes("--stream"), "root --help must not include stream mode");
+      assert.ok(!help.includes("--result-only"), "root --help must not include result-only mode");
     });
 
     it("recursive markdown export contains subcommand details", () => {
@@ -507,6 +707,7 @@ if (process.env["NODE_TEST_CONTEXT"]) {
       const schema = helpSchema(undefined, "recursive") as Record<string, unknown>;
       assert.equal(schema.code, "help");
       assert.equal(schema.scope, "recursive");
+      assert.deepEqual(schema.versions, { afdata: AFDATA_VERSION });
       const commands = schema.commands as Array<Record<string, unknown>>;
       assert.ok(commands.some((command) => command.flags !== undefined), "recursive schema must include child flags");
     });
@@ -559,6 +760,21 @@ if (process.env["NODE_TEST_CONTEXT"]) {
       const leaf = JSON.stringify(helpSchema("echo", "one_level"));
       assert.ok(leaf.includes("--output") && leaf.includes("markdown"), "leaf help schema must document --output formats");
     });
+
+    it("redacts secret defaults in every help format", () => {
+      const helpCase = securityHelpDefaultCase();
+      assert.equal(helpCase.default, HELP_DEFAULT_API_KEY_SECRET);
+      assert.equal(helpCase.expected, "***");
+      for (const rendered of [
+        formatRootHelp(),
+        formatMarkdownHelp(undefined, false),
+        renderHelpOutput(undefined, "json", true, false),
+        renderHelpOutput(undefined, "yaml", true, false),
+      ]) {
+        assert.ok(rendered.includes(helpCase.expected));
+        assert.ok(!rendered.includes(helpCase.default));
+      }
+    });
   });
 
   describe("agent_cli example", () => {
@@ -569,74 +785,124 @@ if (process.env["NODE_TEST_CONTEXT"]) {
       assert.throws(() => cliParseOutput("xml"));
     });
 
+    it("detects missing output values before falling back to json", () => {
+      for (const args of [["--output"], ["--output", "--json"], ["--output="]]) {
+        assert.equal(outputFlagMissing(args), true, `${args.join(" ")} must be missing`);
+        assert.throws(() => resolveOutputArg(args), /missing value for --output/);
+      }
+      for (const args of [["--output", "json"], ["--output=json"], ["--json"]]) {
+        assert.equal(outputFlagMissing(args), false, `${args.join(" ")} must not be missing`);
+      }
+    });
+
+    it("strictly validates known flags, command flags, and positionals", () => {
+      for (const args of [
+        ["echo"],
+        ["echo", "--dry-run"],
+        ["ping", "--host", "example.com"],
+        ["skill", "status", "--agent", "opencode"],
+      ]) {
+        assert.doesNotThrow(() => strictParseArgs(args));
+      }
+      for (const args of [
+        ["--bogus", "echo"],
+        ["--log"],
+        ["echo", "--host", "example.com"],
+        ["echo", "extra"],
+        ["ping", "extra"],
+        ["skill"],
+        ["skill", "status", "extra"],
+      ]) {
+        assert.throws(() => strictParseArgs(args), Error, `${args.join(" ")} should fail strict parsing`);
+      }
+    });
+
     it("parse log normalizes", () => {
+      const lf = cliParseLogFilters(["Startup", " REQUEST ", "startup"]);
       assert.deepEqual(
-        cliParseLogFilters(["Startup", " REQUEST ", "startup"]),
+        Array.from(lf.filters),
         ["startup", "request"]
       );
     });
 
     it("log enabled honors all/* wildcards", () => {
-      assert.ok(!logEnabled([], "startup"));
-      assert.ok(logEnabled(["startup"], "startup"));
-      assert.ok(!logEnabled(["startup"], "request"));
+      assert.ok(!logEnabled(cliParseLogFilters([]), "startup"));
+      assert.ok(logEnabled(cliParseLogFilters(["startup"]), "startup"));
+      assert.ok(!logEnabled(cliParseLogFilters(["startup"]), "request"));
       for (const everything of ["all", "*"]) {
-        assert.ok(logEnabled([everything], "startup"), `${everything} enables startup`);
-        assert.ok(logEnabled([everything], "request"), `${everything} enables request`);
+        assert.ok(logEnabled(cliParseLogFilters([everything]), "startup"), `${everything} enables startup`);
+        assert.ok(logEnabled(cliParseLogFilters([everything]), "request"), `${everything} enables request`);
       }
     });
 
     it("log lines are category-tagged", () => {
-      const req = buildRequestLog(undefined) as Record<string, unknown>;
-      assert.equal(req["code"], "log");
-      assert.equal(req["category"], "request");
-      assert.equal(req["command"], "none");
-      const start = buildStartupLog() as Record<string, unknown>;
-      assert.equal(start["category"], "startup");
+      const req = buildRequestLog(undefined) as Record<string, any>;
+      assert.equal(req["kind"], "log");
+      assert.equal(req["log"].category, "request");
+      assert.equal(req["log"].command, "none");
+      const raw = ["--output", "yaml", "--log", "startup", "--api-key-secret", "sk-test", "ping"];
+      const start = buildStartupLog(raw, "ping", "yaml", cliParseLogFilters(["startup"]), false) as Record<string, any>;
+      assert.equal(start["kind"], "log");
+      assert.equal(start["log"].category, "startup");
+      assert.deepEqual(start["log"].argv, ["--output", "yaml", "--log", "startup", "--api-key-secret", "sk-test", "ping"]);
+      assert.deepEqual(start["log"].parsed, { command: "ping", output: "yaml", log: ["startup"], verbose: false });
+      assert.deepEqual(start["log"].effective_config, { output: "yaml", log: ["startup"] });
+      const env = start["log"].env as Array<Record<string, unknown>>;
+      assert.equal(env.length, 1);
+      assert.equal(env[0]?.key, PING_HOST_ENV);
+      assert.equal(env[0]?.present, process.env[PING_HOST_ENV] !== undefined);
+      if (process.env[PING_HOST_ENV] !== undefined) assert.equal(env[0]?.value, process.env[PING_HOST_ENV]);
     });
 
     it("build cli error structure", () => {
-      const v = buildCliError("--output: invalid value 'xml'") as Record<string, unknown>;
-      assert.equal(v["code"], "error");
-      assert.equal(v["error"], "--output: invalid value 'xml'");
+      const event = buildCliError("--output: invalid value 'xml'");
+      const v = event.toJSON() as Record<string, unknown>;
+      assert.equal(v["kind"], "error");
+      assert.equal((v["error"] as Record<string, unknown>).code, "cli_error");
+      assert.equal((v["error"] as Record<string, unknown>).message, "--output: invalid value 'xml'");
       assert.equal(v["error_code"], undefined);
       assert.equal(v["retryable"], undefined);
-      assert.equal(v["trace"], undefined);
+      assert.deepEqual(v["trace"], {});
     });
 
     it("build cli error with hint", () => {
-      const v = buildCliError("unknown action: foo", "valid actions: echo, ping") as Record<string, unknown>;
-      assert.equal(v["code"], "error");
-      assert.equal(v["hint"], "valid actions: echo, ping");
+      const event = buildCliError("unknown action: foo", "valid actions: echo, ping");
+      const v = event.toJSON() as Record<string, unknown>;
+      assert.equal(v["kind"], "error");
+      assert.equal((v["error"] as Record<string, unknown>).hint, "valid actions: echo, ping");
     });
 
     it("build json error with hint", () => {
-      const v = buildJsonError("not configured", "set PING_HOST") as Record<string, unknown>;
-      assert.equal(v["code"], "error");
-      assert.equal(v["error"], "not configured");
-      assert.equal(v["hint"], "set PING_HOST");
+      const event = jsonError("not_configured", "not configured").hint("set PING_HOST").build();
+      const v = event.toJSON() as Record<string, any>;
+      assert.equal(v["kind"], "error");
+      assert.equal(v["error"].code, "not_configured");
+      assert.equal(v["error"].message, "not configured");
+      assert.equal(v["error"].hint, "set PING_HOST");
     });
 
     it("build json error without hint has no hint key", () => {
-      const v = buildJsonError("something failed") as Record<string, unknown>;
-      assert.equal(v["hint"], undefined);
+      const event = jsonError("failed", "something failed").build();
+      const v = event.toJSON() as Record<string, any>;
+      assert.equal(v["error"].hint, undefined);
     });
 
     it("cli output all formats", () => {
-      const v = { code: "ok" };
-      const jsonOut = cliOutput(v, "json");
-      const yamlOut = cliOutput(v, "yaml");
-      const plainOut = cliOutput(v, "plain");
-      assert.ok(jsonOut.includes('"code"'));
+      const event = jsonResult({ ok: true }).build();
+      const jsonOut = cliOutput(event, "json");
+      const yamlOut = cliOutput(event, "yaml");
+      const plainOut = cliOutput(event, "plain");
+      assert.ok(jsonOut.includes('"kind"'));
       assert.ok(yamlOut.startsWith("---"));
-      assert.ok(plainOut.includes("code=ok"));
+      assert.ok(plainOut.includes("kind=result"));
     });
 
     it("error round trip is valid jsonl", () => {
-      const v = buildCliError("unknown flag: --foo");
-      const line = outputJson(v);
+      const event = buildCliError("unknown flag: --foo");
+      const line = outputJson(event.toJSON() as JsonValue);
       const parsed = JSON.parse(line);
-      assert.equal(parsed.code, "error");
+      assert.equal(parsed.kind, "error");
+      assert.equal(parsed.error.code, "cli_error");
       assert.ok(!line.includes("\n"));
     });
   });

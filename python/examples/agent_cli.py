@@ -21,30 +21,38 @@ Test: PYTHONPATH=. python3 -m pytest examples/agent_cli.py -v
 
 import argparse
 import json
+import os
+import signal
 import sys
 
 from agent_first_data import (
     OutputFormat,
+    LogLevel,
+    build_cli_error,
+    json_error,
+    json_log,
+    json_result,
+    cli_output,
+    cli_handle_version_or_continue,
+    cli_parse_log_filters,
+    cli_parse_output,
+    output_json,
+)
+from agent_first_data.skill import (
     SkillAction,
     SkillAgentSelection,
     SkillError,
     SkillOptions,
     SkillScope,
     SkillSpec,
-    build_cli_error,
-    build_json,
-    build_json_error,
-    build_json_ok,
-    cli_output,
-    cli_handle_version_or_continue,
-    cli_parse_log_filters,
-    cli_parse_output,
-    output_json,
-    install_stream_redirect_from_raw_args,
     run_skill_admin,
 )
+from agent_first_data.stream_redirect import install_from_raw_args as install_stream_redirect_from_raw_args
 
 AGENT_CLI_VERSION = "0.13.0"
+AFDATA_VERSION = "0.15.0"
+HELP_DEFAULT_API_KEY_SECRET = "sk-help-default"
+PING_HOST_ENV = "PING_HOST"
 
 # A fictional spore's embedded Agent Skill, used by the `skill` subcommand to
 # demonstrate run_skill_admin.
@@ -61,8 +69,22 @@ WIDGET_SPEC = SkillSpec(
 )
 
 
+class ArgumentParserError(ValueError):
+    pass
+
+
+class StrictArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ArgumentParserError(message)
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        if status:
+            raise ArgumentParserError((message or "").strip())
+        raise SystemExit(status)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = StrictArgumentParser(
         prog="agent-cli",
         description="Minimal agent-first CLI example",
         add_help=False,  # we handle --help ourselves
@@ -70,12 +92,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--help", "-h", action="store_true", help="Show this help (one-level)")
     parser.add_argument("--recursive", action="store_true", help="With --help, expand the full command tree (a bare --recursive is ignored)")
     parser.add_argument("--output", default="json", help="Output format: json, yaml, plain; help also accepts markdown")
+    parser.add_argument("--json", action="store_true", help="Equivalent to --output json")
     parser.add_argument("--log", default="", help="Log categories (comma-separated); --log all (or --verbose) enables every category")
     parser.add_argument("--verbose", action="store_true", help="Enable all log categories (shorthand for --log all)")
+    parser.add_argument("--api-key-secret", default=HELP_DEFAULT_API_KEY_SECRET, help=f"API key used by examples (default: {redact_help_default('--api-key-secret', HELP_DEFAULT_API_KEY_SECRET)})")
     parser.add_argument("--stdout-file", dest="stdout_file", help="Redirect stdout to a file")
     parser.add_argument("--stderr-file", dest="stderr_file", help="Redirect stderr to a file")
 
-    subs = parser.add_subparsers(dest="command")
+    subs = parser.add_subparsers(dest="command", parser_class=StrictArgumentParser)
 
     echo_p = subs.add_parser("echo", add_help=False, help="Echo back the input as structured output")
     echo_p.add_argument("--help", "-h", action="store_true", help="Show help for echo")
@@ -84,6 +108,9 @@ def build_parser() -> argparse.ArgumentParser:
     ping_p = subs.add_parser("ping", add_help=False, help="Ping a remote target")
     ping_p.add_argument("--help", "-h", action="store_true", help="Show help for ping")
     ping_p.add_argument("--host", help="Target host to ping")
+
+    cancel_p = subs.add_parser("cancel", add_help=False, help="Return a tool-defined cancellation error")
+    cancel_p.add_argument("--help", "-h", action="store_true", help="Show help for cancel")
 
     skill_p = subs.add_parser("skill", add_help=False, help="Manage this tool's embedded Agent Skill")
     skill_p.add_argument("--help", "-h", action="store_true", help="Show help for skill")
@@ -103,6 +130,7 @@ def leaf_global_options_note() -> str:
     return (
         "\nGlobal options:\n"
         "  --output <FORMAT>  Output format: json, yaml, plain; help also accepts markdown\n"
+        "  --json             Equivalent to --output json\n"
     )
 
 
@@ -117,7 +145,7 @@ def format_complete_help(parser: argparse.ArgumentParser) -> str:
                 lines.append(f"{parser.prog} {name}")
                 lines.append("=" * 60)
                 lines.append(sub.format_help())
-    return "\n".join(lines)
+    return "\n".join(lines) + f"\nAFDATA: {AFDATA_VERSION}\n"
 
 
 def subcommand_about(parser: argparse.ArgumentParser, name: str) -> str:
@@ -152,18 +180,18 @@ def format_markdown_help(parser: argparse.ArgumentParser, command: str | None, r
     sub = find_subparser(parser, command)
     if sub is not None:
         heading = markdown_heading("#", parser.prog, command, subcommand_about(parser, command))
-        return f"{heading}\n\n```text\n{sub.format_help()}{leaf_global_options_note()}```\n"
+        return f"{heading}\n\n```text\n{sub.format_help()}{leaf_global_options_note()}```\n\nAFDATA: {AFDATA_VERSION}\n"
 
     root_heading = markdown_heading("#", parser.prog, None, parser.description or "")
     lines = [root_heading, "", "```text", help_without_description(parser).rstrip(), "```"]
     if not recursive:
-        return "\n".join(lines) + "\n"
+        return "\n".join(lines) + f"\n\nAFDATA: {AFDATA_VERSION}\n"
     for action in parser._subparsers._actions:
         if isinstance(action, argparse._SubParsersAction):
             for name, choice in action.choices.items():
                 sub_heading = markdown_heading("##", parser.prog, name, subcommand_about(parser, name))
                 lines.extend(["", sub_heading, "", "```text", choice.format_help().rstrip(), "```"])
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + f"\n\nAFDATA: {AFDATA_VERSION}\n"
 
 
 def find_subparser(parser: argparse.ArgumentParser, command: str | None) -> argparse.ArgumentParser | None:
@@ -176,7 +204,16 @@ def find_subparser(parser: argparse.ArgumentParser, command: str | None) -> argp
 
 
 def output_explicit(raw: list[str]) -> bool:
-    return "--output" in raw or any(arg.startswith("--output=") for arg in raw)
+    return "--json" in raw or "--output" in raw or any(arg.startswith("--output=") for arg in raw)
+
+
+def output_missing(raw: list[str]) -> bool:
+    for index, arg in enumerate(raw):
+        if arg == "--output":
+            return index + 1 >= len(raw) or raw[index + 1].startswith("-")
+        if arg.startswith("--output="):
+            return arg.split("=", 1)[1] == ""
+    return False
 
 
 def output_value(raw: list[str], default: str | None = None) -> str | None:
@@ -187,7 +224,35 @@ def output_value(raw: list[str], default: str | None = None) -> str | None:
         idx = raw.index("--output")
         if idx + 1 < len(raw) and not raw[idx + 1].startswith("-"):
             return raw[idx + 1]
+    if "--json" in raw:
+        return "json"
     return default
+
+
+def output_conflict(raw: list[str]) -> str | None:
+    if "--json" not in raw:
+        return None
+    output_without_json = output_value([arg for arg in raw if arg != "--json"])
+    if output_without_json is not None and output_without_json != "json":
+        return f"conflicting output formats: --json conflicts with --output {output_without_json}"
+    return None
+
+
+def parse_cli_args(parser: argparse.ArgumentParser, raw: list[str]):
+    args, unknown = parser.parse_known_args(raw)
+    if unknown:
+        raise ArgumentParserError(f"unexpected argument: {unknown[0]}")
+    return args
+
+
+def cli_error_format_from_raw(raw: list[str]) -> OutputFormat:
+    value = output_value(raw, "json")
+    if value is None:
+        return OutputFormat.JSON
+    try:
+        return cli_parse_output(value)
+    except ValueError:
+        return OutputFormat.JSON
 
 
 def help_requested(raw: list[str]) -> bool:
@@ -206,11 +271,72 @@ def log_enabled(filters: list[str], category: str) -> bool:
 
 
 def build_request_log(command: str | None) -> dict:
-    return build_json("log", {"category": "request", "command": command or "none"})
+    return json_log(LogLevel.INFO, "request").field("category", "request").field("command", command or "none").build().to_dict()
 
 
-def build_startup_log() -> dict:
-    return build_json("log", {"category": "startup", "event": "startup"})
+def build_startup_log(raw: list[str], args, log: list[str]) -> dict:
+    return json_log(LogLevel.INFO, "startup").fields({
+        "category": "startup",
+        "event": "startup",
+        "argv": _redact_argv_local(raw),
+        "parsed": {
+            "command": args.command or "none",
+            "output": args.output,
+            "log": log,
+            "verbose": args.verbose,
+        },
+        "effective_config": {
+            "output": args.output,
+            "log": log,
+        },
+        "env": startup_env_snapshot(),
+    }).build().to_dict()
+
+
+def startup_env_snapshot() -> list[dict]:
+    snapshot = []
+    for key in (PING_HOST_ENV,):
+        item = {"key": key, "present": key in os.environ}
+        if key in os.environ:
+            item["value"] = os.environ[key]
+        snapshot.append(item)
+    return snapshot
+
+
+def _redact_argv_local(args) -> list[str]:
+    """Redact argv values whose long flag names are secret by AFDATA naming.
+
+    Covers both --name-secret=value and --name-secret value.
+    """
+    out: list[str] = []
+    redact_next = False
+    for arg in args:
+        if redact_next:
+            if arg.startswith("-"):
+                out.append(arg)
+            else:
+                out.append("***")
+            redact_next = False
+            continue
+        if arg.startswith("--"):
+            rest = arg[2:]
+            if "=" in rest:
+                name, _value = rest.split("=", 1)
+                normalized = name.replace("-", "_")
+                if normalized.endswith("_secret") or normalized.endswith("_SECRET"):
+                    out.append(f"--{name}=***")
+                    continue
+            elif rest.replace("-", "_").endswith("_secret") or rest.replace("-", "_").endswith("_SECRET"):
+                redact_next = True
+        out.append(arg)
+    return out
+
+
+def redact_help_default(name: str, value: str) -> str:
+    normalized = name.lstrip("-").replace("-", "_")
+    if normalized.endswith("_secret") or normalized.endswith("_SECRET"):
+        return "***"
+    return value
 
 
 def global_help_options(include_recursive: bool) -> list[dict]:
@@ -220,8 +346,14 @@ def global_help_options(include_recursive: bool) -> list[dict]:
     target omits --recursive (nothing to expand)."""
     opts = [
         {"name": "--output", "help": "Output format: json, yaml, plain; help also accepts markdown"},
+        {"name": "--json", "help": "Equivalent to --output json"},
         {"name": "--log", "help": "Log categories (comma-separated); --log all (or --verbose) enables every category"},
         {"name": "--verbose", "help": "Enable all log categories (shorthand for --log all)"},
+        {
+            "name": "--api-key-secret",
+            "help": "API key used by examples",
+            "default_values": [redact_help_default("--api-key-secret", HELP_DEFAULT_API_KEY_SECRET)],
+        },
         {"name": "--stdout-file", "help": "Redirect stdout to a file"},
         {"name": "--stderr-file", "help": "Redirect stderr to a file"},
     ]
@@ -237,6 +369,7 @@ def help_schema(parser: argparse.ArgumentParser, command: str | None, scope: str
         return {
             "code": "help",
             "scope": scope,
+            "versions": {"afdata": AFDATA_VERSION},
             "name": command,
             "command_path": f"{parser.prog} {command}",
             "usage": sub.format_usage().strip(),
@@ -254,6 +387,7 @@ def help_schema(parser: argparse.ArgumentParser, command: str | None, scope: str
     return {
         "code": "help",
         "scope": scope,
+        "versions": {"afdata": AFDATA_VERSION},
         "name": parser.prog,
         "command_path": parser.prog,
         "usage": parser.format_usage().strip(),
@@ -265,23 +399,27 @@ def help_schema(parser: argparse.ArgumentParser, command: str | None, scope: str
 def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
     explicit = output_explicit(raw)
     value = output_value(raw, args.output)
+    conflict = output_conflict(raw)
     sub = find_subparser(parser, args.command)
     # Scope (--recursive) and format (--output) are orthogonal. A specific
     # subcommand is leaf-level here, so its scope is the same either way.
     recursive = recursive_requested(raw)
     scope = "recursive" if recursive else "one_level"
 
-    if explicit and value is None:
+    if output_missing(raw) or (explicit and value is None):
         print(output_json(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml")))
+        sys.exit(2)
+    if conflict is not None:
+        print(output_json(build_cli_error(conflict, hint="valid help output formats: plain, markdown, json, yaml")))
         sys.exit(2)
 
     if not explicit or value == "plain":
         if sub is not None:
-            text = sub.format_help() + leaf_global_options_note()
+            text = sub.format_help() + leaf_global_options_note() + f"\nAFDATA: {AFDATA_VERSION}\n"
         elif recursive:
             text = format_complete_help(parser)
         else:
-            text = parser.format_help()
+            text = parser.format_help() + f"\nAFDATA: {AFDATA_VERSION}\n"
         print(text, end="" if text.endswith("\n") else "\n")
         return
 
@@ -316,10 +454,24 @@ def main() -> None:
         print(version, end="")
         return
 
-    if help_requested(raw) and output_explicit(raw) and output_value(raw) is None:
-        print(output_json(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml")))
+    if output_missing(raw):
+        if help_requested(raw):
+            print(output_json(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml")))
+        else:
+            print(output_json(build_cli_error("missing value for --output: expected json, yaml, or plain", hint="valid output formats: json, yaml, plain")))
         sys.exit(2)
-    args, _ = parser.parse_known_args()
+    try:
+        args = parse_cli_args(parser, raw)
+    except ArgumentParserError as e:
+        fmt = cli_error_format_from_raw(raw)
+        print(cli_output(build_cli_error(str(e), hint="try: agent-cli --help"), fmt))
+        sys.exit(2)
+    conflict = output_conflict(raw)
+    if conflict is not None:
+        print(output_json(build_cli_error(conflict, hint="valid output formats: json, yaml, plain")))
+        sys.exit(2)
+    if args.json:
+        args.output = "json"
 
     # --help is one-level plain; --recursive expands the tree and --output picks
     # the format. A bare --recursive (no --help) is ignored and parsing continues.
@@ -345,29 +497,41 @@ def main() -> None:
     if log_enabled(log, "request"):
         print(cli_output(build_request_log(args.command), fmt))
     if log_enabled(log, "startup"):
-        print(cli_output(build_startup_log(), fmt))
+        print(cli_output(build_startup_log(raw, args, log), fmt))
 
     # Step 3: no subcommand → error with hint
     if not args.command:
-        print(output_json(build_cli_error("no subcommand provided", hint="try: agent-cli --help")))
+        print(cli_output(build_cli_error("no subcommand provided", hint="try: agent-cli --help"), fmt))
         sys.exit(2)
 
     if args.command == "echo":
         # Step 4: --dry-run → preview without executing
         if args.dry_run:
-            preview = build_json("dry_run", {"action": "echo", "log": log}, trace={"duration_ms": 0})
-            print(cli_output(preview, fmt))
+            preview = json_result({"action": "echo", "log": log}).trace({"duration_ms": 0}).build()
+            print(cli_output(preview.to_dict(), fmt))
             return
 
-        result = build_json_ok({"action": "echo", "log": log})
-        print(cli_output(result, fmt))
+        result = json_result({"action": "echo", "log": log}).build()
+        print(cli_output(result.to_dict(), fmt))
 
     elif args.command == "ping":
-        # Step 5: demonstrate build_json_error with hint on failure
-        if not args.host:
-            err = build_json_error("ping target not configured", hint="set PING_HOST or pass --host", trace={"duration_ms": 0})
-            print(cli_output(err, fmt))
+        # Step 5: demonstrate a protocol v1 error with hint on failure
+        host = args.host or os.environ.get(PING_HOST_ENV)
+        if not host:
+            err = json_error(
+                "ping_target_not_configured",
+                "ping target not configured",
+            ).hint("set PING_HOST or pass --host").trace({"duration_ms": 0}).build()
+            print(cli_output(err.to_dict(), fmt))
             sys.exit(1)
+
+    elif args.command == "cancel":
+        err = json_error(
+            "cancelled",
+            "operation cancelled",
+        ).hint("the operation was cancelled before completion").trace({"duration_ms": 0}).build()
+        print(cli_output(err.to_dict(), fmt))
+        sys.exit(1)
 
     elif args.command == "skill":
         # Step 6: wire the embedded Agent Skill installer to the library.
@@ -446,12 +610,15 @@ def test_root_help_is_one_level():
     assert "--help-all" not in md, "root --help must not advertise removed recursive flag"
     assert "--dry-run" not in md, "root --help must not include echo's --dry-run"
     assert "--host" not in md, "root --help must not include ping's --host"
+    assert "--stream" not in md, "root --help must not include a stream mode flag"
+    assert "--result-only" not in md, "root --help must not include a result-only mode flag"
 
 
 def test_recursive_markdown_export_contains_all_subcommand_details():
     parser = build_parser()
     md = format_markdown_help(parser, None, True)
     assert "# agent-cli" in md, "markdown export must include root heading"
+    assert f"AFDATA: {AFDATA_VERSION}" in md, "markdown export must include AFDATA version"
     assert "--dry-run" in md, "recursive markdown export must include echo's --dry-run"
     assert "--host" in md, "recursive markdown export must include ping's --host"
 
@@ -508,6 +675,7 @@ def test_help_schema_is_recursive_export():
     schema = help_schema(parser, None, "recursive")
     assert schema["code"] == "help"
     assert schema["scope"] == "recursive"
+    assert schema["versions"] == {"afdata": AFDATA_VERSION}
     assert any("help" in command for command in schema["commands"])
 
 
@@ -555,6 +723,36 @@ def test_help_schema_documents_formats():
     )
 
 
+def security_help_default_case():
+    fixture_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "spec",
+        "fixtures",
+        "security.json",
+    )
+    with open(fixture_path, encoding="utf-8") as fixture_file:
+        return json.load(fixture_file)["help_default_cases"][0]
+
+
+def test_help_redacts_secret_defaults_in_every_format():
+    help_case = security_help_default_case()
+    secret_default = help_case["default"]
+    redaction_marker = help_case["expected"]
+    assert secret_default == HELP_DEFAULT_API_KEY_SECRET
+    assert redaction_marker == "***"
+    parser = build_parser()
+    for rendered in (
+        parser.format_help(),
+        format_markdown_help(parser, None, False),
+        cli_output(help_schema(parser, None, "one_level"), OutputFormat.JSON),
+        cli_output(help_schema(parser, None, "one_level"), OutputFormat.YAML),
+    ):
+        assert redaction_marker in rendered
+        assert secret_default not in rendered
+
+
 def test_parse_output_all_variants():
     assert cli_parse_output("json") is OutputFormat.JSON
     assert cli_parse_output("yaml") is OutputFormat.YAML
@@ -564,8 +762,32 @@ def test_parse_output_all_variants():
         cli_parse_output("xml")
 
 
+def test_output_missing_detection():
+    for raw in (["--output"], ["--output", "--json"], ["--output="]):
+        assert output_missing(raw), f"{raw} must be treated as missing --output value"
+    for raw in (["--output", "json"], ["--output=json"], ["--json"]):
+        assert not output_missing(raw), f"{raw} must have a valid output value or alias"
+
+
+def test_parse_cli_args_is_strict():
+    parser = build_parser()
+    assert parse_cli_args(parser, ["echo"]).command == "echo"
+    assert parse_cli_args(parser, ["ping", "--host", "example.com"]).command == "ping"
+    import pytest
+
+    for raw in (
+        ["--bogus", "echo"],
+        ["--log"],
+        ["echo", "--host", "example.com"],
+        ["echo", "extra"],
+        ["missing"],
+    ):
+        with pytest.raises(ArgumentParserError):
+            parse_cli_args(parser, list(raw))
+
+
 def test_parse_log_normalizes():
-    assert cli_parse_log_filters(["Startup", " REQUEST ", "startup"]) == ["startup", "request"]
+    assert list(cli_parse_log_filters(["Startup", " REQUEST ", "startup"])) == ["startup", "request"]
 
 
 def test_log_enabled_wildcards():
@@ -580,55 +802,79 @@ def test_log_enabled_wildcards():
 
 def test_log_lines_are_category_tagged():
     req = build_request_log(None)
-    assert req["code"] == "log" and req["category"] == "request" and req["command"] == "none"
-    start = build_startup_log()
-    assert start["code"] == "log" and start["category"] == "startup"
+    assert req["kind"] == "log"
+    assert req["log"]["category"] == "request"
+    assert req["log"]["command"] == "none"
+    parser = build_parser()
+    args, _ = parser.parse_known_args(["--output", "yaml", "--log", "startup", "--api-key-secret", "sk-test", "ping"])
+    start = build_startup_log(["--output", "yaml", "--log", "startup", "--api-key-secret", "sk-test", "ping"], args, ["startup"])
+    assert start["kind"] == "log"
+    assert start["log"]["category"] == "startup"
+    assert start["log"]["argv"] == ["--output", "yaml", "--log", "startup", "--api-key-secret", "***", "ping"]
+    assert start["log"]["parsed"] == {
+        "command": "ping",
+        "output": "yaml",
+        "log": ["startup"],
+        "verbose": False,
+    }
+    assert start["log"]["effective_config"] == {"output": "yaml", "log": ["startup"]}
+    env = start["log"]["env"]
+    assert env == [{"key": PING_HOST_ENV, "present": PING_HOST_ENV in os.environ, **({"value": os.environ[PING_HOST_ENV]} if PING_HOST_ENV in os.environ else {})}]
 
 
 def test_build_cli_error_structure():
     v = build_cli_error("--output: invalid value 'xml'")
-    assert v["code"] == "error"
-    assert v["error"] == "--output: invalid value 'xml'"
+    assert v["kind"] == "error"
+    assert v["error"]["code"] == "cli_error"
+    assert v["error"]["message"] == "--output: invalid value 'xml'"
+    assert v["error"]["retryable"] is False  # 0.16: error.retryable defaults to false
     assert "error_code" not in v
-    assert "retryable" not in v
-    assert "trace" not in v
+    assert v["trace"] == {}  # 0.16: all events have trace by default
 
 
 def test_build_cli_error_with_hint():
     v = build_cli_error("unknown action: foo", hint="valid actions: echo, ping")
-    assert v["code"] == "error"
-    assert v["hint"] == "valid actions: echo, ping"
+    assert v["kind"] == "error"
+    assert v["error"]["hint"] == "valid actions: echo, ping"
 
 
-def test_build_json_error_with_hint():
-    v = build_json_error("not configured", hint="set PING_HOST")
-    assert v["code"] == "error"
-    assert v["error"] == "not configured"
-    assert v["hint"] == "set PING_HOST"
+def test_json_error_builder_with_hint():
+    v = json_error("not_configured", "not configured").hint("set PING_HOST").build()
+    assert v.to_dict()["kind"] == "error"
+    assert v.to_dict()["error"]["code"] == "not_configured"
+    assert v.to_dict()["error"]["message"] == "not configured"
+    assert v.to_dict()["error"]["hint"] == "set PING_HOST"
 
 
-def test_build_json_error_without_hint_has_no_hint_key():
-    v = build_json_error("something failed")
-    assert "hint" not in v
+def test_json_error_builder_without_hint_has_no_hint_key():
+    v = json_error("failed", "something failed").build()
+    assert "hint" not in v.to_dict()["error"]
 
 
 def test_cli_output_all_formats():
-    v = {"code": "ok"}
-    json_out = cli_output(v, OutputFormat.JSON)
-    yaml_out = cli_output(v, OutputFormat.YAML)
-    plain_out = cli_output(v, OutputFormat.PLAIN)
-    assert '"code"' in json_out
+    v = json_result({"ok": True}).build()
+    v_dict = v.to_dict()
+    json_out = cli_output(v_dict, OutputFormat.JSON)
+    yaml_out = cli_output(v_dict, OutputFormat.YAML)
+    plain_out = cli_output(v_dict, OutputFormat.PLAIN)
+    assert '"kind"' in json_out
     assert yaml_out.startswith("---")
-    assert "code=ok" in plain_out
+    assert "kind=result" in plain_out
 
 
 def test_error_round_trip_is_valid_jsonl():
     v = build_cli_error("unknown flag: --foo")
     line = output_json(v)
     parsed = json.loads(line)
-    assert parsed["code"] == "error"
+    assert parsed["kind"] == "error"
+    assert parsed["error"]["code"] == "cli_error"
     assert "\n" not in line
 
 
 if __name__ == "__main__":
-    main()
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    try:
+        main()
+    except BrokenPipeError:
+        sys.stdout = open(os.devnull, "w")
+        os._exit(0)

@@ -8,31 +8,28 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  buildJsonOk,
-  buildJsonError,
-  buildJson,
-  redactSecretsInPlace,
-  redactSecretsInPlaceWithOptions,
+  jsonError,
+  jsonProgress,
+  jsonLog,
+  jsonResult,
+  validateProtocolEvent,
+  validateProtocolStream,
   redactedValue,
-  redactedValueWith,
-  redactedValueWithOptions,
   RedactionPolicy,
-  type RedactionOptions,
   OutputStyle,
   type OutputOptions,
+  outputOptionsForPolicy,
   outputJson,
-  outputJsonWith,
-  outputJsonWithOptions,
   outputYaml,
-  outputYamlWithOptions,
   outputPlain,
-  outputPlainWithOptions,
-  redactUrlSecretsWithOptions,
+  redactUrlSecrets,
   type JsonValue,
   parseSize,
   normalizeUtcOffset,
   isValidRfc3339Date,
   isValidRfc3339Time,
+  decodeProtocolEvent,
+  EventDecodeError,
 } from "./format.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -42,7 +39,11 @@ function load(name: string): any[] {
   return JSON.parse(readFileSync(join(FIXTURES_DIR, name), "utf-8"));
 }
 
-function redactionOptions(tc: any): RedactionOptions {
+function loadObject(name: string): any {
+  return JSON.parse(readFileSync(join(FIXTURES_DIR, name), "utf-8"));
+}
+
+function redactionOptions(tc: any): { policy?: RedactionPolicy; secretNames?: readonly string[] } {
   const opts = tc.options ?? {};
   return {
     policy: opts.policy as RedactionPolicy | undefined,
@@ -56,22 +57,25 @@ describe("redact_url fixtures", () => {
   for (const tc of load("redact_url.json")) {
     it(tc.name, () => {
       const options = redactionOptions(tc);
-      assert.equal(redactUrlSecretsWithOptions(tc.input, options), tc.expected);
+      assert.equal(redactUrlSecrets(tc.input, options), tc.expected);
     });
   }
 });
 
-// --- Redact fixtures ---
+// --- Redact fixtures (default full redaction via redactedValue) ---
 
 describe("redact fixtures", () => {
   for (const tc of load("redact.json")) {
     it(tc.name, () => {
-      const inp = JSON.parse(JSON.stringify(tc.input));
-      redactSecretsInPlace(inp);
-      assert.deepEqual(inp, tc.expected);
+      const input = JSON.parse(JSON.stringify(tc.input));
+      assert.deepEqual(redactedValue(input), tc.expected);
+      // redactedValue returns a copy: the input must be untouched.
+      assert.deepEqual(input, tc.input);
     });
   }
 });
+
+// --- Redaction options fixtures ---
 
 describe("redaction options fixtures", () => {
   for (const tc of load("redaction_options.json")) {
@@ -81,53 +85,141 @@ describe("redaction options fixtures", () => {
         redaction: options,
         style: OutputStyle.Readable,
       };
-      const got = redactedValueWithOptions(tc.input, options);
+      const got = redactedValue(tc.input, options);
       assert.deepEqual(got, tc.expected, "value mismatch");
 
-      const inp = JSON.parse(JSON.stringify(tc.input));
-      redactSecretsInPlaceWithOptions(inp, options);
-      assert.deepEqual(inp, tc.expected, "in-place mismatch");
-
-      const gotJson = JSON.parse(outputJsonWithOptions(tc.input as JsonValue, outputOptions));
+      const gotJson = JSON.parse(outputJson(tc.input as JsonValue, outputOptions));
       assert.deepEqual(gotJson, tc.expected, "json mismatch");
 
       if (tc.expected_yaml !== undefined) {
-        assert.equal(outputYamlWithOptions(tc.input as JsonValue, outputOptions), tc.expected_yaml, "yaml mismatch");
+        assert.equal(outputYaml(tc.input as JsonValue, outputOptions), tc.expected_yaml, "yaml mismatch");
       }
       if (tc.expected_plain !== undefined) {
-        assert.equal(outputPlainWithOptions(tc.input as JsonValue, outputOptions), tc.expected_plain, "plain mismatch");
+        assert.equal(outputPlain(tc.input as JsonValue, outputOptions), tc.expected_plain, "plain mismatch");
+      }
+    });
+  }
+});
+
+describe("security fixtures", () => {
+  const fixture = loadObject("security.json");
+  for (const tc of fixture.redaction_cases) {
+    it(`redaction/${tc.name}`, () => {
+      const options = redactionOptions(tc);
+      const outputOptions: OutputOptions = { redaction: options, style: OutputStyle.Readable };
+      assert.deepEqual(redactedValue(tc.input, options), tc.expected);
+      for (const output of [
+        outputJson(tc.input as JsonValue, outputOptions),
+        outputYaml(tc.input as JsonValue, outputOptions),
+        outputPlain(tc.input as JsonValue, outputOptions),
+      ]) {
+        for (const needle of tc.must_contain) {
+          assert.ok(output.includes(needle), `output missing ${JSON.stringify(needle)}: ${output}`);
+        }
+        for (const needle of tc.must_not_contain) {
+          assert.ok(!output.includes(needle), `output leaked ${JSON.stringify(needle)}: ${output}`);
+        }
       }
     });
   }
 });
 
 // --- Protocol fixtures ---
+// Fixture protocol.json has been updated to canonical 0.16 format with:
+// 1. trace: {} added by default to all builders
+// 2. log builder requires (level, message) parameters
+// 3. progress builder requires message parameter
+// Test cases use "args" vocabulary: "result" (payload), "code"+"message" (error),
+// "hint" (→ .hint()), "retryable" (bool → .retryableIf()), "fields" (→ .fields()),
+// "trace" (→ .trace()), "message" (progress/log), "level" (log).
+// All builder results are deep-compared against fixture "expected".
 
 describe("protocol fixtures", () => {
   for (const tc of load("protocol.json")) {
     it(tc.name, () => {
+      if (tc.invalid !== undefined) {
+        assert.throws(() => validateProtocolEvent(tc.invalid));
+        return;
+      }
       let result: any;
       const args = tc.args;
       switch (tc.type) {
-        case "ok": result = buildJsonOk(args.result); break;
-        case "ok_trace": result = buildJsonOk(args.result, args.trace); break;
-        case "error": result = buildJsonError(args.message); break;
-        case "error_trace": result = buildJsonError(args.message, undefined, args.trace); break;
-        case "error_hint": result = buildJsonError(args.message, args.hint); break;
-        case "error_hint_trace": result = buildJsonError(args.message, args.hint, args.trace); break;
-        case "status": result = buildJson(args.code, args.fields); break;
+        case "result": result = jsonResult(args.result).build().toJSON(); break;
+        case "result_trace": result = jsonResult(args.result).trace(args.trace).build().toJSON(); break;
+        case "error": result = jsonError(args.code, args.message).build().toJSON(); break;
+        case "error_trace": result = jsonError(args.code, args.message).trace(args.trace).build().toJSON(); break;
+        case "error_hint": result = jsonError(args.code, args.message).hint(args.hint).build().toJSON(); break;
+        case "error_retryable": result = jsonError(args.code, args.message).retryableIf(args.retryable).build().toJSON(); break;
+        case "error_extension_fields": {
+          const builder = jsonError(args.code, args.message);
+          if (args.fields) {
+            builder.fields(args.fields);
+          }
+          result = builder.build().toJSON();
+          break;
+        }
+        case "progress": {
+          const builder = jsonProgress(args.message);
+          if (args.fields) {
+            builder.fields(args.fields);
+          }
+          if (args.trace) {
+            builder.trace(args.trace);
+          }
+          result = builder.build().toJSON();
+          break;
+        }
+        case "log": {
+          const builder = jsonLog(args.level, args.message);
+          if (args.fields) {
+            builder.fields(args.fields);
+          }
+          if (args.trace) {
+            builder.trace(args.trace);
+          }
+          result = builder.build().toJSON();
+          break;
+        }
         default: throw new Error(`unknown type: ${tc.type}`);
       }
-      if (tc.expected) {
-        assert.deepEqual(result, tc.expected);
-      }
-      if (tc.expected_contains) {
-        for (const [k, v] of Object.entries(tc.expected_contains)) {
-          assert.deepEqual(result[k], v, `key ${k}`);
-        }
+      validateProtocolEvent(result);
+      // Deep equality check against fixture expected value
+      assert.deepEqual(result, tc.expected, `fixture ${tc.name} event mismatch`);
+    });
+  }
+});
+
+describe("protocol stream fixtures", () => {
+  for (const tc of load("protocol_streams.json")) {
+    it(tc.name, () => {
+      if (tc.valid) {
+        assert.doesNotThrow(() => validateProtocolStream(tc.events, false));
+      } else {
+        assert.throws(() => validateProtocolStream(tc.events, false));
       }
     });
   }
+});
+
+describe("protocol strict fixtures", () => {
+  for (const tc of load("protocol_strict.json")) {
+    it(tc.name, () => {
+      if (tc.valid) assert.doesNotThrow(() => validateProtocolStream(tc.events));
+      else assert.throws(() => validateProtocolStream(tc.events));
+    });
+  }
+});
+
+it("error builder ignores reserved extension fields", () => {
+  const event = jsonError("explicit", "message")
+    .field("code", "wrong")
+    .field("message", "wrong")
+    .field("hint", "wrong")
+    .field("detail", 1);
+
+  // Attempting to write reserved fields should accumulate errors
+  // but not throw until build() is called
+  assert.throws(() => event.build(), /cannot write reserved error field/);
 });
 
 // --- Helper fixtures ---
@@ -217,7 +309,7 @@ describe("output options", () => {
       redaction: { policy: RedactionPolicy.RedactionTraceOnly },
       style: OutputStyle.Raw,
     };
-    const out = outputYamlWithOptions({
+    const out = outputYaml({
       code: "result",
       rows: [{ api_key_secret: "sk-live-1", duration_ms: 42 }],
       trace: { request_secret: "top-secret" },
@@ -235,7 +327,7 @@ describe("output options", () => {
       redaction: { policy: RedactionPolicy.RedactionTraceOnly },
       style: OutputStyle.Raw,
     };
-    const out = outputPlainWithOptions({
+    const out = outputPlain({
       duration_ms: 42,
       trace: { request_secret: "top-secret" },
     } as JsonValue, options);
@@ -246,7 +338,7 @@ describe("output options", () => {
   });
 
   it("with-options functions default to readable style", () => {
-    const out = outputYamlWithOptions(
+    const out = outputYaml(
       { duration_ms: 42 } as JsonValue,
       {
         redaction: { policy: RedactionPolicy.RedactionNone },
@@ -262,7 +354,7 @@ describe("parseSize safety", () => {
   it("returns null for unsafe integers", () => {
     assert.equal(parseSize("9007199254740993"), null);
     assert.equal(parseSize("9007199254740992"), null);
-    assert.equal(parseSize("8796093022208K"), null);
+    assert.equal(parseSize("9007199255MB"), null);
   });
 });
 
@@ -287,12 +379,12 @@ describe("json safety", () => {
     assert.equal(parsedMeta["self"], "<unsupported:circular>");
   });
 
-  it("outputJsonWith RedactionTraceOnly keeps result secrets", () => {
-    const out = outputJsonWith({
-      code: "ok",
+  it("outputJson with RedactionTraceOnly keeps result secrets", () => {
+    const out = outputJson({
+      kind: "result",
       result: { api_key_secret: "sk-live-123" },
       trace: { request_secret: "top-secret" },
-    } as unknown as JsonValue, RedactionPolicy.RedactionTraceOnly);
+    } as unknown as JsonValue, outputOptionsForPolicy(RedactionPolicy.RedactionTraceOnly));
     const parsed = JSON.parse(out) as Record<string, unknown>;
     const parsedResult = parsed["result"] as Record<string, unknown>;
     const parsedTrace = parsed["trace"] as Record<string, unknown>;
@@ -300,10 +392,10 @@ describe("json safety", () => {
     assert.equal(parsedResult["api_key_secret"], "sk-live-123");
   });
 
-  it("outputJsonWith RedactionNone keeps all secrets", () => {
-    const out = outputJsonWith(
+  it("outputJson with RedactionNone keeps all secrets", () => {
+    const out = outputJson(
       { api_key_secret: "sk-live-123" } as unknown as JsonValue,
-      RedactionPolicy.RedactionNone,
+      outputOptionsForPolicy(RedactionPolicy.RedactionNone),
     );
     const parsed = JSON.parse(out) as Record<string, unknown>;
     assert.equal(parsed["api_key_secret"], "sk-live-123");
@@ -322,5 +414,13 @@ describe("json safety", () => {
     const input = { db_secret: { password_secret: "real", host: "localhost" } };
     const defaultValue = redactedValue(input) as Record<string, unknown>;
     assert.equal(defaultValue["db_secret"], "***");
+  });
+
+  it("max-depth marker is not the secret redaction marker", () => {
+    let input: unknown = "leaf";
+    for (let i = 0; i < 300; i++) input = { next: input };
+    const out = outputJson(input as JsonValue);
+    assert.ok(out.includes("<afdata:max-depth>"));
+    assert.ok(!out.includes("***"));
   });
 });

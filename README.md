@@ -26,6 +26,17 @@ It is a convention, not a framework — a small set of name endings, plus a tiny
 - **Logging agents can read.** Structured logs that follow the same rules, with request-scoped fields.
 - **The same in four languages.** One identical API across Rust, Go, Python, and TypeScript.
 
+## Redaction boundary
+
+AFDATA redaction is intentionally field-name based:
+
+- `_secret` / `_SECRET` redacts the whole value or subtree to `***`.
+- Legacy names such as `api_key` are redacted only when the caller passes an explicit `secret_names` list; matching is exact field-name equality.
+- `_url` fields scrub the userinfo password and query parameters whose names end in `_secret` or appear in `secret_names`; broad names such as `api_key`, `token`, or `password` are not hidden by default.
+- Free-form strings are not scanned for arbitrary secrets. If a secret URL is embedded in prose, redact the URL first with `redact_url_secrets`.
+
+There are no named redaction profiles. Use the default policy, an explicit `secret_names` list, or the documented scoped policies (`RedactionTraceOnly`, `RedactionNone`) for deliberate exceptions.
+
 ## Where to use it: CLI flags, config files, logs, and API responses
 
 - **Building a CLI tool an agent will call** — your output is understood correctly the first time, with no extra schema to ship.
@@ -36,7 +47,7 @@ It is a convention, not a framework — a small set of name endings, plus a tiny
 
 ## Adopt it: hand the convention to your coding agent
 
-Agent-First Data is a convention, not a dependency you wire in by hand — and adopting a convention is exactly the kind of work you now hand to an agent. There's even an [Agent Skill](skills/agent-first-data.md) for exactly that — the convention in a form an agent reads and applies directly. Paste this to your coding agent:
+Agent-First Data is a convention, not a dependency you wire in by hand — and adopting a convention is exactly the kind of work you now hand to an agent. There's even an [Agent Skill](skills/agent-first-data/SKILL.md) for exactly that — the convention in a form an agent reads and applies directly. Paste this to your coding agent:
 
 > Learn the Agent-First Data convention: read https://agentfirstkit.com/agent-first-data/docs/overview and https://agentfirstkit.com/agent-first-data/docs/agent-skill. Then look at the codebase we're working in and tell me whether adopting the convention would help it — and if so, how: which fields and config keys to rename, and where the output and logging helpers fit.
 
@@ -49,11 +60,22 @@ npm install agent-first-data     # TypeScript
 go get github.com/agentfirstkit/agent-first-data/go   # Go
 ```
 
+Or the `afdata` CLI — the same formatting, redaction, and protocol-event helpers from any shell, no toolchain required:
+
+```bash
+# prebuilt binary
+brew install agentfirstkit/tap/afdata   # macOS / Linux
+scoop bucket add agentfirstkit https://github.com/agentfirstkit/scoop-bucket && scoop install afdata   # Windows
+
+# or from crates.io
+cargo install agent-first-data
+```
+
 ## Docs
 
 - [Overview](docs/overview.md) — the full guide: examples, the complete API, every supported suffix, and logging
 - [Specification](spec/agent-first-data.md) — the formal convention
-- [Agent Skill](skills/agent-first-data.md) — for AI-assisted development
+- [Agent Skill](skills/agent-first-data/SKILL.md) — for AI-assisted development
 - Per-language API reference: [Rust](rust) · [Go](go) · [Python](python) · [TypeScript](typescript)
 
 ## License

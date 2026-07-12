@@ -1,6 +1,6 @@
 {
   "name": "agent-first-data",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "A naming convention that lets AI agents understand your data without being told what it means.",
   "license": "MIT",
   "repository": {
@@ -15,17 +15,18 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
-    "./afdata_logging": {
-      "import": "./dist/afdata_logging.js",
-      "types": "./dist/afdata_logging.d.ts"
+    "./skill": {
+      "import": "./dist/skill.js",
+      "types": "./dist/skill.d.ts"
     },
-    "./stream_redirect": {
+    "./stream-redirect": {
       "import": "./dist/stream_redirect.js",
       "types": "./dist/stream_redirect.d.ts"
     }
   },
   "files": [
     "dist",
+    "assets",
     "README.md"
   ],
   "scripts": {
@@ -34,8 +35,8 @@
     "test": "tsx --test src/*.test.ts examples/agent_cli.ts"
   },
   "devDependencies": {
-    "@types/node": "^26.1.0",
-    "tsx": "^4.22.4",
-    "typescript": "^6.0.3"
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.0",
+    "typescript": "^7.0.2"
   }
 }

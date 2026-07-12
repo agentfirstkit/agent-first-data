@@ -168,7 +168,42 @@ fn validate_optional_file(arg_name: &str, path: Option<&Path>) -> io::Result<()>
 }
 
 fn open_append(path: &Path) -> io::Result<File> {
-    OpenOptions::new().create(true).append(true).open(path)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                let file_type = metadata.file_type();
+                if file_type.is_symlink() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "stream redirection target must not be a symbolic link",
+                    ));
+                }
+                if !file_type.is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "stream redirection target must be a regular file",
+                    ));
+                }
+                OpenOptions::new()
+                    .append(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(path)
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => OpenOptions::new()
+                .append(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(path),
+            Err(err) => Err(err),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        OpenOptions::new().create(true).append(true).open(path)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -225,7 +260,7 @@ where
 
 #[cfg(unix)]
 mod unix {
-    use super::{io, open_append, InstalledStreamRedirect, PathBuf, StreamRedirectConfig, Write};
+    use super::{InstalledStreamRedirect, PathBuf, StreamRedirectConfig, Write, io, open_append};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -262,13 +297,13 @@ mod unix {
         if let Some(target) = &stdout_target {
             redirect_fd(STDOUT_FD, target.file.as_raw_fd())?;
         }
-        if let Some(target) = &stderr_target {
-            if let Err(err) = redirect_fd(STDERR_FD, target.file.as_raw_fd()) {
-                if let Some(stdout_target) = &stdout_target {
-                    let _ = redirect_fd(STDOUT_FD, stdout_target.restore.as_raw_fd());
-                }
-                return Err(err);
+        if let Some(target) = &stderr_target
+            && let Err(err) = redirect_fd(STDERR_FD, target.file.as_raw_fd())
+        {
+            if let Some(stdout_target) = &stdout_target {
+                let _ = redirect_fd(STDOUT_FD, stdout_target.restore.as_raw_fd());
             }
+            return Err(err);
         }
 
         Ok(InstalledStreamRedirect {
@@ -342,6 +377,7 @@ mod tests {
     #[cfg(unix)]
     use std::{
         env, fs,
+        os::unix::fs::{PermissionsExt, symlink},
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -434,6 +470,17 @@ mod tests {
         );
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn install_reports_unsupported_on_non_unix() {
+        let config = StreamRedirectConfig::new(Some("stdout.log"), None::<PathBuf>)
+            .expect("valid config")
+            .expect("redirection should be enabled");
+        let err = install(&config).expect_err("non-unix install must be unsupported");
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("only supported on Unix"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn install_redirects_stdout_and_stderr_in_child_process() {
@@ -448,6 +495,7 @@ mod tests {
         fs::create_dir_all(&dir).expect("create temp directory");
         let stdout_file = dir.join("stdout.log");
         let stderr_file = dir.join("stderr.log");
+        fs::write(&stdout_file, "existing stdout\n").expect("prewrite stdout file");
 
         let status = Command::new(env::current_exe().expect("current test executable"))
             .arg("--exact")
@@ -462,11 +510,129 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(&stdout_file).expect("read stdout file"),
-            "stdout bytes\n"
+            "existing stdout\nstdout bytes\n"
         );
         assert_eq!(
             fs::read_to_string(&stderr_file).expect("read stderr file"),
             "stderr bytes\n"
+        );
+        assert_eq!(
+            fs::metadata(&stderr_file)
+                .expect("stderr metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_rejects_symbolic_link_targets() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let dir = env::temp_dir().join(format!(
+            "afdata-stream-redirect-symlink-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create temp directory");
+        let real_file = dir.join("real.log");
+        let symlink_file = dir.join("stdout.log");
+        fs::write(&real_file, "").expect("create real file");
+        symlink(&real_file, &symlink_file).expect("create symlink");
+
+        let err = install_from_cli_args(Some(symlink_file), None::<PathBuf>)
+            .expect_err("symlink target must be rejected");
+        assert!(
+            err.to_string().contains("symbolic link")
+                || err.to_string().contains("Too many levels"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_drop_flushes_and_restores_stdout_in_child_process() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let dir = env::temp_dir().join(format!(
+            "afdata-stream-redirect-restore-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create temp directory");
+        let stdout_file = dir.join("stdout.log");
+
+        let output = Command::new(env::current_exe().expect("current test executable"))
+            .arg("--exact")
+            .arg("stream_redirect::tests::stream_redirect_child_restores_stdout_after_drop")
+            .arg("--nocapture")
+            .env("AFDATA_STREAM_REDIRECT_RESTORE_CHILD", "1")
+            .env("AFDATA_STREAM_REDIRECT_STDOUT", &stdout_file)
+            .output()
+            .expect("run child test process");
+        assert!(
+            output.status.success(),
+            "child test process failed: status={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert_eq!(
+            fs::read_to_string(&stdout_file).expect("read stdout file"),
+            "redirected before drop\n"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("stdout after restore\n"),
+            "restored stdout should reach parent capture: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_reports_existing_redirect_and_recovers_after_drop_in_child_process() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let dir = env::temp_dir().join(format!(
+            "afdata-stream-redirect-reinstall-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create temp directory");
+        let stdout_file = dir.join("stdout.log");
+        let stderr_file = dir.join("stderr.log");
+
+        let output = Command::new(env::current_exe().expect("current test executable"))
+            .arg("--exact")
+            .arg("stream_redirect::tests::stream_redirect_child_reinstalls_after_drop")
+            .arg("--nocapture")
+            .env("AFDATA_STREAM_REDIRECT_REINSTALL_CHILD", "1")
+            .env("AFDATA_STREAM_REDIRECT_STDOUT", &stdout_file)
+            .env("AFDATA_STREAM_REDIRECT_STDERR", &stderr_file)
+            .output()
+            .expect("run child test process");
+        assert!(
+            output.status.success(),
+            "child test process failed: status={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert_eq!(
+            fs::read_to_string(&stdout_file).expect("read stdout file"),
+            "first redirect still usable\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&stderr_file).expect("read stderr file"),
+            "stderr after reinstall\n"
         );
         let _ = fs::remove_dir_all(dir);
     }
@@ -490,5 +656,61 @@ mod tests {
         io::stderr()
             .write_all(b"stderr bytes\n")
             .expect("write stderr bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stream_redirect_child_restores_stdout_after_drop() {
+        if env::var_os("AFDATA_STREAM_REDIRECT_RESTORE_CHILD").is_none() {
+            return;
+        }
+        let stdout_file =
+            PathBuf::from(env::var_os("AFDATA_STREAM_REDIRECT_STDOUT").expect("stdout path"));
+        let redirect = install_from_cli_args(Some(stdout_file), None::<PathBuf>)
+            .expect("install stream redirect")
+            .expect("stream redirect enabled");
+        io::stdout()
+            .write_all(b"redirected before drop\n")
+            .expect("write redirected stdout bytes");
+        drop(redirect);
+        io::stdout()
+            .write_all(b"stdout after restore\n")
+            .expect("write restored stdout bytes");
+        io::stdout().flush().expect("flush restored stdout");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stream_redirect_child_reinstalls_after_drop() {
+        if env::var_os("AFDATA_STREAM_REDIRECT_REINSTALL_CHILD").is_none() {
+            return;
+        }
+        let stdout_file =
+            PathBuf::from(env::var_os("AFDATA_STREAM_REDIRECT_STDOUT").expect("stdout path"));
+        let stderr_file =
+            PathBuf::from(env::var_os("AFDATA_STREAM_REDIRECT_STDERR").expect("stderr path"));
+        let first = install_from_cli_args(Some(stdout_file), None::<PathBuf>)
+            .expect("install first stream redirect")
+            .expect("first stream redirect enabled");
+        io::stdout()
+            .write_all(b"first redirect still usable\n")
+            .expect("write first redirected stdout bytes");
+
+        let err = install_from_cli_args(None::<PathBuf>, Some(stderr_file.clone()))
+            .expect_err("second install must report an active redirect");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert!(
+            err.to_string().contains("already installed"),
+            "unexpected error message: {err}"
+        );
+
+        drop(first);
+        let second = install_from_cli_args(None::<PathBuf>, Some(stderr_file))
+            .expect("install second stream redirect after drop")
+            .expect("second stream redirect enabled");
+        io::stderr()
+            .write_all(b"stderr after reinstall\n")
+            .expect("write reinstalled stderr bytes");
+        drop(second);
     }
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import sys
 from dataclasses import dataclass
 from typing import Sequence
@@ -136,13 +137,26 @@ class _PreparedTarget:
 def _prepare_target(target_fd: int, path: str | None) -> _PreparedTarget | None:
     if path is None:
         return None
-    file_fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o666)
+    file_fd = _open_append_secure(path)
     try:
         restore_fd = os.dup(target_fd)
     except Exception:
         os.close(file_fd)
         raise
     return _PreparedTarget(file_fd=file_fd, restore_fd=restore_fd)
+
+
+def _open_append_secure(path: str) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_APPEND | nofollow, 0o600)
+    if stat.S_ISLNK(info.st_mode):
+        raise OSError("stream redirection target must not be a symbolic link")
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("stream redirection target must be a regular file")
+    return os.open(path, os.O_WRONLY | os.O_APPEND | nofollow)
 
 
 def _close_prepared(target: _PreparedTarget | None) -> None:

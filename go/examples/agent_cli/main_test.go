@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -14,7 +18,10 @@ func TestRootHelpIsOneLevel(t *testing.T) {
 			t.Errorf("root --help missing %q", want)
 		}
 	}
-	for _, notWant := range []string{"--help-all", "--dry-run", "--host"} {
+	if !containsStr(help, "AFDATA: "+afdata.Version) {
+		t.Errorf("root --help missing AFDATA version")
+	}
+	for _, notWant := range []string{"--help-all", "--dry-run", "--host", "--stream", "--result-only"} {
 		if containsStr(help, notWant) {
 			t.Errorf("root --help should not include %q", notWant)
 		}
@@ -68,6 +75,10 @@ func TestHelpSchemaIsRecursiveExport(t *testing.T) {
 	schema := helpSchema("", "recursive")
 	if schema["code"] != "help" || schema["scope"] != "recursive" {
 		t.Fatalf("unexpected help schema header: %v", schema)
+	}
+	versions, ok := schema["versions"].(map[string]any)
+	if !ok || versions["afdata"] != afdata.Version {
+		t.Fatalf("help schema must include only the AFDATA version: %v", schema["versions"])
 	}
 	commands, ok := schema["commands"].([]map[string]any)
 	if !ok || len(commands) == 0 {
@@ -136,6 +147,57 @@ func TestHelpAlwaysDocumentsFormats(t *testing.T) {
 	}
 }
 
+func TestHelpRedactsSecretDefaults(t *testing.T) {
+	secretDefault, redactionMarker := securityHelpDefaultCase(t)
+	if secretDefault != helpDefaultAPIKeySecret {
+		t.Fatalf("fixture default must match example default: %q", secretDefault)
+	}
+	if redactionMarker != "***" {
+		t.Fatalf("fixture expected marker must match help redaction: %q", redactionMarker)
+	}
+	rendered := []string{
+		formatRootHelp(true),
+		formatMarkdownHelp("", false),
+		afdata.CliOutput(helpSchema("", "one_level"), afdata.OutputFormatJson),
+		afdata.CliOutput(helpSchema("", "one_level"), afdata.OutputFormatYaml),
+	}
+	for _, text := range rendered {
+		if !containsStr(text, redactionMarker) {
+			t.Errorf("help output must contain redaction marker:\n%s", text)
+		}
+		if containsStr(text, secretDefault) {
+			t.Errorf("help output leaked secret default:\n%s", text)
+		}
+	}
+}
+
+func securityHelpDefaultCase(t *testing.T) (string, string) {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate test file")
+	}
+	path := filepath.Join(filepath.Dir(file), "..", "..", "..", "spec", "fixtures", "security.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read security fixture: %v", err)
+	}
+	var fixture struct {
+		HelpDefaultCases []struct {
+			Default  string `json:"default"`
+			Expected string `json:"expected"`
+		} `json:"help_default_cases"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatalf("parse security fixture: %v", err)
+	}
+	if len(fixture.HelpDefaultCases) == 0 {
+		t.Fatal("security fixture has no help_default_cases")
+	}
+	helpCase := fixture.HelpDefaultCases[0]
+	return helpCase.Default, helpCase.Expected
+}
+
 // Token economy: a recursive dump documents the modifiers once (at the root),
 // never repeating the leaf "Global options" note per descendant.
 func TestRecursiveDumpsDoNotRepeatGlobalOptions(t *testing.T) {
@@ -151,18 +213,69 @@ func containsStr(s, sub string) bool {
 	return len(s) > 0 && len(sub) > 0 && strings.Contains(s, sub)
 }
 
+func TestOutputFlagMissing(t *testing.T) {
+	for _, args := range [][]string{
+		{"--output"},
+		{"--output", "--json"},
+		{"--output="},
+	} {
+		if !outputFlagMissing(args) {
+			t.Fatalf("outputFlagMissing(%v) = false", args)
+		}
+	}
+	for _, args := range [][]string{
+		{"--output", "json"},
+		{"--output=json"},
+		{"--json"},
+	} {
+		if outputFlagMissing(args) {
+			t.Fatalf("outputFlagMissing(%v) = true", args)
+		}
+	}
+}
+
+func TestValidateStrictArgs(t *testing.T) {
+	valid := [][]string{
+		{"echo"},
+		{"echo", "--dry-run"},
+		{"ping", "--host", "example.com"},
+		{"skill", "status", "--agent", "opencode"},
+	}
+	for _, args := range valid {
+		if message, _ := validateStrictArgs(args); message != "" {
+			t.Fatalf("validateStrictArgs(%v) unexpected error: %s", args, message)
+		}
+	}
+	invalid := [][]string{
+		{"--bogus", "echo"},
+		{"--log"},
+		{"echo", "--host", "example.com"},
+		{"echo", "extra"},
+		{"ping", "extra"},
+		{"skill", "status", "extra"},
+	}
+	for _, args := range invalid {
+		if message, _ := validateStrictArgs(args); message == "" {
+			t.Fatalf("validateStrictArgs(%v) unexpectedly passed", args)
+		}
+	}
+}
+
 func TestLogEnabledWildcards(t *testing.T) {
-	if logEnabled(nil, "startup") {
+	emptyFilters := afdata.CliParseLogFilters([]string{})
+	if logEnabled(emptyFilters, "startup") {
 		t.Error("empty filters must not enable startup")
 	}
-	if !logEnabled([]string{"startup"}, "startup") {
+	startupFilters := afdata.CliParseLogFilters([]string{"startup"})
+	if !logEnabled(startupFilters, "startup") {
 		t.Error("explicit startup must be enabled")
 	}
-	if logEnabled([]string{"startup"}, "request") {
+	if logEnabled(startupFilters, "request") {
 		t.Error("startup must not enable request")
 	}
 	for _, all := range []string{"all", "*"} {
-		if !logEnabled([]string{all}, "startup") || !logEnabled([]string{all}, "request") {
+		allFilters := afdata.CliParseLogFilters([]string{all})
+		if !logEnabled(allFilters, "startup") || !logEnabled(allFilters, "request") {
 			t.Errorf("%q must enable every category", all)
 		}
 	}
@@ -170,12 +283,84 @@ func TestLogEnabledWildcards(t *testing.T) {
 
 func TestLogLinesAreCategoryTagged(t *testing.T) {
 	req := buildRequestLog("")
-	if req["code"] != "log" || req["category"] != "request" || req["command"] != "none" {
+	reqPayload := req["log"].(map[string]any)
+	if req["kind"] != "log" || reqPayload["category"] != "request" || reqPayload["command"] != "none" {
 		t.Errorf("request log not tagged correctly: %v", req)
 	}
-	start := buildStartupLog()
-	if start["code"] != "log" || start["category"] != "startup" {
+	raw := []string{"--output", "yaml", "--log", "startup", "--api-key-secret", "sk-test", "ping"}
+	startupFilters := afdata.CliParseLogFilters([]string{"startup"})
+	start := buildStartupLog(raw, "ping", "yaml", startupFilters, false)
+	startPayload := start["log"].(map[string]any)
+	if start["kind"] != "log" || startPayload["category"] != "startup" {
 		t.Errorf("startup log not tagged correctly: %v", start)
+	}
+	// argv is now a []interface{} after RedactedValue conversion
+	// Note: RedactArgv was deleted in 0.16; argv redaction is no longer automatic
+	argvRaw, ok := startPayload["argv"].([]interface{})
+	if !ok {
+		t.Fatalf("argv not []interface{}: %#v", startPayload["argv"])
+	}
+	// Arguments are passed through as-is, not redacted (RedactArgv removed in 0.16)
+	argvExpected := []interface{}{"--output", "yaml", "--log", "startup", "--api-key-secret", "sk-test", "ping"}
+	if len(argvRaw) != len(argvExpected) {
+		t.Fatalf("argv length = %d, want %d: %v", len(argvRaw), len(argvExpected), argvRaw)
+	}
+	for i, expected := range argvExpected {
+		if argvRaw[i] != expected {
+			t.Errorf("argv[%d] = %q, want %q", i, argvRaw[i], expected)
+		}
+	}
+	parsed, ok := startPayload["parsed"].(map[string]any)
+	if !ok {
+		t.Fatalf("parsed missing: %v", startPayload["parsed"])
+	}
+	if parsed["command"] != "ping" || parsed["output"] != "yaml" || parsed["verbose"] != false {
+		t.Fatalf("unexpected parsed config: %v", parsed)
+	}
+	assertStringSlice(t, parsed["log"], []string{"startup"})
+	effective, ok := startPayload["effective_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("effective_config missing: %v", startPayload["effective_config"])
+	}
+	if effective["output"] != "yaml" {
+		t.Fatalf("unexpected effective_config: %v", effective)
+	}
+	assertStringSlice(t, effective["log"], []string{"startup"})
+	env, ok := startPayload["env"].([]map[string]any)
+	if !ok || len(env) != 1 {
+		t.Fatalf("unexpected env snapshot: %v", startPayload["env"])
+	}
+	if env[0]["key"] != pingHostEnv {
+		t.Fatalf("unexpected env key: %v", env[0])
+	}
+}
+
+func assertStringSlice(t *testing.T, got any, want []string) {
+	t.Helper()
+	// Handle both []string and []interface{} (from JSON unmarshaling)
+	var values []string
+	switch v := got.(type) {
+	case []string:
+		values = v
+	case []interface{}:
+		values = make([]string, len(v))
+		for i, item := range v {
+			s, ok := item.(string)
+			if !ok {
+				t.Fatalf("slice[%d] is not a string: %#v", i, item)
+			}
+			values[i] = s
+		}
+	default:
+		t.Fatalf("expected []string or []interface{}, got %T: %#v", got, got)
+	}
+	if len(values) != len(want) {
+		t.Fatalf("slice length = %d, want %d: %v", len(values), len(want), values)
+	}
+	for i := range values {
+		if values[i] != want[i] {
+			t.Fatalf("slice[%d] = %q, want %q: %v", i, values[i], want[i], values)
+		}
 	}
 }
 
@@ -189,15 +374,23 @@ func TestParseOutputAllVariants(t *testing.T) {
 
 func TestParseLogNormalizes(t *testing.T) {
 	got := afdata.CliParseLogFilters([]string{"Query", " ERROR ", "query"})
-	if len(got) != 2 || got[0] != "query" || got[1] != "error" {
-		t.Errorf("unexpected: %v", got)
+	if len(got.Values()) != 2 {
+		t.Errorf("unexpected number of filters: %v", got.Values())
+	}
+	if !got.Enabled("query") || !got.Enabled("error") {
+		t.Errorf("filters not working: %v", got.Values())
 	}
 }
 
 func TestBuildCliErrorStructure(t *testing.T) {
-	v := afdata.BuildCliError("bad flag", "")
-	if v["code"] != "error" {
-		t.Errorf("code = %v", v["code"])
+	event, _ := afdata.BuildCLIError("bad flag", "")
+	v := event.Value()
+	if v["kind"] != "error" {
+		t.Errorf("kind = %v", v["kind"])
+	}
+	errPayload := v["error"].(map[string]any)
+	if errPayload["code"] != "cli_error" {
+		t.Errorf("error.code = %v", errPayload["code"])
 	}
 	if _, ok := v["retryable"]; ok {
 		t.Errorf("unexpected retryable = %v", v["retryable"])
@@ -205,37 +398,50 @@ func TestBuildCliErrorStructure(t *testing.T) {
 }
 
 func TestBuildCliErrorWithHint(t *testing.T) {
-	v := afdata.BuildCliError("unknown action: foo", "valid actions: echo, ping")
-	if v["code"] != "error" {
-		t.Errorf("code = %v", v["code"])
+	event, _ := afdata.BuildCLIError("unknown action: foo", "valid actions: echo, ping")
+	v := event.Value()
+	if v["kind"] != "error" {
+		t.Errorf("kind = %v", v["kind"])
 	}
-	if v["hint"] != "valid actions: echo, ping" {
-		t.Errorf("hint = %v", v["hint"])
+	errPayload := v["error"].(map[string]any)
+	if errPayload["code"] != "cli_error" {
+		t.Errorf("error.code = %v", errPayload["code"])
+	}
+	if errPayload["hint"] != "valid actions: echo, ping" {
+		t.Errorf("hint = %v", errPayload["hint"])
 	}
 }
 
 func TestBuildJsonErrorWithHint(t *testing.T) {
-	v := afdata.BuildJsonError("not configured", "set PING_HOST", nil)
-	if v["code"] != "error" {
-		t.Errorf("code = %v", v["code"])
+	event, _ := afdata.NewJSONError("not_configured", "not configured").Hint("set PING_HOST").Build()
+	v := event.Value()
+	if v["kind"] != "error" {
+		t.Errorf("kind = %v", v["kind"])
 	}
-	if v["error"] != "not configured" {
-		t.Errorf("error = %v", v["error"])
+	errPayload := v["error"].(map[string]any)
+	if errPayload["code"] != "not_configured" {
+		t.Errorf("error.code = %v", errPayload["code"])
 	}
-	if v["hint"] != "set PING_HOST" {
-		t.Errorf("hint = %v", v["hint"])
+	if errPayload["message"] != "not configured" {
+		t.Errorf("error.message = %v", errPayload["message"])
+	}
+	if errPayload["hint"] != "set PING_HOST" {
+		t.Errorf("hint = %v", errPayload["hint"])
 	}
 }
 
 func TestBuildJsonErrorWithoutHint(t *testing.T) {
-	v := afdata.BuildJsonError("something failed", "", nil)
-	if _, ok := v["hint"]; ok {
-		t.Errorf("hint should not be present, got %v", v["hint"])
+	event, _ := afdata.NewJSONError("failed", "something failed").Build()
+	v := event.Value()
+	errPayload := v["error"].(map[string]any)
+	if _, ok := errPayload["hint"]; ok {
+		t.Errorf("hint should not be present, got %v", errPayload["hint"])
 	}
 }
 
 func TestCliOutputAllFormats(t *testing.T) {
-	v := map[string]any{"code": "ok"}
+	event, _ := afdata.NewJSONResult(map[string]any{"ok": true}).Build()
+	v := event.Value()
 	for _, f := range []afdata.OutputFormat{afdata.OutputFormatJson, afdata.OutputFormatYaml, afdata.OutputFormatPlain} {
 		out := afdata.CliOutput(v, f)
 		if out == "" {
@@ -245,7 +451,8 @@ func TestCliOutputAllFormats(t *testing.T) {
 }
 
 func TestErrorRoundTripIsValidJsonl(t *testing.T) {
-	v := afdata.BuildCliError("oops", "")
+	event, _ := afdata.BuildCLIError("oops", "")
+	v := event.Value()
 	s := afdata.OutputJson(v)
 	if len(s) == 0 {
 		t.Error("empty json")

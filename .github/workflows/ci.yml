@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout
@@ -31,7 +31,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            rust -> target
+            . -> target
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -50,53 +50,6 @@ jobs:
           cache: npm
           cache-dependency-path: typescript/package-lock.json
 
-      - name: Install Python test deps
-        run: python -m pip install --upgrade pip pytest
-
-      - name: Install TypeScript deps
-        working-directory: typescript
-        run: |
-          npm install
-          npm install --no-save tsx
-
-      - name: Rust (fmt + clippy)
-        working-directory: rust
-        run: |
-          cargo fmt --all --check
-          cargo clippy --lib -- -D warnings
-          cargo clippy --lib --features skill-admin -- -D warnings
-
-      - name: Go (fmt + compile)
-        run: |
-          cd go
-          unformatted="$(find . -name '*.go' -type f -print0 | xargs -0 gofmt -l)"
-          if [ -n "$unformatted" ]; then echo "Go files need formatting:" >&2; printf '%s\n' "$unformatted" >&2; exit 1; fi
-          go test -run '^$' ./...
-
-      - name: Python (syntax)
-        run: cd python && python3 -m compileall agent_first_data examples tests >/dev/null
-
-      - name: TypeScript (typecheck)
-        run: cd typescript && npx tsc --noEmit
-
-      - name: Rust (tests)
-        working-directory: rust
-        run: |
-          cargo test --lib --tests
-          cargo test --lib --tests --features tracing
-          cargo test --lib --tests --features skill-admin
-          cargo test --all-features
-          cargo test --examples --features cli-help,cli-help-markdown
-          cargo test --examples --features cli-help,cli-help-markdown,skill-admin
-
-      - name: Go (tests)
-        run: cd go && go test -v ./...
-
-      - name: Python (tests)
-        run: cd python && PYTHONPATH=. python3 -m pytest tests/ examples/agent_cli.py -v
-
-      - name: TypeScript (tests)
-        working-directory: typescript
-        run: |
-          npx tsx --test src/*.test.ts
-          npx tsx --test examples/agent_cli.ts
+      - name: Fixed project checks
+        shell: bash
+        run: ./scripts/test.sh all

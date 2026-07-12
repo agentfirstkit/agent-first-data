@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { join } from "node:path";
-import { runSkillAdmin, SkillError, type SkillOptions, type SkillSpec } from "./index.js";
+import { runSkillAdmin, SkillError, type SkillOptions, type SkillSpec } from "./skill.js";
 
 const SKILL_SOURCE = "---\nname: agent-first-test\ndescription: test skill\n---\n\n# Body\n\nrules.\n";
 const SKILL_FILE_NAME = "SKILL.md";

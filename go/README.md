@@ -14,28 +14,28 @@ import (
 )
 
 func main() {
-    value := map[string]any{
-        "code": "ok",
-        "result": map[string]any{
-            "api_key_secret": "sk-123",
-            "latency_ms": 1280,
-            "db_url": "postgres://user:p@ss@db/app?token_secret=abc",
-        },
-    }
+    event, _ := afdata.NewJSONResult(map[string]any{
+        "api_key_secret": "sk-123",
+        "latency_ms": 1280,
+        "db_url": "postgres://user:p@ss@db/app?token_secret=abc",
+    }).Build()
+    value := event.Value()
 
     fmt.Println(afdata.OutputJson(value))
     fmt.Println(afdata.OutputPlain(value))
 }
 ```
 
-Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `RedactedValue`, `RedactSecretsInPlace`, `RedactURLSecrets`, `ParseSize`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, `CliHandleVersionOrContinue`, `ParseStreamRedirectArgs`, and `InstallStreamRedirectFromArgs`.
+Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `OutputOptionsForPolicy`, `RedactedValue`, `RedactURLSecrets`, `ParseSize`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, `CliHandleVersionOrContinue`, and `DecodeProtocolEvent`.
 
-Logging is available through the `log/slog` integration: `InitJson`, `InitPlain`, `InitYaml`, `InitJsonWithOptions`, `WithSpan`, and `LoggerFromContext`.
+Skill admin (`RunSkillAdmin`, `SkillSpec`, ...) lives in the `github.com/agentfirstkit/agent-first-data/go/skill` subpackage; stdout/stderr file redirection (`ParseStreamRedirectArgs`, `InstallStreamRedirectFromArgs`, ...) lives in `github.com/agentfirstkit/agent-first-data/go/streamredirect`.
+
+Scoped redaction and extra secret names use the `Redactor` struct:
 
 ```go
-afdata.InitJsonWithOptions(afdata.RedactionOptions{
-    SecretNames: []string{"authorization"},
-})
+r := afdata.Redactor{SecretNames: []string{"authorization"}}
+fmt.Println(afdata.OutputJson(r.Value(value)))
+fmt.Println(r.URL("https://api.example.com/?authorization=abc"))
 ```
 
 ## Behavior Notes
@@ -43,14 +43,14 @@ afdata.InitJsonWithOptions(afdata.RedactionOptions{
 - Default redaction replaces every `_secret` or configured secret-name subtree with `***`, including objects and arrays.
 - `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed and internal whitespace redacts the whole field.
 - YAML/plain quote and escape keys as well as values, sort by UTF-16 code unit order, and render nested objects in arrays as canonical JSON.
-- Logging records use `code: "log"` plus a separate `level` field, so error-level logs are not terminal protocol errors.
-- `build_cli_error(message, hint?)` returns `{code:"error", error: message, hint?}` only.
+- Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
+- `build_cli_error(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
 - Use `CliHandleVersionOrContinue()` before argument parsing so bare `--version` stays conventional and `--version --output json|yaml|plain` stays structured.
-- Use `InstallStreamRedirectFromArgs()` before version/help handling if a CLI exposes `--stdout-file` or `--stderr-file`; stderr is redirected as native diagnostics, not JSON.
+- Use `streamredirect.InstallStreamRedirectFromArgs()` before version/help handling if a CLI exposes `--stdout-file` or `--stderr-file`; stderr is redirected as native diagnostics, not JSON.
 
 ## Reference
 
 - Full convention and API groups: [docs/overview.md](https://github.com/agentfirstkit/agent-first-data/blob/main/docs/overview.md)
 - Formal cross-language contract: [spec/agent-first-data.md](https://github.com/agentfirstkit/agent-first-data/blob/main/spec/agent-first-data.md)
 - Conformance fixtures: [spec/fixtures](https://github.com/agentfirstkit/agent-first-data/tree/main/spec/fixtures)
-- Agent skill: [skills/agent-first-data.md](https://github.com/agentfirstkit/agent-first-data/blob/main/skills/agent-first-data.md)
+- Agent skill: [skills/agent-first-data/SKILL.md](https://github.com/agentfirstkit/agent-first-data/blob/main/skills/agent-first-data/SKILL.md)

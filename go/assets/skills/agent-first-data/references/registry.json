@@ -1,0 +1,260 @@
+{
+  "$schema": "https://agentfirstkit.org/schemas/agent-first-data/registry-v1.schema.json",
+  "schema_version": 1,
+  "name": "agent-first-data",
+  "description": "Machine-readable registry for Agent-First Data suffix semantics.",
+  "safe_integer": {
+    "minimum": -9007199254740991,
+    "maximum": 9007199254740991
+  },
+  "suffixes": [
+    {
+      "suffix": "_ns",
+      "category": "duration",
+      "json_types": ["number"],
+      "unit": "nanosecond",
+      "formatting": {"strip_key": true, "plain_yaml": "append_unit"},
+      "redaction": {"mode": "none"},
+      "constraints": {"number": true}
+    },
+    {
+      "suffix": "_us",
+      "category": "duration",
+      "json_types": ["number"],
+      "unit": "microsecond",
+      "formatting": {"strip_key": true, "plain_yaml": "append_unit"},
+      "redaction": {"mode": "none"},
+      "constraints": {"number": true}
+    },
+    {
+      "suffix": "_ms",
+      "category": "duration",
+      "json_types": ["number"],
+      "unit": "millisecond",
+      "formatting": {"strip_key": true, "plain_yaml": "duration_ms"},
+      "redaction": {"mode": "none"},
+      "constraints": {"number": true}
+    },
+    {
+      "suffix": "_s",
+      "category": "duration",
+      "json_types": ["number"],
+      "unit": "second",
+      "formatting": {"strip_key": true, "plain_yaml": "append_unit"},
+      "redaction": {"mode": "none"},
+      "constraints": {"number": true}
+    },
+    {
+      "suffix": "_minutes",
+      "category": "duration",
+      "json_types": ["number"],
+      "unit": "minute",
+      "formatting": {"strip_key": true, "plain_yaml": "append_unit_word"},
+      "redaction": {"mode": "none"},
+      "constraints": {"number": true}
+    },
+    {
+      "suffix": "_hours",
+      "category": "duration",
+      "json_types": ["number"],
+      "unit": "hour",
+      "formatting": {"strip_key": true, "plain_yaml": "append_unit_word"},
+      "redaction": {"mode": "none"},
+      "constraints": {"number": true}
+    },
+    {
+      "suffix": "_days",
+      "category": "duration",
+      "json_types": ["number"],
+      "unit": "day",
+      "formatting": {"strip_key": true, "plain_yaml": "append_unit_word"},
+      "redaction": {"mode": "none"},
+      "constraints": {"number": true}
+    },
+    {
+      "suffix": "_epoch_s",
+      "category": "timestamp",
+      "json_types": ["integer"],
+      "unit": "unix_epoch_second",
+      "formatting": {"strip_key": true, "plain_yaml": "rfc3339_datetime"},
+      "redaction": {"mode": "none"},
+      "constraints": {"integer": true}
+    },
+    {
+      "suffix": "_epoch_ms",
+      "category": "timestamp",
+      "json_types": ["integer"],
+      "unit": "unix_epoch_millisecond",
+      "formatting": {"strip_key": true, "plain_yaml": "rfc3339_datetime"},
+      "redaction": {"mode": "none"},
+      "constraints": {"integer": true}
+    },
+    {
+      "suffix": "_epoch_ns",
+      "category": "timestamp",
+      "json_types": ["string"],
+      "unit": "unix_epoch_nanosecond",
+      "formatting": {"strip_key": true, "plain_yaml": "rfc3339_datetime"},
+      "redaction": {"mode": "none"},
+      "constraints": {"decimal_integer_string": true}
+    },
+    {
+      "suffix": "_rfc3339",
+      "category": "timestamp",
+      "json_types": ["string"],
+      "unit": "rfc3339_datetime",
+      "formatting": {"strip_key": true, "plain_yaml": "pass_through"},
+      "redaction": {"mode": "none"},
+      "constraints": {"rfc3339_datetime": true}
+    },
+    {
+      "suffix": "_rfc3339_date",
+      "category": "strict_string",
+      "json_types": ["string"],
+      "unit": "rfc3339_full_date",
+      "formatting": {"strip_key": false, "plain_yaml": "pass_through"},
+      "redaction": {"mode": "none"},
+      "constraints": {"rfc3339_date": true}
+    },
+    {
+      "suffix": "_rfc3339_time",
+      "category": "strict_string",
+      "json_types": ["string"],
+      "unit": "rfc3339_partial_time",
+      "formatting": {"strip_key": false, "plain_yaml": "pass_through"},
+      "redaction": {"mode": "none"},
+      "constraints": {"rfc3339_time": true}
+    },
+    {
+      "suffix": "_bcp47",
+      "category": "strict_string",
+      "json_types": ["string"],
+      "unit": "bcp47_language_tag",
+      "formatting": {"strip_key": false, "plain_yaml": "pass_through"},
+      "redaction": {"mode": "none"},
+      "constraints": {"string": true}
+    },
+    {
+      "suffix": "_utc_offset",
+      "category": "strict_string",
+      "json_types": ["string"],
+      "unit": "fixed_utc_offset",
+      "formatting": {"strip_key": false, "plain_yaml": "pass_through"},
+      "redaction": {"mode": "none"},
+      "constraints": {"utc_offset": true}
+    },
+    {
+      "suffix": "_bytes",
+      "category": "size",
+      "json_types": ["integer"],
+      "unit": "byte",
+      "formatting": {"strip_key": true, "plain_yaml": "binary_size"},
+      "redaction": {"mode": "none"},
+      "constraints": {"integer": true, "minimum": 0}
+    },
+    {
+      "suffix": "_size",
+      "category": "size",
+      "json_types": ["string"],
+      "unit": "byte_size_input",
+      "formatting": {"strip_key": false, "plain_yaml": "pass_through"},
+      "redaction": {"mode": "none"},
+      "constraints": {"parse_size_units": ["B", "kB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB"]}
+    },
+    {
+      "suffix": "_percent",
+      "category": "ratio",
+      "json_types": ["number"],
+      "unit": "percent",
+      "formatting": {"strip_key": true, "plain_yaml": "append_percent"},
+      "redaction": {"mode": "none"},
+      "constraints": {"number": true}
+    },
+    {
+      "suffix": "_msats",
+      "category": "currency",
+      "json_types": ["integer", "string"],
+      "unit": "millisatoshi",
+      "formatting": {"strip_key": true, "plain_yaml": "append_unit"},
+      "redaction": {"mode": "none"},
+      "constraints": {"integer_or_decimal_integer_string": true}
+    },
+    {
+      "suffix": "_sats",
+      "category": "currency",
+      "json_types": ["integer", "string"],
+      "unit": "satoshi",
+      "formatting": {"strip_key": true, "plain_yaml": "append_unit"},
+      "redaction": {"mode": "none"},
+      "constraints": {"integer_or_decimal_integer_string": true}
+    },
+    {
+      "suffix": "_usd_cents",
+      "category": "currency",
+      "json_types": ["integer"],
+      "unit": "usd_cent",
+      "formatting": {"strip_key": true, "plain_yaml": "currency_minor_unit"},
+      "redaction": {"mode": "none"},
+      "constraints": {"integer": true}
+    },
+    {
+      "suffix": "_eur_cents",
+      "category": "currency",
+      "json_types": ["integer"],
+      "unit": "eur_cent",
+      "formatting": {"strip_key": true, "plain_yaml": "currency_minor_unit"},
+      "redaction": {"mode": "none"},
+      "constraints": {"integer": true}
+    },
+    {
+      "suffix": "_jpy",
+      "category": "currency",
+      "json_types": ["integer"],
+      "unit": "jpy",
+      "formatting": {"strip_key": true, "plain_yaml": "currency_major_unit"},
+      "redaction": {"mode": "none"},
+      "constraints": {"integer": true}
+    },
+    {
+      "suffix": "_{code}_cents",
+      "category": "currency",
+      "json_types": ["integer"],
+      "unit": "currency_minor_unit",
+      "formatting": {"strip_key": true, "plain_yaml": "currency_code_minor_unit"},
+      "redaction": {"mode": "none"},
+      "constraints": {"integer": true, "code_pattern": "^[A-Za-z]{3,4}$"}
+    },
+    {
+      "suffix": "_{code}_micro",
+      "category": "currency",
+      "json_types": ["integer"],
+      "unit": "currency_micro_unit",
+      "formatting": {"strip_key": true, "plain_yaml": "currency_code_micro_unit"},
+      "redaction": {"mode": "none"},
+      "constraints": {"integer": true, "code_pattern": "^[A-Za-z]{3,4}$"}
+    },
+    {
+      "suffix": "_secret",
+      "category": "sensitive",
+      "json_types": ["any"],
+      "unit": null,
+      "formatting": {"strip_key": true, "plain_yaml": "redacted"},
+      "redaction": {"mode": "whole_value", "marker": "***"},
+      "constraints": {"free_text_detection": false}
+    },
+    {
+      "suffix": "_url",
+      "category": "sensitive",
+      "json_types": ["string"],
+      "unit": "url",
+      "formatting": {"strip_key": false, "plain_yaml": "scrub_url"},
+      "redaction": {
+        "mode": "url_components",
+        "userinfo_password": true,
+        "query_param_secret_suffix": "_secret",
+        "marker": "***"
+      },
+      "constraints": {"single_url_string": true, "free_text_detection": false}
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "name": "complete_recommended_stream",
+    "valid": true,
+    "events": [
+      {"kind":"log","log":{"message":"starting","level":"info"},"trace":{}},
+      {"kind":"progress","progress":{"message":"working","current":1,"total":2},"trace":{}},
+      {"kind":"result","result":{"ok":true},"trace":{"duration_ms":2}}
+    ]
+  },
+  {
+    "name": "log_with_timestamp_extension",
+    "valid": true,
+    "events": [
+      {"kind":"log","log":{"message":"request","level":"info","timestamp_epoch_ms":1710000000000},"trace":{}},
+      {"kind":"result","result":{"ok":true},"trace":{}}
+    ]
+  },
+  {
+    "name": "error_with_retryable",
+    "valid": true,
+    "events": [
+      {"kind":"error","error":{"code":"network_error","message":"connection failed","retryable":true},"trace":{}}
+    ]
+  },
+  {
+    "name": "missing_terminal_trace",
+    "valid": false,
+    "events": [{"kind":"result","result":{"ok":true}}]
+  },
+  {
+    "name": "log_with_code_field",
+    "valid": false,
+    "events": [
+      {"kind":"log","log":{"code":"log","message":"starting","level":"info"},"trace":{}},
+      {"kind":"result","result":{},"trace":{}}
+    ]
+  },
+  {
+    "name": "incomplete_log_payload",
+    "valid": false,
+    "events": [
+      {"kind":"log","log":{"message":"starting"},"trace":{}},
+      {"kind":"result","result":{},"trace":{}}
+    ]
+  },
+  {
+    "name": "progress_without_message",
+    "valid": false,
+    "events": [
+      {"kind":"progress","progress":{"current":1},"trace":{}},
+      {"kind":"error","error":{"code":"failed","message":"failed","retryable":false},"trace":{}}
+    ]
+  },
+  {
+    "name": "error_without_retryable",
+    "valid": false,
+    "events": [
+      {"kind":"error","error":{"code":"failed","message":"failed"},"trace":{}}
+    ]
+  }
+]

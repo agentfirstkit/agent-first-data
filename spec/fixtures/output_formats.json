@@ -13,8 +13,8 @@
       "file_size_bytes": 5242880,
       "latency_ms": 1280
     },
-    "expected_yaml": "---\napi_key: \"***\"\ncreated_at: \"2025-02-07T00:00:00.000Z\"\nfile_size: \"5.0MB\"\nlatency: \"1.28s\"",
-    "expected_plain": "api_key=*** created_at=2025-02-07T00:00:00.000Z file_size=5.0MB latency=1.28s"
+    "expected_yaml": "---\napi_key: \"***\"\ncreated_at: \"2025-02-07T00:00:00.000Z\"\nfile_size: \"5.0MiB\"\nlatency: \"1.28s\"",
+    "expected_plain": "api_key=*** created_at=2025-02-07T00:00:00.000Z file_size=5.0MiB latency=1.28s"
   },
   {
     "name": "negative_ms_uses_abs_threshold",
@@ -45,15 +45,15 @@
   {
     "name": "negative_epoch_and_bytes_formatting",
     "input": {
-      "created_epoch_ns": -1,
+      "created_epoch_ns": "-1",
       "delta_bytes": -5242880
     },
     "expected_json": {
-      "created_epoch_ns": -1,
+      "created_epoch_ns": "-1",
       "delta_bytes": -5242880
     },
-    "expected_yaml": "---\ncreated: \"1969-12-31T23:59:59.999Z\"\ndelta: \"-5.0MB\"",
-    "expected_plain": "created=1969-12-31T23:59:59.999Z delta=-5.0MB"
+    "expected_yaml": "---\ncreated: \"1969-12-31T23:59:59.999Z\"\ndelta_bytes: -5242880",
+    "expected_plain": "created=1969-12-31T23:59:59.999Z delta_bytes=-5242880"
   },
   {
     "name": "type_fallthrough_keeps_original_keys",
@@ -121,8 +121,33 @@
       "timeout_s": 30.0,
       "balance_msats": 50000.0
     },
-    "expected_yaml": "---\nbalance: \"50000msats\"\ncpu: \"95%\"\nreserve: \"3 BTC\"\ntimeout: \"30s\"",
-    "expected_plain": "balance=50000msats cpu=95% reserve=\"3 BTC\" timeout=30s"
+    "expected_yaml": "---\nbalance: \"50000msats\"\ncpu: \"95%\"\nreserve_btc: 3\ntimeout: \"30s\"",
+    "expected_plain": "balance=50000msats cpu=95% reserve_btc=3 timeout=30s"
+  },
+  {
+    "name": "registry_suffix_coverage",
+    "input": {
+      "buffer_size": "10MiB",
+      "cached_epoch_s": 0,
+      "cert_days": 365,
+      "invoice_eur_cents": 12345,
+      "pause_ns": 450000,
+      "query_us": 830,
+      "timeout_minutes": 30,
+      "validity_hours": 24
+    },
+    "expected_json": {
+      "buffer_size": "10MiB",
+      "cached_epoch_s": 0,
+      "cert_days": 365,
+      "invoice_eur_cents": 12345,
+      "pause_ns": 450000,
+      "query_us": 830,
+      "timeout_minutes": 30,
+      "validity_hours": 24
+    },
+    "expected_yaml": "---\nbuffer_size: \"10MiB\"\ncached: \"1970-01-01T00:00:00.000Z\"\ncert: \"365 days\"\ninvoice: \"€123.45\"\npause: \"450000ns\"\nquery: \"830μs\"\ntimeout: \"30 minutes\"\nvalidity: \"24 hours\"",
+    "expected_plain": "buffer_size=10MiB cached=1970-01-01T00:00:00.000Z cert=\"365 days\" invoice=€123.45 pause=450000ns query=830μs timeout=\"30 minutes\" validity=\"24 hours\""
   },
   {
     "name": "integral_floats_satisfy_integer_required_suffixes",
@@ -138,8 +163,8 @@
       "fee_jpy": 1500.0,
       "created_at_epoch_ms": 1738886400000.0
     },
-    "expected_yaml": "---\ncreated_at: \"2025-02-07T00:00:00.000Z\"\nfee: \"\u00a51,500\"\nfile_size: \"5.0MB\"\nprice: \"$9.99\"",
-    "expected_plain": "created_at=2025-02-07T00:00:00.000Z fee=\u00a51,500 file_size=5.0MB price=$9.99"
+    "expected_yaml": "---\ncreated_at: \"2025-02-07T00:00:00.000Z\"\nfee: \"\u00a51,500\"\nfile_size: \"5.0MiB\"\nprice: \"$9.99\"",
+    "expected_plain": "created_at=2025-02-07T00:00:00.000Z fee=\u00a51,500 file_size=5.0MiB price=$9.99"
   },
   {
     "name": "fractional_floats_render_shortest_round_trip",
@@ -151,8 +176,8 @@
       "ratio_percent": 99.9,
       "amount_btc": 0.5
     },
-    "expected_yaml": "---\namount: \"0.5 BTC\"\nratio: \"99.9%\"",
-    "expected_plain": "amount=\"0.5 BTC\" ratio=99.9%"
+    "expected_yaml": "---\namount_btc: 0.5\nratio: \"99.9%\"",
+    "expected_plain": "amount_btc=0.5 ratio=99.9%"
   },
   {
     "name": "bytes_round_half_to_even",
@@ -166,8 +191,8 @@
       "b_bytes": 3328,
       "c_bytes": 1310720
     },
-    "expected_yaml": "---\na: \"1.2KB\"\nb: \"3.2KB\"\nc: \"1.2MB\"",
-    "expected_plain": "a=1.2KB b=3.2KB c=1.2MB"
+    "expected_yaml": "---\na: \"1.2KiB\"\nb: \"3.2KiB\"\nc: \"1.2MiB\"",
+    "expected_plain": "a=1.2KiB b=3.2KiB c=1.2MiB"
   },
   {
     "name": "strict_string_suffixes_pass_through",
@@ -209,6 +234,30 @@
     },
     "expected_yaml": "---\nbad_date_rfc3339_date: 20260613\nbad_time_rfc3339_time: false",
     "expected_plain": "bad_date_rfc3339_date=20260613 bad_time_rfc3339_time=false"
+  },
+  {
+    "name": "epoch_ns_decimal_string_current_era",
+    "input": {
+      "created_epoch_ns": "1707868800000000000"
+    },
+    "expected_json": {
+      "created_epoch_ns": "1707868800000000000"
+    },
+    "expected_yaml": "---\ncreated: \"2024-02-14T00:00:00.000Z\"",
+    "expected_plain": "created=2024-02-14T00:00:00.000Z"
+  },
+  {
+    "name": "bitcoin_units_accept_decimal_integer_strings",
+    "input": {
+      "balance_msats": "9007199254740993",
+      "withdrawn_sats": "9007199254740993"
+    },
+    "expected_json": {
+      "balance_msats": "9007199254740993",
+      "withdrawn_sats": "9007199254740993"
+    },
+    "expected_yaml": "---\nbalance: \"9007199254740993msats\"\nwithdrawn: \"9007199254740993sats\"",
+    "expected_plain": "balance=9007199254740993msats withdrawn=9007199254740993sats"
   },
   {
     "name": "container_secret_collision_never_leaks",
@@ -303,6 +352,32 @@
     },
     "expected_yaml": "---\nfare: \"150.50 THB\"\ntotal_amount_cents: 15050",
     "expected_plain": "fare=\"150.50 THB\" total_amount_cents=15050"
+  },
+  {
+    "name": "currency_micro",
+    "input": {
+      "cost_usd_micro": 170000,
+      "price_cny_micro": 5000000
+    },
+    "expected_json": {
+      "cost_usd_micro": 170000,
+      "price_cny_micro": 5000000
+    },
+    "expected_yaml": "---\ncost: \"0.170000 USD\"\nprice: \"5.000000 CNY\"",
+    "expected_plain": "cost=\"0.170000 USD\" price=\"5.000000 CNY\""
+  },
+  {
+    "name": "generic_micro_requires_currency_code",
+    "input": {
+      "fare_thb_micro": 15050,
+      "total_amount_micro": 15050
+    },
+    "expected_json": {
+      "fare_thb_micro": 15050,
+      "total_amount_micro": 15050
+    },
+    "expected_yaml": "---\nfare: \"0.015050 THB\"\ntotal_amount_micro: 15050",
+    "expected_plain": "fare=\"0.015050 THB\" total_amount_micro=15050"
   },
   {
     "name": "plain_quotes_vt_ff_nbsp",

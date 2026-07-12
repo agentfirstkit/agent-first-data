@@ -4,18 +4,16 @@ import os
 
 import pytest
 
-from agent_first_data import (
+from agent_first_data.skill import (
+    SKILL_FILE_NAME,
     SkillAction,
+    SkillAgent,
     SkillAgentSelection,
     SkillError,
     SkillOptions,
     SkillScope,
     SkillSpec,
     run_skill_admin,
-)
-from agent_first_data.skill import (
-    SKILL_FILE_NAME,
-    SkillAgent,
     _generated_by,
     _legacy_marker_block,
     _managed_marker_block,

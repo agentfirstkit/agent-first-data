@@ -3,7 +3,8 @@
     clippy::expect_used,
     clippy::panic,
     clippy::print_stdout,
-    clippy::print_stderr
+    clippy::print_stderr,
+    unused_imports
 )]
 
 // Minimal agent-first CLI — canonical pattern for tools built on agent-first-data.
@@ -30,12 +31,38 @@
 //       cargo test --examples --features cli-help,cli-help-markdown,skill-admin
 
 use agent_first_data::{
-    build_cli_error, build_json, build_json_error, build_json_ok, cli_output,
-    cli_parse_log_filters, cli_parse_output,
+    build_cli_error, cli_output, cli_parse_log_filters, cli_parse_output, json_error, json_result,
 };
 #[cfg(feature = "cli-help")]
 use clap::CommandFactory;
 use clap::{Parser, Subcommand};
+use std::io::Write;
+
+macro_rules! stdoutln {
+    ($($arg:tt)*) => {{
+        write_stdout_line_or_exit(&format!($($arg)*));
+    }};
+}
+
+macro_rules! stdout {
+    ($($arg:tt)*) => {{
+        write_stdout_or_exit(&format!($($arg)*));
+    }};
+}
+
+fn write_stdout_line_or_exit(line: &str) {
+    write_stdout_or_exit(&format!("{line}\n"));
+}
+
+fn write_stdout_or_exit(text: &str) {
+    let mut stdout = std::io::stdout().lock();
+    if let Err(err) = stdout.write_all(text.as_bytes()) {
+        if err.kind() == std::io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        std::process::exit(1);
+    }
+}
 
 const AGENT_CLI_HOST_ENV: &str = "AGENT_CLI_HOST";
 const STARTUP_ENV_KEYS: &[&str] = &[AGENT_CLI_HOST_ENV];
@@ -78,6 +105,10 @@ struct Cli {
     /// Output format: json (default), yaml, plain; help also accepts markdown
     #[arg(long, default_value = "json")]
     output: String,
+
+    /// Equivalent to --output json; conflicts with other explicit output formats
+    #[arg(long)]
+    json: bool,
 
     /// Log categories (comma-separated). Use `--log all` (or --verbose) to
     /// enable every category and discover them from the tagged output.
@@ -123,6 +154,8 @@ enum Command {
         #[arg(long, default_value = "5000")]
         timeout_ms: u64,
     },
+    /// Return a tool-defined cancellation error
+    Cancel,
     /// Manage this tool's embedded Agent Skill (Codex, Claude Code, opencode, Hermes)
     #[cfg(feature = "skill-admin")]
     Skill {
@@ -206,7 +239,7 @@ fn main() {
         match agent_first_data::stream_redirect::install_from_raw_args(raw.clone()) {
             Ok(installed) => installed,
             Err(err) => {
-                println!(
+                stdoutln!(
                     "{}",
                     agent_first_data::output_json(&build_cli_error(&err.to_string(), None))
                 );
@@ -221,12 +254,12 @@ fn main() {
         &agent_first_data::VersionConfig::conventional_default(),
     ) {
         Ok(Some(version)) => {
-            print!("{version}");
+            stdout!("{version}");
             std::process::exit(0);
         }
         Ok(None) => {}
         Err(err) => {
-            println!("{}", agent_first_data::output_json(&err));
+            stdoutln!("{}", agent_first_data::output_json(&err));
             std::process::exit(2);
         }
     }
@@ -240,12 +273,12 @@ fn main() {
             &agent_first_data::HelpConfig::human_cli_default(),
         ) {
             Ok(Some(help)) => {
-                print!("{help}");
+                stdout!("{help}");
                 std::process::exit(0);
             }
             Ok(None) => {}
             Err(err) => {
-                println!("{}", agent_first_data::output_json(&err));
+                stdoutln!("{}", agent_first_data::output_json(&err));
                 std::process::exit(2);
             }
         }
@@ -259,7 +292,7 @@ fn main() {
         ) {
             e.exit();
         }
-        println!(
+        stdoutln!(
             "{}",
             agent_first_data::output_json(&build_cli_error(
                 &e.to_string(),
@@ -271,9 +304,9 @@ fn main() {
     #[cfg(feature = "stream-redirect")]
     let _stream_redirect_args = (&cli.stdout_file, &cli.stderr_file);
 
-    // Parse --output and --log
-    let format = cli_parse_output(&cli.output).unwrap_or_else(|e| {
-        println!(
+    // Parse --output/--json and --log
+    let output = resolve_output(&cli.output, cli.json).unwrap_or_else(|e| {
+        stdoutln!(
             "{}",
             agent_first_data::output_json(&build_cli_error(
                 &e,
@@ -282,46 +315,68 @@ fn main() {
         );
         std::process::exit(2);
     });
-    let mut log = cli_parse_log_filters(&cli.log);
-    if cli.verbose {
+    let format = cli_parse_output(&output).unwrap_or_else(|e| {
+        stdoutln!(
+            "{}",
+            agent_first_data::output_json(&build_cli_error(
+                &e,
+                Some("valid values: json, yaml, plain"),
+            ))
+        );
+        std::process::exit(2);
+    });
+    let log = if cli.verbose {
         // --verbose is shorthand for --log all.
-        log.push("all".to_string());
-    }
+        let mut entries: Vec<String> = cli.log.clone();
+        entries.push("all".to_string());
+        cli_parse_log_filters(&entries)
+    } else {
+        cli_parse_log_filters(&cli.log)
+    };
 
     // Each diagnostic line self-tags with its `category`, so `--log all` reveals
     // the full set from real output rather than a static help list.
-    if log_enabled(&log, "request") {
-        println!(
+    if log.enabled("request") {
+        stdoutln!(
             "{}",
             cli_output(&build_request_log(cli.command.as_ref()), format)
         );
     }
-    if log_enabled(&log, "startup") {
-        println!("{}", cli_output(&build_startup_log(), format));
+    if log.enabled("startup") {
+        stdoutln!(
+            "{}",
+            cli_output(
+                &build_startup_log(cli.command.as_ref(), &output, &log, cli.verbose),
+                format
+            )
+        );
     }
 
     match cli.command {
         None => {
-            println!(
+            stdoutln!(
                 "{}",
-                agent_first_data::output_json(&build_cli_error(
-                    "no subcommand provided",
-                    Some("try: agent-cli --help"),
-                ))
+                cli_output(
+                    &build_cli_error("no subcommand provided", Some("try: agent-cli --help"),),
+                    format,
+                )
             );
             std::process::exit(2);
         }
         Some(Command::Config { action }) => match action {
             ConfigAction::Show => {
-                let result = build_json_ok(serde_json::json!({"action": "config_show"}), None);
-                println!("{}", cli_output(&result, format));
+                let result = json_result(serde_json::json!({"action": "config_show"}))
+                    .build()
+                    .expect("result builder failed");
+                stdoutln!("{}", cli_output(&result, format));
             }
             ConfigAction::Set { key, value } => {
-                let result = build_json_ok(
+                let result = json_result(
                     serde_json::json!({"action": "config_set", "key": key, "value": value}),
-                    None,
-                );
-                println!("{}", cli_output(&result, format));
+                )
+                .build()
+                .expect("result builder failed");
+                stdoutln!("{}", cli_output(&result, format));
             }
         },
         Some(Command::Service { action }) => match action {
@@ -329,37 +384,52 @@ fn main() {
                 port,
                 api_key_secret,
             } => {
-                let result = build_json_ok(
+                let result = json_result(
                     serde_json::json!({"action": "service_start", "port": port, "api_key_secret": api_key_secret}),
-                    None,
-                );
-                println!("{}", cli_output(&result, format));
+                )
+                .build()
+                .expect("result builder failed");
+                stdoutln!("{}", cli_output(&result, format));
             }
             ServiceAction::Stop => {
-                let result = build_json_ok(serde_json::json!({"action": "service_stop"}), None);
-                println!("{}", cli_output(&result, format));
+                let result = json_result(serde_json::json!({"action": "service_stop"}))
+                    .build()
+                    .expect("result builder failed");
+                stdoutln!("{}", cli_output(&result, format));
             }
             ServiceAction::Status => {
-                let result = build_json_ok(serde_json::json!({"action": "service_status"}), None);
-                println!("{}", cli_output(&result, format));
+                let result = json_result(serde_json::json!({"action": "service_status"}))
+                    .build()
+                    .expect("result builder failed");
+                stdoutln!("{}", cli_output(&result, format));
             }
         },
         Some(Command::Ping { host, timeout_ms }) => {
             let host = host.or_else(|| std::env::var(AGENT_CLI_HOST_ENV).ok());
             if host.is_none() {
-                let err = build_json_error(
-                    "ping target not configured",
-                    Some("pass --host or set AGENT_CLI_HOST"),
-                    Some(serde_json::json!({"duration_ms": 0})),
-                );
-                println!("{}", cli_output(&err, format));
+                let err = json_error("ping_target_not_configured", "ping target not configured")
+                    .hint("pass --host or set AGENT_CLI_HOST")
+                    .field("duration_ms", serde_json::json!(0))
+                    .build()
+                    .expect("error builder failed");
+                stdoutln!("{}", cli_output(&err, format));
                 std::process::exit(1);
             }
-            let result = build_json_ok(
+            let result = json_result(
                 serde_json::json!({"action": "ping", "host": host, "timeout_ms": timeout_ms}),
-                None,
-            );
-            println!("{}", cli_output(&result, format));
+            )
+            .build()
+            .expect("result builder failed");
+            stdoutln!("{}", cli_output(&result, format));
+        }
+        Some(Command::Cancel) => {
+            let err = json_error("cancelled", "operation cancelled")
+                .hint("the operation was cancelled before completion")
+                .field("duration_ms", serde_json::json!(0))
+                .build()
+                .expect("error builder failed");
+            stdoutln!("{}", cli_output(&err, format));
+            std::process::exit(1);
         }
         #[cfg(feature = "skill-admin")]
         Some(Command::Skill { action }) => {
@@ -368,46 +438,69 @@ fn main() {
     }
 }
 
-/// A diagnostic `category` is enabled when it is listed explicitly, or when the
-/// caller asked for everything via `all` / `*` (what `--verbose` expands to).
-fn log_enabled(filters: &[String], category: &str) -> bool {
-    filters
-        .iter()
-        .any(|f| f == category || f == "all" || f == "*")
-}
-
 fn command_label(command: Option<&Command>) -> &'static str {
     match command {
         None => "none",
         Some(Command::Config { .. }) => "config",
         Some(Command::Service { .. }) => "service",
         Some(Command::Ping { .. }) => "ping",
+        Some(Command::Cancel) => "cancel",
         #[cfg(feature = "skill-admin")]
         Some(Command::Skill { .. }) => "skill",
     }
 }
 
-fn build_request_log(command: Option<&Command>) -> serde_json::Value {
-    build_json(
-        "log",
-        serde_json::json!({
-            "category": "request",
-            "command": command_label(command),
-        }),
-        None,
-    )
+fn resolve_output(output: &str, json: bool) -> Result<String, String> {
+    if json && output != "json" {
+        return Err(format!(
+            "conflicting output formats: --json conflicts with --output {output}"
+        ));
+    }
+    if json {
+        Ok("json".to_string())
+    } else {
+        Ok(output.to_string())
+    }
 }
 
-fn build_startup_log() -> serde_json::Value {
-    build_json(
-        "log",
-        serde_json::json!({
-            "category": "startup",
-            "event": "startup",
-            "env": startup_env_snapshot(),
-        }),
-        None,
-    )
+fn build_request_log(command: Option<&Command>) -> serde_json::Value {
+    agent_first_data::json_log(agent_first_data::LogLevel::Info, "request")
+        .field("category", serde_json::json!("request"))
+        .field("command", serde_json::json!(command_label(command)))
+        .build()
+        .expect("request log builder failed")
+        .into_value()
+}
+
+fn build_startup_log(
+    command: Option<&Command>,
+    output: &str,
+    log: &agent_first_data::LogFilters,
+    verbose: bool,
+) -> serde_json::Value {
+    agent_first_data::json_log(agent_first_data::LogLevel::Info, "startup")
+        .field("category", serde_json::json!("startup"))
+        .field("event", serde_json::json!("startup"))
+        .field(
+            "parsed",
+            serde_json::json!({
+                "command": command_label(command),
+                "output": output,
+                "log": log.as_slice(),
+                "verbose": verbose,
+            }),
+        )
+        .field(
+            "effective_config",
+            serde_json::json!({
+                "output": output,
+                "log": log.as_slice(),
+            }),
+        )
+        .field("env", startup_env_snapshot())
+        .build()
+        .expect("startup log builder failed")
+        .into_value()
 }
 
 fn startup_env_snapshot() -> serde_json::Value {
@@ -418,6 +511,7 @@ fn startup_env_snapshot() -> serde_json::Value {
                 serde_json::json!({
                     "key": key,
                     "present": std::env::var_os(*key).is_some(),
+                    "value": std::env::var(*key).ok(),
                 })
             })
             .collect(),
@@ -437,7 +531,7 @@ fn run_skill(action: SkillCmd, format: agent_first_data::OutputFormat) -> i32 {
     let options = match build_skill_options(target, force) {
         Ok(options) => options,
         Err((message, hint)) => {
-            println!(
+            stdoutln!(
                 "{}",
                 cli_output(&build_cli_error(&message, Some(&hint)), format)
             );
@@ -447,11 +541,11 @@ fn run_skill(action: SkillCmd, format: agent_first_data::OutputFormat) -> i32 {
     match skill::run_skill_admin(&WIDGET_SPEC, verb, &options) {
         Ok(report) => match serde_json::to_value(&report) {
             Ok(value) => {
-                println!("{}", cli_output(&value, format));
+                stdoutln!("{}", cli_output(&value, format));
                 0
             }
             Err(e) => {
-                println!(
+                stdoutln!(
                     "{}",
                     cli_output(&build_cli_error(&e.to_string(), None), format)
                 );
@@ -459,7 +553,7 @@ fn run_skill(action: SkillCmd, format: agent_first_data::OutputFormat) -> i32 {
             }
         },
         Err(err) => {
-            println!(
+            stdoutln!(
                 "{}",
                 cli_output(&build_cli_error(&err.message, err.hint.as_deref()), format)
             );
@@ -486,7 +580,7 @@ fn build_skill_options(
             return Err((
                 format!("invalid --agent '{other}'"),
                 "valid values: all, codex, claude-code, opencode, hermes".to_string(),
-            ))
+            ));
         }
     };
     let scope = match target.scope.as_str() {
@@ -496,7 +590,7 @@ fn build_skill_options(
             return Err((
                 format!("invalid --scope '{other}'"),
                 "valid values: personal, workspace".to_string(),
-            ))
+            ));
         }
     };
     Ok(SkillOptions {
@@ -588,8 +682,20 @@ mod tests {
             "one-level help must include globals"
         );
         assert!(
+            help.contains(concat!("AFDATA: ", env!("CARGO_PKG_VERSION"))),
+            "one-level help must include AFDATA version"
+        );
+        assert!(
             !help.contains("--help-all"),
             "one-level help must not advertise removed recursive help flag"
+        );
+        assert!(
+            !help.contains("--stream"),
+            "one-level help must not advertise stream mode"
+        );
+        assert!(
+            !help.contains("--result-only"),
+            "one-level help must not advertise result-only mode"
         );
         assert!(
             !help.contains("config show"),
@@ -744,6 +850,58 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "cli-help")]
+    fn secret_default_help_command() -> clap::Command {
+        clap::Command::new("secret-defaults").arg(
+            clap::Arg::new("api_key_secret")
+                .long("api-key-secret")
+                .default_value("sk-help-default")
+                .help("API key default shown only as a redacted value"),
+        )
+    }
+
+    #[cfg(feature = "cli-help")]
+    fn security_help_default_case() -> serde_json::Value {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/spec/fixtures/security.json");
+        let data = std::fs::read_to_string(path).expect("read security fixture");
+        let fixture: serde_json::Value =
+            serde_json::from_str(&data).expect("parse security fixture");
+        fixture["help_default_cases"][0].clone()
+    }
+
+    #[cfg(feature = "cli-help")]
+    #[test]
+    fn help_redacts_secret_default_values_in_every_output() {
+        let help_case = security_help_default_case();
+        let default = help_case["default"].as_str().expect("fixture default");
+        let expected = help_case["expected"].as_str().expect("fixture expected");
+        assert_eq!(default, "sk-help-default");
+        assert_eq!(expected, "***");
+        for output in ["plain", "json", "yaml", "markdown"] {
+            let raw = vec![
+                "secret-defaults".to_string(),
+                "--help".to_string(),
+                "--output".to_string(),
+                output.to_string(),
+            ];
+            let help = agent_first_data::cli_handle_help_or_continue(
+                &raw,
+                &secret_default_help_command(),
+                &agent_first_data::HelpConfig::human_cli_default(),
+            )
+            .expect("valid help request")
+            .unwrap_or_else(|| panic!("help should render for --output {output}"));
+            assert!(
+                help.contains(expected),
+                "--help --output {output} must show the redaction marker:\n{help}"
+            );
+            assert!(
+                !help.contains(default),
+                "--help --output {output} must not leak secret defaults:\n{help}"
+            );
         }
     }
 
@@ -1074,11 +1232,83 @@ mod tests {
             &agent_first_data::HelpConfig::human_cli_default(),
         )
         .expect_err("invalid help output must return error");
-        assert_eq!(err["code"], "error");
+        assert_eq!(err["kind"], "error");
+        assert_eq!(err["error"]["code"], "cli_error");
         assert!(
-            err["error"].as_str().is_some_and(|s| s.contains("xml")),
+            err["error"]["message"]
+                .as_str()
+                .is_some_and(|s| s.contains("xml")),
             "error should mention invalid value: {err}"
         );
+    }
+
+    #[cfg(feature = "cli-help")]
+    #[test]
+    fn help_handler_protocol_v1_json_wraps_help_schema() {
+        let cmd = Cli::command();
+        let raw = vec![
+            "agent-cli".to_string(),
+            "--help".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ];
+        let help = agent_first_data::cli_handle_help_or_continue(
+            &raw,
+            &cmd,
+            &agent_first_data::HelpConfig::human_cli_default().with_protocol_v1(),
+        )
+        .expect("valid help request")
+        .expect("json help should render");
+        let event: serde_json::Value = serde_json::from_str(help.trim()).expect("json event");
+        assert_eq!(event["kind"], "result");
+        assert_eq!(event["result"]["code"], "help");
+        assert!(event["result"]["help"].is_object());
+        assert_eq!(event["trace"], serde_json::json!({}));
+        agent_first_data::validate_protocol_event(&event, true).expect("strict event");
+    }
+
+    #[cfg(feature = "cli-help")]
+    #[test]
+    fn help_handler_protocol_v1_yaml_wraps_help_schema() {
+        let cmd = Cli::command();
+        let raw = vec![
+            "agent-cli".to_string(),
+            "--help".to_string(),
+            "--output".to_string(),
+            "yaml".to_string(),
+        ];
+        let help = agent_first_data::cli_handle_help_or_continue(
+            &raw,
+            &cmd,
+            &agent_first_data::HelpConfig::human_cli_default().with_protocol_v1(),
+        )
+        .expect("valid help request")
+        .expect("yaml help should render");
+        assert!(help.contains("kind: \"result\""), "{help}");
+        assert!(help.contains("code: \"help\""), "{help}");
+        assert!(help.contains("trace: {}"), "{help}");
+    }
+
+    #[cfg(feature = "cli-help")]
+    #[test]
+    fn help_handler_protocol_v1_invalid_format_has_trace() {
+        let cmd = Cli::command();
+        let raw = vec![
+            "agent-cli".to_string(),
+            "--help".to_string(),
+            "--output".to_string(),
+            "xml".to_string(),
+        ];
+        let event = agent_first_data::cli_handle_help_or_continue(
+            &raw,
+            &cmd,
+            &agent_first_data::HelpConfig::human_cli_default().with_protocol_v1(),
+        )
+        .expect_err("invalid help output must fail");
+        assert_eq!(event["kind"], "error");
+        assert_eq!(event["error"]["code"], "cli_error");
+        assert_eq!(event["trace"], serde_json::json!({}));
+        agent_first_data::validate_protocol_event(&event, true).expect("strict event");
     }
 
     #[cfg(feature = "cli-help")]
@@ -1096,9 +1326,10 @@ mod tests {
             &agent_first_data::HelpConfig::human_cli_default(),
         )
         .expect_err("missing help output value must return error");
-        assert_eq!(err["code"], "error");
+        assert_eq!(err["kind"], "error");
+        assert_eq!(err["error"]["code"], "cli_error");
         assert!(
-            err["error"]
+            err["error"]["message"]
                 .as_str()
                 .is_some_and(|s| s.contains("missing value")),
             "error should mention missing value: {err}"
@@ -1120,9 +1351,10 @@ mod tests {
             &agent_first_data::HelpConfig::human_cli_default(),
         )
         .expect_err("missing help output value must return error");
-        assert_eq!(err["code"], "error");
+        assert_eq!(err["kind"], "error");
+        assert_eq!(err["error"]["code"], "cli_error");
         assert!(
-            err["error"]
+            err["error"]["message"]
                 .as_str()
                 .is_some_and(|s| s.contains("missing value")),
             "error should mention missing value: {err}"
@@ -1315,6 +1547,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("help json must parse");
         assert_eq!(parsed["code"], "help");
         assert_eq!(parsed["scope"], "one_level");
+        assert_eq!(parsed["versions"]["afdata"], env!("CARGO_PKG_VERSION"));
         assert_eq!(parsed["name"], env!("DISPLAY_NAME"));
         assert_eq!(parsed["subcommands"][0]["arguments"], serde_json::json!([]));
     }
@@ -1341,6 +1574,10 @@ mod tests {
             "yaml help must include recursive scope"
         );
         assert!(
+            yaml.contains("versions:") && yaml.contains("afdata:"),
+            "yaml help must include the AFDATA version"
+        );
+        assert!(
             yaml.contains("api_key_secret"),
             "raw help schema must preserve secret-like argument ids"
         );
@@ -1357,101 +1594,134 @@ mod tests {
     }
 
     #[test]
+    fn json_alias_resolves_to_json_output() {
+        assert_eq!(resolve_output("json", true).expect("json alias"), "json");
+    }
+
+    #[test]
+    fn json_alias_conflicts_with_other_output_formats() {
+        let err = resolve_output("yaml", true).expect_err("json/yaml conflict");
+        assert!(err.contains("conflicting output formats"));
+    }
+
+    #[test]
     fn parse_log_normalizes() {
         let f = cli_parse_log_filters(&["Startup", " REQUEST ", "startup"]);
-        assert_eq!(f, vec!["startup", "request"]);
+        assert_eq!(f.as_slice(), &["startup", "request"]);
     }
 
     #[test]
     fn log_filter_is_explicit_with_wildcards() {
-        assert!(!log_enabled(
-            &cli_parse_log_filters::<String>(&[]),
-            "startup"
-        ));
-        assert!(!log_enabled(
-            &cli_parse_log_filters(&["query.result"]),
-            "startup"
-        ));
-        assert!(log_enabled(&cli_parse_log_filters(&["startup"]), "startup"));
+        assert!(!cli_parse_log_filters::<String>(&[]).enabled("startup"));
+        assert!(!cli_parse_log_filters(&["query.result"]).enabled("startup"));
+        assert!(cli_parse_log_filters(&["startup"]).enabled("startup"));
         // `all` / `*` enable every category, including ones not named.
-        assert!(log_enabled(&cli_parse_log_filters(&["all"]), "startup"));
-        assert!(log_enabled(&cli_parse_log_filters(&["all"]), "request"));
-        assert!(log_enabled(&cli_parse_log_filters(&["*"]), "request"));
+        assert!(cli_parse_log_filters(&["all"]).enabled("startup"));
+        assert!(cli_parse_log_filters(&["all"]).enabled("request"));
+        assert!(cli_parse_log_filters(&["*"]).enabled("request"));
         // an explicit, unrelated category does not enable a different one.
-        assert!(!log_enabled(
-            &cli_parse_log_filters(&["startup"]),
-            "request"
-        ));
+        assert!(!cli_parse_log_filters(&["startup"]).enabled("request"));
     }
 
     #[test]
     fn request_log_is_category_tagged() {
         let v = build_request_log(None);
-        assert_eq!(v["code"], "log");
-        assert_eq!(v["category"], "request");
-        assert_eq!(v["command"], "none");
+        assert_eq!(v["kind"], "log");
+        assert_eq!(v["log"]["category"], "request");
+        assert_eq!(v["log"]["command"], "none");
     }
 
     #[test]
-    fn startup_log_contains_only_env_presence() {
-        let v = build_startup_log();
-        assert_eq!(v["code"], "log");
-        assert_eq!(v["category"], "startup");
-        assert_eq!(v["event"], "startup");
-        assert!(v.get("args").is_none());
-        assert!(v.get("mode").is_none());
-        assert!(v.get("command").is_none());
+    fn startup_log_contains_parsed_config_and_scoped_env() {
+        let log = cli_parse_log_filters(&["startup"]);
+        let command = Command::Ping {
+            host: Some("example.com".to_string()),
+            timeout_ms: 5000,
+        };
+        let v = build_startup_log(Some(&command), "yaml", &log, false);
+        assert_eq!(v["kind"], "log");
+        assert_eq!(v["log"]["category"], "startup");
+        assert_eq!(v["log"]["event"], "startup");
+        assert_eq!(
+            v["log"]["parsed"],
+            serde_json::json!({
+                "command": "ping",
+                "output": "yaml",
+                "log": ["startup"],
+                "verbose": false,
+            })
+        );
+        assert_eq!(
+            v["log"]["effective_config"],
+            serde_json::json!({
+                "output": "yaml",
+                "log": ["startup"],
+            })
+        );
 
-        let env = v["env"].as_array().expect("env must be an array");
+        let env = v["log"]["env"].as_array().expect("env must be an array");
         let host = env
             .iter()
             .find(|entry| entry["key"] == AGENT_CLI_HOST_ENV)
             .expect("startup env must include exact AGENT_CLI_HOST key");
         assert!(host["present"].is_boolean());
-        assert!(host.get("value").is_none());
+        if std::env::var_os(AGENT_CLI_HOST_ENV).is_some() {
+            assert!(host["value"].is_string());
+        } else {
+            assert!(host["value"].is_null());
+        }
     }
 
     #[test]
     fn build_cli_error_structure() {
         let v = build_cli_error("--output: invalid value 'xml'", None);
-        assert_eq!(v["code"], "error");
-        assert_eq!(v["error"], "--output: invalid value 'xml'");
+        assert_eq!(v["kind"], "error");
+        assert_eq!(v["error"]["code"], "cli_error");
+        assert_eq!(v["error"]["message"], "--output: invalid value 'xml'");
         assert!(v.get("error_code").is_none());
         assert!(v.get("retryable").is_none());
-        assert!(v.get("trace").is_none());
+        assert!(v["trace"].is_object());
     }
 
     #[test]
     fn build_cli_error_with_hint() {
         let v = build_cli_error("unknown action: foo", Some("valid actions: echo, ping"));
-        assert_eq!(v["code"], "error");
-        assert_eq!(v["hint"], "valid actions: echo, ping");
+        assert_eq!(v["kind"], "error");
+        assert_eq!(v["error"]["hint"], "valid actions: echo, ping");
     }
 
     #[test]
-    fn build_json_error_with_hint() {
-        let v = build_json_error("not configured", Some("set PING_HOST"), None);
-        assert_eq!(v["code"], "error");
-        assert_eq!(v["error"], "not configured");
-        assert_eq!(v["hint"], "set PING_HOST");
+    fn json_error_with_hint() {
+        let v = json_error("not_configured", "not configured")
+            .hint("set PING_HOST")
+            .build()
+            .expect("error builder failed");
+        assert_eq!(v["kind"], "error");
+        assert_eq!(v["error"]["code"], "not_configured");
+        assert_eq!(v["error"]["message"], "not configured");
+        assert_eq!(v["error"]["hint"], "set PING_HOST");
     }
 
     #[test]
-    fn build_json_error_without_hint_has_no_hint_key() {
-        let v = build_json_error("something failed", None, None);
-        assert!(v.get("hint").is_none());
+    fn json_error_without_hint_has_no_hint_key() {
+        let v = json_error("failed", "something failed")
+            .build()
+            .expect("error builder failed");
+        assert!(v["error"].get("hint").is_none());
     }
 
     #[test]
     fn cli_output_all_formats_compile_and_run() {
-        let v = serde_json::json!({"code": "ok"});
+        let v = json_result(serde_json::json!({"ok": true}))
+            .build()
+            .expect("result builder failed");
         let json_out = cli_output(&v, OutputFormat::Json);
         let yaml_out = cli_output(&v, OutputFormat::Yaml);
         let plain_out = cli_output(&v, OutputFormat::Plain);
 
-        assert!(json_out.contains("\"code\""));
+        assert!(json_out.contains("\"kind\""));
         assert!(yaml_out.starts_with("---"));
-        assert!(plain_out.contains("code=ok"));
+        assert!(plain_out.contains("kind=result"));
     }
 
     #[test]
@@ -1460,7 +1730,8 @@ mod tests {
         let line = agent_first_data::output_json(&err);
         let parsed: serde_json::Value =
             serde_json::from_str(&line).unwrap_or(serde_json::Value::Null);
-        assert_eq!(parsed["code"], "error");
+        assert_eq!(parsed["kind"], "error");
+        assert_eq!(parsed["error"]["code"], "cli_error");
         assert!(!line.contains('\n'));
     }
 
@@ -1470,7 +1741,7 @@ mod tests {
     mod skill {
         use super::*;
         use agent_first_data::skill::{
-            run_skill_admin, SkillAction, SkillAgentSelection, SkillOptions, SkillScope,
+            SkillAction, SkillAgentSelection, SkillOptions, SkillScope, run_skill_admin,
         };
         use std::path::PathBuf;
         use std::time::{SystemTime, UNIX_EPOCH};

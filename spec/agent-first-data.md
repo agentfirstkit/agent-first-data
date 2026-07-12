@@ -24,8 +24,8 @@ Agent-First Data has three parts:
 |:---------|:---------|:-------------------|
 | **Duration** | `_ns`, `_us`, `_ms`, `_s`, `_minutes`, `_hours`, `_days` | `latency_ms: 1280` → `latency: 1.28s` |
 | **Timestamps** | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` | `created_at_epoch_ms: 1707868800000` → `created_at: 2024-02-14T...` |
-| **Size** | `_bytes` (output), `_size` (config input) | `file_size_bytes: 5242880` → `file_size: 5.0MB` |
-| **Currency** | `_msats`, `_sats`, `_btc`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents` | `price_usd_cents: 999` → `price: $9.99` |
+| **Size** | `_bytes` (output), `_size` (config input) | `file_size_bytes: 5242880` → `file_size: 5.0MiB` |
+| **Currency** | `_msats`, `_sats`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents`, `_{code}_micro` | `price_usd_cents: 999` → `price: $9.99` |
 | **String formats** | `_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time` | `language_bcp47: "zh-CN"`, `invoice_due_rfc3339_date: "2026-06-13"` |
 | **Other** | `_percent`, `_secret`, `_url` | `cpu_percent: 85` → `cpu: 85%` |
 
@@ -67,12 +67,12 @@ Applies to all structured data: JSON, YAML, TOML, CLI arguments, environment var
 
 | Suffix | Format | Example |
 |:-------|:-------|:--------|
-| `_epoch_ns` | nanoseconds since Unix epoch | `created_epoch_ns: 1707868800000000000` |
+| `_epoch_ns` | nanoseconds since Unix epoch as a decimal string | `created_epoch_ns: "1707868800000000000"` |
 | `_epoch_ms` | milliseconds since Unix epoch | `created_at_epoch_ms: 1707868800000` |
 | `_epoch_s` | seconds since Unix epoch | `cached_epoch_s: 1707868800` |
 | `_rfc3339` | RFC 3339 date-time string | `expires_rfc3339: "2026-02-14T10:30:00Z"` |
 
-> **Precision note**: this is a property of the host's JSON number parsing, not of AFDATA. Any integer beyond 2⁵³ (≈ 9×10¹⁵) — most commonly `_epoch_ns` (~1.7×10¹⁸ near the current era), but also large `_msats`/`_sats` balances — loses precision wherever JSON numbers are parsed as IEEE-754 doubles. This affects **JavaScript** (`JSON.parse` always yields a double; use `BigInt` or a custom parser) and **Go** with the default `json.Unmarshal` into `any` (yields `float64`; decode with `json.Decoder` + `UseNumber()` to preserve exact integers — the library formats `json.Number` losslessly). Rust (`serde_json` i64/u64) and Python (arbitrary-precision `int`) preserve such integers exactly. When exact large integers must survive every language boundary, transport them as strings.
+`_epoch_s` and `_epoch_ms` use JSON integers. Current-era `_epoch_ns` values exceed JSON's cross-language safe integer range, so `_epoch_ns` uses a decimal string.
 
 ### Strict string formats
 
@@ -101,39 +101,37 @@ Tools should avoid magic string sentinels such as `"auto"` inside strict-format 
 
 | Suffix | Value type | Usage | Example |
 |:-------|:-----------|:------|:--------|
-| `_bytes` | numeric | Output, APIs | `payload_bytes: 456789` |
-| `_size` | string with unit | Config input | `buffer_size: "10M"` |
+| `_bytes` | non-negative integer | Output, APIs | `payload_bytes: 456789` |
+| `_size` | string with explicit unit | Config input | `buffer_size: "10MiB"` |
 
 **Simple rule:**
 
 - **Output/APIs** → use `_bytes` (numeric, agents compute on this)
-- **Config files** → use `_size` (string like "10M", humans write this)
+- **Config files** → use `_size` (string like "10MiB" or "10MB", humans write this)
 
 Programs parse `_size` at load time using `parse_size()` and convert to bytes for internal use.
 
-**Parsing rules for `_size` (binary units):**
+**Parsing rules for `_size`:**
 
 | Unit | Multiplier | Example |
 |:-----|:-----------|:--------|
-| `B` or bare number | 1 | `"512"` → 512 |
-| `K` | 1024 | `"10K"` → 10240 |
-| `M` | 1024² | `"10M"` → 10485760 |
-| `G` | 1024³ | `"2G"` → 2147483648 |
-| `T` | 1024⁴ | `"1T"` → 1099511627776 |
+| `B` | 1 | `"512B"` → 512 |
+| `kB`/`MB`/`GB`/`TB` | decimal powers of 1000 | `"10MB"` → 10000000 |
+| `KiB`/`MiB`/`GiB`/`TiB` | binary powers of 1024 | `"10MiB"` → 10485760 |
 
-Case-insensitive. Supports decimals (`"1.5M"`). Returns null for invalid, negative, or overflow/unrepresentable input. To keep the helper byte-identical across all four ports, parsed sizes above JSON's safe integer ceiling (`2^53 - 1`) are rejected.
+Ambiguous `K/M/G/T` units and bare numbers are rejected. Supports decimals (`"1.5MiB"`). Returns null for invalid, negative, or overflow/unrepresentable input. To keep the helper byte-identical across all four ports, parsed sizes above JSON's safe integer ceiling (`2^53 - 1`) are rejected.
 
 **Example config file:**
 
 ```json
 {
-  "shared_buffers_size": "128M",
-  "max_wal_size": "1G",
-  "archive_retention_size": "2T"
+  "shared_buffers_size": "128MiB",
+  "max_wal_size": "1GiB",
+  "archive_retention_size": "2TiB"
 }
 ```
 
-In YAML and Plain output, `_bytes` values auto-scale to human-readable format (5.0MB, 2.0GB).
+In YAML and Plain output, `_bytes` values auto-scale to human-readable format (5.0MiB, 2.0GiB).
 
 ### Percentage
 
@@ -147,9 +145,10 @@ Bitcoin:
 
 | Suffix | Unit | Example |
 |:-------|:-----|:--------|
-| `_msats` | millisatoshis | `balance_msats: 97900` |
-| `_sats` | satoshis | `withdrawn_sats: 1234` |
-| `_btc` | bitcoin | `reserve_btc: 0.5` |
+| `_msats` | millisatoshis as an integer or decimal integer string | `balance_msats: 97900` |
+| `_sats` | satoshis as an integer or decimal integer string | `withdrawn_sats: 1234` |
+
+AFDATA does not define a floating `_btc` suffix. Use integer `_sats` or `_msats` instead.
 
 Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` for currencies without (JPY). Always integers:
 
@@ -162,6 +161,14 @@ Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` 
 
 Stablecoins follow the same `_{code}_cents` pattern: `deposit_usdt_cents: 1000`, `payout_usdc_cents: 500`.
 
+Sub-cent precision — `_{code}_micro` for integer micro-units, one millionth (10⁻⁶) of the major unit:
+
+| Suffix | Unit | Example |
+|:-------|:-----|:--------|
+| `_{code}_micro` | millionths of one major unit | `cost_usd_micro: 170000` (= $0.17) |
+
+`_{code}_micro` is the fiat analog of `_msats`: when cents are too coarse (per-token LLM pricing, metered API costs, unit-economics accounting), do not switch to decimal cents — move to a smaller integer unit. Values are always integers. Use `_{code}_cents` for user-facing amounts and `_{code}_micro` for high-precision internal accounting.
+
 ### Sensitive
 
 | Suffix | Handling | Example |
@@ -169,13 +176,15 @@ Stablecoins follow the same `_{code}_cents` pattern: `deposit_usdt_cents: 1000`,
 | `_secret` | redact the entire value/subtree to `***` | `api_key_secret: "sk-or-v1-abc..."` |
 | `_url` | redact secret components **inside** the URL value (userinfo password, secret-named query params); the rest of the URL is preserved | `callback_url: "https://h/cb?code_secret=..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Any `_secret` value — scalar, object, or array — becomes the scalar string `***`, so a secret-marked container never leaks through JSON, YAML, Plain, or collision fallback. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `OutputOptions.redaction.secret_names` (or `RedactionOptions.secret_names` in redaction helpers) at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction; formatting suffix stripping is still controlled by AFDATA suffixes in the default readable style. Callers that need schema-preserving YAML/plain rendering can use `OutputOptions` with the `Raw` output style. For cases that require partial/no redaction on specific payload sections, choose an explicit output policy at serialization time.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Any `_secret` value — scalar, object, or array — becomes the scalar string `***`, so a secret-marked container never leaks through JSON, YAML, Plain, or collision fallback. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `OutputOptions.redaction.secret_names` (a configured `Redactor` in Rust/Go, keyword arguments in Python/TS) at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction; formatting suffix stripping is still controlled by AFDATA suffixes in the default readable style. AFDATA does not define named redaction profiles; use the default, `secret_names`, `RedactionTraceOnly`, or `RedactionNone` deliberately at the serialization boundary. Callers that need schema-preserving YAML/plain rendering can use `OutputOptions` with the `Raw` output style.
+
+The marker `***` has exactly one meaning in AFDATA output: a value was redacted because its field name, URL query parameter name, or explicit `secret_names` entry made it sensitive. It is not used for serialization failures, truncation, unsupported types, or arbitrary “maybe secret” guesses.
 
 #### Secrets inside URLs
 
 Key-based redaction cannot reach a secret embedded **inside** a URL string — `token` in `wss://host/cdp?token=abc` is not its own field, and the URL often lives in a free-form `error` or log message that must stay readable. Implementations expose a URL-aware helper for this:
 
-- `redact_url_secrets(url)` / `redact_url_secrets_with_options(url, options)` — returns `url` with its secret components redacted to `***`.
+- `redact_url_secrets(url, *, secret_names=())` (Python) / `redactUrlSecrets(url, options?)` (TS) / `redact_url_secrets(url)` with `Redactor{secret_names}.url(url)` for custom names (Rust/Go) — returns `url` with its secret components redacted to `***`.
 
 The same secret decision as everywhere else applies, **to the URL's query-parameter names**: a parameter is redacted iff its (form-decoded) name ends in `_secret`/`_SECRET`, or matches an exact entry in `secret_names`. No built-in list of "sensitive" parameter names exists — a legacy parameter such as `?token=` is redacted only when the caller passes `secret_names: ["token"]`, exactly as for legacy field names. Consumers that own the URL should instead rename the parameter to follow the suffix convention (`?token_secret=`).
 
@@ -210,7 +219,7 @@ Same suffixes, kebab-case. An agent reading `--help` output understands units an
 --cache-ttl-s 3600         # seconds
 --max-size-bytes 1048576   # bytes
 --api-key-secret sk-xxx    # redact from logs and process listings
---buffer-size 10M          # human-readable config input (parse_size)
+--buffer-size 10MiB        # human-readable config input (parse_size)
 --port 8080                # no suffix needed — meaning obvious
 --verbose                  # boolean flag — no suffix needed
 ```
@@ -224,17 +233,22 @@ myapp --cache-ttl-s 3600 --api-key-secret sk-xxx --max-size-bytes 1048576
 ```
 
 ```json
-{"code": "log", "event": "startup", "args": {"cache_ttl_s": 3600, "api_key_secret": "***", "max_size_bytes": 1048576}}
+{"kind":"log","log":{"message":"startup","level":"info","event":"startup","args":{"cache_ttl_s":3600,"api_key_secret":"***","max_size_bytes":1048576}},"trace":{}}
 ```
 
 ```yaml
 ---
-args:
-  api_key: "***"
-  cache_ttl: "3600s"
-  max_size: "1.0MB"
-code: "log"
-event: "startup"
+kind: "log"
+log:
+  args:
+    api_key: "***"
+    cache_ttl: "3600s"
+    max_size: "1.0MiB"
+  event: "startup"
+  level: "info"
+  message: "startup"
+  timestamp: "2024-03-09T16:00:00.000Z"
+trace: {}
 ```
 
 The flag name, the JSON field name, and the formatted output all tell the same story. No mapping table, no `--help` prose explaining "timeout is in milliseconds" — the suffix is the documentation.
@@ -243,7 +257,7 @@ The flag name, the JSON field name, and the formatted output all tell the same s
 
 **Human help vs export surface.** Help scope and help format are orthogonal. Scope is controlled by `--recursive`: `--help` is one-level (and `myapp sub --help` is one-level for that subcommand), while `--help --recursive` expands the selected command subtree. Format is controlled by `--output`: plain by default, or `json|yaml|markdown`. So human-facing CLIs use plain one-level `--help`; agent/doc flows use `--help --recursive` (recursive plain), `--help --recursive --output json|yaml` (recursive export), or `--help --recursive --output markdown` (recursive docs). A bare `--recursive` without `--help` is a no-op for help and MUST NOT be consumed by the help layer — it falls through to the application's own parser. Help `markdown` is help-only and SHOULD NOT become a general business output format.
 
-**Version output.** Agent-first CLIs should handle `--version` before the argument parser's built-in plain-text exit. A bare `--version` should keep conventional human text, while `--version --output json|yaml|plain` MUST honor the requested AFDATA renderer. JSON version output uses `{"code":"version","version":"<semver>"}`. Compatibility wrappers may keep conventional bare text (for example `tool 1.2.3`) as long as an explicit structured `--output` is honored.
+**Version output.** Agent-first CLIs should handle `--version` before the argument parser's built-in plain-text exit. A bare `--version` should keep conventional human text, while `--version --output json|yaml|plain` MUST honor the requested AFDATA renderer. JSON version output uses `{"kind":"result","result":{"version":"<semver>"}}`. Compatibility wrappers may keep conventional bare text (for example `tool 1.2.3`) as long as an explicit structured `--output` is honored.
 
 ### Environment variables
 
@@ -315,7 +329,7 @@ CREATE TABLE events (
 |:-------|:-----|:---------------|:----|
 | `created_at` | `TIMESTAMPTZ` | no | type encodes semantics |
 | `duration_ms` | `INTEGER` | yes | 142 what? ms vs s vs μs |
-| `payload_bytes` | `INTEGER` | yes | bytes vs KB vs count |
+| `payload_bytes` | `INTEGER` | yes | bytes vs KiB vs count |
 | `api_key_secret` | `TEXT` | yes | enables auto-redaction |
 | `retry_count` | `INTEGER` | no | meaning obvious from name |
 | `expires_at` | `TIMESTAMPTZ` | no | type encodes semantics |
@@ -409,18 +423,19 @@ Each JSON line becomes a YAML document, separated by `---`. Strings always quote
 
 ```yaml
 ---
-args:
-  config_path: "config.yml"
-code: "log"
-config:
-  api_key: "***"
-  dns_ttl: "3600s"
-event: "startup"
+kind: "log"
+log:
+  args:
+    config_path: "config.yml"
+  config:
+    api_key: "***"
+    dns_ttl: "3600s"
+  event: "startup"
 ---
-code: "ok"
+kind: "result"
 result:
   hash: "abc123"
-  size: "446.1KB"
+  size: "446.1KiB"
 trace:
   duration: "1.28s"
   cost: "2056msats"
@@ -436,8 +451,8 @@ Single-line [logfmt](https://brandur.org/logfmt) style. In the default readable 
 - Null values are empty: `RUST_LOG=`
 
 ```
-args.config_path=config.yml code=log config.api_key=*** config.dns_ttl=3600s event=startup
-code=ok result.hash=abc123 result.size=446.1KB trace.cost=2056msats trace.duration=1.28s
+kind=log log.args.config_path=config.yml log.config.api_key=*** log.config.dns_ttl=3600s log.event=startup
+kind=result result.hash=abc123 result.size=446.1KiB trace.cost=2056msats trace.duration=1.28s
 ```
 
 ### Suffix processing (yaml and plain)
@@ -449,10 +464,10 @@ YAML and plain apply two transformations:
 **Algorithm:** match the longest known suffix from the list below. Each suffix is recognized in two forms: lowercase (`_secret`) and uppercase (`_SECRET`). No other casing is matched. Remove the matched suffix from the key. If no suffix matches, keep the key unchanged. Match order (longest first):
 
 1. `_epoch_ms`, `_epoch_s`, `_epoch_ns` (compound timestamp suffixes)
-2. `_usd_cents`, `_eur_cents`, `_{code}_cents` (compound currency suffixes; `code` is 3-4 ASCII letters)
+2. `_usd_cents`, `_eur_cents`, `_{code}_cents`, `_{code}_micro` (compound currency suffixes; `code` is 3-4 ASCII letters)
 3. `_rfc3339`, `_minutes`, `_hours`, `_days` (multi-char suffixes)
 4. `_msats`, `_sats`, `_bytes`, `_percent`, `_secret` (single-unit suffixes)
-5. `_btc`, `_jpy`, `_ns`, `_us`, `_ms`, `_s` (short suffixes, matched last to avoid false positives)
+5. `_jpy`, `_ns`, `_us`, `_ms`, `_s` (short suffixes, matched last to avoid false positives)
 
 Strict string suffixes (`_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time`) are not key-stripping suffixes. They keep the field's format contract visible in readable output.
 
@@ -461,7 +476,7 @@ Strict string suffixes (`_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time
 | JSON key | YAML/Plain key | Why |
 |:---------|:---------------|:----|
 | `duration_ms` | `duration` | value shows `1.28s` |
-| `size_bytes` | `size` | value shows `446.1KB` |
+| `size_bytes` | `size` | value shows `446.1KiB` |
 | `created_at_epoch_ms` | `created_at` | value shows `2025-02-07T...` |
 | `expires_rfc3339` | `expires` | value passes through |
 | `api_key_secret` | `api_key` | value shows `***` |
@@ -483,25 +498,25 @@ Strict string suffixes (`_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time
 - `_ns`, `_us`, `_ms`, `_s` → append unit (`450000ns`, `830μs`, `42ms`, `3600s`)
 - `_ms` with absolute value ≥ 1000 → convert to seconds (`1280` → `1.28s`, `-1500` → `-1.5s`)
 - `_minutes`, `_hours`, `_days` → append unit (`30 minutes`, `24 hours`)
-- `_epoch_ms` / `_epoch_s` / `_epoch_ns` → RFC 3339 (`2024-02-14T00:00:00.000Z`), negative values produce pre-1970 dates
+- `_epoch_ms` / `_epoch_s` / decimal-string `_epoch_ns` → RFC 3339 (`2024-02-14T00:00:00.000Z`), negative values produce pre-1970 dates
 - `_rfc3339` → pass through
-- `_bytes` → human-readable (`456789` → `446.1KB`, `-5242880` → `-5.0MB`)
-- `_size` → pass through (config input string, e.g. `"10M"` stays `"10M"`)
+- `_bytes` → human-readable (`456789` → `446.1KiB`); negative and fractional byte values fall through as raw values
+- `_size` → pass through (config input string, e.g. `"10MiB"` stays `"10MiB"`)
 - `_percent` → append `%` (`85` → `85%`, `99.9` → `99.9%`)
 - `_msats` → append unit (`2056msats`)
 - `_sats` → append unit (`1234sats`)
-- `_btc` → append unit (`0.5 BTC`)
 - `_usd_cents` → dollars (`999` → `$9.99`), negative falls through
 - `_eur_cents` → euros (`850` → `€8.50`), negative falls through
 - other `_{code}_cents` → major unit with code (`15050` → `150.50 THB`), where `code` is 3-4 ASCII letters; negative falls through
+- `_{code}_micro` → major unit with six decimals and code (`170000` → `0.170000 USD`), where `code` is 3-4 ASCII letters; negative falls through
 - `_jpy` → yen (`1500` → `¥1,500`), negative falls through
 - `_secret` → `***` (already applied by the redaction phase; the formatter does not perform a second, divergent redaction pass)
 
 Strict string fields such as `_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are not value-formatting suffixes; their string values pass through unchanged.
 
-A `_url` field value is preserved byte-for-byte in YAML and plain except for the redacted secret spans (userinfo password, `_secret`-suffixed/`secret_names` query parameters): the `_url` key is not stripped, and formatting suffixes that appear *inside* the URL — `?timeout_ms=5000`, `?size_bytes=1048576` — are **not** reformatted (`5s`, `1.0MB`) or stripped, because the URL must round-trip to its server exactly. URL key-stripping/value-formatting applies to JSON object keys, never to query parameters inside a string value. This is pinned by the `url_params_redacted_not_reformatted` case in [`spec/fixtures/output_formats.json`](fixtures/output_formats.json).
+A `_url` field value is preserved byte-for-byte in YAML and plain except for the redacted secret spans (userinfo password, `_secret`-suffixed/`secret_names` query parameters): the `_url` key is not stripped, and formatting suffixes that appear *inside* the URL — `?timeout_ms=5000`, `?size_bytes=1048576` — are **not** reformatted (`5s`, `1.0MiB`) or stripped, because the URL must round-trip to its server exactly. URL key-stripping/value-formatting applies to JSON object keys, never to query parameters inside a string value. This is pinned by the `url_params_redacted_not_reformatted` case in [`spec/fixtures/output_formats.json`](fixtures/output_formats.json).
 
-**Type constraints**: `_bytes` and `_epoch_*` require integer values. `_usd_cents`, `_eur_cents`, `_jpy`, and `_{code}_cents` require non-negative integers. Duration, Bitcoin, and `_percent` suffixes accept any number. When the value type doesn't match, formatting falls through to the raw value with the original key preserved. An **integral-valued float** counts as an integer for the integer-required suffixes (`3.0` is treated as `3`): a JSON number's value, not its lexical form, decides, because JavaScript cannot distinguish `3` from `3.0` after parsing.
+**Type constraints**: `_bytes` and `_epoch_*` require integer values. `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents`, and `_{code}_micro` require non-negative integers. Duration, Bitcoin, and `_percent` suffixes accept any number. When the value type doesn't match, formatting falls through to the raw value with the original key preserved. An **integral-valued float** counts as an integer for the integer-required suffixes (`3.0` is treated as `3`): a JSON number's value, not its lexical form, decides, because JavaScript cannot distinguish `3` from `3.0` after parsing.
 
 **Number rendering**: a number is rendered for YAML/plain by the shared fixture-defined decimal form: integral-valued floats drop their trailing `.0` (`3.0` → `3`), exponent markers use lowercase `e`, and exponent signs/leading zeroes are normalized (`1e-07` → `1e-7`). Integers beyond 2⁵³ are preserved exactly by Rust, Go, and Python; JavaScript loses precision on them (see the `_epoch_ns` precision note above).
 
@@ -534,16 +549,27 @@ A recommended structure for program output. This part is **optional** — adopt 
 ## Core Fields
 
 **Required:**
-- `code` — identifies the message type (`"log"`, `"ok"`, `"error"`, or tool-defined)
+- `kind` — protocol discriminator: `"result"`, `"error"`, `"progress"`, or `"log"`
+- a payload field whose name matches `kind`
 
 **Recommended:**
 - `trace` — execution context (duration, source, resource usage)
 
-**Everything else is flexible.** Fields can be flat or nested. Both styles are valid. Examples below show both approaches.
+`trace`, when present, is a JSON object. `result`, `progress`, and `log`
+payloads are tool-defined valid JSON values. `error` is a JSON object with
+required non-empty `code` and `message`, optional `hint`, and tool-defined
+extension fields.
 
-## JSONL Stream
+## CLI Event Framing
 
-Programs emit JSONL to stdout — one JSON object per line. Every line has a `code` field identifying its type:
+Structured CLI programs emit complete AFDATA protocol v1 events to stdout.
+Framing depends on `--output`:
+
+- JSON multi-event output is JSONL/NDJSON: one complete event per line.
+- Plain multi-event output is one display event per line.
+- YAML multi-event output uses an explicit `---` document boundary for every event.
+
+Agent-facing machine input remains JSON. YAML and plain are display formats.
 
 Channel policy:
 - `stdout` is the only protocol/log stream for machine-readable events
@@ -566,38 +592,36 @@ Recommended enforcement:
 - Rust: clippy `print_stderr = "deny"` plus disallow `std::eprintln` / `std::io::stderr`
 - Go/Python/TypeScript: source-policy tests or lint rules that fail on stderr API usage in runtime code
 
-| `code` | Meaning |
-|:-------|:--------|
-| `"log"` | Diagnostic event (`event` field identifies startup/request/progress/retry/redirect) |
-| `"ok"` | Success result |
-| `"error"` | Generic error (prefer specific codes) |
-| tool-defined | Status / errors / progress |
+Finite structured CLI event streams follow:
+
+```text
+(log | progress)* -> exactly one (result | error) -> end
+```
 
 Minimum logging envelope across language integrations:
-- Required fields: `timestamp_epoch_ms`, `message`, `code`, `level`
-- `code` is always `"log"` so log events never collide with terminal protocol codes such as `"error"`
+- Required fields: `message`, `level`
 - `level` carries the logging level (`debug`, `info`, `warn`, `error`)
 - Additional tool/span fields are free-form and additive
+- `timestamp_epoch_ms` is not required by the protocol; projects that need it should add it as an extension field
 
 Log fields are redacted **by field name** at emit time — the same `_secret`/`_url` rule as all other output, applied by the formatter, not by scanning rendered values. Emit secrets as named fields (`api_key_secret`) so the rule can see them. Logging a whole object pre-rendered to a single string (e.g. a language's debug/inspect form) defeats redaction, because the inner field names are no longer visible: build a structured value and redact it before logging instead.
 
-Three values are reserved: `log`, `ok`, `error`. All other values are tool-defined.
+The top-level `kind` values are reserved: `log`, `progress`, `result`, and `error`. Tool-defined codes belong inside the corresponding payload.
 
-**Error codes:** Use specific codes instead of generic `"error"`:
+**Error payload codes:** Use specific codes instead of generic `"error"`:
 - `"not_found"`, `"unauthorized"`, `"validation_error"`, `"rate_limit"`, `"internal_error"`, etc.
 - Generic `"error"` is supported but specific codes are preferred
 
-**Status codes:** Progress, requests, custom events:
-- `"request"`, `"progress"`, `"sync"`, etc.
+Progress and log payloads may add tool-defined fields such as `event: "request"` or `phase: "sync"`.
 
 Not all phases are required. A simple CLI tool may emit only a result line. A long-running service may never emit a result.
 
 ### Startup Diagnostic Event
 
-`code: "log", event: "startup"`. Optional. Emitted once at the beginning if diagnostic logging is enabled.
+`kind: "log"` with `log.event: "startup"`. Optional. Emitted once at the beginning if diagnostic logging is enabled.
 
 ```json
-{"code": "log", "event": "startup", "version": "0.1.0", "argv": ["tool", "--log", "startup"], "config": {"api_key_secret": "***", "dns_ttl_s": 3600}, "args": {"config_path": "config.yml"}, "env": {"RUST_LOG": null, "DATABASE_URL_SECRET": "***"}}
+{"kind":"log","log":{"message":"startup","level":"info","event":"startup","version":"0.1.0","argv":["tool","--log","startup"],"config":{"api_key_secret":"***","dns_ttl_s":3600},"args":{"config_path":"config.yml"},"env":{"RUST_LOG":null,"DATABASE_URL_SECRET":"***"}},"trace":{}}
 ```
 
 Startup payload fields are tool-defined. Common fields:
@@ -609,63 +633,51 @@ Startup payload fields are tool-defined. Common fields:
 
 ### Status
 
-`code` is tool-defined. Content is tool-defined. Include `trace` for execution context.
+`kind` is the protocol discriminator. `progress` and `log` payload content is tool-defined. Include `trace` for execution context when it helps debugging.
 
 ```json
-{"code": "progress", "current": 3, "total": 10, "message": "indexing spores", "trace": {"duration_ms": 500}}
+{"kind": "progress", "progress": {"current": 3, "total": 10, "message": "indexing spores"}, "trace": {"duration_ms": 500}}
 ```
 
 ```json
-{"code": "request", "method": "POST", "path": "/v1/chat", "http_status": 200, "trace": {"latency_ms": 42}}
+{"kind":"log","log":{"message":"POST /v1/chat completed","level":"info","event":"request","method":"POST","path":"/v1/chat","http_status":200},"trace":{"latency_ms":42}}
 ```
 
 ### Result
 
-`code: "ok"` on success, `code: "error"` or specific error code on failure. An agent watching a stream can treat any result code as the signal that the operation is complete.
+`kind:"result"` is success, and `kind:"error"` is failure. An agent watching a finite stream can treat either as the unique terminal event.
 
 **Always include `trace`** for execution context — duration, data sources, resource usage, query details.
 
-**Success - both styles valid:**
-
-Nested (structured):
+**Success:**
 ```json
-{"code": "ok", "result": {"hash": "abc123", "size_bytes": 456789}, "trace": {"duration_ms": 1280, "tokens_input": 512}}
+{"kind": "result", "result": {"hash": "abc123", "size_bytes": 456789}, "trace": {"duration_ms": 1280, "tokens_input": 512}}
 ```
 
-Flat:
-```json
-{"code": "ok", "hash": "abc123", "size_bytes": 456789, "trace": {"duration_ms": 1280, "tokens_input": 512}}
-```
-
-**Error - both styles valid:**
+**Error:**
 
 Simple message:
 ```json
-{"code": "error", "error": "config file not found", "trace": {"duration_ms": 3}}
+{"kind": "error", "error": {"code": "config_not_found", "message": "config file not found", "retryable": false}, "trace": {"duration_ms": 3}}
 ```
 
 With actionable hint:
 ```json
-{"code": "error", "error": "connection refused", "hint": "check --host/--port or PGHOST/PGPORT environment variables", "trace": {"duration_ms": 3}}
+{"kind": "error", "error": {"code": "connection_refused", "message": "connection refused", "retryable": false, "hint": "check --host/--port or PGHOST/PGPORT environment variables"}, "trace": {"duration_ms": 3}}
 ```
 
 The `hint` field is optional. When present, it provides an actionable suggestion for the user or agent to resolve the error. Omit `hint` when no specific remediation is available.
 
-Nested error details:
+Error details are direct extension fields inside the error payload:
 ```json
-{"code": "not_found", "error": {"resource": "user", "id": 123}, "trace": {"duration_ms": 8}}
+{"kind": "error", "error": {"code": "not_found", "message": "user not found", "retryable": false, "resource": "user", "id": 123}, "trace": {"duration_ms": 8}}
 ```
 
-Flat error details:
+More examples:
 ```json
-{"code": "not_found", "resource": "user", "id": 123, "trace": {"duration_ms": 8}}
-```
-
-More examples (flat style):
-```json
-{"code": "validation_error", "fields": ["email", "age"], "trace": {"duration_ms": 2}}
-{"code": "unauthorized", "message": "invalid token", "trace": {"duration_ms": 5}}
-{"code": "rate_limit", "retry_after_s": 60, "quota_remaining": 0, "trace": {"duration_ms": 1}}
+{"kind": "error", "error": {"code": "validation_error", "message": "invalid fields", "retryable": false, "fields": ["email", "age"]}, "trace": {"duration_ms": 2}}
+{"kind": "error", "error": {"code": "unauthorized", "message": "invalid token", "retryable": false}, "trace": {"duration_ms": 5}}
+{"kind": "error", "error": {"code": "rate_limit", "message": "rate limited", "retryable": false, "retry_after_s": 60, "quota_remaining": 0}, "trace": {"duration_ms": 1}}
 ```
 
 ### Best Practices
@@ -679,30 +691,41 @@ More examples (flat style):
 
 **Good (with trace):**
 ```json
-{"code": "ok", "count": 42, "trace": {"duration_ms": 150, "source": "db"}}
-{"code": "error", "error": "not found", "trace": {"duration_ms": 5}}
+{"kind": "result", "result": {"count": 42}, "trace": {"duration_ms": 150, "source": "db"}}
+{"kind": "error", "error": {"code": "not_found", "message": "not found", "retryable": false}, "trace": {"duration_ms": 5}}
 ```
 
-**Also good (structured):**
+**Also good:**
 ```json
-{"code": "ok", "result": {"count": 42}, "trace": {"duration_ms": 150, "source": "db"}}
-{"code": "validation_error", "error": {"fields": [...]}, "trace": {"duration_ms": 2}}
+{"kind": "result", "result": {"count": 42}, "trace": {"duration_ms": 150, "source": "db"}}
+{"kind": "error", "error": {"code": "validation_error", "message": "invalid input", "retryable": false, "fields": [...]}, "trace": {"duration_ms": 2}}
 ```
 
 **Avoid (missing trace):**
-```json
-{"code": "ok", "count": 42}
-{"code": "error", "error": "not found"}
+```jsonc
+{"kind": "result", "result": {"count": 42}}
+{"kind": "error", "error": {"code": "not_found", "message": "not found", "retryable": false}}
 ```
 
 Missing `trace` makes debugging harder. Agents can't analyze performance, cost, or data flow without execution context.
 
+### Validation profiles
+
+The `validate_protocol_event(event, strict)` / `validate_protocol_stream(events, strict)` APIs enforce protocol compliance. With `strict=false`, only mandatory MUST rules are enforced: envelope shape, error payload requirements, and finite-stream lifecycle. With `strict=true` (the default in Python/TS), additional recommendations are required:
+
+- every event includes an object-valued `trace`
+- every log payload includes a non-empty `message` and `level` in `debug|info|warn|error` (log payload MUST NOT contain a `code` field)
+- every error payload includes `retryable` as a boolean
+- every progress payload includes a non-empty, human-readable `message`
+
+Passing the base validator proves mandatory conformance only. Use the strict validator when claiming conformance with these recommendations. Structured version metadata may intentionally use the base profile when no execution trace exists.
+
 ### Agent consumption
 
-1. Read `code` on every line.
-2. `{"code":"log","event":"startup",...}` → understand configuration.
-3. `"ok"` or `"error"` → operation complete.
-4. Anything else → status/progress, tool-specific.
+1. Read `kind` on every line and read the same-named payload (`event[kind]`).
+2. `kind:"log"` with `log.event:"startup"` describes resolved startup configuration.
+3. `kind:"result"` or `kind:"error"` completes a finite operation.
+4. `kind:"log"` and `kind:"progress"` are non-terminal events before that terminal event.
 
 ## Usage in HTTP Services
 
@@ -716,17 +739,17 @@ Response body follows the protocol structure:
 
 **HTTP 200:**
 ```json
-{"code": "ok", "result": {"balance_msats": 97900}, "trace": {"source": "redb", "duration_ms": 3}}
+{"kind": "result", "result": {"balance_msats": 97900}, "trace": {"source": "redb", "duration_ms": 3}}
 ```
 
 **HTTP 404:**
 ```json
-{"code": "not_found", "error": {"resource": "user", "id": 123}, "trace": {"duration_ms": 5}}
+{"kind": "error", "error": {"code": "not_found", "message": "user not found", "retryable": false, "resource": "user", "id": 123}, "trace": {"duration_ms": 5}}
 ```
 
 **HTTP 402:**
 ```json
-{"code": "insufficient_balance", "error": {"balance_msats": 0, "required_msats": 2056}, "trace": {"source": "redb", "duration_ms": 2}}
+{"kind": "error", "error": {"code": "insufficient_balance", "message": "insufficient balance", "retryable": false, "balance_msats": 0, "required_msats": 2056}, "trace": {"source": "redb", "duration_ms": 2}}
 ```
 
 ### MCP Tool Response
@@ -734,7 +757,7 @@ Response body follows the protocol structure:
 Same structure, raw JSON:
 
 ```json
-{"code": "ok", "result": {"files": ["src/main.rs"]}, "trace": {"source": "glob", "matched": 1, "duration_ms": 12}}
+{"kind": "result", "result": {"files": ["src/main.rs"]}, "trace": {"source": "glob", "matched": 1, "duration_ms": 12}}
 ```
 
 ### Streaming (SSE)
@@ -742,21 +765,26 @@ Same structure, raw JSON:
 JSONL stream, raw JSON per line:
 
 ```json
-{"code": "log", "event": "startup", "config": {"model": "gpt-4", "max_tokens": 1024}, "args": {}, "env": {}}
-{"code": "progress", "current": 1, "total": 5, "message": "processing", "trace": {"duration_ms": 500}}
-{"code": "ok", "result": {"answer": "..."}, "trace": {"tokens_input": 512, "duration_ms": 1280}}
+{"kind":"log","log":{"message":"startup","level":"info","event":"startup","config":{"model":"gpt-4","max_tokens":1024},"args":{},"env":{}},"trace":{}}
+{"kind": "progress", "progress": {"current": 1, "total": 5, "message": "processing"}, "trace": {"duration_ms": 500}}
+{"kind": "result", "result": {"answer": "..."}, "trace": {"tokens_input": 512, "duration_ms": 1280}}
 ```
 
 ### One Protocol, Multiple Contexts
 
 | Context | Output | Secret Protection |
 |:--------|:-------|:------------------|
-| **CLI / Logs** | JSONL (json/yaml/plain formats) | ✅ Automatic |
+| **CLI / Logs** | JSONL, one-line plain events, or YAML documents | ✅ Automatic |
 | **HTTP body (raw path)** | JSON body (raw Value) | Use `redacted_value` before framework serialization |
 | **MCP tool (raw path)** | JSON (raw Value) | Use `redacted_value` before SDK serialization |
 | **SSE stream (raw path)** | JSONL (raw JSON) | Use `redacted_value` before emitting events |
 
-All contexts can use the protocol structure from Part 3. Only `code` (required) and `trace` (recommended) are standardized. Other fields can be flat or nested — both styles work. CLI/logs apply output formatting and secret protection from Part 2. Raw-path serializers return JSON values unchanged unless the program explicitly calls `redacted_value`. For CLI/log protocol transport, use `stdout` only; do not split protocol events across `stdout` and `stderr`.
+All contexts can use the protocol structure from Part 3. `kind`, its matching
+payload field, and optional object-valued `trace` are standardized. CLI/logs
+apply output formatting and secret protection from Part 2. Raw-path serializers
+return JSON values unchanged unless the program explicitly calls
+`redacted_value`. For CLI/log protocol transport, use `stdout` only; do not
+split protocol events across `stdout` and `stderr`.
 
 ---
 
@@ -778,95 +806,106 @@ The tool converts CLI flags from kebab-case to snake_case and emits a startup di
 
 ```json
 {
-  "code": "log",
-  "event": "startup",
-  "config": {
-    "api_key_secret": "sk-1234567890abcdef",
-    "endpoint": "https://storage.example.com",
-    "timeout_s": 30,
-    "max_file_size_bytes": 10737418240
+  "kind": "log",
+  "log": {
+    "timestamp_epoch_ms": 1710000000000,
+    "message": "startup",
+    "level": "info",
+    "event": "startup",
+    "config": {
+      "api_key_secret": "sk-1234567890abcdef",
+      "endpoint": "https://storage.example.com",
+      "timeout_s": 30,
+      "max_file_size_bytes": 10737418240
+    },
+    "args": {
+      "input_path": "/data/backup.tar.gz",
+      "compression_level": 9
+    }
   },
-  "args": {
-    "input_path": "/data/backup.tar.gz",
-    "compression_level": 9
-  }
+  "trace": {}
 }
 ```
 
 Field names encode semantics:
 - `api_key_secret` → agent knows to redact
 - `timeout_s` → 30 seconds
-- `max_file_size_bytes` → 10GB in bytes
+- `max_file_size_bytes` → 10GiB in bytes
 
 ## Output Formats (Part 2: Output Processing)
 
 **JSON** (raw, for machines):
 ```json
-{"code":"log","event":"startup","config":{"api_key_secret":"***","endpoint":"https://storage.example.com","timeout_s":30,"max_file_size_bytes":10737418240},"args":{"input_path":"/data/backup.tar.gz","compression_level":9}}
+{"kind":"log","log":{"message":"startup","level":"info","event":"startup","config":{"api_key_secret":"***","endpoint":"https://storage.example.com","timeout_s":30,"max_file_size_bytes":10737418240},"args":{"input_path":"/data/backup.tar.gz","compression_level":9}},"trace":{}}
 ```
 
 **YAML** (structured, formatting suffixes stripped, for human inspection):
 ```yaml
 ---
-args:
-  compression_level: 9
-  input_path: "/data/backup.tar.gz"
-code: "log"
-config:
-  api_key: "***"
-  endpoint: "https://storage.example.com"
-  max_file_size: "10.0GB"
-  timeout: "30s"
-event: "startup"
+kind: "log"
+log:
+  args:
+    compression_level: 9
+    input_path: "/data/backup.tar.gz"
+  config:
+    api_key: "***"
+    endpoint: "https://storage.example.com"
+    max_file_size: "10.0GiB"
+    timeout: "30s"
+  event: "startup"
+  level: "info"
+  message: "startup"
+trace: {}
 ```
 
 **Plain** (single-line logfmt, formatting suffixes stripped, for compact scanning):
 ```
-args.compression_level=9 args.input_path=/data/backup.tar.gz code=log config.api_key=*** config.endpoint=https://storage.example.com config.max_file_size=10.0GB config.timeout=30s event=startup
+kind=log log.args.compression_level=9 log.args.input_path=/data/backup.tar.gz log.config.api_key=*** log.config.endpoint=https://storage.example.com log.config.max_file_size=10.0GiB log.config.timeout=30s log.event=startup log.level=info log.message=startup
 ```
 
 Note:
 - **Key stripping**: formatting suffixes such as `api_key_secret` → `api_key`, `timeout_s` → `timeout`, `max_file_size_bytes` → `max_file_size`
 - **Secret protection**: `api_key_secret` redacted in all three formats
-- **Suffix formatting**: `_bytes` → `10.0GB`, `_s` → `30s` in YAML and Plain
+- **Suffix formatting**: `_bytes` → `10.0GiB`, `_s` → `30s` in YAML and Plain
 
 ## Progress Update (Part 3: Protocol Template)
 
 ```json
-{"code": "progress", "current": 3, "total": 10, "message": "uploading chunks", "trace": {"duration_ms": 5420, "uploaded_bytes": 3221225472}}
+{"kind":"progress","progress":{"current":3,"total":10,"message":"uploading chunks"},"trace":{"duration_ms":5420,"uploaded_bytes":3221225472}}
 ```
 
 YAML:
 ```yaml
 ---
-code: "progress"
-current: 3
-message: "uploading chunks"
-total: 10
+kind: "progress"
+progress:
+  current: 3
+  message: "uploading chunks"
+  total: 10
 trace:
   duration: "5.42s"
-  uploaded: "3.0GB"
+  uploaded: "3.0GiB"
 ```
 
 Plain:
 ```
-code=progress current=3 message="uploading chunks" total=10 trace.duration=5.42s trace.uploaded=3.0GB
+kind=progress progress.current=3 progress.message="uploading chunks" progress.total=10 trace.duration=5.42s trace.uploaded=3.0GiB
 ```
 
 ## Final Result
 
 ```json
-{"code": "ok", "result": {"backup_url": "https://storage.example.com/backup.tar.gz", "size_bytes": 10485760, "checksum": "sha256:abc123...", "uploaded_at_epoch_ms": 1738886400000}, "trace": {"duration_ms": 15300, "chunks": 10, "retries": 2}}
+{"kind": "result", "result": {"backup_url": "https://storage.example.com/backup.tar.gz", "size_bytes": 10485760, "checksum": "sha256:abc123...", "uploaded_at_epoch_ms": 1738886400000}, "trace": {"duration_ms": 15300, "chunks": 10, "retries": 2}}
 ```
 
 YAML:
 ```yaml
 ---
-code: "ok"
+kind: "result"
 result:
   backup_url: "https://storage.example.com/backup.tar.gz"
   checksum: "sha256:abc123..."
-  size: "10.0MB"
+  size: "10.0MiB"
   uploaded_at: "2025-02-07T00:00:00.000Z"
 trace:
   chunks: 10
@@ -876,7 +915,7 @@ trace:
 
 Plain:
 ```
-code=ok result.backup_url=https://storage.example.com/backup.tar.gz result.checksum=sha256:abc123... result.size=10.0MB result.uploaded_at=2025-02-07T00:00:00.000Z trace.chunks=10 trace.duration=15.3s trace.retries=2
+kind=result result.backup_url=https://storage.example.com/backup.tar.gz result.checksum=sha256:abc123... result.size=10.0MiB result.uploaded_at=2025-02-07T00:00:00.000Z trace.chunks=10 trace.duration=15.3s trace.retries=2
 ```
 
 ## What This Demonstrates

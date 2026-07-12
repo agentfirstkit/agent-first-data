@@ -1,0 +1,91 @@
+{
+  "redaction_cases": [
+    {
+      "name": "nested arrays custom names env url and free text",
+      "options": {
+        "secret_names": [
+          "API_TOKEN",
+          "legacy_key"
+        ]
+      },
+      "input": {
+        "records": [
+          {
+            "api_key_secret": "sk-nested",
+            "nested": {
+              "legacy_key": "legacy-secret",
+              "name": "alice"
+            }
+          }
+        ],
+        "env": {
+          "API_TOKEN": "tok-env",
+          "HOME": "/tmp/agent"
+        },
+        "callback_url": "https://user:pass@example.com/cb?api_key=visible&token_secret=hidden&legacy_key=hidden2",
+        "message": "free text keeps api_key_secret=sk-free and https://user:pass@example.com/?token_secret=free"
+      },
+      "expected": {
+        "records": [
+          {
+            "api_key_secret": "***",
+            "nested": {
+              "legacy_key": "***",
+              "name": "alice"
+            }
+          }
+        ],
+        "env": {
+          "API_TOKEN": "***",
+          "HOME": "/tmp/agent"
+        },
+        "callback_url": "https://user:***@example.com/cb?api_key=visible&token_secret=***&legacy_key=***",
+        "message": "free text keeps api_key_secret=sk-free and https://user:pass@example.com/?token_secret=free"
+      },
+      "must_contain": [
+        "***",
+        "/tmp/agent",
+        "api_key=visible",
+        "sk-free"
+      ],
+      "must_not_contain": [
+        "sk-nested",
+        "legacy-secret",
+        "tok-env",
+        "pass@example.com/cb",
+        "token_secret=hidden"
+      ]
+    }
+  ],
+  "argv_cases": [
+    {
+      "name": "inline and space separated secret argv",
+      "options": {
+        "secret_names": [
+          "legacy-key"
+        ]
+      },
+      "input": [
+        "--api-key-secret=sk-inline",
+        "--legacy-key",
+        "legacy-space",
+        "free text api_key_secret=visible"
+      ],
+      "expected": [
+        "--api-key-secret=***",
+        "--legacy-key",
+        "***",
+        "free text api_key_secret=visible"
+      ]
+    }
+  ],
+  "help_default_cases": [
+    {
+      "name": "secret help default",
+      "flag": "--api-key-secret",
+      "field_name": "api_key_secret",
+      "default": "sk-help-default",
+      "expected": "***"
+    }
+  ]
+}

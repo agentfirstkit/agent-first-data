@@ -27,25 +27,37 @@ func loadFixture(name string) []map[string]any {
 	return result
 }
 
-func redactionOptionsFromCase(tc map[string]any) RedactionOptions {
+func loadFixtureObject(name string) map[string]any {
+	data, err := os.ReadFile(filepath.Join(fixturesDir(), name))
+	if err != nil {
+		panic(fmt.Sprintf("failed to read %s: %v", name, err))
+	}
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		panic(fmt.Sprintf("failed to parse %s: %v", name, err))
+	}
+	return result
+}
+
+func redactorFromCase(tc map[string]any) Redactor {
 	opts, _ := tc["options"].(map[string]any)
-	redactionOptions := RedactionOptions{}
+	redactor := Redactor{}
 	if policy, ok := opts["policy"].(string); ok {
 		switch policy {
 		case "RedactionTraceOnly":
-			redactionOptions.Policy = RedactionTraceOnly
+			redactor.Policy = RedactionTraceOnly
 		case "RedactionNone":
-			redactionOptions.Policy = RedactionNone
+			redactor.Policy = RedactionNone
 		default:
 			panic(fmt.Sprintf("unknown redaction policy: %s", policy))
 		}
 	}
 	if names, ok := opts["secret_names"].([]any); ok {
 		for _, name := range names {
-			redactionOptions.SecretNames = append(redactionOptions.SecretNames, name.(string))
+			redactor.SecretNames = append(redactor.SecretNames, name.(string))
 		}
 	}
-	return redactionOptions
+	return redactor
 }
 
 type secretStringFunc func()
@@ -62,8 +74,8 @@ func TestRedactURLFixtures(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			input := tc["input"].(string)
 			expected := tc["expected"].(string)
-			options := redactionOptionsFromCase(tc)
-			got := RedactURLSecretsWithOptions(input, options)
+			options := redactorFromCase(tc)
+			got := options.URL(input)
 			if got != expected {
 				t.Errorf("got %q, want %q", got, expected)
 			}
@@ -75,17 +87,14 @@ func TestRedactFixtures(t *testing.T) {
 	for _, tc := range loadFixture("redact.json") {
 		name := tc["name"].(string)
 		t.Run(name, func(t *testing.T) {
-			// Deep copy via JSON round-trip
-			b, _ := json.Marshal(tc["input"])
-			var inp any
-			json.Unmarshal(b, &inp)
-			RedactSecretsInPlace(inp)
+			// Use RedactedValue instead of in-place redaction
+			got := RedactedValue(tc["input"])
 
 			b2, _ := json.Marshal(tc["expected"])
 			var expected any
 			json.Unmarshal(b2, &expected)
 
-			gotJSON, _ := json.Marshal(inp)
+			gotJSON, _ := json.Marshal(got)
 			expJSON, _ := json.Marshal(expected)
 			if string(gotJSON) != string(expJSON) {
 				t.Errorf("got %s, want %s", gotJSON, expJSON)
@@ -98,27 +107,18 @@ func TestRedactionOptionsFixtures(t *testing.T) {
 	for _, tc := range loadFixture("redaction_options.json") {
 		name := tc["name"].(string)
 		t.Run(name, func(t *testing.T) {
-			options := redactionOptionsFromCase(tc)
+			options := redactorFromCase(tc)
 			outputOptions := OutputOptions{
 				Redaction: options,
 				Style:     OutputStyleReadable,
 			}
 			expected := tc["expected"]
 
-			got := RedactedValueWithOptions(tc["input"], options)
+			got := options.Value(tc["input"])
 			gotJSON, _ := json.Marshal(got)
 			expJSON, _ := json.Marshal(expected)
 			if string(gotJSON) != string(expJSON) {
 				t.Errorf("redacted value got %s, want %s", gotJSON, expJSON)
-			}
-
-			b, _ := json.Marshal(tc["input"])
-			var inp any
-			json.Unmarshal(b, &inp)
-			RedactSecretsInPlaceWithOptions(inp, options)
-			gotJSON, _ = json.Marshal(inp)
-			if string(gotJSON) != string(expJSON) {
-				t.Errorf("in-place got %s, want %s", gotJSON, expJSON)
 			}
 
 			jsonLine := OutputJsonWithOptions(tc["input"], outputOptions)
@@ -145,61 +145,201 @@ func TestRedactionOptionsFixtures(t *testing.T) {
 	}
 }
 
+func TestSecurityFixtures(t *testing.T) {
+	fixture := loadFixtureObject("security.json")
+	for _, tc := range mapSliceFromAny(t, fixture["redaction_cases"]) {
+		name := tc["name"].(string)
+		t.Run("redaction/"+name, func(t *testing.T) {
+			options := redactorFromCase(tc)
+			outputOptions := OutputOptions{Redaction: options, Style: OutputStyleReadable}
+			expected := tc["expected"]
+			got := options.Value(tc["input"])
+			gotJSON, _ := json.Marshal(got)
+			expJSON, _ := json.Marshal(expected)
+			if string(gotJSON) != string(expJSON) {
+				t.Fatalf("redacted value got %s, want %s", gotJSON, expJSON)
+			}
+			outputs := []string{
+				OutputJsonWithOptions(tc["input"], outputOptions),
+				OutputYamlWithOptions(tc["input"], outputOptions),
+				OutputPlainWithOptions(tc["input"], outputOptions),
+			}
+			for _, output := range outputs {
+				for _, needle := range stringSliceFromAny(t, tc["must_contain"]) {
+					if !strings.Contains(output, needle) {
+						t.Fatalf("output missing %q: %s", needle, output)
+					}
+				}
+				for _, needle := range stringSliceFromAny(t, tc["must_not_contain"]) {
+					if strings.Contains(output, needle) {
+						t.Fatalf("output leaked %q: %s", needle, output)
+					}
+				}
+			}
+		})
+	}
+}
+
+func mapSliceFromAny(t *testing.T, value any) []map[string]any {
+	t.Helper()
+	items, ok := value.([]any)
+	if !ok {
+		t.Fatalf("value must be array: %#v", value)
+	}
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("value must contain objects: %#v", value)
+		}
+		result = append(result, m)
+	}
+	return result
+}
+
+func stringSliceFromAny(t *testing.T, value any) []string {
+	t.Helper()
+	items, ok := value.([]any)
+	if !ok {
+		t.Fatalf("value must be array: %#v", value)
+	}
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		s, ok := item.(string)
+		if !ok {
+			t.Fatalf("value must contain strings: %#v", value)
+		}
+		result = append(result, s)
+	}
+	return result
+}
+
 // --- Protocol fixtures ---
 
 func TestProtocolFixtures(t *testing.T) {
 	for _, tc := range loadFixture("protocol.json") {
 		name := tc["name"].(string)
 		t.Run(name, func(t *testing.T) {
+			if invalid, ok := tc["invalid"]; ok {
+				if err := ValidateProtocolEvent(invalid, false); err == nil {
+					t.Fatalf("invalid event unexpectedly passed")
+				}
+				return
+			}
 			typ := tc["type"].(string)
 			args := tc["args"].(map[string]any)
 
 			var result map[string]any
 			switch typ {
-			case "ok":
-				result = BuildJsonOk(args["result"], nil)
-			case "ok_trace":
-				result = BuildJsonOk(args["result"], args["trace"])
+			case "result":
+				event, _ := NewJSONResult(args["result"]).Build()
+				result = event.Value()
+			case "result_trace":
+				event, _ := NewJSONResult(args["result"]).Trace(args["trace"]).Build()
+				result = event.Value()
 			case "error":
-				result = BuildJsonError(args["message"].(string), "", nil)
+				event, _ := NewJSONError(args["code"].(string), args["message"].(string)).Build()
+				result = event.Value()
 			case "error_trace":
-				result = BuildJsonError(args["message"].(string), "", args["trace"])
+				event, _ := NewJSONError(args["code"].(string), args["message"].(string)).
+					Trace(args["trace"]).Build()
+				result = event.Value()
 			case "error_hint":
 				hint := ""
 				if h, ok := args["hint"].(string); ok {
 					hint = h
 				}
-				result = BuildJsonError(args["message"].(string), hint, nil)
-			case "error_hint_trace":
-				hint := ""
-				if h, ok := args["hint"].(string); ok {
-					hint = h
+				event, _ := NewJSONError(args["code"].(string), args["message"].(string)).
+					Hint(hint).Build()
+				result = event.Value()
+			case "error_retryable":
+				retryable := false
+				if r, ok := args["retryable"].(bool); ok {
+					retryable = r
 				}
-				result = BuildJsonError(args["message"].(string), hint, args["trace"])
-			case "status":
-				result = BuildJson(args["code"].(string), args["fields"], nil)
+				event, _ := NewJSONError(args["code"].(string), args["message"].(string)).
+					RetryableIf(retryable).Build()
+				result = event.Value()
+			case "error_extension_fields":
+				fields := args["fields"].(map[string]any)
+				event, _ := NewJSONError(args["code"].(string), args["message"].(string)).
+					Fields(fields).Build()
+				result = event.Value()
+			case "progress":
+				msg := args["message"].(string)
+				builder := NewJSONProgress(msg)
+				if fields, ok := args["fields"].(map[string]any); ok {
+					builder.Fields(fields)
+				}
+				event, _ := builder.Build()
+				result = event.Value()
+			case "log":
+				level := LogLevelInfo
+				if l, ok := args["level"].(string); ok {
+					level = LogLevel(l)
+				}
+				message := args["message"].(string)
+				builder := NewJSONLog(level, message)
+				if fields, ok := args["fields"].(map[string]any); ok {
+					builder.Fields(fields)
+				}
+				event, _ := builder.Build()
+				result = event.Value()
 			default:
 				t.Fatalf("unknown type: %s", typ)
 			}
 
+			if err := ValidateProtocolEvent(result, true); err != nil {
+				t.Fatalf("invalid event: %v", err)
+			}
 			if expected, ok := tc["expected"]; ok {
+				// 0.16: All builder cases must pass deep equality against expected.
+				exp := expected.(map[string]any)
 				gotJSON, _ := json.Marshal(result)
-				expJSON, _ := json.Marshal(expected)
+				expJSON, _ := json.Marshal(exp)
 				if string(gotJSON) != string(expJSON) {
 					t.Errorf("got %s, want %s", gotJSON, expJSON)
 				}
 			}
-			if ec, ok := tc["expected_contains"]; ok {
-				ecMap := ec.(map[string]any)
-				for k, v := range ecMap {
-					gotJSON, _ := json.Marshal(result[k])
-					expJSON, _ := json.Marshal(v)
-					if string(gotJSON) != string(expJSON) {
-						t.Errorf("key %s: got %s, want %s", k, gotJSON, expJSON)
-					}
-				}
+		})
+	}
+}
+
+func TestProtocolStreamFixtures(t *testing.T) {
+	for _, tc := range loadFixture("protocol_streams.json") {
+		name := tc["name"].(string)
+		t.Run(name, func(t *testing.T) {
+			valid := tc["valid"].(bool)
+			events := tc["events"].([]any)
+			err := ValidateProtocolStream(events, false)
+			if valid && err != nil {
+				t.Fatalf("valid stream failed: %v", err)
+			}
+			if !valid && err == nil {
+				t.Fatalf("invalid stream unexpectedly passed")
 			}
 		})
+	}
+}
+
+func TestProtocolStrictFixtures(t *testing.T) {
+	for _, tc := range loadFixture("protocol_strict.json") {
+		events := tc["events"].([]any)
+		if got := ValidateProtocolStream(events, true) == nil; got != tc["valid"].(bool) {
+			t.Errorf("%s: valid=%v", tc["name"], got)
+		}
+	}
+}
+
+func TestErrorBuilderRejectsReservedExtensionFields(t *testing.T) {
+	// In 0.16, reserved field writes are errors returned by Build(), not silently ignored
+	builder := NewJSONError("explicit", "message").
+		Fields(map[string]any{
+			"code": "wrong", "message": "wrong", "hint": "wrong", "detail": 1,
+		})
+	_, err := builder.Build()
+	if err == nil {
+		t.Fatalf("expected error for reserved field, got nil")
 	}
 }
 
@@ -346,7 +486,7 @@ func TestOutputFormatFixtures(t *testing.T) {
 
 func TestOutputYamlRawKeepsSuffixKeysAndStructure(t *testing.T) {
 	options := OutputOptions{
-		Redaction: RedactionOptions{Policy: RedactionTraceOnly},
+		Redaction: Redactor{Policy: RedactionTraceOnly},
 		Style:     OutputStyleRaw,
 	}
 	out := OutputYamlWithOptions(map[string]any{
@@ -367,7 +507,7 @@ func TestOutputYamlRawKeepsSuffixKeysAndStructure(t *testing.T) {
 
 func TestOutputPlainRawKeepsSuffixKeysAndRedactsTrace(t *testing.T) {
 	options := OutputOptions{
-		Redaction: RedactionOptions{Policy: RedactionTraceOnly},
+		Redaction: Redactor{Policy: RedactionTraceOnly},
 		Style:     OutputStyleRaw,
 	}
 	out := OutputPlainWithOptions(map[string]any{
@@ -384,7 +524,7 @@ func TestOutputWithOptionsDefaultsToReadableStyle(t *testing.T) {
 	out := OutputYamlWithOptions(
 		map[string]any{"duration_ms": int64(42)},
 		OutputOptions{
-			Redaction: RedactionOptions{Policy: RedactionNone},
+			Redaction: Redactor{Policy: RedactionNone},
 			Style:     OutputStyleReadable,
 		},
 	)
@@ -436,19 +576,19 @@ func TestOutputJsonNestedSecretsRedacted(t *testing.T) {
 }
 
 func TestOutputJsonWithTraceOnlyRedactsTraceOnly(t *testing.T) {
-	got := OutputJsonWith(map[string]any{
+	got := OutputJsonWithOptions(map[string]any{
 		"code":   "ok",
 		"result": map[string]any{"api_key_secret": "sk-live-123"},
 		"trace":  map[string]any{"request_secret": "top-secret"},
-	}, RedactionTraceOnly)
+	}, OutputOptionsForPolicy(RedactionTraceOnly))
 	assertContains(t, got, `"request_secret":"***"`)
 	assertContains(t, got, `"api_key_secret":"sk-live-123"`)
 }
 
 func TestOutputJsonWithNoneKeepsSecrets(t *testing.T) {
-	got := OutputJsonWith(map[string]any{
+	got := OutputJsonWithOptions(map[string]any{
 		"api_key_secret": "sk-live-123",
-	}, RedactionNone)
+	}, OutputOptionsForPolicy(RedactionNone))
 	assertContains(t, got, `"api_key_secret":"sk-live-123"`)
 	assertNotContains(t, got, `"***"`)
 }
@@ -478,6 +618,20 @@ func TestRedactedValueRedactsSecretSubtreeByDefault(t *testing.T) {
 	defaultValue := RedactedValue(input).(map[string]any)
 	if defaultValue["db_secret"] != "***" {
 		t.Fatalf("db_secret = %#v, want ***", defaultValue["db_secret"])
+	}
+}
+
+func TestMaxDepthMarkerIsNotSecretRedactionMarker(t *testing.T) {
+	var input any = "leaf"
+	for i := 0; i < 300; i++ {
+		input = map[string]any{"next": input}
+	}
+	out := OutputJson(input)
+	if !strings.Contains(out, `<afdata:max-depth>`) && !strings.Contains(out, `\u003cafdata:max-depth\u003e`) {
+		t.Fatalf("missing max-depth marker: %s", out)
+	}
+	if strings.Contains(out, "***") {
+		t.Fatalf("max-depth path must not use secret redaction marker: %s", out)
 	}
 }
 
@@ -700,8 +854,7 @@ func TestOutputYamlStripSats(t *testing.T) {
 
 func TestOutputYamlStripBtc(t *testing.T) {
 	got := OutputYaml(map[string]any{"reserve_btc": 0.5})
-	assertContains(t, got, "reserve:")
-	assertNotContains(t, got, "reserve_btc:")
+	assertContains(t, got, "reserve_btc:")
 }
 
 func TestOutputYamlStripUsdCents(t *testing.T) {
@@ -827,12 +980,12 @@ func TestOutputYamlFmtEpochS(t *testing.T) {
 
 func TestOutputYamlFmtBytes(t *testing.T) {
 	got := OutputYaml(map[string]any{"file_bytes": 5242880})
-	assertContains(t, got, "5.0MB")
+	assertContains(t, got, "5.0MiB")
 }
 
 func TestOutputYamlFmtBytesKb(t *testing.T) {
 	got := OutputYaml(map[string]any{"file_bytes": 456789})
-	assertContains(t, got, "446.1KB")
+	assertContains(t, got, "446.1KiB")
 }
 
 func TestOutputYamlFmtUsdCents(t *testing.T) {
@@ -867,7 +1020,7 @@ func TestOutputYamlFmtSats(t *testing.T) {
 
 func TestOutputYamlFmtBtc(t *testing.T) {
 	got := OutputYaml(map[string]any{"reserve_btc": 0.5})
-	assertContains(t, got, "0.5 BTC")
+	assertContains(t, got, "reserve_btc: 0.5")
 }
 
 func TestOutputYamlFmtPercentInt(t *testing.T) {
@@ -1039,4 +1192,12 @@ func TestNormalizePreservesLargeIntegers(t *testing.T) {
 	got := OutputJson(in)
 	want := `{"created_epoch_ns":1707868800123456789,"size_bytes":18446744073709551615}`
 	assertEqual(t, got, want)
+}
+
+// deepEqualIgnoringTrace compares two JSON values for deep equality, ignoring trace fields.
+// Used for protocol.json fixtures which don't include default trace: {} in expected output.
+func deepEqualIgnoringTrace(a, b any) bool {
+	aJSON, _ := json.Marshal(a)
+	bJSON, _ := json.Marshal(b)
+	return string(aJSON) == string(bJSON)
 }

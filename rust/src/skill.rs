@@ -10,6 +10,7 @@
 //! Requires the `skill-admin` feature.
 
 use serde::Serialize;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const SKILL_FILE_NAME: &str = "SKILL.md";
@@ -189,18 +190,30 @@ pub struct SkillError {
     pub message: String,
     /// Optional remediation hint.
     pub hint: Option<String>,
+    /// Per-target report captured after a multi-target operation failed.
+    pub partial_report: Option<SkillReport>,
 }
 
 impl SkillError {
     fn invalid_request(message: String, hint: Option<String>) -> Self {
-        Self { message, hint }
+        Self {
+            message,
+            hint,
+            partial_report: None,
+        }
     }
 
     fn io(action: &str, err: std::io::Error) -> Self {
         Self {
             message: format!("{action} failed: {err}"),
             hint: None,
+            partial_report: None,
         }
+    }
+
+    fn with_partial_report(mut self, report: SkillReport) -> Self {
+        self.partial_report = Some(report);
+        self
     }
 }
 
@@ -240,39 +253,78 @@ fn install(spec: &SkillSpec, options: &SkillOptions) -> Result<SkillReport, Skil
     validate_skill_text(spec, spec.source)?;
     let targets = resolve_targets(spec, options)?;
     let content = managed_skill_contents(spec);
-    let mut installed = Vec::with_capacity(targets.len());
+    preflight_install_targets(spec, options, &targets)?;
     for target in &targets {
-        std::fs::create_dir_all(&target.skill_dir)
-            .map_err(|e| SkillError::io("create skill dir", e))?;
+        if let Err(err) = std::fs::create_dir_all(&target.skill_dir)
+            .map_err(|e| SkillError::io("create skill dir", e))
+        {
+            return Err(err.with_partial_report(install_report_lossy(spec, &targets, false)));
+        }
+    }
+    install_targets(spec, &targets, &content)
+}
+
+fn preflight_install_targets(
+    spec: &SkillSpec,
+    options: &SkillOptions,
+    targets: &[SkillTarget],
+) -> Result<(), SkillError> {
+    let mut failures = Vec::new();
+    for target in targets {
         if let Some(kind) = skill_path_file_type(&target.skill_path)? {
-            if kind.is_symlink() && !options.force {
-                return Err(SkillError::invalid_request(
-                    format!(
+            if kind.is_symlink() {
+                if !options.force {
+                    failures.push(format!(
                         "refusing to overwrite symlinked skill at {}",
                         target.skill_path.display()
-                    ),
-                    Some(
-                        "pass --force to replace the symlink itself, or choose another --skills-dir"
-                            .to_string(),
-                    ),
-                ));
+                    ));
+                }
+                continue;
             }
-            if !kind.is_symlink()
-                && !is_managed_or_bundled_skill(spec, &target.skill_path)?
-                && !options.force
-            {
-                return Err(SkillError::invalid_request(
-                    format!(
-                        "refusing to overwrite unmanaged skill at {}",
-                        target.skill_path.display()
-                    ),
-                    Some("pass --force to replace it, or choose another --skills-dir".to_string()),
+            if !kind.is_file() {
+                failures.push(format!(
+                    "refusing to overwrite non-regular skill at {}",
+                    target.skill_path.display()
+                ));
+                continue;
+            }
+            if !is_managed_or_bundled_skill(spec, &target.skill_path)? && !options.force {
+                failures.push(format!(
+                    "refusing to overwrite unmanaged skill at {}",
+                    target.skill_path.display()
                 ));
             }
         }
-        write_skill_atomic(target, &content)?;
-        validate_installed_skill(spec, &target.skill_path)?;
-        installed.push(target_status(spec, target)?);
+    }
+    if failures.is_empty() {
+        return Ok(());
+    }
+    Err(SkillError::invalid_request(
+        failures.join("; "),
+        Some("pass --force to replace unmanaged files or symlinks".to_string()),
+    )
+    .with_partial_report(install_report_lossy(spec, targets, false)))
+}
+
+fn install_targets(
+    spec: &SkillSpec,
+    targets: &[SkillTarget],
+    content: &str,
+) -> Result<SkillReport, SkillError> {
+    let mut installed = Vec::with_capacity(targets.len());
+    for target in targets {
+        if let Err(err) = write_skill_atomic(target, content) {
+            return Err(err.with_partial_report(install_report_lossy(spec, targets, false)));
+        }
+        if let Err(err) = validate_installed_skill(spec, &target.skill_path) {
+            return Err(err.with_partial_report(install_report_lossy(spec, targets, false)));
+        }
+        match target_status(spec, target) {
+            Ok(status) => installed.push(status),
+            Err(err) => {
+                return Err(err.with_partial_report(install_report_lossy(spec, targets, false)));
+            }
+        }
     }
     Ok(SkillReport::Install {
         skill: spec.name.to_string(),
@@ -284,37 +336,28 @@ fn install(spec: &SkillSpec, options: &SkillOptions) -> Result<SkillReport, Skil
 
 fn uninstall(spec: &SkillSpec, options: &SkillOptions) -> Result<SkillReport, SkillError> {
     let targets = resolve_targets(spec, options)?;
+    preflight_uninstall_targets(spec, options, &targets)?;
     let mut removed = Vec::with_capacity(targets.len());
     for target in &targets {
         let Some(kind) = skill_path_file_type(&target.skill_path)? else {
             removed.push(target_uninstall_status(target, false));
             continue;
         };
-        if kind.is_symlink() && !options.force {
-            return Err(SkillError::invalid_request(
+        if !kind.is_file() && !kind.is_symlink() {
+            let err = SkillError::invalid_request(
                 format!(
-                    "refusing to remove symlinked skill at {}",
+                    "refusing to remove non-regular skill at {}",
                     target.skill_path.display()
                 ),
-                Some("pass --force to remove the symlink itself".to_string()),
-            ));
+                None,
+            );
+            return Err(err.with_partial_report(uninstall_report_lossy(spec, &targets, &removed)));
         }
-        if !kind.is_symlink()
-            && !is_managed_or_bundled_skill(spec, &target.skill_path)?
-            && !options.force
+        if let Err(err) =
+            std::fs::remove_file(&target.skill_path).map_err(|e| SkillError::io("remove skill", e))
         {
-            return Err(SkillError::invalid_request(
-                format!(
-                    "refusing to remove unmanaged skill at {}",
-                    target.skill_path.display()
-                ),
-                Some(format!(
-                    "only skills generated by {} skill install can be removed without --force",
-                    spec.marker_slug
-                )),
-            ));
+            return Err(err.with_partial_report(uninstall_report_lossy(spec, &targets, &removed)));
         }
-        std::fs::remove_file(&target.skill_path).map_err(|e| SkillError::io("remove skill", e))?;
         let _ = std::fs::remove_dir(&target.skill_dir);
         removed.push(target_uninstall_status(target, true));
     }
@@ -323,6 +366,52 @@ fn uninstall(spec: &SkillSpec, options: &SkillOptions) -> Result<SkillReport, Sk
         removed_any: removed.iter().any(|s| s.removed),
         targets: removed,
     })
+}
+
+fn preflight_uninstall_targets(
+    spec: &SkillSpec,
+    options: &SkillOptions,
+    targets: &[SkillTarget],
+) -> Result<(), SkillError> {
+    let mut failures = Vec::new();
+    for target in targets {
+        let Some(kind) = skill_path_file_type(&target.skill_path)? else {
+            continue;
+        };
+        if kind.is_symlink() {
+            if !options.force {
+                failures.push(format!(
+                    "refusing to remove symlinked skill at {}",
+                    target.skill_path.display()
+                ));
+            }
+            continue;
+        }
+        if !kind.is_file() {
+            failures.push(format!(
+                "refusing to remove non-regular skill at {}",
+                target.skill_path.display()
+            ));
+            continue;
+        }
+        if !is_managed_or_bundled_skill(spec, &target.skill_path)? && !options.force {
+            failures.push(format!(
+                "refusing to remove unmanaged skill at {}",
+                target.skill_path.display()
+            ));
+        }
+    }
+    if failures.is_empty() {
+        return Ok(());
+    }
+    Err(SkillError::invalid_request(
+        failures.join("; "),
+        Some(format!(
+            "only skills generated by {} skill install can be removed without --force",
+            spec.marker_slug
+        )),
+    )
+    .with_partial_report(uninstall_report_lossy(spec, targets, &[])))
 }
 
 struct SkillTarget {
@@ -475,7 +564,7 @@ fn target_status(spec: &SkillSpec, target: &SkillTarget) -> Result<SkillTargetSt
         let text = std::fs::read_to_string(&target.skill_path)
             .map_err(|e| SkillError::io("read skill", e))?;
         managed = skill_text_is_managed_or_bundled(spec, &text);
-        current = normalize_skill_text(spec, &text) == normalize_skill_text(spec, spec.source);
+        current = normalized_content_hash(spec, &text) == source_hash(spec);
         match validate_skill_text(spec, &text) {
             Ok(()) => valid = true,
             Err(err) => validation_error = Some(err.message),
@@ -508,27 +597,91 @@ fn target_uninstall_status(target: &SkillTarget, removed: bool) -> SkillUninstal
     }
 }
 
+fn target_status_lossy(spec: &SkillSpec, target: &SkillTarget) -> SkillTargetStatus {
+    target_status(spec, target).unwrap_or_else(|err| {
+        let installed = std::fs::symlink_metadata(&target.skill_path).is_ok();
+        SkillTargetStatus {
+            agent: target.agent,
+            scope: target.scope,
+            skills_dir: target.skills_dir.clone(),
+            skill_dir: target.skill_dir.clone(),
+            skill_path: target.skill_path.clone(),
+            installed,
+            managed: false,
+            valid: false,
+            current: false,
+            validation_error: Some(err.message),
+        }
+    })
+}
+
+fn install_report_lossy(spec: &SkillSpec, targets: &[SkillTarget], installed: bool) -> SkillReport {
+    SkillReport::Install {
+        skill: spec.name.to_string(),
+        installed,
+        targets: targets
+            .iter()
+            .map(|target| target_status_lossy(spec, target))
+            .collect(),
+        hint: "restart the agent so it reloads installed skills",
+    }
+}
+
+fn uninstall_report_lossy(
+    spec: &SkillSpec,
+    targets: &[SkillTarget],
+    removed: &[SkillUninstallStatus],
+) -> SkillReport {
+    let mut statuses = Vec::with_capacity(targets.len());
+    for target in targets {
+        if let Some(status) = removed.iter().find(|status| {
+            status.agent == target.agent
+                && status.scope == target.scope
+                && status.skill_path == target.skill_path
+        }) {
+            statuses.push(status.clone());
+        } else {
+            statuses.push(target_uninstall_status(target, false));
+        }
+    }
+    SkillReport::Uninstall {
+        skill: spec.name.to_string(),
+        removed_any: statuses.iter().any(|status| status.removed),
+        targets: statuses,
+    }
+}
+
 fn generated_by(spec: &SkillSpec) -> String {
     format!("Generated by {} skill install", spec.marker_slug)
 }
 
-fn source_hash(spec: &SkillSpec) -> String {
+fn text_hash(text: &str) -> String {
     let mut hash = FNV1A64_OFFSET;
-    for byte in spec.source.as_bytes() {
+    for byte in text.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(FNV1A64_PRIME);
     }
     format!("{hash:016x}")
 }
 
+fn source_hash(spec: &SkillSpec) -> String {
+    normalized_content_hash(spec, spec.source)
+}
+
+fn normalized_content_hash(spec: &SkillSpec, text: &str) -> String {
+    text_hash(&normalize_skill_text(spec, text))
+}
+
 fn managed_marker_block(spec: &SkillSpec) -> String {
     let slug = spec.marker_slug;
     format!(
-        "<!--\n{}\n{}-managed-skill: true\n{}-managed-skill-name: {}\n{}-managed-skill-source-hash-fnv1a64: {}\n-->",
+        "<!--\n{}\n{}-managed-skill: true\n{}-managed-skill-name: {}\n{}-managed-skill-owner: {}\n{}-managed-skill-content-hash-fnv1a64: {}\n-->",
         generated_by(spec),
         slug,
         slug,
         spec.name,
+        slug,
+        slug,
         slug,
         source_hash(spec)
     )
@@ -675,19 +828,90 @@ fn is_managed_or_bundled_skill(spec: &SkillSpec, path: &Path) -> Result<bool, Sk
 }
 
 fn skill_text_is_managed_or_bundled(spec: &SkillSpec, text: &str) -> bool {
-    skill_text_has_current_marker(spec, text)
+    skill_text_has_managed_identity(spec, text)
         || normalize_skill_text(spec, text) == normalize_skill_text(spec, spec.source)
 }
 
-fn skill_text_has_current_marker(spec: &SkillSpec, text: &str) -> bool {
-    text.replace("\r\n", "\n")
-        .contains(&managed_marker_block(spec))
+fn skill_text_has_managed_identity(spec: &SkillSpec, text: &str) -> bool {
+    for block in html_comment_blocks(text) {
+        if managed_marker_block_has_identity(spec, &block) {
+            return true;
+        }
+    }
+    false
+}
+
+fn managed_marker_block_has_identity(spec: &SkillSpec, block: &str) -> bool {
+    let slug = spec.marker_slug;
+    let generated_by_line = generated_by(spec);
+    let managed_line = format!("{slug}-managed-skill: true");
+    let name_line = format!("{slug}-managed-skill-name: {}", spec.name);
+    let owner_line = format!("{slug}-managed-skill-owner: {slug}");
+    let mut has_generated_by = false;
+    let mut has_managed = false;
+    let mut has_name = false;
+    let mut has_owner = false;
+    for line in block.replace("\r\n", "\n").lines() {
+        let trimmed = line.trim();
+        has_generated_by |= trimmed == generated_by_line;
+        has_managed |= trimmed == managed_line;
+        has_name |= trimmed == name_line;
+        has_owner |= trimmed == owner_line;
+    }
+    has_generated_by && has_managed && has_name && has_owner
+}
+
+fn html_comment_blocks(text: &str) -> Vec<String> {
+    let normalized = text.replace("\r\n", "\n");
+    let mut blocks = Vec::new();
+    let mut lines = normalized.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != "<!--" {
+            continue;
+        }
+        let mut block = vec![line.to_string()];
+        for next in lines.by_ref() {
+            block.push(next.to_string());
+            if next.trim() == "-->" {
+                blocks.push(block.join("\n"));
+                break;
+            }
+        }
+    }
+    blocks
+}
+
+fn strip_managed_marker_blocks(spec: &SkillSpec, text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n");
+    let mut output = Vec::new();
+    let mut lines = normalized.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != "<!--" {
+            output.push(line.to_string());
+            continue;
+        }
+        let mut block = vec![line.to_string()];
+        let mut closed = false;
+        for next in lines.by_ref() {
+            block.push(next.to_string());
+            if next.trim() == "-->" {
+                closed = true;
+                break;
+            }
+        }
+        if closed {
+            let block_text = block.join("\n");
+            if managed_marker_block_has_identity(spec, &block_text) {
+                continue;
+            }
+        }
+        output.extend(block);
+    }
+    output.join("\n")
 }
 
 fn normalize_skill_text(spec: &SkillSpec, text: &str) -> String {
-    let text = text
-        .replace("\r\n", "\n")
-        .replace(&managed_marker_block(spec), "");
+    let text = strip_managed_marker_blocks(spec, text);
     // Drop the managed-marker blocks, then collapse runs of blank lines to one so that the blank
     // line `managed_skill_contents` inserts after the marker block does not make a managed install
     // compare unequal to the bundled source.
@@ -749,22 +973,44 @@ fn write_skill_atomic(target: &SkillTarget, content: &str) -> Result<(), SkillEr
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let tmp_path = target.skill_dir.join(format!(
-        ".{SKILL_FILE_NAME}.{}.{}.tmp",
-        std::process::id(),
-        nanos
-    ));
-    let result = (|| {
-        std::fs::write(&tmp_path, content)
-            .map_err(|e| SkillError::io("write temporary skill", e))?;
-        std::fs::rename(&tmp_path, &target.skill_path)
-            .map_err(|e| SkillError::io("replace skill", e))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
+    for attempt in 0..16 {
+        let tmp_path = target.skill_dir.join(format!(
+            ".{SKILL_FILE_NAME}.{}.{}.{}.tmp",
+            std::process::id(),
+            nanos,
+            attempt
+        ));
+        let mut tmp = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(SkillError::io("create temporary skill", err)),
+        };
+        let result = (|| {
+            tmp.write_all(content.as_bytes())
+                .map_err(|e| SkillError::io("write temporary skill", e))?;
+            tmp.sync_all()
+                .map_err(|e| SkillError::io("sync temporary skill", e))?;
+            drop(tmp);
+            std::fs::rename(&tmp_path, &target.skill_path)
+                .map_err(|e| SkillError::io("replace skill", e))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+        return result;
     }
-    result
+    Err(SkillError::io(
+        "create temporary skill",
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "temporary skill path collision",
+        ),
+    ))
 }
 
 fn home_dir() -> Result<PathBuf, SkillError> {
@@ -834,6 +1080,17 @@ mod tests {
         }
     }
 
+    fn custom_target(agent: SkillAgent, dir: &Path) -> SkillTarget {
+        let skill_dir = dir.join("agent-first-test");
+        SkillTarget {
+            agent,
+            scope: SkillScope::Personal,
+            skills_dir: dir.to_path_buf(),
+            skill_path: skill_dir.join(SKILL_FILE_NAME),
+            skill_dir,
+        }
+    }
+
     #[test]
     fn validates_bundled_frontmatter() {
         assert!(validate_skill_frontmatter(SKILL_SOURCE).is_ok());
@@ -856,7 +1113,9 @@ mod tests {
         let text = std::fs::read_to_string(&skill_path).unwrap_or_default();
         assert!(text.contains(&managed_marker_block(&spec())));
         assert!(text.contains("aftest-managed-skill-name: agent-first-test"));
-        assert!(text.contains("aftest-managed-skill-source-hash-fnv1a64:"));
+        assert!(text.contains("aftest-managed-skill-owner: aftest"));
+        assert!(text.contains("aftest-managed-skill-content-hash-fnv1a64:"));
+        assert!(!text.contains("aftest-managed-skill-source-hash-fnv1a64:"));
 
         let status = run_skill_admin(&spec(), SkillAction::Status, &opts);
         assert!(status.is_ok());
@@ -969,6 +1228,143 @@ mod tests {
             assert_eq!(targets.first().map(|t| t.managed), Some(false));
         }
         assert!(run_skill_admin(&spec(), SkillAction::Install, &opts).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn old_marker_format_is_not_managed() {
+        let dir = temp_skills_dir("old-marker");
+        let opts = options(SkillAgentSelection::Opencode, &dir, false);
+        let skill_dir = dir.join("agent-first-test");
+        let skill_path = skill_dir.join(SKILL_FILE_NAME);
+        assert!(std::fs::create_dir_all(&skill_dir).is_ok());
+        let old_marker = concat!(
+            "---\n",
+            "name: agent-first-test\n",
+            "description: test skill\n",
+            "---\n",
+            "<!--\n",
+            "Generated by aftest skill install\n",
+            "aftest-managed-skill: true\n",
+            "aftest-managed-skill-name: agent-first-test\n",
+            "aftest-managed-skill-source-hash-fnv1a64: deadbeef\n",
+            "-->\n",
+            "\n",
+            "# Body\n",
+            "\n",
+            "rules.\n"
+        );
+        assert!(std::fs::write(&skill_path, old_marker).is_ok());
+
+        if let Ok(SkillReport::Status { targets, .. }) =
+            run_skill_admin(&spec(), SkillAction::Status, &opts)
+            && let Some(t) = targets.first()
+        {
+            assert!(t.installed);
+            assert!(t.valid);
+            assert!(!t.managed);
+            assert!(!t.current);
+        }
+        assert!(run_skill_admin(&spec(), SkillAction::Install, &opts).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn install_preflight_reports_all_targets_without_writing() {
+        let dir = temp_skills_dir("install-preflight");
+        let codex = custom_target(SkillAgent::Codex, &dir.join("codex"));
+        let opencode = custom_target(SkillAgent::Opencode, &dir.join("opencode"));
+        assert!(std::fs::create_dir_all(&opencode.skill_dir).is_ok());
+        assert!(
+            std::fs::write(
+                &opencode.skill_path,
+                "---\nname: custom\ndescription: custom\n---\n"
+            )
+            .is_ok()
+        );
+        let opts = SkillOptions {
+            agent: SkillAgentSelection::All,
+            scope: SkillScope::Personal,
+            skills_dir: None,
+            force: false,
+        };
+
+        let result = preflight_install_targets(&spec(), &opts, &[codex, opencode]);
+        assert!(result.is_err());
+        let Err(err) = result else {
+            return;
+        };
+        assert!(
+            err.message
+                .contains("refusing to overwrite unmanaged skill")
+        );
+        assert!(!dir.join("codex").join("agent-first-test").exists());
+        let partial_report = err.partial_report;
+        assert!(matches!(partial_report, Some(SkillReport::Install { .. })));
+        let Some(SkillReport::Install {
+            installed, targets, ..
+        }) = partial_report
+        else {
+            return;
+        };
+        assert!(!installed);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets.first().map(|target| target.installed), Some(false));
+        assert_eq!(targets.get(1).map(|target| target.installed), Some(true));
+        assert_eq!(targets.get(1).map(|target| target.managed), Some(false));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn uninstall_preflight_reports_all_targets_without_removing() {
+        let dir = temp_skills_dir("uninstall-preflight");
+        let codex = custom_target(SkillAgent::Codex, &dir.join("codex"));
+        let opencode = custom_target(SkillAgent::Opencode, &dir.join("opencode"));
+        assert!(std::fs::create_dir_all(&codex.skill_dir).is_ok());
+        assert!(std::fs::create_dir_all(&opencode.skill_dir).is_ok());
+        assert!(std::fs::write(&codex.skill_path, managed_skill_contents(&spec())).is_ok());
+        assert!(
+            std::fs::write(
+                &opencode.skill_path,
+                "---\nname: custom\ndescription: custom\n---\n"
+            )
+            .is_ok()
+        );
+        let opts = SkillOptions {
+            agent: SkillAgentSelection::All,
+            scope: SkillScope::Personal,
+            skills_dir: None,
+            force: false,
+        };
+
+        let result = preflight_uninstall_targets(&spec(), &opts, &[codex, opencode]);
+        assert!(result.is_err());
+        let Err(err) = result else {
+            return;
+        };
+        assert!(err.message.contains("refusing to remove unmanaged skill"));
+        assert!(
+            dir.join("codex")
+                .join("agent-first-test")
+                .join(SKILL_FILE_NAME)
+                .exists()
+        );
+        let partial_report = err.partial_report;
+        assert!(matches!(
+            partial_report,
+            Some(SkillReport::Uninstall { .. })
+        ));
+        let Some(SkillReport::Uninstall {
+            removed_any,
+            targets,
+            ..
+        }) = partial_report
+        else {
+            return;
+        };
+        assert!(!removed_any);
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().all(|target| !target.removed));
         let _ = std::fs::remove_dir_all(dir);
     }
 

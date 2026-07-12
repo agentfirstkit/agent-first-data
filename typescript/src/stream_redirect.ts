@@ -6,7 +6,7 @@
  * into JSON.
  */
 
-import { closeSync, openSync } from "node:fs";
+import { closeSync, constants, existsSync, lstatSync, openSync } from "node:fs";
 
 export const STDOUT_FILE_ARG = "--stdout-file";
 export const STDERR_FILE_ARG = "--stderr-file";
@@ -98,7 +98,7 @@ function takeValue(args: readonly string[], idx: number, flag: string): [string,
 
 function validateWritable(path: string | undefined): void {
   if (path === undefined) return;
-  const fd = openSync(path, "a");
+  const fd = openAppendSecure(path);
   closeSync(fd);
 }
 
@@ -110,11 +110,30 @@ function redirectFd(targetFd: 1 | 2, path: string | undefined): void {
   } catch {
     // The target fd may already be closed in unusual embedding environments.
   }
-  const fd = openSync(path, "a");
+  const fd = openAppendSecure(path);
   if (fd !== targetFd) {
     closeSync(fd);
     throw new Error(`failed to redirect fd ${targetFd} to ${path}`);
   }
+}
+
+function openAppendSecure(path: string): number {
+  const nofollow = constants.O_NOFOLLOW ?? 0;
+  if (existsSync(path)) {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) {
+      throw new Error("stream redirection target must not be a symbolic link");
+    }
+    if (!stat.isFile()) {
+      throw new Error("stream redirection target must be a regular file");
+    }
+    return openSync(path, constants.O_WRONLY | constants.O_APPEND | nofollow);
+  }
+  return openSync(
+    path,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_EXCL | nofollow,
+    0o600,
+  );
 }
 
 function fillLowerFds(targetFd: 1 | 2): void {

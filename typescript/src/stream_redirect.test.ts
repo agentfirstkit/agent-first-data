@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -53,6 +53,7 @@ describe("stream redirect args", () => {
         "",
       ].join("\n"),
     );
+    writeFileSync(stdoutPath, "existing stdout\n");
 
     try {
       execFileSync(tsxBin, [childPath, "--stdout-file", stdoutPath, "--stderr-file", stderrPath], {
@@ -67,7 +68,37 @@ describe("stream redirect args", () => {
       assert.equal(output.stderr, "");
     }
 
-    assert.equal(readFileSync(stdoutPath, "utf-8"), "stdout bytes\n");
+    assert.equal(readFileSync(stdoutPath, "utf-8"), "existing stdout\nstdout bytes\n");
     assert.match(readFileSync(stderrPath, "utf-8"), /Error: stderr bytes/);
+    if (process.platform !== "win32") {
+      assert.equal(statSync(stderrPath).mode & 0o777, 0o600);
+    }
+  });
+
+  it("rejects symbolic link targets", () => {
+    if (process.platform === "win32") return;
+    const tempDir = mkdtempSync(join(tmpdir(), "afdata-stream-redirect-symlink-"));
+    const realPath = join(tempDir, "real.log");
+    const symlinkPath = join(tempDir, "stdout.log");
+    const childPath = join(tempDir, "redirect_symlink_child.ts");
+    const tsxBin = join(dir, "..", "node_modules", ".bin", "tsx");
+
+    writeFileSync(realPath, "");
+    symlinkSync(realPath, symlinkPath);
+    writeFileSync(
+      childPath,
+      [
+        `import { installStreamRedirectFromRawArgs } from ${JSON.stringify(pathToFileURL(join(dir, "stream_redirect.ts")).href)};`,
+        "installStreamRedirectFromRawArgs(process.argv.slice(2));",
+        'process.stdout.write("should not redirect\\n");',
+        "",
+      ].join("\n"),
+    );
+
+    assert.throws(
+      () => execFileSync(tsxBin, [childPath, "--stdout-file", symlinkPath], { encoding: "utf-8", stdio: "pipe" }),
+      /symbolic link/,
+    );
+    assert.equal(readFileSync(realPath, "utf-8"), "");
   });
 });

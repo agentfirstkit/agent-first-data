@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentfirstkit.org/schemas/agent-first-data/protocol-v1.schema.json",
+  "title": "Agent-First Data Protocol v1 Event",
+  "type": "object",
+  "oneOf": [
+    {"$ref": "#/$defs/resultEvent"},
+    {"$ref": "#/$defs/errorEvent"},
+    {"$ref": "#/$defs/progressEvent"},
+    {"$ref": "#/$defs/logEvent"}
+  ],
+  "$defs": {
+    "trace": {
+      "type": "object"
+    },
+    "resultEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "result"},
+        "result": true,
+        "trace": {"$ref": "#/$defs/trace"}
+      },
+      "required": ["kind", "result"],
+      "additionalProperties": false
+    },
+    "errorEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "error"},
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {"type": "string", "minLength": 1},
+            "message": {"type": "string", "minLength": 1},
+            "retryable": {"type": "boolean"},
+            "hint": {"type": "string"}
+          },
+          "required": ["code", "message", "retryable"],
+          "additionalProperties": true
+        },
+        "trace": {"$ref": "#/$defs/trace"}
+      },
+      "required": ["kind", "error"],
+      "additionalProperties": false
+    },
+    "progressEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "progress"},
+        "progress": {
+          "type": "object",
+          "properties": {
+            "message": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": true
+        },
+        "trace": {"$ref": "#/$defs/trace"}
+      },
+      "required": ["kind", "progress"],
+      "additionalProperties": false
+    },
+    "logEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "log"},
+        "log": {
+          "type": "object",
+          "properties": {
+            "message": {"type": "string", "minLength": 1},
+            "level": {"enum": ["debug", "info", "warn", "error"]},
+            "code": false
+          },
+          "not": {
+            "required": ["code"]
+          },
+          "additionalProperties": true
+        },
+        "trace": {"$ref": "#/$defs/trace"}
+      },
+      "required": ["kind", "log"],
+      "additionalProperties": false
+    }
+  }
+}

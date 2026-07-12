@@ -1,11 +1,10 @@
 /**
  * AFDATA output formatting and protocol templates.
  *
- * 21 public APIs and 4 types: protocol builders, value redactors (copy and
- * in-place; cover _secret and _url fields), output formatters, URL-string
- * redactors (redactUrlSecrets / WithOptions), parseSize, normalizeUtcOffset,
- * isValidRfc3339Date, isValidRfc3339Time, RedactionPolicy, RedactionOptions,
- * OutputStyle, and OutputOptions.
+ * Public APIs include protocol event builders, redactedValue (covers _secret
+ * and _url fields), output formatters, redactUrlSecrets, parseSize,
+ * normalizeUtcOffset, isValidRfc3339Date, isValidRfc3339Time,
+ * RedactionPolicy, OutputStyle, and OutputOptions.
  */
 
 export type JsonValue =
@@ -16,31 +15,576 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
 // ═══════════════════════════════════════════
-// Public API: Protocol Builders
+// Event type: opaque branded wrapper
 // ═══════════════════════════════════════════
 
-/** Build {code: "ok", result, trace?}. */
-export function buildJsonOk(result: JsonValue, trace?: JsonValue): JsonValue {
-  const m: Record<string, JsonValue> = { code: "ok", result };
-  if (trace !== undefined) m.trace = trace;
-  return m;
+/**
+ * Event is an opaque type wrapping a protocol event envelope.
+ * Guaranteed to be strict-valid by construction.
+ */
+export class Event {
+  private readonly __brand = "Event";
+
+  constructor(private readonly value: JsonValue) {}
+
+  toJSON(): JsonValue {
+    return this.value;
+  }
+
+  valueOf(): JsonValue {
+    return this.value;
+  }
 }
 
-/** Build {code: "error", error: message, hint?, trace?}. */
-export function buildJsonError(message: string, hint?: string, trace?: JsonValue): JsonValue {
-  const m: Record<string, JsonValue> = { code: "error", error: message };
-  if (hint !== undefined) m.hint = hint;
-  if (trace !== undefined) m.trace = trace;
-  return m;
+// ═══════════════════════════════════════════
+// EventBuildError: typed error from .build()
+// ═══════════════════════════════════════════
+
+export class EventBuildError extends Error {
+  constructor(
+    message: string,
+    public readonly issues: string[],
+  ) {
+    super(message);
+    this.name = "EventBuildError";
+  }
 }
 
-/** Build {code: "<custom>", ...fields, trace?}. */
-export function buildJson(code: string, fields: JsonValue, trace?: JsonValue): JsonValue {
-  const result: Record<string, JsonValue> = isObject(fields) ? { ...fields } : {};
-  result.code = code;
-  if (trace !== undefined) result.trace = trace;
-  return result;
+// ═══════════════════════════════════════════
+// Public API: Protocol v1 Builders and Validation
+// ═══════════════════════════════════════════
+
+// ═══════════════════════════════════════════
+// Fluent builders
+// ═══════════════════════════════════════════
+
+export class JsonResultBuilder {
+  private traceValue: Record<string, JsonValue> = {};
+  private issues: string[] = [];
+
+  constructor(private readonly payload: JsonValue) {}
+
+  trace(value: Record<string, JsonValue> | undefined): this {
+    if (value !== undefined) {
+      if (!isObject(value)) {
+        this.issues.push("trace must be a JSON object");
+      } else {
+        this.traceValue = value as Record<string, JsonValue>;
+      }
+    }
+    return this;
+  }
+
+  build(): Event {
+    if (this.issues.length > 0) {
+      throw new EventBuildError(`Failed to build result event: ${this.issues.join("; ")}`, this.issues);
+    }
+    const m: Record<string, JsonValue> = { kind: "result", result: this.payload, trace: this.traceValue };
+    return new Event(m);
+  }
+}
+
+export class JsonErrorBuilder {
+  private retryableValue = false;
+  private hintValue: string | undefined;
+  private extensionFields: Record<string, JsonValue> = {};
+  private traceValue: Record<string, JsonValue> = {};
+  private issues: string[] = [];
+
+  constructor(
+    private readonly code: string,
+    private readonly message: string,
+  ) {
+    if (!code || code === "") this.issues.push("code must be a non-empty string");
+    if (!message || message === "") this.issues.push("message must be a non-empty string");
+  }
+
+  retryable(): this {
+    this.retryableValue = true;
+    return this;
+  }
+
+  retryableIf(flag: boolean): this {
+    this.retryableValue = flag;
+    return this;
+  }
+
+  hint(value: string): this {
+    if (!value || value === "") {
+      this.issues.push("hint must be a non-empty string");
+    } else {
+      this.hintValue = value;
+    }
+    return this;
+  }
+
+  hintIfSome(value: string | undefined | null): this {
+    if (value) {
+      return this.hint(value);
+    }
+    return this;
+  }
+
+  field(name: string, value: JsonValue): this {
+    if (this.isReservedErrorField(name)) {
+      this.issues.push(`cannot write reserved error field ${JSON.stringify(name)}`);
+    } else {
+      this.extensionFields[name] = value;
+    }
+    return this;
+  }
+
+  fields(obj: unknown): this {
+    if (!isObject(obj)) {
+      this.issues.push("fields must be a JSON object");
+      return this;
+    }
+    for (const [key, val] of Object.entries(obj)) {
+      if (this.isReservedErrorField(key)) {
+        this.issues.push(`cannot write reserved error field ${JSON.stringify(key)}`);
+      } else {
+        this.extensionFields[key] = val as JsonValue;
+      }
+    }
+    return this;
+  }
+
+  extend(obj: unknown): this {
+    if (!isObject(obj)) {
+      this.issues.push("extend must be a JSON object");
+      return this;
+    }
+    for (const [key, val] of Object.entries(obj)) {
+      if (this.isReservedErrorField(key)) {
+        this.issues.push(`cannot write reserved error field ${JSON.stringify(key)}`);
+      } else {
+        this.extensionFields[key] = val as JsonValue;
+      }
+    }
+    return this;
+  }
+
+  trace(value: Record<string, JsonValue> | undefined): this {
+    if (value !== undefined) {
+      if (!isObject(value)) {
+        this.issues.push("trace must be a JSON object");
+      } else {
+        this.traceValue = value as Record<string, JsonValue>;
+      }
+    }
+    return this;
+  }
+
+  private isReservedErrorField(name: string): boolean {
+    return name === "code" || name === "message" || name === "hint" || name === "retryable";
+  }
+
+  build(): Event {
+    if (this.issues.length > 0) {
+      throw new EventBuildError(`Failed to build error event: ${this.issues.join("; ")}`, this.issues);
+    }
+    const error: Record<string, JsonValue> = { ...this.extensionFields };
+    error.code = this.code;
+    error.message = this.message;
+    error.retryable = this.retryableValue;
+    if (this.hintValue !== undefined) error.hint = this.hintValue;
+    const m: Record<string, JsonValue> = { kind: "error", error, trace: this.traceValue };
+    return new Event(m);
+  }
+}
+
+export class JsonProgressBuilder {
+  private extensionFields: Record<string, JsonValue> = {};
+  private traceValue: Record<string, JsonValue> = {};
+  private issues: string[] = [];
+
+  constructor(private readonly message: string) {
+    if (!message || message === "") this.issues.push("message must be a non-empty string");
+  }
+
+  field(name: string, value: JsonValue): this {
+    if (this.isReservedProgressField(name)) {
+      this.issues.push(`cannot write reserved progress field ${JSON.stringify(name)}`);
+    } else {
+      this.extensionFields[name] = value;
+    }
+    return this;
+  }
+
+  fields(obj: unknown): this {
+    if (!isObject(obj)) {
+      this.issues.push("fields must be a JSON object");
+      return this;
+    }
+    for (const [key, val] of Object.entries(obj)) {
+      if (this.isReservedProgressField(key)) {
+        this.issues.push(`cannot write reserved progress field ${JSON.stringify(key)}`);
+      } else {
+        this.extensionFields[key] = val as JsonValue;
+      }
+    }
+    return this;
+  }
+
+  extend(obj: unknown): this {
+    if (!isObject(obj)) {
+      this.issues.push("extend must be a JSON object");
+      return this;
+    }
+    for (const [key, val] of Object.entries(obj)) {
+      if (this.isReservedProgressField(key)) {
+        this.issues.push(`cannot write reserved progress field ${JSON.stringify(key)}`);
+      } else {
+        this.extensionFields[key] = val as JsonValue;
+      }
+    }
+    return this;
+  }
+
+  trace(value: Record<string, JsonValue> | undefined): this {
+    if (value !== undefined) {
+      if (!isObject(value)) {
+        this.issues.push("trace must be a JSON object");
+      } else {
+        this.traceValue = value as Record<string, JsonValue>;
+      }
+    }
+    return this;
+  }
+
+  private isReservedProgressField(name: string): boolean {
+    return name === "message";
+  }
+
+  build(): Event {
+    if (this.issues.length > 0) {
+      throw new EventBuildError(`Failed to build progress event: ${this.issues.join("; ")}`, this.issues);
+    }
+    const progress: Record<string, JsonValue> = { ...this.extensionFields };
+    progress.message = this.message;
+    const m: Record<string, JsonValue> = { kind: "progress", progress, trace: this.traceValue };
+    return new Event(m);
+  }
+}
+
+export class JsonLogBuilder {
+  private extensionFields: Record<string, JsonValue> = {};
+  private traceValue: Record<string, JsonValue> = {};
+  private issues: string[] = [];
+
+  constructor(
+    private readonly level: LogLevel,
+    private readonly message: string,
+  ) {
+    if (!message || message === "") this.issues.push("message must be a non-empty string");
+    if (!isValidLogLevel(level)) this.issues.push(`level must be one of debug, info, warn, error`);
+  }
+
+  field(name: string, value: JsonValue): this {
+    if (this.isReservedLogField(name)) {
+      this.issues.push(`cannot write reserved log field ${JSON.stringify(name)}`);
+    } else {
+      this.extensionFields[name] = value;
+    }
+    return this;
+  }
+
+  fields(obj: unknown): this {
+    if (!isObject(obj)) {
+      this.issues.push("fields must be a JSON object");
+      return this;
+    }
+    for (const [key, val] of Object.entries(obj)) {
+      if (this.isReservedLogField(key)) {
+        this.issues.push(`cannot write reserved log field ${JSON.stringify(key)}`);
+      } else {
+        this.extensionFields[key] = val as JsonValue;
+      }
+    }
+    return this;
+  }
+
+  extend(obj: unknown): this {
+    if (!isObject(obj)) {
+      this.issues.push("extend must be a JSON object");
+      return this;
+    }
+    for (const [key, val] of Object.entries(obj)) {
+      if (this.isReservedLogField(key)) {
+        this.issues.push(`cannot write reserved log field ${JSON.stringify(key)}`);
+      } else {
+        this.extensionFields[key] = val as JsonValue;
+      }
+    }
+    return this;
+  }
+
+  trace(value: Record<string, JsonValue> | undefined): this {
+    if (value !== undefined) {
+      if (!isObject(value)) {
+        this.issues.push("trace must be a JSON object");
+      } else {
+        this.traceValue = value as Record<string, JsonValue>;
+      }
+    }
+    return this;
+  }
+
+  private isReservedLogField(name: string): boolean {
+    return name === "message" || name === "level" || name === "code";
+  }
+
+  build(): Event {
+    if (this.issues.length > 0) {
+      throw new EventBuildError(`Failed to build log event: ${this.issues.join("; ")}`, this.issues);
+    }
+    const log: Record<string, JsonValue> = { ...this.extensionFields };
+    log.level = this.level;
+    log.message = this.message;
+    const m: Record<string, JsonValue> = { kind: "log", log, trace: this.traceValue };
+    return new Event(m);
+  }
+}
+
+/** Fluent builder for result events. */
+export function jsonResult(payload: JsonValue): JsonResultBuilder {
+  return new JsonResultBuilder(payload);
+}
+
+/** Fluent builder for error events. */
+export function jsonError(code: string, message: string): JsonErrorBuilder {
+  return new JsonErrorBuilder(code, message);
+}
+
+/** Fluent builder for progress events. */
+export function jsonProgress(message: string): JsonProgressBuilder {
+  return new JsonProgressBuilder(message);
+}
+
+/** Fluent builder for log events. */
+export function jsonLog(level: LogLevel, message: string): JsonLogBuilder {
+  return new JsonLogBuilder(level, message);
+}
+
+function isValidLogLevel(level: unknown): level is LogLevel {
+  return level === "debug" || level === "info" || level === "warn" || level === "error";
+}
+
+/** Validate one protocol event envelope. `strict` also enforces the recommended strict protocol profile (default true). */
+export function validateProtocolEvent(event: unknown, strict = true): void {
+  if (!isObject(event)) {
+    throw new Error("event must be a JSON object");
+  }
+  const kind = event.kind;
+  if (kind !== "result" && kind !== "error" && kind !== "progress" && kind !== "log") {
+    throw new Error("event.kind must be one of result, error, progress, log");
+  }
+  if (!(kind in event)) {
+    throw new Error(`event payload field ${JSON.stringify(kind)} is required`);
+  }
+  for (const key of Object.keys(event)) {
+    if (key !== "kind" && key !== kind && key !== "trace") {
+      throw new Error(`unexpected top-level field ${JSON.stringify(key)}`);
+    }
+  }
+  if ("trace" in event && !isObject(event.trace)) {
+    throw new Error("event.trace must be a JSON object when present");
+  }
+  if (kind === "error") {
+    validateErrorPayload(event.error);
+  }
+  if (!strict) return;
+  if (!isObject(event.trace)) throw new Error("event.trace is required in strict mode");
+  if (kind === "log") validateStrictLog(event.log);
+  if (kind === "progress") validateStrictProgress(event.progress);
+  if (kind === "error") validateStrictError(event.error);
+}
+
+function validateErrorPayload(error: unknown): void {
+  if (!isObject(error)) {
+    throw new Error("event.error must be a JSON object");
+  }
+  if (typeof error.code !== "string" || error.code === "") {
+    throw new Error("event.error.code must be a non-empty string");
+  }
+  if (typeof error.message !== "string" || error.message === "") {
+    throw new Error("event.error.message must be a non-empty string");
+  }
+  if ("hint" in error && typeof error.hint !== "string") {
+    throw new Error("event.error.hint must be a string when present");
+  }
+}
+
+/** Validate finite CLI lifecycle: (log | progress)* -> exactly one terminal. `strict` also enforces the recommended strict protocol profile (default true). */
+export function validateProtocolStream(events: readonly unknown[], strict = true): void {
+  let terminalSeen = false;
+  events.forEach((event, idx) => {
+    try {
+      validateProtocolEvent(event, strict);
+    } catch (e) {
+      throw new Error(`event ${idx}: ${(e as Error).message}`);
+    }
+    const kind = (event as Record<string, unknown>).kind;
+    if (kind === "log" || kind === "progress") {
+      if (terminalSeen) throw new Error(`event ${idx}: non-terminal event after terminal`);
+    } else if (kind === "result" || kind === "error") {
+      if (terminalSeen) throw new Error(`event ${idx}: duplicate terminal event`);
+      terminalSeen = true;
+    }
+  });
+  if (!terminalSeen) {
+    throw new Error("event stream must contain exactly one terminal result or error");
+  }
+}
+
+function validateStrictLog(payload: unknown): void {
+  if (!isObject(payload)) throw new Error("event.log must be a JSON object in strict mode");
+  // 0.16: log payload MUST NOT contain code field
+  if ("code" in (payload as Record<string, unknown>)) {
+    throw new Error("event.log.code is not allowed in strict mode");
+  }
+  if (typeof payload.message !== "string" || payload.message === "") {
+    throw new Error("event.log.message must be a non-empty string in strict mode");
+  }
+  if (!['debug', 'info', 'warn', 'error'].includes(payload.level as string)) {
+    throw new Error("event.log.level must be one of debug, info, warn, error in strict mode");
+  }
+}
+
+function validateStrictProgress(payload: unknown): void {
+  if (!isObject(payload) || typeof payload.message !== "string" || payload.message === "") {
+    throw new Error("event.progress.message must be a non-empty string in strict mode");
+  }
+}
+
+function validateStrictError(error: unknown): void {
+  if (!isObject(error)) throw new Error("event.error must be a JSON object in strict mode");
+  if (typeof error.code !== "string" || error.code === "") {
+    throw new Error("event.error.code must be a non-empty string in strict mode");
+  }
+  if (typeof error.message !== "string" || error.message === "") {
+    throw new Error("event.error.message must be a non-empty string in strict mode");
+  }
+  if (typeof error.retryable !== "boolean") {
+    throw new Error("event.error.retryable must be a boolean in strict mode");
+  }
+  if ("hint" in error && typeof error.hint !== "string") {
+    throw new Error("event.error.hint must be a string when present in strict mode");
+  }
+}
+
+// ═══════════════════════════════════════════
+// Public API: decodeProtocolEvent
+// ═══════════════════════════════════════════
+
+export type DecodedResult = {
+  kind: "result";
+  result: JsonValue;
+  trace?: Record<string, JsonValue>;
+};
+
+export type DecodedError = {
+  kind: "error";
+  code: string;
+  message: string;
+  retryable: boolean;
+  hint?: string;
+  fields: Record<string, JsonValue>;
+  trace?: Record<string, JsonValue>;
+};
+
+export type DecodedProgress = {
+  kind: "progress";
+  message: string;
+  fields: Record<string, JsonValue>;
+  trace?: Record<string, JsonValue>;
+};
+
+export type DecodedLog = {
+  kind: "log";
+  level: LogLevel;
+  message: string;
+  fields: Record<string, JsonValue>;
+  trace?: Record<string, JsonValue>;
+};
+
+/** Discriminated union of decoded protocol events, narrow on `kind`. */
+export type DecodedEvent = DecodedResult | DecodedError | DecodedProgress | DecodedLog;
+
+/** Thrown by decodeProtocolEvent for malformed JSON or a strict-invalid event. */
+export class EventDecodeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EventDecodeError";
+  }
+}
+
+const ERROR_RESERVED_FIELDS = new Set(["code", "message", "hint", "retryable"]);
+const PROGRESS_RESERVED_FIELDS = new Set(["message"]);
+const LOG_RESERVED_FIELDS = new Set(["level", "message"]);
+
+/**
+ * Parse one protocol line (a single JSON text value), strict-validate it, and
+ * return a typed decoded event. Extension fields are every payload key beyond
+ * the required ones, collected into `fields`.
+ */
+export function decodeProtocolEvent(text: string): DecodedEvent {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    throw new EventDecodeError(`invalid JSON: ${(e as Error).message}`);
+  }
+  try {
+    validateProtocolEvent(parsed, true);
+  } catch (e) {
+    throw new EventDecodeError((e as Error).message);
+  }
+  const event = parsed as Record<string, JsonValue>;
+  const trace = isObject(event.trace) ? (event.trace as Record<string, JsonValue>) : undefined;
+  switch (event.kind) {
+    case "result":
+      return { kind: "result", result: event.result, trace };
+    case "error": {
+      const error = event.error as Record<string, JsonValue>;
+      const fields: Record<string, JsonValue> = {};
+      for (const [k, v] of Object.entries(error)) {
+        if (!ERROR_RESERVED_FIELDS.has(k)) fields[k] = v;
+      }
+      const decoded: DecodedError = {
+        kind: "error",
+        code: error.code as string,
+        message: error.message as string,
+        retryable: error.retryable as boolean,
+        fields,
+        trace,
+      };
+      if (typeof error.hint === "string") decoded.hint = error.hint;
+      return decoded;
+    }
+    case "progress": {
+      const progress = event.progress as Record<string, JsonValue>;
+      const fields: Record<string, JsonValue> = {};
+      for (const [k, v] of Object.entries(progress)) {
+        if (!PROGRESS_RESERVED_FIELDS.has(k)) fields[k] = v;
+      }
+      return { kind: "progress", message: progress.message as string, fields, trace };
+    }
+    case "log": {
+      const log = event.log as Record<string, JsonValue>;
+      const fields: Record<string, JsonValue> = {};
+      for (const [k, v] of Object.entries(log)) {
+        if (!LOG_RESERVED_FIELDS.has(k)) fields[k] = v;
+      }
+      return { kind: "log", level: log.level as LogLevel, message: log.message as string, fields, trace };
+    }
+    default:
+      // Unreachable: validateProtocolEvent already constrains event.kind.
+      throw new EventDecodeError(`unsupported event kind ${JSON.stringify(event.kind)}`);
+  }
 }
 
 // ═══════════════════════════════════════════
@@ -52,75 +596,59 @@ export enum RedactionPolicy {
   RedactionNone = "RedactionNone",
 }
 
-export type RedactionOptions = {
-  /** Optional scoped policy. Omitted means default full redaction. */
-  policy?: RedactionPolicy;
-  /**
-   * Field names to treat as secrets in addition to _secret suffixes.
-   * Matching is exact field-name equality at any nesting level. The same
-   * list also matches URL query-parameter names inside _url fields (see
-   * redactUrlSecrets).
-   */
-  secretNames?: readonly string[];
-};
-
 export enum OutputStyle {
   Readable = "Readable",
   Raw = "Raw",
 }
 
 export type OutputOptions = {
-  /** Redaction options applied before rendering. */
-  redaction?: RedactionOptions;
+  /** Redaction policy. Omitted means default full redaction. */
+  redaction?: {
+    /** Optional scoped policy. Omitted means default full redaction. */
+    policy?: RedactionPolicy;
+    /**
+     * Field names to treat as secrets in addition to _secret suffixes.
+     * Matching is exact field-name equality at any nesting level.
+     */
+    secretNames?: readonly string[];
+  };
   /** Rendering style for YAML/plain output. Omitted means readable. */
   style?: OutputStyle;
 };
 
+/** Convenience: build OutputOptions scoped to a RedactionPolicy. */
+export function outputOptionsForPolicy(policy: RedactionPolicy): OutputOptions {
+  return { redaction: { policy } };
+}
+
 /** Format as single-line JSON. Secrets redacted, original keys, raw values. */
-export function outputJson(value: JsonValue): string {
-  return JSON.stringify(redactedValue(value));
-}
-
-/** Format as single-line JSON with explicit redaction policy. */
-export function outputJsonWith(value: JsonValue, redactionPolicy: RedactionPolicy): string {
-  return JSON.stringify(redactedValueWith(value, redactionPolicy));
-}
-
-/** Format as single-line JSON with explicit output options. */
-export function outputJsonWithOptions(value: JsonValue, outputOptions: OutputOptions): string {
-  return JSON.stringify(redactedValueWithOptions(value, outputOptions.redaction ?? {}));
+export function outputJson(value: JsonValue | Event, options: OutputOptions = {}): string {
+  const unwrapped = value instanceof Event ? (value.toJSON() as JsonValue) : value;
+  return JSON.stringify(redactedValue(unwrapped, options.redaction ?? {}));
 }
 
 /** Format as multi-line YAML. Keys stripped, values formatted, secrets redacted. */
-export function outputYaml(value: JsonValue): string {
-  return outputYamlWithOptions(value, {});
-}
-
-/** Format as multi-line YAML with explicit output options. */
-export function outputYamlWithOptions(value: JsonValue, outputOptions: OutputOptions): string {
-  value = redactedValueWithOptions(value, outputOptions.redaction ?? {});
+export function outputYaml(value: JsonValue | Event, options: OutputOptions = {}): string {
+  const unwrapped = value instanceof Event ? (value.toJSON() as JsonValue) : value;
+  const redacted = redactedValue(unwrapped, options.redaction ?? {});
   const lines = ["---"];
-  if (outputOptions.style === OutputStyle.Raw) {
-    renderYamlRaw(value, 0, lines);
+  if (options.style === OutputStyle.Raw) {
+    renderYamlRaw(redacted, 0, lines);
   } else {
-    renderYamlProcessed(value, 0, lines);
+    renderYamlProcessed(redacted, 0, lines);
   }
   return lines.join("\n");
 }
 
 /** Format as single-line logfmt. Keys stripped, values formatted, secrets redacted. */
-export function outputPlain(value: JsonValue): string {
-  return outputPlainWithOptions(value, {});
-}
-
-/** Format as single-line logfmt with explicit output options. */
-export function outputPlainWithOptions(value: JsonValue, outputOptions: OutputOptions): string {
-  value = redactedValueWithOptions(value, outputOptions.redaction ?? {});
+export function outputPlain(value: JsonValue | Event, options: OutputOptions = {}): string {
+  const unwrapped = value instanceof Event ? (value.toJSON() as JsonValue) : value;
+  const redacted = redactedValue(unwrapped, options.redaction ?? {});
   const pairs: [string, string][] = [];
-  if (outputOptions.style === OutputStyle.Raw) {
-    collectPlainPairsRaw(value, "", pairs);
+  if (options.style === OutputStyle.Raw) {
+    collectPlainPairsRaw(redacted, "", pairs);
   } else {
-    collectPlainPairs(value, "", pairs);
+    collectPlainPairs(redacted, "", pairs);
   }
   pairs.sort(([a], [b]) => jcsCompare(a, b));
   return pairs
@@ -132,45 +660,11 @@ export function outputPlainWithOptions(value: JsonValue, outputOptions: OutputOp
 // Public API: Redaction & Utility
 // ═══════════════════════════════════════════
 
-/** Redact _secret fields in-place. */
-export function redactSecretsInPlace(value: JsonValue): void {
-  redactSecrets(value);
-}
-
-/** Redact secret fields in-place using explicit redaction options. */
-export function redactSecretsInPlaceWithOptions(value: JsonValue, redactionOptions: RedactionOptions): void {
-  applyRedactionOptions(value, redactionOptions);
-}
-
-/** Return a JSON-safe copy with default _secret redaction applied. */
-export function redactedValue(value: unknown): JsonValue {
+/** Return a JSON-safe copy with redaction options applied (default: full _secret redaction). */
+export function redactedValue(value: unknown, options?: { policy?: RedactionPolicy; secretNames?: readonly string[] }): JsonValue {
   const v = sanitizeForJson(value);
-  redactSecrets(v);
+  applyRedactionOptions(v, options ?? {});
   return v;
-}
-
-/** Return a JSON-safe copy with an explicit redaction policy applied. */
-export function redactedValueWith(value: unknown, redactionPolicy: RedactionPolicy): JsonValue {
-  const v = sanitizeForJson(value);
-  applyRedactionPolicy(v, redactionPolicy);
-  return v;
-}
-
-/** Return a JSON-safe copy with explicit redaction options applied. */
-export function redactedValueWithOptions(value: unknown, redactionOptions: RedactionOptions): JsonValue {
-  const v = sanitizeForJson(value);
-  applyRedactionOptions(v, redactionOptions);
-  return v;
-}
-
-/**
- * Redact secret components of a single URL string, using default options.
- *
- * Returns url with its userinfo password and any _secret-suffixed query
- * parameter values replaced by "***". See redactUrlSecretsWithOptions.
- */
-export function redactUrlSecrets(url: string): string {
-  return redactUrlSecretsWithOptions(url, {});
 }
 
 /**
@@ -183,34 +677,35 @@ export function redactUrlSecrets(url: string): string {
  * A string that is not a single, whitespace-free, scheme-prefixed URL
  * (including a URL embedded in surrounding prose) is returned unchanged.
  */
-export function redactUrlSecretsWithOptions(url: string, redactionOptions: RedactionOptions): string {
-  const redacted = redactUrlInStr(url, secretNameSet(redactionOptions));
+export function redactUrlSecrets(url: string, options?: { secretNames?: readonly string[] }): string {
+  const redacted = redactUrlInStr(url, secretNameSet(options ?? {}));
   return redacted ?? url;
 }
 
 /**
  * Parse a human-readable size string into bytes.
- * Accepts bare numbers or numbers followed by a unit letter (B/K/M/G/T).
- * Case-insensitive. Trims whitespace. Returns null for invalid input.
+ * Accepts numbers followed by explicit units. Decimal units are
+ * B/kB/MB/GB/TB; binary units are KiB/MiB/GiB/TiB.
+ * Trims whitespace and rejects ambiguous K/M/G/T units.
  */
 export function parseSize(s: string): number | null {
   s = s.trim();
   if (!s) return null;
   const multipliers: Record<string, number> = {
-    b: 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3, t: 1024 ** 4,
+    KiB: 1024,
+    MiB: 1024 ** 2,
+    GiB: 1024 ** 3,
+    TiB: 1024 ** 4,
+    kB: 1000,
+    MB: 1000 ** 2,
+    GB: 1000 ** 3,
+    TB: 1000 ** 4,
+    B: 1,
   };
-  const last = s[s.length - 1].toLowerCase();
-  let numStr: string;
-  let mult: number;
-  if (last in multipliers) {
-    numStr = s.slice(0, -1);
-    mult = multipliers[last];
-  } else if ((last >= "0" && last <= "9") || last === ".") {
-    numStr = s;
-    mult = 1;
-  } else {
-    return null;
-  }
+  const unit = Object.keys(multipliers).find((candidate) => s.endsWith(candidate));
+  if (unit === undefined) return null;
+  const numStr = s.slice(0, -unit.length);
+  const mult = multipliers[unit];
   if (!numStr || !/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(numStr)) return null;
   const n = Number(numStr);
   if (isNaN(n) || n < 0 || !isFinite(n)) return null;
@@ -294,6 +789,12 @@ function isLeapYear(year: number): boolean {
 // Secret Redaction
 // ═══════════════════════════════════════════
 
+/** Internal shape shared by the inlined redaction option parameters. */
+type RedactionOpts = {
+  policy?: RedactionPolicy;
+  secretNames?: readonly string[];
+};
+
 type RedactionContext = {
   secretNames: ReadonlySet<string>;
 };
@@ -302,11 +803,11 @@ const DEFAULT_CONTEXT: RedactionContext = {
   secretNames: new Set<string>(),
 };
 
-function secretNameSet(redactionOptions: RedactionOptions): ReadonlySet<string> {
+function secretNameSet(redactionOptions: RedactionOpts): ReadonlySet<string> {
   return new Set(redactionOptions.secretNames ?? []);
 }
 
-function contextFromOptions(redactionOptions: RedactionOptions): RedactionContext {
+function contextFromOptions(redactionOptions: RedactionOpts): RedactionContext {
   return { secretNames: secretNameSet(redactionOptions) };
 }
 
@@ -323,6 +824,7 @@ function isSecretKey(key: string, secretNames: ReadonlySet<string>): boolean {
 }
 
 const MAX_DEPTH = 256;
+const MAX_DEPTH_MARKER = "<afdata:max-depth>";
 
 function redactSecrets(value: JsonValue, context: RedactionContext = DEFAULT_CONTEXT, depth = 0): void {
   if (depth >= MAX_DEPTH) return;
@@ -335,25 +837,21 @@ function redactSecrets(value: JsonValue, context: RedactionContext = DEFAULT_CON
         if (typeof v === "string") {
           value[k] = redactUrlFieldValue(v, context.secretNames);
         } else {
-          value[k] = depth + 1 >= MAX_DEPTH ? "***" : (redactSecrets(v, context, depth + 1), v);
+          value[k] = depth + 1 >= MAX_DEPTH ? MAX_DEPTH_MARKER : (redactSecrets(v, context, depth + 1), v);
         }
       } else {
-        value[k] = depth + 1 >= MAX_DEPTH ? "***" : (redactSecrets(v, context, depth + 1), v);
+        value[k] = depth + 1 >= MAX_DEPTH ? MAX_DEPTH_MARKER : (redactSecrets(v, context, depth + 1), v);
       }
     }
   } else if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
-      if (depth + 1 >= MAX_DEPTH) value[i] = "***";
+      if (depth + 1 >= MAX_DEPTH) value[i] = MAX_DEPTH_MARKER;
       else redactSecrets(value[i], context, depth + 1);
     }
   }
 }
 
-function applyRedactionPolicy(value: JsonValue, redactionPolicy: RedactionPolicy): void {
-  applyRedactionPolicyWithContext(value, redactionPolicy, DEFAULT_CONTEXT);
-}
-
-function applyRedactionOptions(value: JsonValue, redactionOptions: RedactionOptions): void {
+function applyRedactionOptions(value: JsonValue, redactionOptions: RedactionOpts): void {
   applyRedactionPolicyWithContext(value, redactionOptions.policy, contextFromOptions(redactionOptions));
 }
 
@@ -554,8 +1052,39 @@ function tryStripGenericCents(key: string): [string, string] | null {
   return [stripped, code];
 }
 
+function tryStripGenericMicro(key: string): [string, string] | null {
+  const code = extractCurrencyCodeMicro(key);
+  if (code === null) return null;
+  const suffixLen = code.length + "_micro".length + 1; // _{code}_micro
+  const stripped = key.slice(0, -suffixLen);
+  if (!stripped) return null;
+  return [stripped, code];
+}
+
 function isInt(value: JsonValue): value is number {
   return typeof value === "number" && Number.isInteger(value);
+}
+
+function decimalIntText(value: JsonValue): string | null {
+  if (typeof value === "string" && /^-?\d+$/.test(value)) return value;
+  if (isInt(value)) return String(value);
+  return null;
+}
+
+function epochNsToMs(value: JsonValue): number | null {
+  const text = decimalIntText(value);
+  if (text === null) return null;
+  try {
+    const ns = BigInt(text);
+    const divisor = 1_000_000n;
+    let ms = ns / divisor;
+    if (ns < 0n && ns % divisor !== 0n) ms -= 1n;
+    const asNumber = Number(ms);
+    if (!Number.isSafeInteger(asNumber)) return null;
+    return asNumber;
+  } catch {
+    return null;
+  }
 }
 
 function isNum(value: JsonValue): value is number {
@@ -578,7 +1107,8 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   }
   stripped = stripSuffixCI(key, "_epoch_ns");
   if (stripped !== null) {
-    if (isInt(value)) { const formatted = formatRfc3339Ms(Math.floor(value / 1_000_000)); if (formatted !== null) return [stripped, formatted]; }
+    const ms = epochNsToMs(value);
+    if (ms !== null) { const formatted = formatRfc3339Ms(ms); if (formatted !== null) return [stripped, formatted]; }
     return null;
   }
 
@@ -597,6 +1127,12 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   if (gc !== null) {
     const [gcStripped, code] = gc;
     if (isInt(value) && value >= 0) return [gcStripped, `${Math.floor(value / 100)}.${String(value % 100).padStart(2, "0")} ${code.toUpperCase()}`];
+    return null;
+  }
+  const gm = tryStripGenericMicro(key);
+  if (gm !== null) {
+    const [gmStripped, code] = gm;
+    if (isInt(value) && value >= 0) return [gmStripped, `${Math.floor(value / 1_000_000)}.${String(value % 1_000_000).padStart(6, "0")} ${code.toUpperCase()}`];
     return null;
   }
 
@@ -625,17 +1161,19 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   // Group 4: single-unit suffixes
   stripped = stripSuffixCI(key, "_msats");
   if (stripped !== null) {
-    if (isNum(value)) return [stripped, `${plainScalar(value)}msats`];
+    const text = decimalIntText(value);
+    if (text !== null) return [stripped, `${text}msats`];
     return null;
   }
   stripped = stripSuffixCI(key, "_sats");
   if (stripped !== null) {
-    if (isNum(value)) return [stripped, `${plainScalar(value)}sats`];
+    const text = decimalIntText(value);
+    if (text !== null) return [stripped, `${text}sats`];
     return null;
   }
   stripped = stripSuffixCI(key, "_bytes");
   if (stripped !== null) {
-    if (isInt(value)) return [stripped, formatBytesHuman(value)];
+    if (isInt(value) && value >= 0) return [stripped, formatBytesHuman(value)];
     return null;
   }
   stripped = stripSuffixCI(key, "_percent");
@@ -644,11 +1182,6 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
     return null;
   }
   // Group 5: short suffixes (last to avoid false positives)
-  stripped = stripSuffixCI(key, "_btc");
-  if (stripped !== null) {
-    if (isNum(value)) return [stripped, `${plainScalar(value)} BTC`];
-    return null;
-  }
   stripped = stripSuffixCI(key, "_jpy");
   if (stripped !== null) {
     if (isInt(value) && value >= 0) return [stripped, `\u00a5${formatWithCommas(value)}`];
@@ -751,7 +1284,7 @@ function formatRfc3339Ms(ms: number): string | null {
  * Round to `digits` decimals using round-half-to-even (banker's rounding) and
  * format with a fixed decimal count. `Number.toFixed` rounds half away from
  * zero, which diverges from the printf `%.1f` used by Rust/Go/Python on exact
- * ties (e.g. 1280 bytes = 1.25 KB → "1.2KB", not "1.3KB").
+ * ties (e.g. 1280 bytes = 1.25 KiB → "1.2KiB", not "1.3KiB").
  */
 function toFixedHalfEven(x: number, digits: number): string {
   const factor = 10 ** digits;
@@ -767,16 +1300,15 @@ function toFixedHalfEven(x: number, digits: number): string {
 }
 
 function formatBytesHuman(bytes: number): string {
-  const KB = 1024;
-  const MB = KB * 1024;
-  const GB = MB * 1024;
-  const TB = GB * 1024;
-  const sign = bytes < 0 ? "-" : "";
-  const b = Math.abs(bytes);
-  if (b >= TB) return `${sign}${toFixedHalfEven(b / TB, 1)}TB`;
-  if (b >= GB) return `${sign}${toFixedHalfEven(b / GB, 1)}GB`;
-  if (b >= MB) return `${sign}${toFixedHalfEven(b / MB, 1)}MB`;
-  if (b >= KB) return `${sign}${toFixedHalfEven(b / KB, 1)}KB`;
+  const KiB = 1024;
+  const MiB = KiB * 1024;
+  const GiB = MiB * 1024;
+  const TiB = GiB * 1024;
+  const b = bytes;
+  if (b >= TiB) return `${toFixedHalfEven(b / TiB, 1)}TiB`;
+  if (b >= GiB) return `${toFixedHalfEven(b / GiB, 1)}GiB`;
+  if (b >= MiB) return `${toFixedHalfEven(b / MiB, 1)}MiB`;
+  if (b >= KiB) return `${toFixedHalfEven(b / KiB, 1)}KiB`;
   return `${bytes}B`;
 }
 
@@ -796,9 +1328,22 @@ function extractCurrencyCode(key: string): string | null {
   if (key.endsWith("_cents")) withoutCents = key.slice(0, -6);
   else if (key.endsWith("_CENTS")) withoutCents = key.slice(0, -6);
   else return null;
-  const idx = withoutCents.lastIndexOf("_");
+  return extractCurrencyCodeFromStem(withoutCents);
+}
+
+/** Extract currency code from _{code}_micro / _{CODE}_MICRO suffix. */
+function extractCurrencyCodeMicro(key: string): string | null {
+  let withoutMicro: string;
+  if (key.endsWith("_micro")) withoutMicro = key.slice(0, -6);
+  else if (key.endsWith("_MICRO")) withoutMicro = key.slice(0, -6);
+  else return null;
+  return extractCurrencyCodeFromStem(withoutMicro);
+}
+
+function extractCurrencyCodeFromStem(stem: string): string | null {
+  const idx = stem.lastIndexOf("_");
   if (idx < 0) return null;
-  const code = withoutCents.slice(idx + 1);
+  const code = stem.slice(idx + 1);
   if (!/^[A-Za-z]{3,4}$/.test(code)) return null;
   return code;
 }
@@ -1002,7 +1547,7 @@ function quoteLogfmtKey(key: string): string {
 // ═══════════════════════════════════════════
 
 function sanitizeForJson(value: unknown, stack = new WeakSet<object>(), depth = 0): JsonValue {
-  if (depth >= MAX_DEPTH) return "***";
+  if (depth >= MAX_DEPTH) return MAX_DEPTH_MARKER;
   if (value === null) return null;
   const t = typeof value;
   if (t === "string") return value as string;

@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import enum
-from typing import Any
+from typing import Any, Callable, Mapping, Iterator
 
 from agent_first_data.format import (
+    Event,
+    LogLevel,
     OutputOptions,
-    build_json,
+    json_error,
+    json_log,
+    json_progress,
+    json_result,
     output_json,
-    output_json_with_options,
     output_yaml,
-    output_yaml_with_options,
     output_plain,
-    output_plain_with_options,
+    validate_protocol_event,
 )
 
 
@@ -23,6 +26,44 @@ class OutputFormat(enum.Enum):
     JSON = "json"
     YAML = "yaml"
     PLAIN = "plain"
+
+
+class LogFilters:
+    """Log event filter matcher."""
+
+    def __init__(self, filters: list[str]) -> None:
+        """Initialize with a normalized filter list."""
+        self._filters = filters
+
+    def enabled(self, event: str) -> bool:
+        """Check if event should be logged.
+
+        Empty filter list returns False.
+        Filters containing 'all' or '*' return True.
+        Otherwise returns True if event (lowercased) starts with any filter.
+        """
+        if not self._filters:
+            return False
+        if any(f in ("all", "*") for f in self._filters):
+            return True
+        event_lower = event.lower()
+        return any(event_lower.startswith(f) for f in self._filters)
+
+    def __bool__(self) -> bool:
+        """True if the filter list is non-empty."""
+        return bool(self._filters)
+
+    def __iter__(self) -> Iterator[str]:
+        """Iterate over filter entries."""
+        return iter(self._filters)
+
+    def __len__(self) -> int:
+        """Return the number of filters."""
+        return len(self._filters)
+
+    def append(self, item: str) -> None:
+        """Append a filter entry."""
+        self._filters.append(item)
 
 
 def cli_parse_output(s: str) -> OutputFormat:
@@ -45,12 +86,14 @@ def cli_parse_output(s: str) -> OutputFormat:
         )
 
 
-def cli_parse_log_filters(entries: list[str]) -> list[str]:
-    """Normalize --log flag entries: trim, lowercase, deduplicate, remove empty.
+def cli_parse_log_filters(entries: list[str]) -> LogFilters:
+    """Normalize --log flag entries and return a LogFilters matcher.
 
+    Trims, lowercases, deduplicates, and removes empty entries.
     Accepts pre-split entries (e.g. after splitting on comma).
 
-    >>> cli_parse_log_filters(["Query", " error ", "query"])
+    >>> filters = cli_parse_log_filters(["Query", " error ", "query"])
+    >>> list(filters)
     ['query', 'error']
     """
     out: list[str] = []
@@ -58,13 +101,14 @@ def cli_parse_log_filters(entries: list[str]) -> list[str]:
         s = entry.strip().lower()
         if s and s not in out:
             out.append(s)
-    return out
+    return LogFilters(out)
 
 
-def cli_output(value: Any, format: OutputFormat) -> str:
+def cli_output(value: Any, format: OutputFormat, *, options: OutputOptions | None = None) -> str:
     """Dispatch output formatting by OutputFormat.
 
     Equivalent to calling output_json, output_yaml, or output_plain directly.
+    JSON ignores OutputStyle and preserves original keys and values after redaction.
 
     >>> import json
     >>> v = {"code": "ok"}
@@ -72,31 +116,117 @@ def cli_output(value: Any, format: OutputFormat) -> str:
     True
     """
     if format is OutputFormat.YAML:
-        return output_yaml(value)
+        return output_yaml(value, options=options)
     if format is OutputFormat.PLAIN:
-        return output_plain(value)
-    return output_json(value)
+        return output_plain(value, options=options)
+    return output_json(value, options=options)
 
 
-def cli_output_with_options(
-    value: Any,
-    format: OutputFormat,
-    output_options: OutputOptions,
-) -> str:
-    """Dispatch output formatting with explicit redaction and style.
+class CliEmitter:
+    """Stateful emitter for finite structured CLI executions."""
 
-    JSON ignores OutputStyle and preserves original keys and values after redaction.
-    """
-    if format is OutputFormat.YAML:
-        return output_yaml_with_options(value, output_options)
-    if format is OutputFormat.PLAIN:
-        return output_plain_with_options(value, output_options)
-    return output_json_with_options(value, output_options)
+    def __init__(
+        self,
+        writer: Any,
+        format: OutputFormat,
+        output_options: OutputOptions | None = None,
+        log_fields: Callable[[], Mapping[str, Any]] | None = None,
+    ) -> None:
+        self._writer = writer
+        self._format = format
+        self._output_options = output_options or OutputOptions()
+        self._terminal_emitted = False
+        self._log_fields_provider = log_fields
+
+    def with_log_fields(self, provider: Callable[[], Mapping[str, Any]]) -> CliEmitter:
+        """Set a provider callable for default log event fields.
+
+        Returns self for chaining. The provider is called for each log event
+        and its fields are merged (with explicit fields taking precedence).
+        """
+        self._log_fields_provider = provider
+        return self
+
+    def emit(self, event: Event | dict) -> None:
+        """Emit a typed Event or a dict (for compatibility)."""
+        if isinstance(event, Event):
+            envelope = event.to_dict()
+        else:
+            envelope = event
+
+        validate_protocol_event(envelope, strict=False)
+        kind = envelope["kind"]
+        if kind in ("log", "progress"):
+            if self._terminal_emitted:
+                raise RuntimeError("cannot emit non-terminal event after terminal event")
+        elif kind in ("result", "error"):
+            if self._terminal_emitted:
+                raise RuntimeError("cannot emit duplicate terminal event")
+        else:
+            raise ValueError(f"unsupported event kind {kind!r}")
+
+        # Apply log fields provider if this is a log event
+        if kind == "log" and self._log_fields_provider is not None:
+            provider_fields = self._log_fields_provider()
+            if provider_fields:
+                # Check for reserved fields from provider
+                log_payload = envelope.get("log", {})
+                for reserved in ("message", "level", "code"):
+                    if reserved in provider_fields:
+                        raise RuntimeError(
+                            f"log fields provider cannot write reserved field '{reserved}'"
+                        )
+                # Merge provider fields, explicit fields take precedence
+                merged_log = dict(provider_fields)
+                merged_log.update(log_payload)
+                envelope["log"] = merged_log
+
+        self._writer.write(cli_output(envelope, self._format, options=self._output_options) + "\n")
+        flush = getattr(self._writer, "flush", None)
+        if flush is not None:
+            flush()
+        if kind in ("result", "error"):
+            self._terminal_emitted = True
+
+    def emit_validated_value(self, value: Any) -> None:
+        """Emit a dynamic JSON value after strict validation."""
+        try:
+            validate_protocol_event(value, strict=True)
+        except ValueError as e:
+            raise ValueError(f"emit_validated_value failed validation: {e}") from e
+        self.emit(value)
+
+    def emit_result(self, result: Any) -> None:
+        """Emit a result event from a payload."""
+        event = json_result(result).build()
+        self.emit(event)
+
+    def emit_error(self, code: str, message: str) -> None:
+        """Emit an error event with retryable defaulting to False."""
+        event = json_error(code, message).build()
+        self.emit(event)
+
+    def emit_progress(self, message: str) -> None:
+        """Emit a progress event."""
+        if not message or not isinstance(message, str):
+            raise ValueError("message must be a non-empty string")
+        # Use the builder to get default trace: {}
+        event = json_progress(message).build()
+        self.emit(event)
+
+    def emit_log(self, level: LogLevel | str, message: str) -> None:
+        """Emit a log event."""
+        if isinstance(level, str):
+            level = LogLevel(level)
+        if not message or not isinstance(message, str):
+            raise ValueError("message must be a non-empty string")
+        event = json_log(level, message).build()
+        self.emit(event)
 
 
 def build_cli_version(version: str) -> dict:
     """Build a standard CLI version value."""
-    return build_json("version", {"version": version})
+    return json_result({"version": version}).build().to_dict()
 
 
 def cli_render_version(
@@ -142,6 +272,15 @@ def cli_handle_version_or_continue(
             version_requested = True
             i += 1
             continue
+        if allow_output_format and arg == "--json":
+            if output_format is not None and output_format is not OutputFormat.JSON:
+                output_error = ValueError(
+                    "conflicting output formats: --json conflicts with previous output format"
+                )
+            else:
+                output_format = OutputFormat.JSON
+            i += 1
+            continue
         if allow_output_format and (arg == output_flag or arg.startswith(f"{output_flag}=")):
             value: str | None
             if arg.startswith(f"{output_flag}="):
@@ -159,7 +298,13 @@ def cli_handle_version_or_continue(
                 )
             else:
                 try:
-                    output_format = cli_parse_output(value)
+                    parsed_output = cli_parse_output(value)
+                    if output_format is not None and output_format is not parsed_output:
+                        output_error = ValueError(
+                            f"conflicting output formats: {output_flag} {value} conflicts with previous output format"
+                        )
+                    else:
+                        output_format = parsed_output
                 except ValueError as e:
                     output_error = e
             i += step
@@ -177,13 +322,15 @@ def cli_handle_version_or_continue(
     )
 
 
-def build_cli_error(message: str, hint: str | None = None) -> dict:
-    """Build a standard CLI parse error value.
+def build_cli_error(message: str, hint: str | None = None) -> dict | Event:
+    """Build a standard CLI parse error event.
 
     Use when argument parsing fails or a flag value is invalid.
     Print with output_json and exit with code 2.
+
+    Returns the event envelope as a dict.
     """
-    m: dict = {"code": "error", "error": message}
+    event = json_error("cli_error", message)
     if hint is not None:
-        m["hint"] = hint
-    return m
+        event = event.hint(hint)
+    return event.build().to_dict()

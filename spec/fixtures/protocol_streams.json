@@ -1,0 +1,57 @@
+[
+  {
+    "name": "single_result",
+    "valid": true,
+    "events": [
+      {"kind": "result", "result": {"rows": 12}}
+    ]
+  },
+  {
+    "name": "logs_progress_then_result",
+    "valid": true,
+    "events": [
+      {"kind": "log", "log": {"level": "info", "message": "startup"}},
+      {"kind": "progress", "progress": {"message": "halfway", "percent": 50}},
+      {"kind": "result", "result": {"rows": 12}}
+    ]
+  },
+  {
+    "name": "single_error",
+    "valid": true,
+    "events": [
+      {"kind": "error", "error": {"code": "file_not_found", "message": "missing input"}}
+    ]
+  },
+  {
+    "name": "missing_terminal",
+    "valid": false,
+    "events": [
+      {"kind": "log", "log": {"level": "info", "message": "startup"}},
+      {"kind": "progress", "progress": {"message": "halfway", "percent": 50}}
+    ]
+  },
+  {
+    "name": "duplicate_terminal",
+    "valid": false,
+    "events": [
+      {"kind": "result", "result": {"rows": 12}},
+      {"kind": "error", "error": {"code": "late_error", "message": "too late"}}
+    ]
+  },
+  {
+    "name": "terminal_then_progress",
+    "valid": false,
+    "events": [
+      {"kind": "result", "result": {"rows": 12}},
+      {"kind": "progress", "progress": {"message": "done", "percent": 100}}
+    ]
+  },
+  {
+    "name": "invalid_event_inside_stream",
+    "valid": false,
+    "events": [
+      {"kind": "log", "log": {"level": "info", "message": "startup"}},
+      {"kind": "result", "error": {"code": "mismatch", "message": "wrong payload"}}
+    ]
+  }
+]

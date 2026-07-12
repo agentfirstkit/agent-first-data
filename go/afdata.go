@@ -1,11 +1,11 @@
 // Package afdata implements Agent-First Data (AFDATA) output formatting
 // and protocol templates.
 //
-// 29 public APIs and 5 types: 3 protocol builders + 3 value-copy redactors +
-// 7 output formatters + 2 in-place value redactors (redact _secret and _url
-// fields) + 2 URL-string redactors (operate on one URL string; the value
-// redactors apply these to _url fields) + 4 utilities + 8 CLI helpers +
-// OutputFormat + RedactionPolicy + RedactionOptions + OutputStyle + OutputOptions.
+// Public APIs include protocol v1 builders + 2 value-copy redactors (redact
+// _secret and _url fields) + 2 URL-string redactors (operate on one URL
+// string; the value redactors apply these to _url fields) + 7 output
+// formatters + 4 utilities + CLI helpers + OutputFormat + RedactionPolicy +
+// Redactor + OutputStyle + OutputOptions + LogFilters.
 package afdata
 
 import (
@@ -25,52 +25,674 @@ import (
 
 const maxSafeInteger = uint64(9007199254740991)
 
-// ═══════════════════════════════════════════
-// Public API: Protocol Builders
-// ═══════════════════════════════════════════
+// LogLevel represents the severity level for log events.
+type LogLevel string
 
-// BuildJsonOk builds {code: "ok", result, trace?}.
-func BuildJsonOk(result any, trace any) map[string]any {
-	m := map[string]any{"code": "ok", "result": result}
-	if trace != nil {
-		m["trace"] = trace
-	}
-	return m
+const (
+	LogLevelDebug LogLevel = "debug"
+	LogLevelInfo  LogLevel = "info"
+	LogLevelWarn  LogLevel = "warn"
+	LogLevelError LogLevel = "error"
+)
+
+// Event represents a protocol v1 event envelope with strict construction.
+// Events are opaque and strict-valid by construction.
+type Event struct {
+	envelope map[string]any
 }
 
-// BuildJsonError builds {code: "error", error: message, hint?, trace?}.
-// Pass empty string for hint to omit it.
-func BuildJsonError(message string, hint string, trace any) map[string]any {
-	m := map[string]any{"code": "error", "error": message}
+// BuilderError represents an error encountered during builder construction,
+// with structured details about what validation failed.
+type BuilderError struct {
+	msg string
+	// Can be expanded with structured fields for errors.As() matching
+}
+
+func (e *BuilderError) Error() string {
+	return e.msg
+}
+
+// ═══════════════════════════════════════════
+// Public API: Protocol v1 Builders and Validation
+// ═══════════════════════════════════════════
+
+// MarshalJSON implements json.Marshaler, allowing Event to be serialized as JSON.
+func (e Event) MarshalJSON() ([]byte, error) {
+	return json.Marshal(e.envelope)
+}
+
+// Value returns the underlying envelope as a map for introspection.
+// Callers should not modify the returned map.
+func (e Event) Value() map[string]any {
+	return e.envelope
+}
+
+// BuildCLIError builds a standard CLI error with code "cli_error".
+// Pass empty string for hint to omit it. Returns a strict-ready Event.
+func BuildCLIError(message string, hint string) (Event, error) {
+	builder := NewJSONError("cli_error", message)
 	if hint != "" {
-		m["hint"] = hint
+		builder.Hint(hint)
 	}
-	if trace != nil {
-		m["trace"] = trace
-	}
-	return m
+	return builder.Build()
 }
 
-// BuildJson builds {code: "<custom>", ...fields, trace?}.
-func BuildJson(code string, fields any, trace any) map[string]any {
-	result := make(map[string]any)
-	if m, ok := fields.(map[string]any); ok {
-		for k, v := range m {
-			result[k] = v
+// ═════════════════════════════════════════════
+// JSON Result Builder
+// ═════════════════════════════════════════════
+
+// JSONResultBuilder constructs result events with optional trace.
+type JSONResultBuilder struct {
+	result any
+	trace  any
+	errs   []error
+}
+
+// NewJSONResult creates a builder for a result event.
+func NewJSONResult(result any) *JSONResultBuilder {
+	return &JSONResultBuilder{result: result}
+}
+
+// Trace sets the trace object (must be or produce a JSON object).
+func (b *JSONResultBuilder) Trace(trace any) *JSONResultBuilder {
+	b.trace = trace
+	return b
+}
+
+// Build constructs the Event, performing strict validation.
+func (b *JSONResultBuilder) Build() (Event, error) {
+	if len(b.errs) > 0 {
+		return Event{}, b.errs[0]
+	}
+	traceObj := map[string]any{}
+	if b.trace != nil {
+		if obj, ok := b.trace.(map[string]any); ok {
+			traceObj = obj
+		} else {
+			// Try to marshal and unmarshal to validate it's object-shaped
+			data, err := json.Marshal(b.trace)
+			if err != nil {
+				return Event{}, &BuilderError{msg: "trace must be serializable: " + err.Error()}
+			}
+			if err := json.Unmarshal(data, &traceObj); err != nil {
+				return Event{}, &BuilderError{msg: "trace must be a JSON object"}
+			}
 		}
 	}
-	result["code"] = code
-	if trace != nil {
-		result["trace"] = trace
+	envelope := map[string]any{
+		"kind":   "result",
+		"result": b.result,
+		"trace":  traceObj,
 	}
-	return result
+	return Event{envelope: envelope}, nil
+}
+
+// ═════════════════════════════════════════════
+// JSON Error V1 Builder
+// ═════════════════════════════════════════════
+
+// JSONErrorBuilder constructs error events with optional hint, retryable, fields, and trace.
+type JSONErrorBuilder struct {
+	code      string
+	message   string
+	retryable bool
+	hint      string
+	fields    map[string]any
+	trace     any
+	errs      []error
+	fieldErrs []string
+}
+
+// NewJSONError creates a builder for an error event.
+// code and message must be non-empty strings.
+func NewJSONError(code string, message string) *JSONErrorBuilder {
+	b := &JSONErrorBuilder{
+		code:      code,
+		message:   message,
+		retryable: false,
+		fields:    make(map[string]any),
+	}
+	if code == "" {
+		b.errs = append(b.errs, &BuilderError{msg: "error code must be non-empty"})
+	}
+	if message == "" {
+		b.errs = append(b.errs, &BuilderError{msg: "error message must be non-empty"})
+	}
+	return b
+}
+
+// Retryable marks the error as retryable (true).
+func (b *JSONErrorBuilder) Retryable() *JSONErrorBuilder {
+	b.retryable = true
+	return b
+}
+
+// RetryableIf marks the error as retryable based on a boolean condition.
+func (b *JSONErrorBuilder) RetryableIf(flag bool) *JSONErrorBuilder {
+	b.retryable = flag
+	return b
+}
+
+// Hint sets the optional hint string.
+func (b *JSONErrorBuilder) Hint(text string) *JSONErrorBuilder {
+	b.hint = text
+	return b
+}
+
+// Field adds a single extension field.
+// Reserved field names (code, message, hint, retryable) are recorded as errors,
+// returned at Build() time.
+func (b *JSONErrorBuilder) Field(name string, value any) *JSONErrorBuilder {
+	if isReservedErrorField(name) {
+		b.fieldErrs = append(b.fieldErrs, fmt.Sprintf("field %q is reserved", name))
+		return b
+	}
+	b.fields[name] = value
+	return b
+}
+
+// Fields merges extension fields from a map.
+// Reserved field names are skipped with an error recorded.
+func (b *JSONErrorBuilder) Fields(obj map[string]any) *JSONErrorBuilder {
+	if obj == nil {
+		return b
+	}
+	for k, v := range obj {
+		b.Field(k, v)
+	}
+	return b
+}
+
+// Extend merges fields from a struct (serialized via json tags) or map.
+// Reserved field names are rejected with an error recorded.
+func (b *JSONErrorBuilder) Extend(value any) *JSONErrorBuilder {
+	if value == nil {
+		return b
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		b.errs = append(b.errs, &BuilderError{msg: "extend: failed to marshal value: " + err.Error()})
+		return b
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		b.errs = append(b.errs, &BuilderError{msg: "extend: value must serialize to a JSON object"})
+		return b
+	}
+	b.Fields(obj)
+	return b
+}
+
+// Trace sets the trace object.
+func (b *JSONErrorBuilder) Trace(trace any) *JSONErrorBuilder {
+	b.trace = trace
+	return b
+}
+
+// Build constructs the Event, performing strict validation.
+func (b *JSONErrorBuilder) Build() (Event, error) {
+	if len(b.errs) > 0 {
+		return Event{}, b.errs[0]
+	}
+	if len(b.fieldErrs) > 0 {
+		return Event{}, &BuilderError{msg: b.fieldErrs[0]}
+	}
+
+	errorPayload := make(map[string]any)
+	for k, v := range b.fields {
+		errorPayload[k] = v
+	}
+	errorPayload["code"] = b.code
+	errorPayload["message"] = b.message
+	errorPayload["retryable"] = b.retryable
+	if b.hint != "" {
+		errorPayload["hint"] = b.hint
+	}
+
+	traceObj := map[string]any{}
+	if b.trace != nil {
+		if obj, ok := b.trace.(map[string]any); ok {
+			traceObj = obj
+		} else {
+			data, err := json.Marshal(b.trace)
+			if err != nil {
+				return Event{}, &BuilderError{msg: "trace must be serializable: " + err.Error()}
+			}
+			if err := json.Unmarshal(data, &traceObj); err != nil {
+				return Event{}, &BuilderError{msg: "trace must be a JSON object"}
+			}
+		}
+	}
+
+	envelope := map[string]any{
+		"kind":  "error",
+		"error": errorPayload,
+		"trace": traceObj,
+	}
+	return Event{envelope: envelope}, nil
+}
+
+func isReservedErrorField(name string) bool {
+	return name == "code" || name == "message" || name == "hint" || name == "retryable"
+}
+
+// ═════════════════════════════════════════════
+// JSON Progress Builder
+// ═════════════════════════════════════════════
+
+// JSONProgressBuilder constructs progress events with optional fields and trace.
+type JSONProgressBuilder struct {
+	message   string
+	fields    map[string]any
+	trace     any
+	errs      []error
+	fieldErrs []string
+}
+
+// NewJSONProgress creates a builder for a progress event.
+func NewJSONProgress(message string) *JSONProgressBuilder {
+	b := &JSONProgressBuilder{
+		message: message,
+		fields:  make(map[string]any),
+	}
+	if message == "" {
+		b.errs = append(b.errs, &BuilderError{msg: "progress message must be non-empty"})
+	}
+	return b
+}
+
+// Field adds a single extension field.
+// Reserved field name "message" is recorded as an error.
+func (b *JSONProgressBuilder) Field(name string, value any) *JSONProgressBuilder {
+	if name == "message" {
+		b.fieldErrs = append(b.fieldErrs, "field \"message\" is reserved")
+		return b
+	}
+	b.fields[name] = value
+	return b
+}
+
+// Fields merges extension fields from a map.
+func (b *JSONProgressBuilder) Fields(obj map[string]any) *JSONProgressBuilder {
+	if obj == nil {
+		return b
+	}
+	for k, v := range obj {
+		b.Field(k, v)
+	}
+	return b
+}
+
+// Extend merges fields from a struct or map.
+func (b *JSONProgressBuilder) Extend(value any) *JSONProgressBuilder {
+	if value == nil {
+		return b
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		b.errs = append(b.errs, &BuilderError{msg: "extend: failed to marshal value: " + err.Error()})
+		return b
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		b.errs = append(b.errs, &BuilderError{msg: "extend: value must serialize to a JSON object"})
+		return b
+	}
+	b.Fields(obj)
+	return b
+}
+
+// Trace sets the trace object.
+func (b *JSONProgressBuilder) Trace(trace any) *JSONProgressBuilder {
+	b.trace = trace
+	return b
+}
+
+// Build constructs the Event, performing strict validation.
+func (b *JSONProgressBuilder) Build() (Event, error) {
+	if len(b.errs) > 0 {
+		return Event{}, b.errs[0]
+	}
+	if len(b.fieldErrs) > 0 {
+		return Event{}, &BuilderError{msg: b.fieldErrs[0]}
+	}
+
+	progressPayload := make(map[string]any)
+	for k, v := range b.fields {
+		progressPayload[k] = v
+	}
+	progressPayload["message"] = b.message
+
+	traceObj := map[string]any{}
+	if b.trace != nil {
+		if obj, ok := b.trace.(map[string]any); ok {
+			traceObj = obj
+		} else {
+			data, err := json.Marshal(b.trace)
+			if err != nil {
+				return Event{}, &BuilderError{msg: "trace must be serializable: " + err.Error()}
+			}
+			if err := json.Unmarshal(data, &traceObj); err != nil {
+				return Event{}, &BuilderError{msg: "trace must be a JSON object"}
+			}
+		}
+	}
+
+	envelope := map[string]any{
+		"kind":     "progress",
+		"progress": progressPayload,
+		"trace":    traceObj,
+	}
+	return Event{envelope: envelope}, nil
+}
+
+// ═════════════════════════════════════════════
+// JSON Log Builder
+// ═════════════════════════════════════════════
+
+// JSONLogBuilder constructs log events with optional fields and trace.
+type JSONLogBuilder struct {
+	level     LogLevel
+	message   string
+	fields    map[string]any
+	trace     any
+	errs      []error
+	fieldErrs []string
+}
+
+// NewJSONLog creates a builder for a log event.
+func NewJSONLog(level LogLevel, message string) *JSONLogBuilder {
+	b := &JSONLogBuilder{
+		level:   level,
+		message: message,
+		fields:  make(map[string]any),
+	}
+	if !isValidLogLevel(level) {
+		b.errs = append(b.errs, &BuilderError{msg: fmt.Sprintf("log level %q is invalid; must be debug, info, warn, or error", level)})
+	}
+	if message == "" {
+		b.errs = append(b.errs, &BuilderError{msg: "log message must be non-empty"})
+	}
+	return b
+}
+
+func isValidLogLevel(level LogLevel) bool {
+	return level == LogLevelDebug || level == LogLevelInfo || level == LogLevelWarn || level == LogLevelError
+}
+
+// Field adds a single extension field.
+// Reserved field names (message, level, code) are recorded as errors.
+func (b *JSONLogBuilder) Field(name string, value any) *JSONLogBuilder {
+	if isReservedLogField(name) {
+		b.fieldErrs = append(b.fieldErrs, fmt.Sprintf("field %q is reserved", name))
+		return b
+	}
+	b.fields[name] = value
+	return b
+}
+
+// Fields merges extension fields from a map.
+func (b *JSONLogBuilder) Fields(obj map[string]any) *JSONLogBuilder {
+	if obj == nil {
+		return b
+	}
+	for k, v := range obj {
+		b.Field(k, v)
+	}
+	return b
+}
+
+// Extend merges fields from a struct or map.
+func (b *JSONLogBuilder) Extend(value any) *JSONLogBuilder {
+	if value == nil {
+		return b
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		b.errs = append(b.errs, &BuilderError{msg: "extend: failed to marshal value: " + err.Error()})
+		return b
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(data, &obj); err != nil {
+		b.errs = append(b.errs, &BuilderError{msg: "extend: value must serialize to a JSON object"})
+		return b
+	}
+	b.Fields(obj)
+	return b
+}
+
+// Trace sets the trace object.
+func (b *JSONLogBuilder) Trace(trace any) *JSONLogBuilder {
+	b.trace = trace
+	return b
+}
+
+// Build constructs the Event, performing strict validation.
+func (b *JSONLogBuilder) Build() (Event, error) {
+	if len(b.errs) > 0 {
+		return Event{}, b.errs[0]
+	}
+	if len(b.fieldErrs) > 0 {
+		return Event{}, &BuilderError{msg: b.fieldErrs[0]}
+	}
+
+	logPayload := make(map[string]any)
+	for k, v := range b.fields {
+		logPayload[k] = v
+	}
+	logPayload["message"] = b.message
+	logPayload["level"] = string(b.level)
+
+	traceObj := map[string]any{}
+	if b.trace != nil {
+		if obj, ok := b.trace.(map[string]any); ok {
+			traceObj = obj
+		} else {
+			data, err := json.Marshal(b.trace)
+			if err != nil {
+				return Event{}, &BuilderError{msg: "trace must be serializable: " + err.Error()}
+			}
+			if err := json.Unmarshal(data, &traceObj); err != nil {
+				return Event{}, &BuilderError{msg: "trace must be a JSON object"}
+			}
+		}
+	}
+
+	envelope := map[string]any{
+		"kind":  "log",
+		"log":   logPayload,
+		"trace": traceObj,
+	}
+	return Event{envelope: envelope}, nil
+}
+
+func isReservedLogField(name string) bool {
+	return name == "message" || name == "level" || name == "code"
+}
+
+// ValidateProtocolEvent validates one protocol v1 event envelope. When strict
+// is true, it additionally applies the recommended strict profile: a required
+// trace object, event.error.retryable required and boolean, event.log without
+// a 'code' field, and non-empty message strings for log/progress.
+func ValidateProtocolEvent(event any, strict bool) error {
+	obj, ok := event.(map[string]any)
+	if !ok {
+		return fmt.Errorf("event must be a JSON object")
+	}
+	kind, ok := obj["kind"].(string)
+	if !ok {
+		return fmt.Errorf("event.kind must be one of result, error, progress, log")
+	}
+	switch kind {
+	case "result", "error", "progress", "log":
+	default:
+		return fmt.Errorf("unsupported event kind %q", kind)
+	}
+	if _, ok := obj[kind]; !ok {
+		return fmt.Errorf("event payload field %q is required", kind)
+	}
+	for key := range obj {
+		if key != "kind" && key != kind && key != "trace" {
+			return fmt.Errorf("unexpected top-level field %q", key)
+		}
+	}
+	trace, hasTrace := obj["trace"]
+	if hasTrace {
+		if _, ok := trace.(map[string]any); !ok {
+			return fmt.Errorf("event.trace must be a JSON object when present")
+		}
+	}
+	if strict && !hasTrace {
+		return fmt.Errorf("event.trace is required by the strict profile")
+	}
+	if kind == "error" {
+		if err := validateErrorPayload(obj["error"]); err != nil {
+			return err
+		}
+	}
+	if !strict {
+		return nil
+	}
+	switch kind {
+	case "log":
+		return validateStrictLogPayload(obj["log"])
+	case "progress":
+		return validateStrictProgressPayload(obj["progress"])
+	case "error":
+		return validateStrictErrorPayload(obj["error"])
+	default:
+		return nil
+	}
+}
+
+func validateErrorPayload(value any) error {
+	errorPayload, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("event.error must be a JSON object")
+	}
+	code, ok := errorPayload["code"].(string)
+	if !ok || code == "" {
+		return fmt.Errorf("event.error.code must be a non-empty string")
+	}
+	message, ok := errorPayload["message"].(string)
+	if !ok || message == "" {
+		return fmt.Errorf("event.error.message must be a non-empty string")
+	}
+	if hint, ok := errorPayload["hint"]; ok {
+		if _, ok := hint.(string); !ok {
+			return fmt.Errorf("event.error.hint must be a string when present")
+		}
+	}
+	return nil
+}
+
+// ValidateProtocolStream validates a finite structured CLI event stream:
+// (log | progress)* -> exactly one (result | error) -> end. When strict is
+// true, every event is additionally validated against the strict profile
+// (see ValidateProtocolEvent).
+func ValidateProtocolStream(events []any, strict bool) error {
+	terminalSeen := false
+	for idx, event := range events {
+		if err := ValidateProtocolEvent(event, strict); err != nil {
+			return fmt.Errorf("event %d: %w", idx, err)
+		}
+		kind := event.(map[string]any)["kind"].(string)
+		switch kind {
+		case "log", "progress":
+			if terminalSeen {
+				return fmt.Errorf("event %d: non-terminal event after terminal", idx)
+			}
+		case "result", "error":
+			if terminalSeen {
+				return fmt.Errorf("event %d: duplicate terminal event", idx)
+			}
+			terminalSeen = true
+		default:
+			return fmt.Errorf("event %d: unsupported event kind %q", idx, kind)
+		}
+	}
+	if !terminalSeen {
+		return fmt.Errorf("event stream must contain exactly one terminal result or error")
+	}
+	return nil
+}
+
+func validateStrictErrorPayload(value any) error {
+	errorPayload, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("event.error must be a JSON object")
+	}
+	// Validate retryable is present and boolean
+	retryable, ok := errorPayload["retryable"]
+	if !ok {
+		return fmt.Errorf("event.error.retryable is required by the strict profile")
+	}
+	if _, ok := retryable.(bool); !ok {
+		return fmt.Errorf("event.error.retryable must be a boolean")
+	}
+	return nil
+}
+
+func validateStrictLogPayload(value any) error {
+	log, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("event.log must be a JSON object in the strict profile")
+	}
+	// 0.16: log.code is NOT part of the protocol, reject if present
+	if _, hasCode := log["code"]; hasCode {
+		return fmt.Errorf("event.log must not contain 'code' field in the strict profile")
+	}
+	if err := requireNonEmptyString(log, "message", "event.log"); err != nil {
+		return err
+	}
+	level, ok := log["level"].(string)
+	if !ok || (level != "debug" && level != "info" && level != "warn" && level != "error") {
+		return fmt.Errorf("event.log.level must be one of debug, info, warn, error in the strict profile")
+	}
+	// 0.16: timestamp_epoch_ms is NOT required; it's an optional extension field
+	// (no validation required; it's written as an ordinary field if present)
+	return nil
+}
+
+func isNonNegativeInteger(value any) bool {
+	v := reflect.ValueOf(value)
+	if !v.IsValid() {
+		return false
+	}
+	switch v.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return v.Int() >= 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return true
+	case reflect.Float32, reflect.Float64:
+		f := v.Float()
+		return f >= 0 && math.Trunc(f) == f
+	default:
+		return false
+	}
+}
+
+func validateStrictProgressPayload(value any) error {
+	progress, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("event.progress must be a JSON object in the strict profile")
+	}
+	return requireNonEmptyString(progress, "message", "event.progress")
+}
+
+func requireNonEmptyString(payload map[string]any, field string, path string) error {
+	value, ok := payload[field].(string)
+	if !ok || value == "" {
+		return fmt.Errorf("%s.%s must be a non-empty string in the strict profile", path, field)
+	}
+	return nil
 }
 
 // ═══════════════════════════════════════════
 // Public API: Output Formatters
 // ═══════════════════════════════════════════
 
-// RedactionPolicy controls scoped redaction behavior for OutputJsonWith.
+// RedactionPolicy controls scoped redaction behavior for OutputJsonWithOptions.
 type RedactionPolicy string
 
 const (
@@ -78,15 +700,38 @@ const (
 	RedactionNone      RedactionPolicy = "RedactionNone"
 )
 
-// RedactionOptions controls scoped redaction and legacy secret field names.
-type RedactionOptions struct {
-	// Policy controls where redaction is applied. Empty means default full redaction.
-	Policy RedactionPolicy
+// Redactor configures scoped redaction and extra secret field names.
+// The zero value applies default full redaction with no extra names.
+type Redactor struct {
 	// SecretNames are field names to redact in addition to _secret suffixes.
 	// Matching is exact field-name equality at any nesting level. The same list
-	// also matches URL query-parameter names inside _url fields (see
-	// RedactURLSecrets).
+	// also matches URL query-parameter names inside _url fields (see URL).
 	SecretNames []string
+	// Policy controls where redaction is applied. Empty means default full redaction.
+	Policy RedactionPolicy
+}
+
+// Value returns a JSON-safe copy of v with the redactor's redaction applied.
+func (r Redactor) Value(v any) any {
+	sanitized := sanitizeForJSON(v)
+	context := newRedactionContext(r)
+	return applyRedactionPolicyWithContext(sanitized, r.Policy, context)
+}
+
+// URL redacts secret components of a single URL string.
+//
+// A query parameter is redacted iff its (form-decoded) name ends in
+// _secret/_SECRET or matches an exact entry in SecretNames. The userinfo
+// password (scheme://user:pass@host) is always redacted as a structural rule.
+// Only the secret spans are replaced with "***"; every other byte is preserved.
+// A string that is not a single, whitespace-free, scheme-prefixed URL (including
+// a URL embedded in surrounding prose) is returned unchanged.
+func (r Redactor) URL(rawURL string) string {
+	context := newRedactionContext(r)
+	if redacted, ok := redactURLInStr(rawURL, context); ok {
+		return redacted
+	}
+	return rawURL
 }
 
 // OutputStyle controls YAML/plain rendering style.
@@ -101,8 +746,14 @@ const (
 
 // OutputOptions combines redaction and rendering style.
 type OutputOptions struct {
-	Redaction RedactionOptions
+	Redaction Redactor
 	Style     OutputStyle
+}
+
+// OutputOptionsForPolicy returns OutputOptions with the given redaction policy
+// and the default (Readable) style.
+func OutputOptionsForPolicy(p RedactionPolicy) OutputOptions {
+	return OutputOptions{Redaction: Redactor{Policy: p}}
 }
 
 // OutputJson formats as single-line JSON. Secrets redacted, original keys, raw values.
@@ -110,15 +761,10 @@ func OutputJson(value any) string {
 	return marshalOutputJSON(RedactedValue(value))
 }
 
-// OutputJsonWith formats as single-line JSON with explicit redaction policy.
-func OutputJsonWith(value any, redactionPolicy RedactionPolicy) string {
-	return marshalOutputJSON(RedactedValueWith(value, redactionPolicy))
-}
-
 // OutputJsonWithOptions formats as single-line JSON with explicit output options.
 // JSON ignores OutputStyle and preserves original keys and values after redaction.
 func OutputJsonWithOptions(value any, outputOptions OutputOptions) string {
-	return marshalOutputJSON(RedactedValueWithOptions(value, outputOptions.Redaction))
+	return marshalOutputJSON(outputOptions.Redaction.Value(value))
 }
 
 func marshalOutputJSON(value any) string {
@@ -136,13 +782,13 @@ func marshalOutputJSON(value any) string {
 
 // OutputYaml formats as multi-line YAML. Keys stripped, values formatted, secrets redacted.
 func OutputYaml(value any) string {
-	return OutputYamlWithOptions(value, OutputOptions{Redaction: RedactionOptions{}})
+	return OutputYamlWithOptions(value, OutputOptions{})
 }
 
 // OutputYamlWithOptions formats as multi-line YAML with explicit output options.
 func OutputYamlWithOptions(value any, outputOptions OutputOptions) string {
 	lines := []string{"---"}
-	v := RedactedValueWithOptions(value, outputOptions.Redaction)
+	v := outputOptions.Redaction.Value(value)
 	if outputOptions.Style == OutputStyleRaw {
 		renderYamlRaw(v, 0, &lines)
 	} else {
@@ -153,13 +799,13 @@ func OutputYamlWithOptions(value any, outputOptions OutputOptions) string {
 
 // OutputPlain formats as single-line logfmt. Keys stripped, values formatted, secrets redacted.
 func OutputPlain(value any) string {
-	return OutputPlainWithOptions(value, OutputOptions{Redaction: RedactionOptions{}})
+	return OutputPlainWithOptions(value, OutputOptions{})
 }
 
 // OutputPlainWithOptions formats as single-line logfmt with explicit output options.
 func OutputPlainWithOptions(value any, outputOptions OutputOptions) string {
 	var pairs [][2]string
-	v := RedactedValueWithOptions(value, outputOptions.Redaction)
+	v := outputOptions.Redaction.Value(value)
 	if outputOptions.Style == OutputStyleRaw {
 		collectPlainPairsRaw(v, "", &pairs)
 	} else {
@@ -179,96 +825,52 @@ func OutputPlainWithOptions(value any, outputOptions OutputOptions) string {
 // Public API: Redaction & Utility
 // ═══════════════════════════════════════════
 
-// RedactSecretsInPlace redacts _secret fields in-place. Container roots
-// (objects, arrays) are mutated in place; a bare string root cannot be replaced
-// through this API — use RedactedValue or RedactURLSecrets for that.
-func RedactSecretsInPlace(value any) {
-	redactSecretsWithContext(value, redactionContext{})
-}
-
-// RedactSecretsInPlaceWithOptions redacts secret fields in-place using explicit options.
-func RedactSecretsInPlaceWithOptions(value any, redactionOptions RedactionOptions) {
-	context := newRedactionContext(redactionOptions)
-	switch redactionOptions.Policy {
-	case RedactionTraceOnly:
-		if obj, ok := value.(map[string]any); ok {
-			if trace, exists := obj["trace"]; exists {
-				obj["trace"] = redactSecretsWithContext(trace, context)
-			}
-		}
-	case RedactionNone:
-		// Explicitly disabled.
-	default:
-		redactSecretsWithContext(value, context)
-	}
-}
-
 // RedactedValue returns a JSON-safe copy with default _secret redaction applied.
+// For scoped redaction or extra secret names, use Redactor.Value.
 func RedactedValue(value any) any {
-	return RedactedValueWithOptions(value, RedactionOptions{})
-}
-
-// RedactedValueWith returns a JSON-safe copy with an explicit redaction policy applied.
-func RedactedValueWith(value any, redactionPolicy RedactionPolicy) any {
-	v := sanitizeForJSON(value)
-	return applyRedactionPolicyWithContext(v, redactionPolicy, redactionContext{})
-}
-
-// RedactedValueWithOptions returns a JSON-safe copy with explicit redaction options applied.
-func RedactedValueWithOptions(value any, redactionOptions RedactionOptions) any {
-	v := sanitizeForJSON(value)
-	return applyRedactionOptions(v, redactionOptions)
+	return Redactor{}.Value(value)
 }
 
 // RedactURLSecrets redacts secret components of a single URL string, using
 // default options. Returns url with its userinfo password and any
 // _secret-suffixed query parameter values replaced by "***".
-// See RedactURLSecretsWithOptions.
+// For extra secret names, use Redactor.URL.
 func RedactURLSecrets(rawURL string) string {
-	return RedactURLSecretsWithOptions(rawURL, RedactionOptions{})
-}
-
-// RedactURLSecretsWithOptions redacts secret components of a single URL string.
-//
-// A query parameter is redacted iff its (form-decoded) name ends in
-// _secret/_SECRET or matches an exact entry in SecretNames. The userinfo
-// password (scheme://user:pass@host) is always redacted as a structural rule.
-// Only the secret spans are replaced with "***"; every other byte is preserved.
-// A string that is not a single, whitespace-free, scheme-prefixed URL (including
-// a URL embedded in surrounding prose) is returned unchanged.
-func RedactURLSecretsWithOptions(rawURL string, redactionOptions RedactionOptions) string {
-	context := newRedactionContext(redactionOptions)
-	if redacted, ok := redactURLInStr(rawURL, context); ok {
-		return redacted
-	}
-	return rawURL
+	return Redactor{}.URL(rawURL)
 }
 
 // ParseSize parses a human-readable size string into bytes.
-// Accepts bare numbers or numbers followed by a unit letter (B/K/M/G/T).
-// Case-insensitive. Trims whitespace. Returns (0, false) for invalid input.
+// Accepts numbers followed by explicit units. Decimal units are B/kB/MB/GB/TB;
+// binary units are KiB/MiB/GiB/TiB. Trims whitespace and rejects ambiguous
+// K/M/G/T units. Returns (0, false) for invalid input.
 func ParseSize(s string) (uint64, bool) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, false
 	}
-	last := s[len(s)-1]
-	var numStr string
+	units := []struct {
+		suffix string
+		mult   uint64
+	}{
+		{"KiB", 1024},
+		{"MiB", 1024 * 1024},
+		{"GiB", 1024 * 1024 * 1024},
+		{"TiB", 1024 * 1024 * 1024 * 1024},
+		{"kB", 1000},
+		{"MB", 1000 * 1000},
+		{"GB", 1000 * 1000 * 1000},
+		{"TB", 1000 * 1000 * 1000 * 1000},
+		{"B", 1},
+	}
+	numStr := ""
 	var mult uint64
-	switch {
-	case last == 'B' || last == 'b':
-		numStr, mult = s[:len(s)-1], 1
-	case last == 'K' || last == 'k':
-		numStr, mult = s[:len(s)-1], 1024
-	case last == 'M' || last == 'm':
-		numStr, mult = s[:len(s)-1], 1024*1024
-	case last == 'G' || last == 'g':
-		numStr, mult = s[:len(s)-1], 1024*1024*1024
-	case last == 'T' || last == 't':
-		numStr, mult = s[:len(s)-1], 1024*1024*1024*1024
-	case (last >= '0' && last <= '9') || last == '.':
-		numStr, mult = s, 1
-	default:
+	for _, unit := range units {
+		if strings.HasSuffix(s, unit.suffix) {
+			numStr, mult = strings.TrimSuffix(s, unit.suffix), unit.mult
+			break
+		}
+	}
+	if numStr == "" {
 		return 0, false
 	}
 	if numStr == "" || !isDecimalNumber(numStr) {
@@ -488,9 +1090,9 @@ type redactionContext struct {
 	secretNames map[string]struct{}
 }
 
-func newRedactionContext(redactionOptions RedactionOptions) redactionContext {
-	names := make(map[string]struct{}, len(redactionOptions.SecretNames))
-	for _, name := range redactionOptions.SecretNames {
+func newRedactionContext(r Redactor) redactionContext {
+	names := make(map[string]struct{}, len(r.SecretNames))
+	for _, name := range r.SecretNames {
 		names[name] = struct{}{}
 	}
 	return redactionContext{secretNames: names}
@@ -520,6 +1122,7 @@ func keyHasURLSuffix(key string) bool {
 // _secret field becomes "***"; a _url field has its URL secrets scrubbed in
 // place. No other string is scanned.
 const maxDepth = 256
+const maxDepthMarker = "<afdata:max-depth>"
 
 func redactSecretsWithContext(value any, context redactionContext) any {
 	return redactSecretsWithContextDepth(value, context, 0)
@@ -527,7 +1130,7 @@ func redactSecretsWithContext(value any, context redactionContext) any {
 
 func redactSecretsWithContextDepth(value any, context redactionContext, depth int) any {
 	if depth >= maxDepth {
-		return "***"
+		return maxDepthMarker
 	}
 	switch v := value.(type) {
 	case map[string]any:
@@ -554,11 +1157,6 @@ func redactSecretsWithContextDepth(value any, context redactionContext, depth in
 	default:
 		return value
 	}
-}
-
-func applyRedactionOptions(value any, redactionOptions RedactionOptions) any {
-	context := newRedactionContext(redactionOptions)
-	return applyRedactionPolicyWithContext(value, redactionOptions.Policy, context)
 }
 
 func applyRedactionPolicyWithContext(value any, redactionPolicy RedactionPolicy, context redactionContext) any {
@@ -777,6 +1375,20 @@ func tryStripGenericCents(key string) (stripped, code string, ok bool) {
 	return stripped, code, true
 }
 
+// tryStripGenericMicro extracts currency code from _{code}_micro / _{CODE}_MICRO.
+func tryStripGenericMicro(key string) (stripped, code string, ok bool) {
+	code = extractCurrencyCodeMicro(key)
+	if code == "" {
+		return "", "", false
+	}
+	suffixLen := len(code) + len("_micro") + 1 // _{code}_micro
+	stripped = key[:len(key)-suffixLen]
+	if stripped == "" {
+		return "", "", false
+	}
+	return stripped, code, true
+}
+
 type processedField struct {
 	key         string
 	value       any
@@ -808,7 +1420,7 @@ func tryProcessField(key string, value any) (string, string, bool) {
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_epoch_ns"); ok {
-		if n, ok := asInt64(value); ok {
+		if n, ok := asDecimalInt64(value); ok {
 			ms := n / 1_000_000
 			if n%1_000_000 < 0 {
 				ms--
@@ -836,6 +1448,12 @@ func tryProcessField(key string, value any) (string, string, bool) {
 	if stripped, code, ok := tryStripGenericCents(key); ok {
 		if n, ok := asNonNegInt64(value); ok {
 			return stripped, fmt.Sprintf("%d.%02d %s", n/100, n%100, strings.ToUpper(code)), true
+		}
+		return "", "", false
+	}
+	if stripped, code, ok := tryStripGenericMicro(key); ok {
+		if n, ok := asNonNegInt64(value); ok {
+			return stripped, fmt.Sprintf("%d.%06d %s", n/1_000_000, n%1_000_000, strings.ToUpper(code)), true
 		}
 		return "", "", false
 	}
@@ -868,19 +1486,19 @@ func tryProcessField(key string, value any) (string, string, bool) {
 
 	// Group 4: single-unit suffixes
 	if stripped, ok := stripSuffixCI(key, "_msats"); ok {
-		if _, ok := asFloat64(value); ok {
-			return stripped, plainScalar(value) + "msats", true
+		if text, ok := decimalIntText(value); ok {
+			return stripped, text + "msats", true
 		}
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_sats"); ok {
-		if _, ok := asFloat64(value); ok {
-			return stripped, plainScalar(value) + "sats", true
+		if text, ok := decimalIntText(value); ok {
+			return stripped, text + "sats", true
 		}
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_bytes"); ok {
-		if n, ok := asInt64(value); ok {
+		if n, ok := asNonNegInt64(value); ok {
 			return stripped, formatBytesHuman(n), true
 		}
 		return "", "", false
@@ -892,12 +1510,6 @@ func tryProcessField(key string, value any) (string, string, bool) {
 		return "", "", false
 	}
 	// Group 5: short suffixes (last to avoid false positives)
-	if stripped, ok := stripSuffixCI(key, "_btc"); ok {
-		if _, ok := asFloat64(value); ok {
-			return stripped, plainScalar(value) + " BTC", true
-		}
-		return "", "", false
-	}
 	if stripped, ok := stripSuffixCI(key, "_jpy"); ok {
 		if n, ok := asNonNegInt64(value); ok {
 			return stripped, fmt.Sprintf("\u00a5%s", formatWithCommas(uint64(n))), true
@@ -1027,26 +1639,21 @@ func formatRFC3339Ms(ms int64) (string, bool) {
 }
 
 func formatBytesHuman(bytes int64) string {
-	const KB = 1024.0
-	const MB = KB * 1024
-	const GB = MB * 1024
-	const TB = GB * 1024
+	const KiB = 1024.0
+	const MiB = KiB * 1024
+	const GiB = MiB * 1024
+	const TiB = GiB * 1024
 
-	sign := ""
 	b := float64(bytes)
-	if b < 0 {
-		sign = "-"
-		b = -b
-	}
 	switch {
-	case b >= TB:
-		return fmt.Sprintf("%s%.1fTB", sign, b/TB)
-	case b >= GB:
-		return fmt.Sprintf("%s%.1fGB", sign, b/GB)
-	case b >= MB:
-		return fmt.Sprintf("%s%.1fMB", sign, b/MB)
-	case b >= KB:
-		return fmt.Sprintf("%s%.1fKB", sign, b/KB)
+	case b >= TiB:
+		return fmt.Sprintf("%.1fTiB", b/TiB)
+	case b >= GiB:
+		return fmt.Sprintf("%.1fGiB", b/GiB)
+	case b >= MiB:
+		return fmt.Sprintf("%.1fMiB", b/MiB)
+	case b >= KiB:
+		return fmt.Sprintf("%.1fKiB", b/KiB)
 	default:
 		return fmt.Sprintf("%dB", bytes)
 	}
@@ -1077,11 +1684,28 @@ func extractCurrencyCode(key string) string {
 	} else {
 		return ""
 	}
-	idx := strings.LastIndex(withoutCents, "_")
+	return extractCurrencyCodeFromStem(withoutCents)
+}
+
+// extractCurrencyCodeMicro extracts code from _{code}_micro / _{CODE}_MICRO suffix.
+func extractCurrencyCodeMicro(key string) string {
+	var withoutMicro string
+	if strings.HasSuffix(key, "_micro") {
+		withoutMicro = key[:len(key)-6]
+	} else if strings.HasSuffix(key, "_MICRO") {
+		withoutMicro = key[:len(key)-6]
+	} else {
+		return ""
+	}
+	return extractCurrencyCodeFromStem(withoutMicro)
+}
+
+func extractCurrencyCodeFromStem(stem string) string {
+	idx := strings.LastIndex(stem, "_")
 	if idx < 0 {
 		return ""
 	}
-	code := withoutCents[idx+1:]
+	code := stem[idx+1:]
 	if code == "" || len(code) < 3 || len(code) > 4 {
 		return ""
 	}
@@ -1472,6 +2096,39 @@ func asNonNegInt64(value any) (int64, bool) {
 	return 0, false
 }
 
+func asDecimalInt64(value any) (int64, bool) {
+	if s, ok := value.(string); ok && isDecimalIntegerString(s) {
+		n, err := strconv.ParseInt(s, 10, 64)
+		return n, err == nil
+	}
+	return asInt64(value)
+}
+
+func decimalIntText(value any) (string, bool) {
+	if s, ok := value.(string); ok && isDecimalIntegerString(s) {
+		return s, true
+	}
+	if n, ok := asInt64(value); ok {
+		return strconv.FormatInt(n, 10), true
+	}
+	return "", false
+}
+
+func isDecimalIntegerString(s string) bool {
+	if strings.HasPrefix(s, "-") {
+		s = strings.TrimPrefix(s, "-")
+	}
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func asFloat64(value any) (float64, bool) {
 	switch v := value.(type) {
 	case int:
@@ -1521,7 +2178,7 @@ type visitKey struct {
 
 func sanitizeForJSONWithVisited(value any, visited map[visitKey]struct{}, depth int) any {
 	if depth >= maxDepth {
-		return "***"
+		return maxDepthMarker
 	}
 	switch v := value.(type) {
 	case map[string]any:

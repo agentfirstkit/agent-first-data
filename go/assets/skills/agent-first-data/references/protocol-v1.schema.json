@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentfirstkit.org/schemas/agent-first-data/protocol-v1.schema.json",
+  "title": "Agent-First Data Protocol v1 Event",
+  "type": "object",
+  "oneOf": [
+    {"$ref": "#/$defs/resultEvent"},
+    {"$ref": "#/$defs/errorEvent"},
+    {"$ref": "#/$defs/progressEvent"},
+    {"$ref": "#/$defs/logEvent"}
+  ],
+  "$defs": {
+    "trace": {
+      "type": "object"
+    },
+    "resultEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "result"},
+        "result": true,
+        "trace": {"$ref": "#/$defs/trace"}
+      },
+      "required": ["kind", "result"],
+      "additionalProperties": false
+    },
+    "errorEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "error"},
+        "error": {
+          "type": "object",
+          "properties": {
+            "code": {"type": "string", "minLength": 1},
+            "message": {"type": "string", "minLength": 1},
+            "hint": {"type": "string"}
+          },
+          "required": ["code", "message"],
+          "additionalProperties": true
+        },
+        "trace": {"$ref": "#/$defs/trace"}
+      },
+      "required": ["kind", "error"],
+      "additionalProperties": false
+    },
+    "progressEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "progress"},
+        "progress": true,
+        "trace": {"$ref": "#/$defs/trace"}
+      },
+      "required": ["kind", "progress"],
+      "additionalProperties": false
+    },
+    "logEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {"const": "log"},
+        "log": true,
+        "trace": {"$ref": "#/$defs/trace"}
+      },
+      "required": ["kind", "log"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,8 +13,17 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Add cross-language stdout and stderr file redirection helpers for CLI output using --stdout-file and --stderr-file.",
-    "Improve Rust CLI help rendering to use display names and avoid duplicated name/about markdown headings."
+    "Redesign the SDK to a builders-only API across all four languages, removing legacy build_json_ok/build_json_error constructors and collapsing every _with_options variant into a single function with optional parameters",
+    "Introduce AFDATA protocol v1: a finite CLI event stream of (log|progress)* followed by exactly one result or error, with typed envelopes carrying code, message, and an optional trace",
+    "Add semantic CLI emitter methods (emit_result/emit_error/emit_progress/emit_log) that validate envelope shape and enforce the single-terminal-event lifecycle at the emitter",
+    "Support protocol-compliant early exits so --help and --version emit structured events when --output json|yaml|plain is requested",
+    "Route structured logging through protocol v1 log events, including a redacted startup diagnostic capturing resolved config, argv, and environment",
+    "Add a machine-readable suffix registry and protocol JSON Schema, bundled as offline reference assets in every language package",
+    "Add the _{code}_micro currency suffix for sub-cent precision as integer millionths of a currency unit, aimed at per-token LLM and metered-API pricing",
+    "Publish a standard Agent Skill plus a skill-admin CLI subcommand that installs and serves the skill offline",
+    "Harden redaction to scrub raw argv secrets, _url userinfo passwords and secret-named query parameters, and secret-flag help defaults",
+    "Add optional stdout/stderr file redirection so services separate machine-readable protocol events from diagnostic output",
+    "Distribute the afdata CLI as prebuilt binaries via Homebrew and Scoop in addition to crates.io, npm, and PyPI"
   ],
   "bonds": [],
   "tree": {

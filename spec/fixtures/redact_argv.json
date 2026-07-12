@@ -1,0 +1,50 @@
+[
+  {
+    "name": "inline secret suffix",
+    "input": ["tool", "--api-key-secret=sk-live", "--domain", "example.com"],
+    "options": {},
+    "expected": ["tool", "--api-key-secret=***", "--domain", "example.com"]
+  },
+  {
+    "name": "space separated secret suffix",
+    "input": ["tool", "--api-key-secret", "sk-live", "--domain", "example.com"],
+    "options": {},
+    "expected": ["tool", "--api-key-secret", "***", "--domain", "example.com"]
+  },
+  {
+    "name": "custom sensitive snake name maps to kebab flag",
+    "input": ["tool", "--api-key", "sk-live", "--domain", "example.com"],
+    "options": {"secret_names": ["api_key"]},
+    "expected": ["tool", "--api-key", "***", "--domain", "example.com"]
+  },
+  {
+    "name": "custom sensitive inline kebab flag",
+    "input": ["tool", "--authorization=Bearer legacy", "--domain", "example.com"],
+    "options": {"secret_names": ["authorization"]},
+    "expected": ["tool", "--authorization=***", "--domain", "example.com"]
+  },
+  {
+    "name": "unknown non-secret args remain visible",
+    "input": ["tool", "--unknown", "visible", "--token", "also-visible"],
+    "options": {},
+    "expected": ["tool", "--unknown", "visible", "--token", "also-visible"]
+  },
+  {
+    "name": "free text is not scanned",
+    "input": ["tool", "api_key_secret=sk-live", "--note", "token sk-live"],
+    "options": {},
+    "expected": ["tool", "api_key_secret=sk-live", "--note", "token sk-live"]
+  },
+  {
+    "name": "missing secret value stays inspectable",
+    "input": ["tool", "--api-key-secret", "--domain", "example.com"],
+    "options": {},
+    "expected": ["tool", "--api-key-secret", "--domain", "example.com"]
+  },
+  {
+    "name": "redaction none disables argv redaction",
+    "input": ["tool", "--api-key-secret=sk-live", "--api-key", "sk-legacy"],
+    "options": {"policy": "RedactionNone", "secret_names": ["api_key"]},
+    "expected": ["tool", "--api-key-secret=sk-live", "--api-key", "sk-legacy"]
+  }
+]

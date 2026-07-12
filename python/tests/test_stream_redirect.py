@@ -35,6 +35,7 @@ def test_config_from_raw_args_missing_value() -> None:
 def test_install_redirects_and_restores_output(tmp_path) -> None:
     stdout_path = tmp_path / "stdout.log"
     stderr_path = tmp_path / "stderr.log"
+    stdout_path.write_bytes(b"existing stdout\n")
 
     redirect = install(StreamRedirectConfig(stdout_file=str(stdout_path), stderr_file=str(stderr_path)))
     try:
@@ -43,5 +44,19 @@ def test_install_redirects_and_restores_output(tmp_path) -> None:
     finally:
         redirect.close()
 
-    assert stdout_path.read_bytes() == b"stdout bytes\n"
+    assert stdout_path.read_bytes() == b"existing stdout\nstdout bytes\n"
     assert stderr_path.read_bytes() == b"stderr bytes\n"
+    assert (stderr_path.stat().st_mode & 0o777) == 0o600
+
+
+def test_install_rejects_symlink_targets(tmp_path) -> None:
+    real_path = tmp_path / "real.log"
+    symlink_path = tmp_path / "stdout.log"
+    real_path.write_bytes(b"")
+    try:
+        symlink_path.symlink_to(real_path)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(OSError, match="symbolic link"):
+        install(StreamRedirectConfig(stdout_file=str(symlink_path)))

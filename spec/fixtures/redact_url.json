@@ -25,6 +25,11 @@
     "expected": "https://example.com/?page=2&limit=50"
   },
   {
+    "name": "broad credential-looking params are not redacted by default",
+    "input": "https://example.com/?api_key=sk-live&password=hunter2&token_secret=abc",
+    "expected": "https://example.com/?api_key=sk-live&password=hunter2&token_secret=***"
+  },
+  {
     "name": "multiple secret params",
     "input": "https://h/cb?code_secret=a&state=xy&id_token_secret=b",
     "expected": "https://h/cb?code_secret=***&state=xy&id_token_secret=***"
@@ -68,6 +73,16 @@
       ]
     },
     "expected": "wss://host:9222/cdp?token=***"
+  },
+  {
+    "name": "credential-looking param redacted only via secret_names",
+    "input": "https://example.com/?api_key=sk-live&password=hunter2",
+    "options": {
+      "secret_names": [
+        "api_key"
+      ]
+    },
+    "expected": "https://example.com/?api_key=***&password=hunter2"
   },
   {
     "name": "legacy param not in list is untouched",

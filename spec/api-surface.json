@@ -1,0 +1,457 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Canonical cross-SDK API surface for the shared AFDATA contract (protocol builders/reader, output, redaction, CLI helpers, core types). Feature-gated Rust modules (cli-help, skill-admin, tracing, stream-redirect) are out of scope: they are implementation utilities, not part of the four-language shared contract, and are allowed to differ in shape per language. A `null` entry for a language means the symbol is intentionally absent there; add a `note` explaining why. Validated by scripts/validate_api_surface.py, wired into scripts/test.sh's static phase.",
+  "groups": [
+    {
+      "id": "json_result",
+      "kind": "fn",
+      "rust": "json_result",
+      "python": "json_result",
+      "typescript": "jsonResult",
+      "go": "NewJSONResult"
+    },
+    {
+      "id": "json_error",
+      "kind": "fn",
+      "rust": "json_error",
+      "python": "json_error",
+      "typescript": "jsonError",
+      "go": "NewJSONError"
+    },
+    {
+      "id": "json_progress",
+      "kind": "fn",
+      "rust": "json_progress",
+      "python": "json_progress",
+      "typescript": "jsonProgress",
+      "go": "NewJSONProgress"
+    },
+    {
+      "id": "json_log",
+      "kind": "fn",
+      "rust": "json_log",
+      "python": "json_log",
+      "typescript": "jsonLog",
+      "go": "NewJSONLog"
+    },
+    {
+      "id": "result_builder",
+      "kind": "type",
+      "rust": "ResultBuilder",
+      "python": "ResultBuilder",
+      "typescript": "JsonResultBuilder",
+      "go": "JSONResultBuilder"
+    },
+    {
+      "id": "error_builder",
+      "kind": "type",
+      "rust": "ErrorBuilder",
+      "python": "ErrorBuilder",
+      "typescript": "JsonErrorBuilder",
+      "go": "JSONErrorBuilder"
+    },
+    {
+      "id": "progress_builder",
+      "kind": "type",
+      "rust": "ProgressBuilder",
+      "python": "ProgressBuilder",
+      "typescript": "JsonProgressBuilder",
+      "go": "JSONProgressBuilder"
+    },
+    {
+      "id": "log_builder",
+      "kind": "type",
+      "rust": "LogBuilder",
+      "python": "LogBuilder",
+      "typescript": "JsonLogBuilder",
+      "go": "JSONLogBuilder"
+    },
+    {
+      "id": "event",
+      "kind": "type",
+      "rust": "Event",
+      "python": "Event",
+      "typescript": "Event",
+      "go": "Event"
+    },
+    {
+      "id": "event_build_error",
+      "kind": "type",
+      "rust": "BuildError",
+      "python": "EventBuildError",
+      "typescript": "EventBuildError",
+      "go": "BuilderError"
+    },
+    {
+      "id": "log_level",
+      "kind": "type",
+      "rust": "LogLevel",
+      "python": "LogLevel",
+      "typescript": "LogLevel",
+      "go": "LogLevel"
+    },
+    {
+      "id": "validate_protocol_event",
+      "kind": "fn",
+      "rust": "validate_protocol_event",
+      "python": "validate_protocol_event",
+      "typescript": "validateProtocolEvent",
+      "go": "ValidateProtocolEvent"
+    },
+    {
+      "id": "validate_protocol_stream",
+      "kind": "fn",
+      "rust": "validate_protocol_stream",
+      "python": "validate_protocol_stream",
+      "typescript": "validateProtocolStream",
+      "go": "ValidateProtocolStream"
+    },
+    {
+      "id": "build_cli_error",
+      "kind": "fn",
+      "rust": "build_cli_error",
+      "python": "build_cli_error",
+      "typescript": "buildCliError",
+      "go": "BuildCLIError"
+    },
+    {
+      "id": "decode_protocol_event",
+      "kind": "fn",
+      "rust": "decode_protocol_event",
+      "python": "decode_protocol_event",
+      "typescript": "decodeProtocolEvent",
+      "go": null,
+      "note": "Go SDK has no protocol-reader API yet (no decode_protocol_event equivalent, no DecodedResult/DecodedError/DecodedProgress/DecodedLog/EventDecodeError types) — a real cross-SDK gap, not an intentional design choice. Tracked here so it stays visible instead of silently drifting further; not fixed in this pass."
+    },
+    {
+      "id": "event_decode_error",
+      "kind": "type",
+      "rust": "EventDecodeError",
+      "python": "EventDecodeError",
+      "typescript": "EventDecodeError",
+      "go": null
+    },
+    {
+      "id": "decoded_event",
+      "kind": "type",
+      "rust": "DecodedEvent",
+      "python": null,
+      "typescript": "DecodedEvent",
+      "go": null,
+      "note": "Rust and TS use a decoded-event enum/union; Python returns one of DecodedResult/DecodedError/DecodedProgress/DecodedLog directly without a wrapping union type."
+    },
+    {
+      "id": "decoded_result",
+      "kind": "type",
+      "rust": "DecodedResult",
+      "python": "DecodedResult",
+      "typescript": "DecodedResult",
+      "go": null
+    },
+    {
+      "id": "decoded_error",
+      "kind": "type",
+      "rust": "DecodedError",
+      "python": "DecodedError",
+      "typescript": "DecodedError",
+      "go": null
+    },
+    {
+      "id": "decoded_progress",
+      "kind": "type",
+      "rust": "DecodedProgress",
+      "python": "DecodedProgress",
+      "typescript": "DecodedProgress",
+      "go": null
+    },
+    {
+      "id": "decoded_log",
+      "kind": "type",
+      "rust": "DecodedLog",
+      "python": "DecodedLog",
+      "typescript": "DecodedLog",
+      "go": null
+    },
+    {
+      "id": "output_json",
+      "kind": "fn",
+      "rust": "output_json",
+      "python": "output_json",
+      "typescript": "outputJson",
+      "go": "OutputJson"
+    },
+    {
+      "id": "output_yaml",
+      "kind": "fn",
+      "rust": "output_yaml",
+      "python": "output_yaml",
+      "typescript": "outputYaml",
+      "go": "OutputYaml"
+    },
+    {
+      "id": "output_plain",
+      "kind": "fn",
+      "rust": "output_plain",
+      "python": "output_plain",
+      "typescript": "outputPlain",
+      "go": "OutputPlain"
+    },
+    {
+      "id": "output_json_with_options",
+      "kind": "fn",
+      "rust": "output_json_with_options",
+      "python": null,
+      "typescript": null,
+      "go": "OutputJsonWithOptions",
+      "note": "Python/TS pass options as an optional keyword/parameter on the base function instead of a separate _with_options entry point."
+    },
+    {
+      "id": "output_yaml_with_options",
+      "kind": "fn",
+      "rust": "output_yaml_with_options",
+      "python": null,
+      "typescript": null,
+      "go": "OutputYamlWithOptions"
+    },
+    {
+      "id": "output_plain_with_options",
+      "kind": "fn",
+      "rust": "output_plain_with_options",
+      "python": null,
+      "typescript": null,
+      "go": "OutputPlainWithOptions"
+    },
+    {
+      "id": "redacted_value",
+      "kind": "fn",
+      "rust": "redacted_value",
+      "python": "redacted_value",
+      "typescript": "redactedValue",
+      "go": "RedactedValue"
+    },
+    {
+      "id": "redact_url_secrets",
+      "kind": "fn",
+      "rust": "redact_url_secrets",
+      "python": "redact_url_secrets",
+      "typescript": "redactUrlSecrets",
+      "go": "RedactURLSecrets"
+    },
+    {
+      "id": "redactor",
+      "kind": "type",
+      "rust": "Redactor",
+      "python": null,
+      "typescript": null,
+      "go": "Redactor",
+      "note": "Rust/Go use a configured Redactor value (.value()/.url() or .Value()/.URL()) for custom secret_names/policy; Python/TS take secret_names/policy as keyword arguments directly on redacted_value/redact_url_secrets/OutputOptions instead of a separate type."
+    },
+    {
+      "id": "redaction_policy",
+      "kind": "type",
+      "rust": "RedactionPolicy",
+      "python": "RedactionPolicy",
+      "typescript": "RedactionPolicy",
+      "go": "RedactionPolicy"
+    },
+    {
+      "id": "output_style",
+      "kind": "type",
+      "rust": "OutputStyle",
+      "python": "OutputStyle",
+      "typescript": "OutputStyle",
+      "go": "OutputStyle"
+    },
+    {
+      "id": "output_options",
+      "kind": "type",
+      "rust": "OutputOptions",
+      "python": "OutputOptions",
+      "typescript": "OutputOptions",
+      "go": "OutputOptions"
+    },
+    {
+      "id": "parse_size",
+      "kind": "fn",
+      "rust": "parse_size",
+      "python": "parse_size",
+      "typescript": "parseSize",
+      "go": "ParseSize"
+    },
+    {
+      "id": "normalize_utc_offset",
+      "kind": "fn",
+      "rust": "normalize_utc_offset",
+      "python": "normalize_utc_offset",
+      "typescript": "normalizeUtcOffset",
+      "go": "NormalizeUTCOffset"
+    },
+    {
+      "id": "is_valid_rfc3339_date",
+      "kind": "fn",
+      "rust": "is_valid_rfc3339_date",
+      "python": "is_valid_rfc3339_date",
+      "typescript": "isValidRfc3339Date",
+      "go": "IsValidRFC3339Date"
+    },
+    {
+      "id": "is_valid_rfc3339_time",
+      "kind": "fn",
+      "rust": "is_valid_rfc3339_time",
+      "python": "is_valid_rfc3339_time",
+      "typescript": "isValidRfc3339Time",
+      "go": "IsValidRFC3339Time"
+    },
+    {
+      "id": "output_format",
+      "kind": "type",
+      "rust": "OutputFormat",
+      "python": "OutputFormat",
+      "typescript": "OutputFormat",
+      "go": "OutputFormat"
+    },
+    {
+      "id": "log_filters",
+      "kind": "type",
+      "rust": "LogFilters",
+      "python": "LogFilters",
+      "typescript": "LogFilters",
+      "go": "LogFilters"
+    },
+    {
+      "id": "cli_parse_output",
+      "kind": "fn",
+      "rust": "cli_parse_output",
+      "python": "cli_parse_output",
+      "typescript": "cliParseOutput",
+      "go": "CliParseOutput"
+    },
+    {
+      "id": "cli_parse_log_filters",
+      "kind": "fn",
+      "rust": "cli_parse_log_filters",
+      "python": "cli_parse_log_filters",
+      "typescript": "cliParseLogFilters",
+      "go": "CliParseLogFilters"
+    },
+    {
+      "id": "cli_output",
+      "kind": "fn",
+      "rust": "cli_output",
+      "python": "cli_output",
+      "typescript": "cliOutput",
+      "go": "CliOutput"
+    },
+    {
+      "id": "cli_output_with_options",
+      "kind": "fn",
+      "rust": "cli_output_with_options",
+      "python": null,
+      "typescript": null,
+      "go": "CliOutputWithOptions"
+    },
+    {
+      "id": "cli_emitter",
+      "kind": "type",
+      "rust": "CliEmitter",
+      "python": "CliEmitter",
+      "typescript": "CliEmitter",
+      "go": "CliEmitter"
+    },
+    {
+      "id": "cli_emitter_new",
+      "kind": "fn",
+      "rust": null,
+      "python": null,
+      "typescript": null,
+      "go": "NewCliEmitter",
+      "note": "Rust/Python/TS construct via CliEmitter's own constructor (CliEmitter::new / CliEmitter(...) / new CliEmitter(...)), not a separate top-level export. Go has no constructor methods, so this is a free function."
+    },
+    {
+      "id": "cli_emitter_new_with_options",
+      "kind": "fn",
+      "rust": null,
+      "python": null,
+      "typescript": null,
+      "go": "NewCliEmitterWithOptions"
+    },
+    {
+      "id": "output_options_for_policy",
+      "kind": "fn",
+      "rust": null,
+      "python": null,
+      "typescript": "outputOptionsForPolicy",
+      "go": "OutputOptionsForPolicy",
+      "note": "Rust/Python expose this as an associated function/classmethod (OutputOptions::for_policy / OutputOptions.for_policy), not a separate top-level export. Go/TS don't have that pattern, so it's a free function."
+    },
+    {
+      "id": "cli_event_writer",
+      "kind": "type",
+      "rust": null,
+      "python": null,
+      "typescript": "CliEventWriter",
+      "go": null,
+      "note": "TS-only structural type for the writer CliEmitter accepts; Rust expresses the equivalent as a generic bound (W: Write), Python/Go accept any writable/file-like object without naming the shape."
+    },
+    {
+      "id": "json_value",
+      "kind": "type",
+      "rust": null,
+      "python": null,
+      "typescript": "JsonValue",
+      "go": null,
+      "note": "TS-only exported type alias for a JSON value. Rust uses serde_json::Value (from the serde_json crate, not this crate's own naming); Python/Go use the host language's dynamic Any/any."
+    },
+    {
+      "id": "cli_emitter_error",
+      "kind": "type",
+      "rust": "CliEmitterError",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only: a typed write-failure error for CliEmitter. Python/TS/Go raise/return the host language's native I/O error instead."
+    },
+    {
+      "id": "cli_protocol_mode",
+      "kind": "type",
+      "rust": "CliProtocolMode",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only CliEmitter configuration enum; other languages don't expose this knob yet."
+    },
+    {
+      "id": "build_cli_version",
+      "kind": "fn",
+      "rust": "build_cli_version",
+      "python": "build_cli_version",
+      "typescript": "buildCliVersion",
+      "go": "BuildCliVersion"
+    },
+    {
+      "id": "cli_render_version",
+      "kind": "fn",
+      "rust": "cli_render_version",
+      "python": "cli_render_version",
+      "typescript": "cliRenderVersion",
+      "go": "CliRenderVersion"
+    },
+    {
+      "id": "cli_handle_version_or_continue",
+      "kind": "fn",
+      "rust": "cli_handle_version_or_continue",
+      "python": "cli_handle_version_or_continue",
+      "typescript": "cliHandleVersionOrContinue",
+      "go": "CliHandleVersionOrContinue"
+    },
+    {
+      "id": "version_config",
+      "kind": "type",
+      "rust": "VersionConfig",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only: a struct grouping name/version for the version helpers. Other languages pass name/version as plain arguments."
+    }
+  ]
+}

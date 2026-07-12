@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --bin afdata --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          BIN_DIR="target/${{ matrix.target }}/release"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            ARCHIVE="afdata-${TAG}-${{ matrix.target }}.zip"
+            cd "$BIN_DIR" && 7z a "../../../$ARCHIVE" afdata.exe && cd -
+          else
+            ARCHIVE="afdata-${TAG}-${{ matrix.target }}.tar.gz"
+            tar -czf "$ARCHIVE" -C "$BIN_DIR" afdata
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256" 2>/dev/null || shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload to release
+        shell: bash
+        run: gh release upload "$TAG" "$ARCHIVE" "${ARCHIVE}.sha256" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
