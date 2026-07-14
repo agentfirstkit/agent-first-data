@@ -331,7 +331,6 @@ impl<W: std::io::Write> CliEmitter<W> {
     ///
     /// The provider is called for every log event (via emit_log or emit with kind:log).
     /// Its output is merged as extension fields; explicit call-site fields take precedence.
-    /// The provider must not write reserved fields (message, level); violations return a typed error.
     pub fn with_log_fields<F>(mut self, provider: F) -> Self
     where
         F: Fn() -> Value + 'static,
@@ -380,7 +379,7 @@ impl<W: std::io::Write> CliEmitter<W> {
     pub fn emit_progress(&mut self, message: &str) -> Result<(), CliEmitterError> {
         #[allow(clippy::expect_used)]
         self.emit(
-            json_progress(message)
+            json_progress(serde_json::json!({ "message": message }))
                 .build()
                 .expect("json_progress: builder failed unexpectedly"),
         )
@@ -391,19 +390,20 @@ impl<W: std::io::Write> CliEmitter<W> {
     /// Applies log_fields_provider if configured; explicit fields take precedence.
     pub fn emit_log(&mut self, level: LogLevel, message: &str) -> Result<(), CliEmitterError> {
         #[allow(clippy::expect_used)]
-        let mut event = json_log(level, message)
-            .build()
-            .expect("json_log: builder failed unexpectedly")
-            .into_value();
+        let mut event = json_log(serde_json::json!({
+            "level": level.as_str(),
+            "message": message,
+        }))
+        .build()
+        .expect("json_log: builder failed unexpectedly")
+        .into_value();
         if let Some(provider) = &self.log_fields_provider {
             let provider_fields = provider();
             if let Some(log_obj) = event.get_mut("log").and_then(|v| v.as_object_mut())
                 && let Value::Object(fields) = provider_fields
             {
                 for (k, v) in fields {
-                    if !matches!(k.as_str(), "message" | "level" | "code") {
-                        log_obj.entry(k).or_insert(v);
-                    }
+                    log_obj.entry(k).or_insert(v);
                 }
             }
         }

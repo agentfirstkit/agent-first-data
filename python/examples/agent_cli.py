@@ -271,11 +271,13 @@ def log_enabled(filters: list[str], category: str) -> bool:
 
 
 def build_request_log(command: str | None) -> dict:
-    return json_log(LogLevel.INFO, "request").field("category", "request").field("command", command or "none").build().to_dict()
+    return json_log({"level": "info", "message": "request", "category": "request", "command": command or "none"}).build().to_dict()
 
 
 def build_startup_log(raw: list[str], args, log: list[str]) -> dict:
-    return json_log(LogLevel.INFO, "startup").fields({
+    return json_log({
+        "level": "info",
+        "message": "startup",
         "category": "startup",
         "event": "startup",
         "argv": _redact_argv_local(raw),

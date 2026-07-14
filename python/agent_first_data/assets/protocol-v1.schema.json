@@ -47,13 +47,7 @@
       "type": "object",
       "properties": {
         "kind": {"const": "progress"},
-        "progress": {
-          "type": "object",
-          "properties": {
-            "message": {"type": "string", "minLength": 1}
-          },
-          "additionalProperties": true
-        },
+        "progress": true,
         "trace": {"$ref": "#/$defs/trace"}
       },
       "required": ["kind", "progress"],
@@ -63,18 +57,7 @@
       "type": "object",
       "properties": {
         "kind": {"const": "log"},
-        "log": {
-          "type": "object",
-          "properties": {
-            "message": {"type": "string", "minLength": 1},
-            "level": {"enum": ["debug", "info", "warn", "error"]},
-            "code": false
-          },
-          "not": {
-            "required": ["code"]
-          },
-          "additionalProperties": true
-        },
+        "log": true,
         "trace": {"$ref": "#/$defs/trace"}
       },
       "required": ["kind", "log"],

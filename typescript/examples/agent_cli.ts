@@ -312,29 +312,35 @@ function logEnabled(filters: LogFilters, category: string): boolean {
 }
 
 function buildRequestLog(command: string | undefined): JsonValue {
-  return jsonLog("info", "request")
-    .field("category", "request")
-    .field("command", command ?? "none")
+  return jsonLog({
+    level: "info",
+    message: "request",
+    category: "request",
+    command: command ?? "none",
+  })
     .build()
     .toJSON();
 }
 
 function buildStartupLog(args: string[], command: string | undefined, output: string, log: LogFilters, verbose: boolean): JsonValue {
-  return jsonLog("info", "startup")
-    .field("category", "startup")
-    .field("event", "startup")
-    .field("argv", args)
-    .field("parsed", {
+  return jsonLog({
+    level: "info",
+    message: "startup",
+    category: "startup",
+    event: "startup",
+    argv: args,
+    parsed: {
       command: command ?? "none",
       output,
       log: Array.from(log.filters),
       verbose,
-    })
-    .field("effective_config", {
+    },
+    effective_config: {
       output,
       log: Array.from(log.filters),
-    })
-    .field("env", startupEnvSnapshot())
+    },
+    env: startupEnvSnapshot(),
+  })
     .build()
     .toJSON();
 }

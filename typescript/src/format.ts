@@ -197,52 +197,10 @@ export class JsonErrorBuilder {
 }
 
 export class JsonProgressBuilder {
-  private extensionFields: Record<string, JsonValue> = {};
   private traceValue: Record<string, JsonValue> = {};
   private issues: string[] = [];
 
-  constructor(private readonly message: string) {
-    if (!message || message === "") this.issues.push("message must be a non-empty string");
-  }
-
-  field(name: string, value: JsonValue): this {
-    if (this.isReservedProgressField(name)) {
-      this.issues.push(`cannot write reserved progress field ${JSON.stringify(name)}`);
-    } else {
-      this.extensionFields[name] = value;
-    }
-    return this;
-  }
-
-  fields(obj: unknown): this {
-    if (!isObject(obj)) {
-      this.issues.push("fields must be a JSON object");
-      return this;
-    }
-    for (const [key, val] of Object.entries(obj)) {
-      if (this.isReservedProgressField(key)) {
-        this.issues.push(`cannot write reserved progress field ${JSON.stringify(key)}`);
-      } else {
-        this.extensionFields[key] = val as JsonValue;
-      }
-    }
-    return this;
-  }
-
-  extend(obj: unknown): this {
-    if (!isObject(obj)) {
-      this.issues.push("extend must be a JSON object");
-      return this;
-    }
-    for (const [key, val] of Object.entries(obj)) {
-      if (this.isReservedProgressField(key)) {
-        this.issues.push(`cannot write reserved progress field ${JSON.stringify(key)}`);
-      } else {
-        this.extensionFields[key] = val as JsonValue;
-      }
-    }
-    return this;
-  }
+  constructor(private readonly payload: JsonValue) {}
 
   trace(value: Record<string, JsonValue> | undefined): this {
     if (value !== undefined) {
@@ -253,74 +211,22 @@ export class JsonProgressBuilder {
       }
     }
     return this;
-  }
-
-  private isReservedProgressField(name: string): boolean {
-    return name === "message";
   }
 
   build(): Event {
     if (this.issues.length > 0) {
       throw new EventBuildError(`Failed to build progress event: ${this.issues.join("; ")}`, this.issues);
     }
-    const progress: Record<string, JsonValue> = { ...this.extensionFields };
-    progress.message = this.message;
-    const m: Record<string, JsonValue> = { kind: "progress", progress, trace: this.traceValue };
+    const m: Record<string, JsonValue> = { kind: "progress", progress: this.payload, trace: this.traceValue };
     return new Event(m);
   }
 }
 
 export class JsonLogBuilder {
-  private extensionFields: Record<string, JsonValue> = {};
   private traceValue: Record<string, JsonValue> = {};
   private issues: string[] = [];
 
-  constructor(
-    private readonly level: LogLevel,
-    private readonly message: string,
-  ) {
-    if (!message || message === "") this.issues.push("message must be a non-empty string");
-    if (!isValidLogLevel(level)) this.issues.push(`level must be one of debug, info, warn, error`);
-  }
-
-  field(name: string, value: JsonValue): this {
-    if (this.isReservedLogField(name)) {
-      this.issues.push(`cannot write reserved log field ${JSON.stringify(name)}`);
-    } else {
-      this.extensionFields[name] = value;
-    }
-    return this;
-  }
-
-  fields(obj: unknown): this {
-    if (!isObject(obj)) {
-      this.issues.push("fields must be a JSON object");
-      return this;
-    }
-    for (const [key, val] of Object.entries(obj)) {
-      if (this.isReservedLogField(key)) {
-        this.issues.push(`cannot write reserved log field ${JSON.stringify(key)}`);
-      } else {
-        this.extensionFields[key] = val as JsonValue;
-      }
-    }
-    return this;
-  }
-
-  extend(obj: unknown): this {
-    if (!isObject(obj)) {
-      this.issues.push("extend must be a JSON object");
-      return this;
-    }
-    for (const [key, val] of Object.entries(obj)) {
-      if (this.isReservedLogField(key)) {
-        this.issues.push(`cannot write reserved log field ${JSON.stringify(key)}`);
-      } else {
-        this.extensionFields[key] = val as JsonValue;
-      }
-    }
-    return this;
-  }
+  constructor(private readonly payload: JsonValue) {}
 
   trace(value: Record<string, JsonValue> | undefined): this {
     if (value !== undefined) {
@@ -333,18 +239,11 @@ export class JsonLogBuilder {
     return this;
   }
 
-  private isReservedLogField(name: string): boolean {
-    return name === "message" || name === "level" || name === "code";
-  }
-
   build(): Event {
     if (this.issues.length > 0) {
       throw new EventBuildError(`Failed to build log event: ${this.issues.join("; ")}`, this.issues);
     }
-    const log: Record<string, JsonValue> = { ...this.extensionFields };
-    log.level = this.level;
-    log.message = this.message;
-    const m: Record<string, JsonValue> = { kind: "log", log, trace: this.traceValue };
+    const m: Record<string, JsonValue> = { kind: "log", log: this.payload, trace: this.traceValue };
     return new Event(m);
   }
 }
@@ -360,17 +259,13 @@ export function jsonError(code: string, message: string): JsonErrorBuilder {
 }
 
 /** Fluent builder for progress events. */
-export function jsonProgress(message: string): JsonProgressBuilder {
-  return new JsonProgressBuilder(message);
+export function jsonProgress(payload: JsonValue): JsonProgressBuilder {
+  return new JsonProgressBuilder(payload);
 }
 
 /** Fluent builder for log events. */
-export function jsonLog(level: LogLevel, message: string): JsonLogBuilder {
-  return new JsonLogBuilder(level, message);
-}
-
-function isValidLogLevel(level: unknown): level is LogLevel {
-  return level === "debug" || level === "info" || level === "warn" || level === "error";
+export function jsonLog(payload: JsonValue): JsonLogBuilder {
+  return new JsonLogBuilder(payload);
 }
 
 /** Validate one protocol event envelope. `strict` also enforces the recommended strict protocol profile (default true). */
@@ -398,8 +293,6 @@ export function validateProtocolEvent(event: unknown, strict = true): void {
   }
   if (!strict) return;
   if (!isObject(event.trace)) throw new Error("event.trace is required in strict mode");
-  if (kind === "log") validateStrictLog(event.log);
-  if (kind === "progress") validateStrictProgress(event.progress);
   if (kind === "error") validateStrictError(event.error);
 }
 
@@ -437,26 +330,6 @@ export function validateProtocolStream(events: readonly unknown[], strict = true
   });
   if (!terminalSeen) {
     throw new Error("event stream must contain exactly one terminal result or error");
-  }
-}
-
-function validateStrictLog(payload: unknown): void {
-  if (!isObject(payload)) throw new Error("event.log must be a JSON object in strict mode");
-  // 0.16: log payload MUST NOT contain code field
-  if ("code" in (payload as Record<string, unknown>)) {
-    throw new Error("event.log.code is not allowed in strict mode");
-  }
-  if (typeof payload.message !== "string" || payload.message === "") {
-    throw new Error("event.log.message must be a non-empty string in strict mode");
-  }
-  if (!['debug', 'info', 'warn', 'error'].includes(payload.level as string)) {
-    throw new Error("event.log.level must be one of debug, info, warn, error in strict mode");
-  }
-}
-
-function validateStrictProgress(payload: unknown): void {
-  if (!isObject(payload) || typeof payload.message !== "string" || payload.message === "") {
-    throw new Error("event.progress.message must be a non-empty string in strict mode");
   }
 }
 
@@ -498,16 +371,13 @@ export type DecodedError = {
 
 export type DecodedProgress = {
   kind: "progress";
-  message: string;
-  fields: Record<string, JsonValue>;
+  progress: JsonValue;
   trace?: Record<string, JsonValue>;
 };
 
 export type DecodedLog = {
   kind: "log";
-  level: LogLevel;
-  message: string;
-  fields: Record<string, JsonValue>;
+  log: JsonValue;
   trace?: Record<string, JsonValue>;
 };
 
@@ -523,13 +393,10 @@ export class EventDecodeError extends Error {
 }
 
 const ERROR_RESERVED_FIELDS = new Set(["code", "message", "hint", "retryable"]);
-const PROGRESS_RESERVED_FIELDS = new Set(["message"]);
-const LOG_RESERVED_FIELDS = new Set(["level", "message"]);
 
 /**
  * Parse one protocol line (a single JSON text value), strict-validate it, and
- * return a typed decoded event. Extension fields are every payload key beyond
- * the required ones, collected into `fields`.
+ * return a typed decoded event.
  */
 export function decodeProtocolEvent(text: string): DecodedEvent {
   let parsed: unknown;
@@ -565,22 +432,10 @@ export function decodeProtocolEvent(text: string): DecodedEvent {
       if (typeof error.hint === "string") decoded.hint = error.hint;
       return decoded;
     }
-    case "progress": {
-      const progress = event.progress as Record<string, JsonValue>;
-      const fields: Record<string, JsonValue> = {};
-      for (const [k, v] of Object.entries(progress)) {
-        if (!PROGRESS_RESERVED_FIELDS.has(k)) fields[k] = v;
-      }
-      return { kind: "progress", message: progress.message as string, fields, trace };
-    }
-    case "log": {
-      const log = event.log as Record<string, JsonValue>;
-      const fields: Record<string, JsonValue> = {};
-      for (const [k, v] of Object.entries(log)) {
-        if (!LOG_RESERVED_FIELDS.has(k)) fields[k] = v;
-      }
-      return { kind: "log", level: log.level as LogLevel, message: log.message as string, fields, trace };
-    }
+    case "progress":
+      return { kind: "progress", progress: event.progress, trace };
+    case "log":
+      return { kind: "log", log: event.log, trace };
     default:
       // Unreachable: validateProtocolEvent already constrains event.kind.
       throw new EventDecodeError(`unsupported event kind ${JSON.stringify(event.kind)}`);

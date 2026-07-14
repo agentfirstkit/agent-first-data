@@ -80,7 +80,7 @@ func TestDecodeProtocolEventErrorWithoutHint(t *testing.T) {
 }
 
 func TestDecodeProtocolEventProgress(t *testing.T) {
-	event, _ := NewJSONProgress("working").Field("percent", float64(50)).Build()
+	event, _ := NewJSONProgress(map[string]any{"message": "working", "percent": float64(50)}).Build()
 	line, _ := json.Marshal(event)
 
 	decoded, err := DecodeProtocolEvent(string(line))
@@ -91,19 +91,14 @@ func TestDecodeProtocolEventProgress(t *testing.T) {
 	if !ok {
 		t.Fatalf("decoded type = %T, want *DecodedProgress", decoded)
 	}
-	if progress.Message != "working" {
-		t.Errorf("message = %v", progress.Message)
-	}
-	if progress.Fields["percent"] == nil {
-		t.Errorf("fields missing percent: %v", progress.Fields)
-	}
-	if _, ok := progress.Fields["message"]; ok {
-		t.Errorf("fields should not contain reserved key 'message'")
+	payload := progress.Progress.(map[string]any)
+	if payload["message"] != "working" || payload["percent"] == nil {
+		t.Errorf("unexpected progress payload: %v", payload)
 	}
 }
 
 func TestDecodeProtocolEventLog(t *testing.T) {
-	event, _ := NewJSONLog(LogLevelWarn, "disk low").Field("free_bytes", float64(1024)).Build()
+	event, _ := NewJSONLog(map[string]any{"level": "warn", "message": "disk low", "free_bytes": float64(1024)}).Build()
 	line, _ := json.Marshal(event)
 
 	decoded, err := DecodeProtocolEvent(string(line))
@@ -114,17 +109,9 @@ func TestDecodeProtocolEventLog(t *testing.T) {
 	if !ok {
 		t.Fatalf("decoded type = %T, want *DecodedLog", decoded)
 	}
-	if log.Level != LogLevelWarn {
-		t.Errorf("level = %v", log.Level)
-	}
-	if log.Message != "disk low" {
-		t.Errorf("message = %v", log.Message)
-	}
-	if log.Fields["free_bytes"] == nil {
-		t.Errorf("fields missing free_bytes: %v", log.Fields)
-	}
-	if _, ok := log.Fields["level"]; ok {
-		t.Errorf("fields should not contain reserved key 'level'")
+	payload := log.Log.(map[string]any)
+	if payload["level"] != "warn" || payload["message"] != "disk low" || payload["free_bytes"] == nil {
+		t.Errorf("unexpected log payload: %v", payload)
 	}
 }
 

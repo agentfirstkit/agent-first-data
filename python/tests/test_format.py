@@ -107,8 +107,8 @@ def _build_protocol_case_event(typ, args):
 
     args vocabulary: "result" (payload), "code"+"message" (error),
     "hint" (-> .hint()), "retryable" (bool -> .retryable_if()),
-    "fields" (object -> .fields()), "trace" (object -> .trace()),
-    "message" alone (progress), "level"+"message" (log).
+    "fields" (object -> .fields()), "trace" (object -> .trace()), and complete
+    progress/log payloads.
     """
     kind = typ.split("_", 1)[0]
 
@@ -121,13 +121,13 @@ def _build_protocol_case_event(typ, args):
         if "retryable" in args:
             builder = builder.retryable_if(args["retryable"])
     elif kind == "progress":
-        builder = json_progress(args["message"])
+        builder = json_progress({"message": args["message"], **args.get("fields", {})})
     elif kind == "log":
-        builder = json_log(LogLevel(args["level"]), args["message"])
+        builder = json_log({"level": args["level"], "message": args["message"], **args.get("fields", {})})
     else:
         raise ValueError(f"unknown fixture type: {typ}")
 
-    if "fields" in args:
+    if "fields" in args and kind not in ("progress", "log"):
         builder = builder.fields(args["fields"])
     if "trace" in args:
         builder = builder.trace(args["trace"])
@@ -388,21 +388,18 @@ def test_decode_protocol_event_error():
 
 
 def test_decode_protocol_event_progress():
-    event = json_progress("halfway").field("percent", 50).build()
+    event = json_progress({"message": "halfway", "percent": 50}).build()
     decoded = decode_protocol_event(output_json(event.to_dict()))
     assert isinstance(decoded, DecodedProgress)
-    assert decoded.message == "halfway"
-    assert decoded.fields == {"percent": 50}
+    assert decoded.progress == {"message": "halfway", "percent": 50}
     assert decoded.trace == {}
 
 
 def test_decode_protocol_event_log():
-    event = json_log(LogLevel.WARN, "slow query").field("duration_ms", 900).build()
+    event = json_log({"level": "warn", "message": "slow query", "duration_ms": 900}).build()
     decoded = decode_protocol_event(output_json(event.to_dict()))
     assert isinstance(decoded, DecodedLog)
-    assert decoded.level == LogLevel.WARN
-    assert decoded.message == "slow query"
-    assert decoded.fields == {"duration_ms": 900}
+    assert decoded.log == {"level": "warn", "message": "slow query", "duration_ms": 900}
     assert decoded.trace == {}
 
 

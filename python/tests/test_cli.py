@@ -140,7 +140,7 @@ def test_cli_output_dispatches_raw_yaml_with_options():
 def test_cli_emitter_writes_events_and_tracks_terminal():
     writer = StringIO()
     emitter = CliEmitter(writer, OutputFormat.JSON)
-    emitter.emit(json_log(LogLevel.INFO, "startup").build())
+    emitter.emit(json_log({"level": "info", "message": "startup"}).build())
     emitter.emit(json_result({"rows": 2}).build())
     lines = writer.getvalue().splitlines()
     assert len(lines) == 2
@@ -150,7 +150,7 @@ def test_cli_emitter_writes_events_and_tracks_terminal():
 
 def test_cli_emitter_framing_all_formats():
     events = [
-        json_log(LogLevel.INFO, "startup").build(),
+        json_log({"level": "info", "message": "startup"}).build(),
         json_result({"rows": 2}).build(),
     ]
     for fmt in (OutputFormat.JSON, OutputFormat.PLAIN, OutputFormat.YAML):
@@ -238,13 +238,20 @@ def test_cli_emitter_convenience_methods():
 def test_cli_emitter_with_log_fields_provider():
     writer = StringIO()
     def log_fields():
-        return {"source": "test"}
+        return {
+            "source": "test",
+            "code": "cache_miss",
+            "message": "provider default",
+            "level": "debug",
+        }
     emitter = CliEmitter(writer, OutputFormat.JSON, log_fields=log_fields)
     emitter.emit_log(LogLevel.INFO, "test message")
     lines = writer.getvalue().splitlines()
     parsed = json.loads(lines[0])
     assert parsed["log"]["source"] == "test"
+    assert parsed["log"]["code"] == "cache_miss"
     assert parsed["log"]["message"] == "test message"
+    assert parsed["log"]["level"] == "info"
 
 
 # ── version helpers ───────────────────────────────────────────────────────────

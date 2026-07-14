@@ -183,49 +183,10 @@ class ErrorBuilder:
 class ProgressBuilder:
     """Fluent builder for progress events."""
 
-    def __init__(self, message: str) -> None:
-        self._message = message
+    def __init__(self, payload: Any) -> None:
+        self._payload = payload
         self._trace: dict = {}
-        self._fields: dict[str, Any] = {}
         self._errors: list[str] = []
-
-    def field(self, name: str, value: Any) -> ProgressBuilder:
-        """Add a single extension field."""
-        if name == "message":
-            self._errors.append(f"cannot override reserved field '{name}'")
-        else:
-            self._fields[name] = value
-        return self
-
-    def fields(self, mapping: Mapping[str, Any]) -> ProgressBuilder:
-        """Add multiple extension fields from a mapping."""
-        if not isinstance(mapping, Mapping):
-            self._errors.append("fields must be a mapping")
-        else:
-            for k, v in mapping.items():
-                if k == "message":
-                    self._errors.append(f"cannot override reserved field '{k}'")
-                else:
-                    self._fields[k] = v
-        return self
-
-    def extend(self, value: Any) -> ProgressBuilder:
-        """Add extension fields from a dataclass or mapping."""
-        if hasattr(value, "__dataclass_fields__"):
-            from dataclasses import asdict
-            mapping = asdict(value)
-        elif isinstance(value, Mapping):
-            mapping = value
-        else:
-            self._errors.append("extend() requires a dataclass or mapping")
-            return self
-
-        for k, v in mapping.items():
-            if k == "message":
-                self._errors.append(f"cannot override reserved field '{k}'")
-            else:
-                self._fields[k] = v
-        return self
 
     def trace(self, obj: Any) -> ProgressBuilder:
         """Set trace context."""
@@ -239,11 +200,9 @@ class ProgressBuilder:
         """Build and return the Event, raising EventBuildError if there are errors."""
         if self._errors:
             raise EventBuildError("; ".join(self._errors))
-        progress = {"message": self._message}
-        progress.update(self._fields)
         envelope = {
             "kind": "progress",
-            "progress": progress,
+            "progress": self._payload,
             "trace": self._trace,
         }
         return Event(envelope)
@@ -252,52 +211,10 @@ class ProgressBuilder:
 class LogBuilder:
     """Fluent builder for log events."""
 
-    def __init__(self, level: LogLevel | str, message: str) -> None:
-        if isinstance(level, str):
-            level = LogLevel(level)
-        self._level = level
-        self._message = message
+    def __init__(self, payload: Any) -> None:
+        self._payload = payload
         self._trace: dict = {}
-        self._fields: dict[str, Any] = {}
         self._errors: list[str] = []
-
-    def field(self, name: str, value: Any) -> LogBuilder:
-        """Add a single extension field."""
-        if name in ("message", "level", "code"):
-            self._errors.append(f"cannot override reserved field '{name}'")
-        else:
-            self._fields[name] = value
-        return self
-
-    def fields(self, mapping: Mapping[str, Any]) -> LogBuilder:
-        """Add multiple extension fields from a mapping."""
-        if not isinstance(mapping, Mapping):
-            self._errors.append("fields must be a mapping")
-        else:
-            for k, v in mapping.items():
-                if k in ("message", "level", "code"):
-                    self._errors.append(f"cannot override reserved field '{k}'")
-                else:
-                    self._fields[k] = v
-        return self
-
-    def extend(self, value: Any) -> LogBuilder:
-        """Add extension fields from a dataclass or mapping."""
-        if hasattr(value, "__dataclass_fields__"):
-            from dataclasses import asdict
-            mapping = asdict(value)
-        elif isinstance(value, Mapping):
-            mapping = value
-        else:
-            self._errors.append("extend() requires a dataclass or mapping")
-            return self
-
-        for k, v in mapping.items():
-            if k in ("message", "level", "code"):
-                self._errors.append(f"cannot override reserved field '{k}'")
-            else:
-                self._fields[k] = v
-        return self
 
     def trace(self, obj: Any) -> LogBuilder:
         """Set trace context."""
@@ -311,11 +228,9 @@ class LogBuilder:
         """Build and return the Event, raising EventBuildError if there are errors."""
         if self._errors:
             raise EventBuildError("; ".join(self._errors))
-        log = {"level": self._level.value, "message": self._message}
-        log.update(self._fields)
         envelope = {
             "kind": "log",
-            "log": log,
+            "log": self._payload,
             "trace": self._trace,
         }
         return Event(envelope)
@@ -331,23 +246,22 @@ def json_error(code: str, message: str) -> ErrorBuilder:
     return ErrorBuilder(code, message)
 
 
-def json_progress(message: str) -> ProgressBuilder:
+def json_progress(payload: Any) -> ProgressBuilder:
     """Create a fluent progress builder."""
-    return ProgressBuilder(message)
+    return ProgressBuilder(payload)
 
 
-def json_log(level: LogLevel | str, message: str) -> LogBuilder:
+def json_log(payload: Any) -> LogBuilder:
     """Create a fluent log builder."""
-    return LogBuilder(level, message)
+    return LogBuilder(payload)
 
 
 def validate_protocol_event(event: Any, *, strict: bool = True) -> None:
     """Validate one protocol v1 event envelope.
 
     With ``strict=True`` (the default), also enforces the recommended strict
-    protocol profile (required trace, required error.retryable, log/progress
-    message and level rules). Pass ``strict=False`` for the plain, lenient
-    envelope-shape check only.
+    protocol profile (required trace and required error.retryable). Pass
+    ``strict=False`` for the plain, lenient envelope-shape check only.
     """
     if not isinstance(event, dict):
         raise ValueError("event must be a JSON object")
@@ -370,10 +284,6 @@ def validate_protocol_event(event: Any, *, strict: bool = True) -> None:
         raise ValueError("event.trace is required by the strict profile")
     if kind == "error":
         _validate_strict_error_payload(event["error"])
-    elif kind == "log":
-        _validate_strict_log_payload(event["log"])
-    elif kind == "progress":
-        _validate_strict_progress_payload(event["progress"])
 
 
 def _validate_error_payload(error: Any) -> None:
@@ -426,26 +336,6 @@ def _validate_strict_error_payload(error: Any) -> None:
         raise ValueError("event.error.retryable must be a boolean in the strict profile")
 
 
-def _validate_strict_log_payload(log: Any) -> None:
-    if not isinstance(log, dict):
-        raise ValueError("event.log must be a JSON object in the strict profile")
-    if "code" in log:
-        raise ValueError("event.log must not contain 'code' field in the strict profile")
-    _require_non_empty_string(log, "message", "event.log")
-    if "level" not in log:
-        raise ValueError("event.log.level is required by the strict profile")
-    if log.get("level") not in ("debug", "info", "warn", "error"):
-        raise ValueError(
-            "event.log.level must be one of debug, info, warn, error in the strict profile"
-        )
-
-
-def _validate_strict_progress_payload(progress: Any) -> None:
-    if not isinstance(progress, dict):
-        raise ValueError("event.progress must be a JSON object in the strict profile")
-    _require_non_empty_string(progress, "message", "event.progress")
-
-
 def _require_non_empty_string(payload: dict, field: str, path: str) -> None:
     value = payload.get(field)
     if not isinstance(value, str) or value == "":
@@ -487,22 +377,17 @@ class DecodedError:
 
 @dataclass(frozen=True)
 class DecodedProgress:
-    """Decoded protocol v1 progress event. ``fields`` holds extension fields
-    beyond message."""
+    """Decoded protocol v1 progress event."""
 
-    message: str
-    fields: dict[str, Any] = field(default_factory=dict)
+    progress: Any
     trace: dict | None = None
 
 
 @dataclass(frozen=True)
 class DecodedLog:
-    """Decoded protocol v1 log event. ``fields`` holds extension fields
-    beyond level/message."""
+    """Decoded protocol v1 log event."""
 
-    level: LogLevel
-    message: str
-    fields: dict[str, Any] = field(default_factory=dict)
+    log: Any
     trace: dict | None = None
 
 
@@ -544,16 +429,10 @@ def decode_protocol_event(
         )
 
     if kind == "progress":
-        progress = event["progress"]
-        fields = {k: v for k, v in progress.items() if k != "message"}
-        return DecodedProgress(message=progress["message"], fields=fields, trace=trace)
+        return DecodedProgress(progress=event["progress"], trace=trace)
 
     # kind == "log"
-    log = event["log"]
-    fields = {k: v for k, v in log.items() if k not in ("level", "message")}
-    return DecodedLog(
-        level=LogLevel(log["level"]), message=log["message"], fields=fields, trace=trace
-    )
+    return DecodedLog(log=event["log"], trace=trace)
 
 
 # ═══════════════════════════════════════════

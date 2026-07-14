@@ -76,8 +76,8 @@
   {
     "name": "log_extension_fields",
     "type": "log",
-    "args": {"level": "warn", "message": "retrying request", "fields": {"attempt": 2, "timestamp_epoch_ms": 1710000000000}},
-    "expected": {"kind": "log", "log": {"level": "warn", "message": "retrying request", "attempt": 2, "timestamp_epoch_ms": 1710000000000}, "trace": {}}
+    "args": {"level": "warn", "message": "retrying request", "fields": {"attempt": 2, "code": "upstream_retry", "timestamp_epoch_ms": 1710000000000}},
+    "expected": {"kind": "log", "log": {"level": "warn", "message": "retrying request", "attempt": 2, "code": "upstream_retry", "timestamp_epoch_ms": 1710000000000}, "trace": {}}
   },
   {
     "name": "arbitrary_json_result",

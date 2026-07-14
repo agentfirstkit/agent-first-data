@@ -372,32 +372,31 @@ fn test_protocol_fixtures() {
             .expect("builder failed")
             .into_value(),
             "progress" => {
-                let message = args["message"].as_str().expect("progress message required");
-                let mut builder = crate::protocol::json_progress(message);
+                let mut payload = serde_json::Map::new();
+                payload.insert("message".to_string(), args["message"].clone());
                 if let Some(fields) = args.get("fields").and_then(Value::as_object) {
                     for (k, v) in fields {
-                        builder = builder.field(k, v.clone());
+                        payload.insert(k.clone(), v.clone());
                     }
                 }
-                builder.build().expect("builder failed").into_value()
+                crate::protocol::json_progress(Value::Object(payload))
+                    .build()
+                    .expect("builder failed")
+                    .into_value()
             }
             "log" => {
-                let level_str = args["level"].as_str().expect("log level required");
-                let level = match level_str {
-                    "debug" => crate::protocol::LogLevel::Debug,
-                    "info" => crate::protocol::LogLevel::Info,
-                    "warn" => crate::protocol::LogLevel::Warn,
-                    "error" => crate::protocol::LogLevel::Error,
-                    other => panic!("unknown log level: {other}"),
-                };
-                let message = args["message"].as_str().expect("log message required");
-                let mut builder = crate::protocol::json_log(level, message);
+                let mut payload = serde_json::Map::new();
+                payload.insert("level".to_string(), args["level"].clone());
+                payload.insert("message".to_string(), args["message"].clone());
                 if let Some(fields) = args.get("fields").and_then(Value::as_object) {
                     for (k, v) in fields {
-                        builder = builder.field(k, v.clone());
+                        payload.insert(k.clone(), v.clone());
                     }
                 }
-                builder.build().expect("builder failed").into_value()
+                crate::protocol::json_log(Value::Object(payload))
+                    .build()
+                    .expect("builder failed")
+                    .into_value()
             }
             other => panic!("unknown protocol type: {other}"),
         };
@@ -2118,14 +2117,15 @@ fn readme_json_output() {
 
 #[test]
 fn readme_cli_startup_yaml() {
-    let startup_val = crate::protocol::json_log(LogLevel::Info, "startup")
-        .fields(json!({
-            "config": {"api_key_secret": "sk-sensitive-key", "timeout_s": 30},
-            "args": {"input_path": "data.json"},
-            "env": {"RUST_LOG": "info"}
-        }))
-        .build()
-        .expect("builder failed");
+    let startup_val = crate::protocol::json_log(json!({
+        "level": "info",
+        "message": "startup",
+        "config": {"api_key_secret": "sk-sensitive-key", "timeout_s": 30},
+        "args": {"input_path": "data.json"},
+        "env": {"RUST_LOG": "info"}
+    }))
+    .build()
+    .expect("builder failed");
     let out = output_yaml(&startup_val);
     assert!(out.contains("kind: \"log\""));
     assert!(out.contains("api_key: \"***\""));
@@ -2137,12 +2137,14 @@ fn readme_cli_startup_yaml() {
 
 #[test]
 fn readme_cli_progress_plain() {
-    let progress = crate::protocol::json_progress("processing")
-        .field("current", json!(3))
-        .field("total", json!(10))
-        .trace(json!({"duration_ms": 1500}))
-        .build()
-        .expect("builder failed");
+    let progress = crate::protocol::json_progress(json!({
+        "message": "processing",
+        "current": 3,
+        "total": 10,
+    }))
+    .trace(json!({"duration_ms": 1500}))
+    .build()
+    .expect("builder failed");
     let out = output_plain(&progress);
     assert!(out.contains("kind=progress"));
     assert!(out.contains("progress.current=3"));
@@ -2209,17 +2211,19 @@ fn decode_error_event_with_extension_fields() {
 
 #[test]
 fn decode_progress_event_with_extension_fields() {
-    let event = crate::protocol::json_progress("uploading")
-        .field("current", json!(3))
-        .field("total", json!(10))
-        .build()
-        .expect("builder failed");
+    let event = crate::protocol::json_progress(json!({
+        "message": "uploading",
+        "current": 3,
+        "total": 10,
+    }))
+    .build()
+    .expect("builder failed");
     let text = serde_json::to_string(&event).expect("serialize");
     match decode_protocol_event(&text).expect("decode progress") {
         DecodedEvent::Progress(decoded) => {
-            assert_eq!(decoded.message, "uploading");
-            assert_eq!(decoded.fields.get("current"), Some(&json!(3)));
-            assert_eq!(decoded.fields.get("total"), Some(&json!(10)));
+            assert_eq!(decoded.progress["message"], "uploading");
+            assert_eq!(decoded.progress["current"], 3);
+            assert_eq!(decoded.progress["total"], 10);
         }
         other => panic!("expected DecodedEvent::Progress, got {other:?}"),
     }
@@ -2227,16 +2231,19 @@ fn decode_progress_event_with_extension_fields() {
 
 #[test]
 fn decode_log_event_with_extension_fields() {
-    let event = crate::protocol::json_log(LogLevel::Warn, "disk low")
-        .field("free_bytes", json!(1024))
-        .build()
-        .expect("builder failed");
+    let event = crate::protocol::json_log(json!({
+        "level": "warn",
+        "message": "disk low",
+        "free_bytes": 1024,
+    }))
+    .build()
+    .expect("builder failed");
     let text = serde_json::to_string(&event).expect("serialize");
     match decode_protocol_event(&text).expect("decode log") {
         DecodedEvent::Log(decoded) => {
-            assert_eq!(decoded.level, LogLevel::Warn);
-            assert_eq!(decoded.message, "disk low");
-            assert_eq!(decoded.fields.get("free_bytes"), Some(&json!(1024)));
+            assert_eq!(decoded.log["level"], "warn");
+            assert_eq!(decoded.log["message"], "disk low");
+            assert_eq!(decoded.log["free_bytes"], 1024);
         }
         other => panic!("expected DecodedEvent::Log, got {other:?}"),
     }

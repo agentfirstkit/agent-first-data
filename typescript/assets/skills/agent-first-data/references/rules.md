@@ -258,7 +258,7 @@ Startup payload fields are tool-defined; `config` is recommended, while `version
 
 All use `kind` plus the same-named payload and optional `trace`. Do not split protocol events across `stdout` and `stderr`.
 
-Base validators enforce mandatory envelope/error/lifecycle rules. Strict validators additionally require object-valued `trace` on every event, complete log fields (`message`, `level`; `code` field MUST NOT appear in log payload), `retryable` on every error, and a non-empty progress `message`. Use strict validation before claiming compliance with all recommendations.
+Base validators enforce mandatory envelope/error/lifecycle rules. Strict validators additionally require object-valued `trace` on every event and `retryable` on every error. Log and progress payloads remain tool-defined in both profiles. Use strict validation before claiming compliance with all recommendations.
 
 ---
 
@@ -298,11 +298,11 @@ let span = info_span!("request", request_id = %uuid);
 let _guard = span.enter();
 ```
 
-For Go, Python, and TypeScript: emit span fields explicitly in each log event via `.field()` or equivalent event construction.
+For Go, Python, and TypeScript: emit span fields explicitly in each tool-defined log payload.
 
 ### Output fields
 
-Every log line contains `message`, `level` (debug/info/warn/error), plus span fields and event fields. Log payloads MUST NOT contain a `code` field. Do not use the log level as `code`; `code:"error"` is reserved for terminal protocol errors. Projects that need timestamps add them as extension fields (`timestamp_epoch_ms`) via emitter defaults or per-call `.field()`.
+Log payloads have no required or reserved fields. Traditional logging adapters commonly add `message` and `level` (debug/info/warn/error), plus span and event fields, but those names and meanings are adapter conventions rather than AFDATA protocol requirements. Projects that need timestamps add `timestamp_epoch_ms` explicitly.
 
 Log redaction is **by field name** (the same `_secret`/`_url` rule as all output), applied when the line is emitted. Name the secret field — `info!(api_key_secret = %key)` — rather than logging a whole object by its `Debug`/string rendering, which hides the inner field names from redaction. For structured/nested secret-bearing data, build a value, apply redaction through output formatters or redacted_value(), then emit via the standard formatting helpers — do not pass the struct to a `?`/`%`-rendered log field.
 

@@ -230,7 +230,7 @@ func TestCliOutputWithOptions_DispatchesRawYaml(t *testing.T) {
 func TestCliEmitterWritesEventsAndTracksTerminal(t *testing.T) {
 	var buf bytes.Buffer
 	emitter := NewCliEmitter(&buf, OutputFormatJson)
-	logEvent, _ := NewJSONLog(LogLevelInfo, "startup").Build()
+	logEvent, _ := NewJSONLog(map[string]any{"level": "info", "message": "startup"}).Build()
 	if err := emitter.Emit(logEvent); err != nil {
 		t.Fatalf("log emit: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestCliEmitterWritesEventsAndTracksTerminal(t *testing.T) {
 }
 
 func TestCliEmitterFramingAllFormats(t *testing.T) {
-	logEvent, _ := NewJSONLog(LogLevelInfo, "startup").Build()
+	logEvent, _ := NewJSONLog(map[string]any{"level": "info", "message": "startup"}).Build()
 	resultEvent, _ := NewJSONResult(map[string]any{"rows": 2}).Build()
 	cases := []struct {
 		name   string
@@ -324,7 +324,7 @@ func TestCliEmitterRejectsNonTerminalAfterTerminal(t *testing.T) {
 	if err := emitter.Emit(resultEvent); err != nil {
 		t.Fatalf("result emit: %v", err)
 	}
-	progressEvent, _ := NewJSONProgress("working").Build()
+	progressEvent, _ := NewJSONProgress(map[string]any{"message": "working"}).Build()
 	err := emitter.Emit(progressEvent)
 	if err == nil || !contains(err.Error(), "after terminal") {
 		t.Fatalf("expected after terminal error, got %v", err)

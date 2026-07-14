@@ -598,11 +598,7 @@ Finite structured CLI event streams follow:
 (log | progress)* -> exactly one (result | error) -> end
 ```
 
-Minimum logging envelope across language integrations:
-- Required fields: `message`, `level`
-- `level` carries the logging level (`debug`, `info`, `warn`, `error`)
-- Additional tool/span fields are free-form and additive
-- `timestamp_epoch_ms` is not required by the protocol; projects that need it should add it as an extension field
+Log and progress payloads are tool-defined JSON values with no required or reserved payload fields. Traditional logging adapters commonly add `message` and `level`; progress producers may add a human-readable `message`. These are conventions, not protocol requirements. Projects that need timestamps add `timestamp_epoch_ms` explicitly.
 
 Log fields are redacted **by field name** at emit time — the same `_secret`/`_url` rule as all other output, applied by the formatter, not by scanning rendered values. Emit secrets as named fields (`api_key_secret`) so the rule can see them. Logging a whole object pre-rendered to a single string (e.g. a language's debug/inspect form) defeats redaction, because the inner field names are no longer visible: build a structured value and redact it before logging instead.
 
@@ -645,7 +641,10 @@ Startup payload fields are tool-defined. Common fields:
 
 ### Result
 
-`kind:"result"` is success, and `kind:"error"` is failure. An agent watching a finite stream can treat either as the unique terminal event.
+`kind:"result"` MUST be emitted only when the command intent was completely
+fulfilled. Any incomplete fulfillment, including partial completion, MUST emit
+`kind:"error"`. An agent watching a finite stream can treat either as the
+unique terminal event.
 
 **Always include `trace`** for execution context — duration, data sources, resource usage, query details.
 
@@ -714,9 +713,7 @@ Missing `trace` makes debugging harder. Agents can't analyze performance, cost, 
 The `validate_protocol_event(event, strict)` / `validate_protocol_stream(events, strict)` APIs enforce protocol compliance. With `strict=false`, only mandatory MUST rules are enforced: envelope shape, error payload requirements, and finite-stream lifecycle. With `strict=true` (the default in Python/TS), additional recommendations are required:
 
 - every event includes an object-valued `trace`
-- every log payload includes a non-empty `message` and `level` in `debug|info|warn|error` (log payload MUST NOT contain a `code` field)
 - every error payload includes `retryable` as a boolean
-- every progress payload includes a non-empty, human-readable `message`
 
 Passing the base validator proves mandatory conformance only. Use the strict validator when claiming conformance with these recommendations. Structured version metadata may intentionally use the base profile when no execution trace exists.
 

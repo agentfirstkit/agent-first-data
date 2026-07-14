@@ -207,17 +207,15 @@ def assert_afdata_validate() -> None:
 
 
 def assert_afdata_validate_strict_event() -> None:
-    valid = (
-        '{"kind":"log","log":{"message":"startup","level":"info"},"trace":{}}\n'
-    )
+    valid = '{"kind":"log","log":{"event":"startup"},"trace":{}}\n'
     proc = run_afdata(("validate", "--strict", "--event"), valid)
     assert proc.returncode == 0, f"strict event failed: stderr={proc.stderr!r}, stdout={proc.stdout!r}"
     events = parse_events(proc.stdout)
     assert events[0]["kind"] == "result", f"strict event result missing: {events!r}"
 
-    invalid = '{"kind":"log","log":{"event":"startup"},"trace":{}}\n'
+    invalid = '{"kind":"log","log":{"event":"startup"}}\n'
     proc = run_afdata(("validate", "--strict", "--event"), invalid)
-    assert proc.returncode != 0, "strict event accepted an incomplete log"
+    assert proc.returncode != 0, "strict event accepted an event without trace"
     events = parse_events(proc.stdout)
     assert events[0]["kind"] == "error", f"strict event error missing: {events!r}"
     assert events[0]["trace"] == {}, f"strict event error is not strict: {events[0]!r}"

@@ -49,7 +49,7 @@ impl fmt::Display for Event {
 /// Error type for builder failures.
 ///
 /// Errors occur when:
-/// - A reserved field is overwritten (code, message, hint, retryable for error; message for progress/log; code is deleted from log vocabulary)
+/// - A reserved error field is overwritten (code, message, hint, retryable)
 /// - An object field (.fields or .extend) is not a JSON object
 /// - A required field (code/message for convenience functions) is empty
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,7 +82,7 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Debug => "debug",
             Self::Info => "info",
@@ -312,84 +312,11 @@ pub fn json_error(code: &str, message: &str) -> ErrorBuilder {
 
 /// Builder for progress events.
 pub struct ProgressBuilder {
-    message: String,
-    fields: serde_json::Map<String, Value>,
+    payload: Value,
     trace: Option<Value>,
-    build_error: Option<BuildError>,
 }
 
 impl ProgressBuilder {
-    /// Add an extension field.
-    pub fn field(mut self, name: &str, value: Value) -> Self {
-        if self.build_error.is_none() {
-            if name == "message" {
-                self.build_error = Some(BuildError::ReservedField(
-                    "cannot write reserved field \"message\" to progress payload".to_string(),
-                ));
-            } else {
-                self.fields.insert(name.to_string(), value);
-            }
-        }
-        self
-    }
-
-    /// Add multiple extension fields from a JSON object.
-    pub fn fields(mut self, fields: Value) -> Self {
-        if self.build_error.is_none() {
-            match fields {
-                Value::Object(map) => {
-                    for (k, v) in map {
-                        if k == "message" {
-                            self.build_error = Some(BuildError::ReservedField(
-                                "cannot write reserved field \"message\" to progress payload"
-                                    .to_string(),
-                            ));
-                            return self;
-                        }
-                        self.fields.insert(k, v);
-                    }
-                }
-                _ => {
-                    self.build_error = Some(BuildError::NonObjectField(
-                        "fields() argument must be a JSON object".to_string(),
-                    ));
-                }
-            }
-        }
-        self
-    }
-
-    /// Extend with a serializable value (must serialize to JSON object).
-    pub fn extend<T: Serialize>(mut self, value: T) -> Self {
-        if self.build_error.is_none() {
-            match serde_json::to_value(&value) {
-                Ok(Value::Object(map)) => {
-                    for (k, v) in map {
-                        if k == "message" {
-                            self.build_error = Some(BuildError::ReservedField(
-                                "cannot write reserved field \"message\" to progress payload"
-                                    .to_string(),
-                            ));
-                            return self;
-                        }
-                        self.fields.insert(k, v);
-                    }
-                }
-                Ok(_) => {
-                    self.build_error = Some(BuildError::NonObjectField(
-                        "extend() argument must serialize to a JSON object".to_string(),
-                    ));
-                }
-                Err(_) => {
-                    self.build_error = Some(BuildError::NonObjectField(
-                        "extend() argument serialization failed".to_string(),
-                    ));
-                }
-            }
-        }
-        self
-    }
-
     /// Set the trace object.
     pub fn trace(mut self, trace: Value) -> Self {
         self.trace = Some(trace);
@@ -398,19 +325,12 @@ impl ProgressBuilder {
 
     /// Build the event.
     pub fn build(self) -> Result<Event, BuildError> {
-        if let Some(err) = self.build_error {
-            return Err(err);
-        }
-
-        let mut progress_obj = self.fields;
-        progress_obj.insert("message".to_string(), Value::String(self.message));
-
         let trace = self
             .trace
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
         let mut obj = serde_json::Map::new();
         obj.insert("kind".to_string(), Value::String("progress".to_string()));
-        obj.insert("progress".to_string(), Value::Object(progress_obj));
+        obj.insert("progress".to_string(), self.payload);
         obj.insert("trace".to_string(), trace);
 
         Ok(Event(Value::Object(obj)))
@@ -419,17 +339,10 @@ impl ProgressBuilder {
 
 /// Fluent builder: start building a progress event.
 ///
-/// Panics if `message` is empty (required by protocol contract).
-#[allow(clippy::panic)]
-pub fn json_progress(message: &str) -> ProgressBuilder {
-    if message.is_empty() {
-        panic!("json_progress: message must not be empty");
-    }
+pub fn json_progress(payload: Value) -> ProgressBuilder {
     ProgressBuilder {
-        message: message.to_string(),
-        fields: serde_json::Map::new(),
+        payload,
         trace: None,
-        build_error: None,
     }
 }
 
@@ -439,94 +352,11 @@ pub fn json_progress(message: &str) -> ProgressBuilder {
 
 /// Builder for log events.
 pub struct LogBuilder {
-    level: LogLevel,
-    message: String,
-    fields: serde_json::Map<String, Value>,
+    payload: Value,
     trace: Option<Value>,
-    build_error: Option<BuildError>,
 }
 
 impl LogBuilder {
-    /// Add an extension field.
-    pub fn field(mut self, name: &str, value: Value) -> Self {
-        if self.build_error.is_none() {
-            match name {
-                "message" | "level" | "code" => {
-                    self.build_error = Some(BuildError::ReservedField(format!(
-                        "cannot write reserved field {name:?} to log payload"
-                    )));
-                }
-                _ => {
-                    self.fields.insert(name.to_string(), value);
-                }
-            }
-        }
-        self
-    }
-
-    /// Add multiple extension fields from a JSON object.
-    pub fn fields(mut self, fields: Value) -> Self {
-        if self.build_error.is_none() {
-            match fields {
-                Value::Object(map) => {
-                    for (k, v) in map {
-                        match k.as_str() {
-                            "message" | "level" | "code" => {
-                                self.build_error = Some(BuildError::ReservedField(format!(
-                                    "cannot write reserved field {k:?} to log payload"
-                                )));
-                                return self;
-                            }
-                            _ => {
-                                self.fields.insert(k, v);
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    self.build_error = Some(BuildError::NonObjectField(
-                        "fields() argument must be a JSON object".to_string(),
-                    ));
-                }
-            }
-        }
-        self
-    }
-
-    /// Extend with a serializable value (must serialize to JSON object).
-    pub fn extend<T: Serialize>(mut self, value: T) -> Self {
-        if self.build_error.is_none() {
-            match serde_json::to_value(&value) {
-                Ok(Value::Object(map)) => {
-                    for (k, v) in map {
-                        match k.as_str() {
-                            "message" | "level" | "code" => {
-                                self.build_error = Some(BuildError::ReservedField(format!(
-                                    "cannot write reserved field {k:?} to log payload"
-                                )));
-                                return self;
-                            }
-                            _ => {
-                                self.fields.insert(k, v);
-                            }
-                        }
-                    }
-                }
-                Ok(_) => {
-                    self.build_error = Some(BuildError::NonObjectField(
-                        "extend() argument must serialize to a JSON object".to_string(),
-                    ));
-                }
-                Err(_) => {
-                    self.build_error = Some(BuildError::NonObjectField(
-                        "extend() argument serialization failed".to_string(),
-                    ));
-                }
-            }
-        }
-        self
-    }
-
     /// Set the trace object.
     pub fn trace(mut self, trace: Value) -> Self {
         self.trace = Some(trace);
@@ -535,23 +365,12 @@ impl LogBuilder {
 
     /// Build the event.
     pub fn build(self) -> Result<Event, BuildError> {
-        if let Some(err) = self.build_error {
-            return Err(err);
-        }
-
-        let mut log_obj = self.fields;
-        log_obj.insert(
-            "level".to_string(),
-            Value::String(self.level.as_str().to_string()),
-        );
-        log_obj.insert("message".to_string(), Value::String(self.message));
-
         let trace = self
             .trace
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
         let mut obj = serde_json::Map::new();
         obj.insert("kind".to_string(), Value::String("log".to_string()));
-        obj.insert("log".to_string(), Value::Object(log_obj));
+        obj.insert("log".to_string(), self.payload);
         obj.insert("trace".to_string(), trace);
 
         Ok(Event(Value::Object(obj)))
@@ -560,18 +379,10 @@ impl LogBuilder {
 
 /// Fluent builder: start building a log event.
 ///
-/// Panics if `message` is empty (required by protocol contract).
-#[allow(clippy::panic)]
-pub fn json_log(level: LogLevel, message: &str) -> LogBuilder {
-    if message.is_empty() {
-        panic!("json_log: message must not be empty");
-    }
+pub fn json_log(payload: Value) -> LogBuilder {
     LogBuilder {
-        level,
-        message: message.to_string(),
-        fields: serde_json::Map::new(),
+        payload,
         trace: None,
-        build_error: None,
     }
 }
 
@@ -705,8 +516,6 @@ fn validate_protocol_event_strict_payload(event: &Value) -> Result<(), String> {
     }
     match event.get("kind").and_then(Value::as_str) {
         Some("error") => validate_strict_error_payload(event.get("error")),
-        Some("log") => validate_strict_log_payload(event.get("log")),
-        Some("progress") => validate_strict_progress_payload(event.get("progress")),
         _ => Ok(()),
     }
 }
@@ -724,40 +533,6 @@ fn validate_strict_error_payload(error: Option<&Value>) -> Result<(), String> {
         return Err("event.error.hint must be a string when present".to_string());
     }
     Ok(())
-}
-
-fn validate_strict_log_payload(log: Option<&Value>) -> Result<(), String> {
-    let Some(log) = log.and_then(Value::as_object) else {
-        return Err("event.log must be a JSON object in the strict profile".to_string());
-    };
-
-    // 0.16 change: log.code is deleted from protocol vocabulary, must not be present
-    if log.contains_key("code") {
-        return Err(
-            "event.log.code must not be present in the strict profile (deleted in 0.16)"
-                .to_string(),
-        );
-    }
-
-    require_non_empty_string(log, "message", "event.log")?;
-    let valid_level = log
-        .get("level")
-        .and_then(Value::as_str)
-        .is_some_and(|level| matches!(level, "debug" | "info" | "warn" | "error"));
-    if !valid_level {
-        return Err(
-            "event.log.level must be one of debug, info, warn, error in the strict profile"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn validate_strict_progress_payload(progress: Option<&Value>) -> Result<(), String> {
-    let Some(progress) = progress.and_then(Value::as_object) else {
-        return Err("event.progress must be a JSON object in the strict profile".to_string());
-    };
-    require_non_empty_string(progress, "message", "event.progress")
 }
 
 fn require_non_empty_string(
@@ -815,9 +590,8 @@ pub struct DecodedError {
 /// Decoded `kind:"progress"` event.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecodedProgress {
-    pub message: String,
-    /// Payload keys beyond `message`.
-    pub fields: serde_json::Map<String, Value>,
+    /// The raw `progress` payload value.
+    pub progress: Value,
     /// The raw `trace` object, when present.
     pub trace: Option<Value>,
 }
@@ -825,10 +599,8 @@ pub struct DecodedProgress {
 /// Decoded `kind:"log"` event.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecodedLog {
-    pub level: LogLevel,
-    pub message: String,
-    /// Payload keys beyond `level`, `message`.
-    pub fields: serde_json::Map<String, Value>,
+    /// The raw `log` payload value.
+    pub log: Value,
     /// The raw `trace` object, when present.
     pub trace: Option<Value>,
 }
@@ -862,8 +634,7 @@ pub fn decode_protocol_event(text: &str) -> Result<DecodedEvent, EventDecodeErro
     validate_protocol_event(&value, true).map_err(EventDecodeError::InvalidEvent)?;
 
     // Strict validation above guarantees the envelope is an object with a
-    // recognized `kind` and a matching, object-shaped payload for
-    // error/progress/log; the `ok_or_else` fallbacks below are defensive only.
+    // recognized `kind`; the `ok_or_else` fallbacks below are defensive only.
     let malformed = || {
         EventDecodeError::InvalidEvent(
             "event passed strict validation but has an unexpected shape".to_string(),
@@ -906,46 +677,14 @@ pub fn decode_protocol_event(text: &str) -> Result<DecodedEvent, EventDecodeErro
                 trace,
             }))
         }
-        Some("progress") => {
-            let mut fields = obj
-                .get("progress")
-                .and_then(Value::as_object)
-                .ok_or_else(malformed)?
-                .clone();
-            let message = fields
-                .remove("message")
-                .and_then(|v| v.as_str().map(str::to_string))
-                .ok_or_else(malformed)?;
-            Ok(DecodedEvent::Progress(DecodedProgress {
-                message,
-                fields,
-                trace,
-            }))
-        }
-        Some("log") => {
-            let mut fields = obj
-                .get("log")
-                .and_then(Value::as_object)
-                .ok_or_else(malformed)?
-                .clone();
-            let message = fields
-                .remove("message")
-                .and_then(|v| v.as_str().map(str::to_string))
-                .ok_or_else(malformed)?;
-            let level = match fields.remove("level").as_ref().and_then(Value::as_str) {
-                Some("debug") => LogLevel::Debug,
-                Some("info") => LogLevel::Info,
-                Some("warn") => LogLevel::Warn,
-                Some("error") => LogLevel::Error,
-                _ => return Err(malformed()),
-            };
-            Ok(DecodedEvent::Log(DecodedLog {
-                level,
-                message,
-                fields,
-                trace,
-            }))
-        }
+        Some("progress") => Ok(DecodedEvent::Progress(DecodedProgress {
+            progress: obj.get("progress").cloned().unwrap_or(Value::Null),
+            trace,
+        })),
+        Some("log") => Ok(DecodedEvent::Log(DecodedLog {
+            log: obj.get("log").cloned().unwrap_or(Value::Null),
+            trace,
+        })),
         _ => Err(malformed()),
     }
 }

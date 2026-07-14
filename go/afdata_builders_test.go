@@ -128,7 +128,7 @@ func TestBuildJSONErrorRejectsReservedField(t *testing.T) {
 }
 
 func TestBuildJSONProgress(t *testing.T) {
-	event, err := NewJSONProgress("working").Build()
+	event, err := NewJSONProgress(map[string]any{"message": "working"}).Build()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -142,15 +142,15 @@ func TestBuildJSONProgress(t *testing.T) {
 	}
 }
 
-func TestBuildJSONProgressEmptyMessage(t *testing.T) {
-	_, err := NewJSONProgress("").Build()
-	if err == nil || !contains(err.Error(), "must be non-empty") {
-		t.Fatalf("expected non-empty message error, got %v", err)
+func TestBuildJSONProgressFreePayload(t *testing.T) {
+	event, err := NewJSONProgress("working").Build()
+	if err != nil || event.Value()["progress"] != "working" {
+		t.Fatalf("unexpected free payload event: %#v, %v", event.Value(), err)
 	}
 }
 
 func TestBuildJSONLog(t *testing.T) {
-	event, err := NewJSONLog(LogLevelInfo, "request started").Build()
+	event, err := NewJSONLog(map[string]any{"level": "info", "message": "request started", "code": "cache_miss"}).Build()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,31 +165,18 @@ func TestBuildJSONLog(t *testing.T) {
 	if logPayload["message"] != "request started" {
 		t.Errorf("message = %v", logPayload["message"])
 	}
-	// 0.16: log payload must NOT contain 'code'
-	if _, hasCode := logPayload["code"]; hasCode {
-		t.Errorf("log payload should not contain 'code' field")
+	if logPayload["code"] != "cache_miss" {
+		t.Errorf("code = %v, want 'cache_miss'", logPayload["code"])
 	}
 }
 
-func TestBuildJSONLogAllLevels(t *testing.T) {
-	levels := []LogLevel{LogLevelDebug, LogLevelInfo, LogLevelWarn, LogLevelError}
-	for _, level := range levels {
-		event, err := NewJSONLog(level, "msg").Build()
-		if err != nil {
-			t.Fatalf("level %v: unexpected error: %v", level, err)
-		}
-		envelope := event.Value()
-		logPayload := envelope["log"].(map[string]any)
-		if logPayload["level"] != string(level) {
-			t.Errorf("level = %v, want %v", logPayload["level"], level)
-		}
+func TestBuildJSONLogFreePayload(t *testing.T) {
+	event, err := NewJSONLog([]any{"custom", float64(1)}).Build()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-}
-
-func TestBuildJSONLogInvalidLevel(t *testing.T) {
-	_, err := NewJSONLog(LogLevel("invalid"), "msg").Build()
-	if err == nil || !contains(err.Error(), "invalid") {
-		t.Fatalf("expected invalid level error, got %v", err)
+	if len(event.Value()["log"].([]any)) != 2 {
+		t.Fatalf("unexpected log payload: %#v", event.Value()["log"])
 	}
 }
 

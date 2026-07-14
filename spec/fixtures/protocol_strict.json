@@ -30,25 +30,25 @@
   },
   {
     "name": "log_with_code_field",
-    "valid": false,
+    "valid": true,
     "events": [
-      {"kind":"log","log":{"code":"log","message":"starting","level":"info"},"trace":{}},
+      {"kind":"log","log":{"code":"cache_miss","message":"starting","level":"info"},"trace":{}},
       {"kind":"result","result":{},"trace":{}}
     ]
   },
   {
-    "name": "incomplete_log_payload",
-    "valid": false,
+    "name": "log_payload_is_tool_defined",
+    "valid": true,
     "events": [
-      {"kind":"log","log":{"message":"starting"},"trace":{}},
+      {"kind":"log","log":{"category":"startup"},"trace":{}},
       {"kind":"result","result":{},"trace":{}}
     ]
   },
   {
-    "name": "progress_without_message",
-    "valid": false,
+    "name": "progress_payload_is_tool_defined",
+    "valid": true,
     "events": [
-      {"kind":"progress","progress":{"current":1},"trace":{}},
+      {"kind":"progress","progress":[1,10],"trace":{}},
       {"kind":"error","error":{"code":"failed","message":"failed","retryable":false},"trace":{}}
     ]
   },

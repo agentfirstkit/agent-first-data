@@ -42,19 +42,16 @@ type DecodedError struct {
 
 // DecodedProgress is a decoded protocol v1 progress event.
 type DecodedProgress struct {
-	Message string
-	// Fields holds extension fields: progress payload keys beyond message.
-	Fields map[string]any
+	// Progress is the raw payload value (any JSON value).
+	Progress any
 	// Trace is the raw trace object, or nil when absent.
 	Trace map[string]any
 }
 
 // DecodedLog is a decoded protocol v1 log event.
 type DecodedLog struct {
-	Level   LogLevel
-	Message string
-	// Fields holds extension fields: log payload keys beyond level and message.
-	Fields map[string]any
+	// Log is the raw payload value (any JSON value).
+	Log any
 	// Trace is the raw trace object, or nil when absent.
 	Trace map[string]any
 }
@@ -112,31 +109,14 @@ func DecodeProtocolEvent(text string) (DecodedEvent, error) {
 			Trace:     trace,
 		}, nil
 	case "progress":
-		progressPayload := obj["progress"].(map[string]any)
-		fields := make(map[string]any, len(progressPayload))
-		for k, v := range progressPayload {
-			if k != "message" {
-				fields[k] = v
-			}
-		}
 		return &DecodedProgress{
-			Message: progressPayload["message"].(string),
-			Fields:  fields,
-			Trace:   trace,
+			Progress: obj["progress"],
+			Trace:    trace,
 		}, nil
 	case "log":
-		logPayload := obj["log"].(map[string]any)
-		fields := make(map[string]any, len(logPayload))
-		for k, v := range logPayload {
-			if k != "level" && k != "message" {
-				fields[k] = v
-			}
-		}
 		return &DecodedLog{
-			Level:   LogLevel(logPayload["level"].(string)),
-			Message: logPayload["message"].(string),
-			Fields:  fields,
-			Trace:   trace,
+			Log:   obj["log"],
+			Trace: trace,
 		}, nil
 	default:
 		// Unreachable: ValidateProtocolEvent already rejected unknown kinds.

@@ -464,12 +464,15 @@ fn resolve_output(output: &str, json: bool) -> Result<String, String> {
 }
 
 fn build_request_log(command: Option<&Command>) -> serde_json::Value {
-    agent_first_data::json_log(agent_first_data::LogLevel::Info, "request")
-        .field("category", serde_json::json!("request"))
-        .field("command", serde_json::json!(command_label(command)))
-        .build()
-        .expect("request log builder failed")
-        .into_value()
+    agent_first_data::json_log(serde_json::json!({
+        "level": "info",
+        "message": "request",
+        "category": "request",
+        "command": command_label(command),
+    }))
+    .build()
+    .expect("request log builder failed")
+    .into_value()
 }
 
 fn build_startup_log(
@@ -478,29 +481,26 @@ fn build_startup_log(
     log: &agent_first_data::LogFilters,
     verbose: bool,
 ) -> serde_json::Value {
-    agent_first_data::json_log(agent_first_data::LogLevel::Info, "startup")
-        .field("category", serde_json::json!("startup"))
-        .field("event", serde_json::json!("startup"))
-        .field(
-            "parsed",
-            serde_json::json!({
+    agent_first_data::json_log(serde_json::json!({
+        "level": "info",
+        "message": "startup",
+        "category": "startup",
+        "event": "startup",
+        "parsed": {
                 "command": command_label(command),
                 "output": output,
                 "log": log.as_slice(),
                 "verbose": verbose,
-            }),
-        )
-        .field(
-            "effective_config",
-            serde_json::json!({
+        },
+        "effective_config": {
                 "output": output,
                 "log": log.as_slice(),
-            }),
-        )
-        .field("env", startup_env_snapshot())
-        .build()
-        .expect("startup log builder failed")
-        .into_value()
+        },
+        "env": startup_env_snapshot(),
+    }))
+    .build()
+    .expect("startup log builder failed")
+    .into_value()
 }
 
 fn startup_env_snapshot() -> serde_json::Value {

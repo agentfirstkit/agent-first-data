@@ -161,7 +161,8 @@ where
             map.insert(k, v);
         }
 
-        // 0.16 API: extract message (required) and level from map
+        // Normalize the tracing adapter's conventional message and level
+        // fields. These are adapter output conventions, not protocol fields.
         let message = map
             .remove("message")
             .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -178,10 +179,12 @@ where
             _ => crate::LogLevel::Info,
         };
 
-        let mut builder = crate::json_log(level, &message);
-        for (k, v) in map {
-            builder = builder.field(&k, v);
-        }
+        map.insert(
+            "level".to_string(),
+            serde_json::Value::String(level.as_str().to_string()),
+        );
+        map.insert("message".to_string(), serde_json::Value::String(message));
+        let builder = crate::json_log(serde_json::Value::Object(map));
         #[allow(clippy::expect_used)]
         let value = builder.build().expect("log event builder failed");
 
@@ -279,6 +282,20 @@ mod tests {
     // that contract (the visitor records raw values; emit redacts by name).
 
     #[test]
+    fn code_field_is_accepted_by_log_builder() {
+        let result = crate::json_log(json!({"code": "cache_miss"})).build();
+        assert!(
+            result.is_ok(),
+            "builder should accept a tool-defined log code"
+        );
+        let Ok(value) = result else {
+            return;
+        };
+
+        assert_eq!(value["log"]["code"], "cache_miss");
+    }
+
+    #[test]
     fn secret_named_field_is_redacted_at_emit() {
         let line = crate::output_json(&json!({
             "code": "info",
@@ -316,16 +333,13 @@ mod tests {
     #[test]
     fn legacy_secret_names_are_redacted_when_layer_has_options() {
         #[allow(clippy::expect_used)]
-        let value = crate::json_log(
-            crate::LogLevel::Info,
-            "authorization appears in message but is not name-redacted",
-        )
-        .field("timestamp_epoch_ms", json!(1))
-        .field("authorization", json!("Bearer legacy"))
-        .field(
-            "request_url",
-            json!("https://example.test/path?authorization=legacy&ok=1"),
-        )
+        let value = crate::json_log(json!({
+            "level": "info",
+            "message": "authorization appears in message but is not name-redacted",
+            "timestamp_epoch_ms": 1,
+            "authorization": "Bearer legacy",
+            "request_url": "https://example.test/path?authorization=legacy&ok=1",
+        }))
         .build()
         .expect("builder failed");
         let redactor = crate::Redactor::new().secret_names(vec!["authorization".to_string()]);
@@ -355,11 +369,14 @@ mod tests {
     #[test]
     fn legacy_secret_names_are_visible_without_layer_options() {
         #[allow(clippy::expect_used)]
-        let value = crate::json_log(crate::LogLevel::Info, "ready")
-            .field("timestamp_epoch_ms", json!(1))
-            .field("authorization", json!("Bearer visible"))
-            .build()
-            .expect("builder failed");
+        let value = crate::json_log(json!({
+            "level": "info",
+            "message": "ready",
+            "timestamp_epoch_ms": 1,
+            "authorization": "Bearer visible",
+        }))
+        .build()
+        .expect("builder failed");
         let layer = AfdataLayer {
             format: LogFormat::Json,
             redactor: crate::Redactor::new(),

@@ -170,7 +170,7 @@ describe("CliEmitter", () => {
   it("writes events and tracks terminal state", () => {
     const lines: string[] = [];
     const emitter = new CliEmitter((line) => lines.push(line), "json");
-    emitter.emit(jsonLog("info", "startup").field("event", "startup").build());
+    emitter.emit(jsonLog({ level: "info", message: "startup", event: "startup" }).build());
     emitter.emit(jsonResult({ rows: 2 }).build());
     assert.equal(lines.length, 2);
     assert.ok(lines[0]!.includes('"kind":"log"'));
@@ -179,7 +179,7 @@ describe("CliEmitter", () => {
 
   it("frames every supported output format explicitly", () => {
     const events = [
-      jsonLog("info", "startup").field("event", "startup").build(),
+      jsonLog({ level: "info", message: "startup", event: "startup" }).build(),
       jsonResult({ rows: 2 }).build(),
     ];
     for (const format of ["json", "plain", "yaml"] as const) {
@@ -211,7 +211,7 @@ describe("CliEmitter", () => {
     const emitter = new CliEmitter(() => undefined, "json");
     emitter.emit(jsonResult({ rows: 2 }).build());
     assert.throws(
-      () => emitter.emit(jsonProgress("working").field("percent", 100).build()),
+      () => emitter.emit(jsonProgress({ message: "working", percent: 100 }).build()),
       /after terminal/
     );
   });

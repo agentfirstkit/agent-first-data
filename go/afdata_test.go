@@ -266,24 +266,22 @@ func TestProtocolFixtures(t *testing.T) {
 					Fields(fields).Build()
 				result = event.Value()
 			case "progress":
-				msg := args["message"].(string)
-				builder := NewJSONProgress(msg)
+				payload := map[string]any{"message": args["message"]}
 				if fields, ok := args["fields"].(map[string]any); ok {
-					builder.Fields(fields)
+					for key, value := range fields {
+						payload[key] = value
+					}
 				}
-				event, _ := builder.Build()
+				event, _ := NewJSONProgress(payload).Build()
 				result = event.Value()
 			case "log":
-				level := LogLevelInfo
-				if l, ok := args["level"].(string); ok {
-					level = LogLevel(l)
-				}
-				message := args["message"].(string)
-				builder := NewJSONLog(level, message)
+				payload := map[string]any{"level": args["level"], "message": args["message"]}
 				if fields, ok := args["fields"].(map[string]any); ok {
-					builder.Fields(fields)
+					for key, value := range fields {
+						payload[key] = value
+					}
 				}
-				event, _ := builder.Build()
+				event, _ := NewJSONLog(payload).Build()
 				result = event.Value()
 			default:
 				t.Fatalf("unknown type: %s", typ)

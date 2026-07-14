@@ -125,13 +125,12 @@ describe("security fixtures", () => {
 });
 
 // --- Protocol fixtures ---
-// Fixture protocol.json has been updated to canonical 0.16 format with:
-// 1. trace: {} added by default to all builders
-// 2. log builder requires (level, message) parameters
-// 3. progress builder requires message parameter
+// Fixture protocol.json uses trace: {} by default for all builders.
+// Result, progress, and log builders receive their complete payload; only the
+// error builder owns protocol fields.
 // Test cases use "args" vocabulary: "result" (payload), "code"+"message" (error),
 // "hint" (→ .hint()), "retryable" (bool → .retryableIf()), "fields" (→ .fields()),
-// "trace" (→ .trace()), "message" (progress/log), "level" (log).
+// "trace" (→ .trace()), and complete progress/log payloads.
 // All builder results are deep-compared against fixture "expected".
 
 describe("protocol fixtures", () => {
@@ -159,10 +158,7 @@ describe("protocol fixtures", () => {
           break;
         }
         case "progress": {
-          const builder = jsonProgress(args.message);
-          if (args.fields) {
-            builder.fields(args.fields);
-          }
+          const builder = jsonProgress({ message: args.message, ...(args.fields ?? {}) });
           if (args.trace) {
             builder.trace(args.trace);
           }
@@ -170,10 +166,7 @@ describe("protocol fixtures", () => {
           break;
         }
         case "log": {
-          const builder = jsonLog(args.level, args.message);
-          if (args.fields) {
-            builder.fields(args.fields);
-          }
+          const builder = jsonLog({ level: args.level, message: args.message, ...(args.fields ?? {}) });
           if (args.trace) {
             builder.trace(args.trace);
           }

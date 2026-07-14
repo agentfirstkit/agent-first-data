@@ -142,8 +142,7 @@ func NewCliEmitterWithOptions(writer io.Writer, format OutputFormat, outputOptio
 
 // WithLogFields sets a provider function that returns default fields for every log event.
 // The provider is called for each log emission. Explicit fields in the log take precedence
-// over provider fields. If the provider returns a reserved field (message, level, code),
-// Emit returns a typed error.
+// over provider fields.
 func (e *CliEmitter) WithLogFields(provider func() map[string]any) *CliEmitter {
 	e.logFieldsFunc = provider
 	return e
@@ -225,7 +224,7 @@ func (e *CliEmitter) EmitError(code string, message string) error {
 
 // EmitProgress emits a progress event with the given message.
 func (e *CliEmitter) EmitProgress(message string) error {
-	event, err := NewJSONProgress(message).Build()
+	event, err := NewJSONProgress(map[string]any{"message": message}).Build()
 	if err != nil {
 		return err
 	}
@@ -234,26 +233,22 @@ func (e *CliEmitter) EmitProgress(message string) error {
 
 // EmitLog emits a log event with the given level and message.
 // Default log fields (if configured via WithLogFields) are merged, with explicit
-// fields taking precedence. Returns an error if the provider or fields write to
-// reserved field names.
+// fields taking precedence.
 func (e *CliEmitter) EmitLog(level LogLevel, message string) error {
-	builder := NewJSONLog(level, message)
+	payload := map[string]any{"level": string(level), "message": message}
 
 	// Merge log fields provider if configured
 	if e.logFieldsFunc != nil {
 		providerFields := e.logFieldsFunc()
 		for k, v := range providerFields {
-			if isReservedLogField(k) {
-				return &BuilderError{msg: fmt.Sprintf("log fields provider returned reserved field %q", k)}
-			}
 			// Don't overwrite if already set; provider fields have lower precedence
-			if _, alreadySet := builder.fields[k]; !alreadySet {
-				builder.fields[k] = v
+			if _, alreadySet := payload[k]; !alreadySet {
+				payload[k] = v
 			}
 		}
 	}
 
-	event, err := builder.Build()
+	event, err := NewJSONLog(payload).Build()
 	if err != nil {
 		return err
 	}

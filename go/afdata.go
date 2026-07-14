@@ -280,66 +280,15 @@ func isReservedErrorField(name string) bool {
 // JSON Progress Builder
 // ═════════════════════════════════════════════
 
-// JSONProgressBuilder constructs progress events with optional fields and trace.
+// JSONProgressBuilder constructs progress events from a tool-defined payload and optional trace.
 type JSONProgressBuilder struct {
-	message   string
-	fields    map[string]any
-	trace     any
-	errs      []error
-	fieldErrs []string
+	payload any
+	trace   any
 }
 
 // NewJSONProgress creates a builder for a progress event.
-func NewJSONProgress(message string) *JSONProgressBuilder {
-	b := &JSONProgressBuilder{
-		message: message,
-		fields:  make(map[string]any),
-	}
-	if message == "" {
-		b.errs = append(b.errs, &BuilderError{msg: "progress message must be non-empty"})
-	}
-	return b
-}
-
-// Field adds a single extension field.
-// Reserved field name "message" is recorded as an error.
-func (b *JSONProgressBuilder) Field(name string, value any) *JSONProgressBuilder {
-	if name == "message" {
-		b.fieldErrs = append(b.fieldErrs, "field \"message\" is reserved")
-		return b
-	}
-	b.fields[name] = value
-	return b
-}
-
-// Fields merges extension fields from a map.
-func (b *JSONProgressBuilder) Fields(obj map[string]any) *JSONProgressBuilder {
-	if obj == nil {
-		return b
-	}
-	for k, v := range obj {
-		b.Field(k, v)
-	}
-	return b
-}
-
-// Extend merges fields from a struct or map.
-func (b *JSONProgressBuilder) Extend(value any) *JSONProgressBuilder {
-	if value == nil {
-		return b
-	}
-	data, err := json.Marshal(value)
-	if err != nil {
-		b.errs = append(b.errs, &BuilderError{msg: "extend: failed to marshal value: " + err.Error()})
-		return b
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(data, &obj); err != nil {
-		b.errs = append(b.errs, &BuilderError{msg: "extend: value must serialize to a JSON object"})
-		return b
-	}
-	b.Fields(obj)
-	return b
+func NewJSONProgress(payload any) *JSONProgressBuilder {
+	return &JSONProgressBuilder{payload: payload}
 }
 
 // Trace sets the trace object.
@@ -350,19 +299,6 @@ func (b *JSONProgressBuilder) Trace(trace any) *JSONProgressBuilder {
 
 // Build constructs the Event, performing strict validation.
 func (b *JSONProgressBuilder) Build() (Event, error) {
-	if len(b.errs) > 0 {
-		return Event{}, b.errs[0]
-	}
-	if len(b.fieldErrs) > 0 {
-		return Event{}, &BuilderError{msg: b.fieldErrs[0]}
-	}
-
-	progressPayload := make(map[string]any)
-	for k, v := range b.fields {
-		progressPayload[k] = v
-	}
-	progressPayload["message"] = b.message
-
 	traceObj := map[string]any{}
 	if b.trace != nil {
 		if obj, ok := b.trace.(map[string]any); ok {
@@ -380,7 +316,7 @@ func (b *JSONProgressBuilder) Build() (Event, error) {
 
 	envelope := map[string]any{
 		"kind":     "progress",
-		"progress": progressPayload,
+		"progress": b.payload,
 		"trace":    traceObj,
 	}
 	return Event{envelope: envelope}, nil
@@ -390,75 +326,15 @@ func (b *JSONProgressBuilder) Build() (Event, error) {
 // JSON Log Builder
 // ═════════════════════════════════════════════
 
-// JSONLogBuilder constructs log events with optional fields and trace.
+// JSONLogBuilder constructs log events from a tool-defined payload and optional trace.
 type JSONLogBuilder struct {
-	level     LogLevel
-	message   string
-	fields    map[string]any
-	trace     any
-	errs      []error
-	fieldErrs []string
+	payload any
+	trace   any
 }
 
 // NewJSONLog creates a builder for a log event.
-func NewJSONLog(level LogLevel, message string) *JSONLogBuilder {
-	b := &JSONLogBuilder{
-		level:   level,
-		message: message,
-		fields:  make(map[string]any),
-	}
-	if !isValidLogLevel(level) {
-		b.errs = append(b.errs, &BuilderError{msg: fmt.Sprintf("log level %q is invalid; must be debug, info, warn, or error", level)})
-	}
-	if message == "" {
-		b.errs = append(b.errs, &BuilderError{msg: "log message must be non-empty"})
-	}
-	return b
-}
-
-func isValidLogLevel(level LogLevel) bool {
-	return level == LogLevelDebug || level == LogLevelInfo || level == LogLevelWarn || level == LogLevelError
-}
-
-// Field adds a single extension field.
-// Reserved field names (message, level, code) are recorded as errors.
-func (b *JSONLogBuilder) Field(name string, value any) *JSONLogBuilder {
-	if isReservedLogField(name) {
-		b.fieldErrs = append(b.fieldErrs, fmt.Sprintf("field %q is reserved", name))
-		return b
-	}
-	b.fields[name] = value
-	return b
-}
-
-// Fields merges extension fields from a map.
-func (b *JSONLogBuilder) Fields(obj map[string]any) *JSONLogBuilder {
-	if obj == nil {
-		return b
-	}
-	for k, v := range obj {
-		b.Field(k, v)
-	}
-	return b
-}
-
-// Extend merges fields from a struct or map.
-func (b *JSONLogBuilder) Extend(value any) *JSONLogBuilder {
-	if value == nil {
-		return b
-	}
-	data, err := json.Marshal(value)
-	if err != nil {
-		b.errs = append(b.errs, &BuilderError{msg: "extend: failed to marshal value: " + err.Error()})
-		return b
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(data, &obj); err != nil {
-		b.errs = append(b.errs, &BuilderError{msg: "extend: value must serialize to a JSON object"})
-		return b
-	}
-	b.Fields(obj)
-	return b
+func NewJSONLog(payload any) *JSONLogBuilder {
+	return &JSONLogBuilder{payload: payload}
 }
 
 // Trace sets the trace object.
@@ -469,20 +345,6 @@ func (b *JSONLogBuilder) Trace(trace any) *JSONLogBuilder {
 
 // Build constructs the Event, performing strict validation.
 func (b *JSONLogBuilder) Build() (Event, error) {
-	if len(b.errs) > 0 {
-		return Event{}, b.errs[0]
-	}
-	if len(b.fieldErrs) > 0 {
-		return Event{}, &BuilderError{msg: b.fieldErrs[0]}
-	}
-
-	logPayload := make(map[string]any)
-	for k, v := range b.fields {
-		logPayload[k] = v
-	}
-	logPayload["message"] = b.message
-	logPayload["level"] = string(b.level)
-
 	traceObj := map[string]any{}
 	if b.trace != nil {
 		if obj, ok := b.trace.(map[string]any); ok {
@@ -500,20 +362,15 @@ func (b *JSONLogBuilder) Build() (Event, error) {
 
 	envelope := map[string]any{
 		"kind":  "log",
-		"log":   logPayload,
+		"log":   b.payload,
 		"trace": traceObj,
 	}
 	return Event{envelope: envelope}, nil
 }
 
-func isReservedLogField(name string) bool {
-	return name == "message" || name == "level" || name == "code"
-}
-
 // ValidateProtocolEvent validates one protocol v1 event envelope. When strict
 // is true, it additionally applies the recommended strict profile: a required
-// trace object, event.error.retryable required and boolean, event.log without
-// a 'code' field, and non-empty message strings for log/progress.
+// trace object and event.error.retryable required and boolean.
 func ValidateProtocolEvent(event any, strict bool) error {
 	obj, ok := event.(map[string]any)
 	if !ok {
@@ -554,10 +411,6 @@ func ValidateProtocolEvent(event any, strict bool) error {
 		return nil
 	}
 	switch kind {
-	case "log":
-		return validateStrictLogPayload(obj["log"])
-	case "progress":
-		return validateStrictProgressPayload(obj["progress"])
 	case "error":
 		return validateStrictErrorPayload(obj["error"])
 	default:
@@ -633,27 +486,6 @@ func validateStrictErrorPayload(value any) error {
 	return nil
 }
 
-func validateStrictLogPayload(value any) error {
-	log, ok := value.(map[string]any)
-	if !ok {
-		return fmt.Errorf("event.log must be a JSON object in the strict profile")
-	}
-	// 0.16: log.code is NOT part of the protocol, reject if present
-	if _, hasCode := log["code"]; hasCode {
-		return fmt.Errorf("event.log must not contain 'code' field in the strict profile")
-	}
-	if err := requireNonEmptyString(log, "message", "event.log"); err != nil {
-		return err
-	}
-	level, ok := log["level"].(string)
-	if !ok || (level != "debug" && level != "info" && level != "warn" && level != "error") {
-		return fmt.Errorf("event.log.level must be one of debug, info, warn, error in the strict profile")
-	}
-	// 0.16: timestamp_epoch_ms is NOT required; it's an optional extension field
-	// (no validation required; it's written as an ordinary field if present)
-	return nil
-}
-
 func isNonNegativeInteger(value any) bool {
 	v := reflect.ValueOf(value)
 	if !v.IsValid() {
@@ -670,22 +502,6 @@ func isNonNegativeInteger(value any) bool {
 	default:
 		return false
 	}
-}
-
-func validateStrictProgressPayload(value any) error {
-	progress, ok := value.(map[string]any)
-	if !ok {
-		return fmt.Errorf("event.progress must be a JSON object in the strict profile")
-	}
-	return requireNonEmptyString(progress, "message", "event.progress")
-}
-
-func requireNonEmptyString(payload map[string]any, field string, path string) error {
-	value, ok := payload[field].(string)
-	if !ok || value == "" {
-		return fmt.Errorf("%s.%s must be a non-empty string in the strict profile", path, field)
-	}
-	return nil
 }
 
 // ═══════════════════════════════════════════

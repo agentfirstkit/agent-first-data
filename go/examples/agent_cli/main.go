@@ -277,8 +277,9 @@ func buildRequestLog(command string) map[string]any {
 	if command == "" {
 		command = "none"
 	}
-	builder := afdata.NewJSONLog(afdata.LogLevelInfo, "event")
-	builder.Fields(map[string]any{
+	builder := afdata.NewJSONLog(map[string]any{
+		"level":    "info",
+		"message":  "event",
 		"category": "request",
 		"command":  command,
 	})
@@ -290,8 +291,9 @@ func buildStartupLog(args []string, command string, output string, filters afdat
 	if command == "" {
 		command = "none"
 	}
-	builder := afdata.NewJSONLog(afdata.LogLevelInfo, "event")
-	builder.Fields(map[string]any{
+	builder := afdata.NewJSONLog(map[string]any{
+		"level":    "info",
+		"message":  "event",
 		"category": "startup",
 		"event":    "startup",
 		"argv":     afdata.RedactedValue(args),

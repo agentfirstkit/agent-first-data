@@ -100,12 +100,7 @@ Long-running services or processes that depend on structured logging (tonic, sql
 
 One-time CLI output (single event) uses `json_log()` or the `CliEmitter` helper; `cli_output()` handles the serialization.
 
-Required log fields:
-
-- `message`
-- `level: "debug" | "info" | "warn" | "error"`
-
-The logging level lives in `level`. Log payloads MUST NOT contain a `code` field; `kind:"log"` already distinguishes log events from terminal protocol codes. Projects that need timestamps add them as extension fields (`timestamp_epoch_ms`) via emitter defaults or per-call `.field()`.
+Log payloads are tool-defined and have no required or reserved fields. Traditional logging adapters commonly add `message` and `level`, but AFDATA does not require them. `kind:"log"` distinguishes log events from terminal protocol events. Projects that need timestamps add them explicitly as `timestamp_epoch_ms`.
 
 Example plain line:
 

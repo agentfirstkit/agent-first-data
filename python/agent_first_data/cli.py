@@ -168,14 +168,8 @@ class CliEmitter:
         # Apply log fields provider if this is a log event
         if kind == "log" and self._log_fields_provider is not None:
             provider_fields = self._log_fields_provider()
-            if provider_fields:
-                # Check for reserved fields from provider
-                log_payload = envelope.get("log", {})
-                for reserved in ("message", "level", "code"):
-                    if reserved in provider_fields:
-                        raise RuntimeError(
-                            f"log fields provider cannot write reserved field '{reserved}'"
-                        )
+            log_payload = envelope.get("log")
+            if provider_fields and isinstance(log_payload, dict):
                 # Merge provider fields, explicit fields take precedence
                 merged_log = dict(provider_fields)
                 merged_log.update(log_payload)
@@ -211,7 +205,7 @@ class CliEmitter:
         if not message or not isinstance(message, str):
             raise ValueError("message must be a non-empty string")
         # Use the builder to get default trace: {}
-        event = json_progress(message).build()
+        event = json_progress({"message": message}).build()
         self.emit(event)
 
     def emit_log(self, level: LogLevel | str, message: str) -> None:
@@ -220,7 +214,7 @@ class CliEmitter:
             level = LogLevel(level)
         if not message or not isinstance(message, str):
             raise ValueError("message must be a non-empty string")
-        event = json_log(level, message).build()
+        event = json_log({"level": level.value, "message": message}).build()
         self.emit(event)
 
 
