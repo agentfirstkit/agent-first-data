@@ -46,7 +46,9 @@ def test_install_redirects_and_restores_output(tmp_path) -> None:
 
     assert stdout_path.read_bytes() == b"existing stdout\nstdout bytes\n"
     assert stderr_path.read_bytes() == b"stderr bytes\n"
-    assert (stderr_path.stat().st_mode & 0o777) == 0o600
+    if os.name == "posix":
+        # Windows has no Unix permission bits; the 0o600 mode is ignored there.
+        assert (stderr_path.stat().st_mode & 0o777) == 0o600
 
 
 def test_install_rejects_symlink_targets(tmp_path) -> None:
