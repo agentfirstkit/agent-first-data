@@ -33,6 +33,9 @@ describe("stream redirect args", () => {
   });
 
   it("redirects stdout and native stderr in a child process", () => {
+    // fd-level stdout/stderr redirection is a POSIX capability; Node on Windows
+    // cannot reassign the process stdio fds the way this relies on.
+    if (process.platform === "win32") return;
     const tempDir = mkdtempSync(join(tmpdir(), "afdata-stream-redirect-"));
     const stdoutPath = join(tempDir, "stdout.log");
     const stderrPath = join(tempDir, "stderr.log");

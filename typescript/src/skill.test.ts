@@ -226,7 +226,7 @@ describe("skill admin", () => {
     if (report.code !== "skill_status") throw new Error("unreachable");
     assert.deepEqual(report.targets.map((t) => t.agent), ["codex"]);
     assert.deepEqual(report.targets.map((t) => t.scope), ["workspace"]);
-    assert.match(report.targets[0].skills_dir, /\.codex\/skills$/);
+    assert.match(report.targets[0].skills_dir, /\.codex[\\/]skills$/);
   });
 
   it("uses the hermes workspace skills dir", () => {
@@ -234,7 +234,7 @@ describe("skill admin", () => {
     if (report.code !== "skill_status") throw new Error("unreachable");
     assert.deepEqual(report.targets.map((t) => t.agent), ["hermes"]);
     assert.deepEqual(report.targets.map((t) => t.scope), ["workspace"]);
-    assert.match(report.targets[0].skills_dir, /\.hermes\/skills$/);
+    assert.match(report.targets[0].skills_dir, /\.hermes[\\/]skills$/);
   });
 
   it("rejects --skills-dir with --agent all", () => {
