@@ -6,7 +6,9 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Canonical CLI argument for redirecting stdout.
@@ -167,6 +169,9 @@ fn validate_optional_file(arg_name: &str, path: Option<&Path>) -> io::Result<()>
     Ok(())
 }
 
+// On non-Unix targets `install` returns Unsupported without ever calling this,
+// but it stays compiled so `File`/`OpenOptions` remain used there.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn open_append(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {

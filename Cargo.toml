@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-data"
-version = "0.17.1"
+version = "0.17.2"
 edition = "2024"
 description = "A naming convention that lets AI agents understand your data without being told what it means."
 license = "MIT"

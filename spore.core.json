@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.17.1",
+  "version": "0.17.2",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,9 +13,7 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Ship the afdata binary full-featured: skill validate/install/status/uninstall, --help --output markdown, --version --output json, and --stdout-file/--stderr-file stream redirection are now wired into the binary itself",
-    "Make the complete feature set the default so cargo install agent-first-data, Homebrew, and Scoop are all batteries-included and cargo add pulls every helper; consumers wanting only the core formatting/redaction/protocol surface opt out with default-features = false",
-    "Fix the Windows release and CI Python venv provisioning to resolve the interpreter via Scripts/python.exe instead of a hardcoded bin/python, unbreaking the windows-latest test leg"
+    "Fix a Windows-only clippy failure in the stream-redirect module: the non-Unix code path left the Write import unused and open_append uncalled, so cargo clippy -- -D warnings now passes on every platform and the windows-latest CI leg goes green"
   ],
   "bonds": [],
   "tree": {
