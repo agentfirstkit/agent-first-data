@@ -2,6 +2,10 @@
 # Run checks for all agent-first-data language implementations.
 
 set -euo pipefail
+# Force Python UTF-8 mode so scripts reading source files / fixtures / subprocess
+# output decode as UTF-8 regardless of OS locale. Windows defaults to cp1252 and
+# chokes on non-ASCII bytes (e.g. em dashes in Go/Rust doc comments).
+export PYTHONUTF8=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOTPATH="$(cd "$SCRIPT_DIR/.." && pwd)"
 MODE="${1:-all}"
