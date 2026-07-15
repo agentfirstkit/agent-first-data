@@ -28,12 +28,13 @@ from agent_first_data import (
     normalize_utc_offset,
     is_valid_rfc3339_date,
     is_valid_rfc3339_time,
+    is_valid_rfc3339,
+    is_valid_bcp47,
 )
 from agent_first_data.format import (
     _format_bytes_human,
     _format_with_commas,
     _extract_currency_code,
-    parse_size,
 )
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "spec", "fixtures")
@@ -205,9 +206,6 @@ def test_helper_fixtures():
             elif name == "extract_currency_code":
                 got = _extract_currency_code(inp)
                 assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
-            elif name == "parse_size":
-                got = parse_size(inp)
-                assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
             elif name == "normalize_utc_offset":
                 got = normalize_utc_offset(inp)
                 assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
@@ -216,6 +214,12 @@ def test_helper_fixtures():
                 assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
             elif name == "is_valid_rfc3339_time":
                 got = is_valid_rfc3339_time(inp)
+                assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
+            elif name == "is_valid_bcp47":
+                got = is_valid_bcp47(inp)
+                assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
+            elif name == "is_valid_rfc3339":
+                got = is_valid_rfc3339(inp)
                 assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
 
 

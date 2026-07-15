@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/bits"
 	"net/url"
 	"reflect"
 	"sort"
@@ -655,100 +654,6 @@ func RedactURLSecrets(rawURL string) string {
 	return Redactor{}.URL(rawURL)
 }
 
-// ParseSize parses a human-readable size string into bytes.
-// Accepts numbers followed by explicit units. Decimal units are B/kB/MB/GB/TB;
-// binary units are KiB/MiB/GiB/TiB. Trims whitespace and rejects ambiguous
-// K/M/G/T units. Returns (0, false) for invalid input.
-func ParseSize(s string) (uint64, bool) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, false
-	}
-	units := []struct {
-		suffix string
-		mult   uint64
-	}{
-		{"KiB", 1024},
-		{"MiB", 1024 * 1024},
-		{"GiB", 1024 * 1024 * 1024},
-		{"TiB", 1024 * 1024 * 1024 * 1024},
-		{"kB", 1000},
-		{"MB", 1000 * 1000},
-		{"GB", 1000 * 1000 * 1000},
-		{"TB", 1000 * 1000 * 1000 * 1000},
-		{"B", 1},
-	}
-	numStr := ""
-	var mult uint64
-	for _, unit := range units {
-		if strings.HasSuffix(s, unit.suffix) {
-			numStr, mult = strings.TrimSuffix(s, unit.suffix), unit.mult
-			break
-		}
-	}
-	if numStr == "" {
-		return 0, false
-	}
-	if numStr == "" || !isDecimalNumber(numStr) {
-		return 0, false
-	}
-	if n, err := strconv.ParseUint(numStr, 10, 64); err == nil {
-		hi, lo := bits.Mul64(n, mult)
-		if hi != 0 || lo > maxSafeInteger {
-			return 0, false
-		}
-		return lo, true
-	}
-	// Integer overflow must not silently fall back to float parsing.
-	if !strings.ContainsAny(numStr, ".eE") {
-		return 0, false
-	}
-	f, err := strconv.ParseFloat(numStr, 64)
-	if err != nil || f < 0 || math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0, false
-	}
-	result := f * float64(mult)
-	if result > float64(maxSafeInteger) {
-		return 0, false
-	}
-	return uint64(result), true
-}
-
-func isDecimalNumber(s string) bool {
-	i := 0
-	digitsBefore := 0
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		i++
-		digitsBefore++
-	}
-	digitsAfter := 0
-	if i < len(s) && s[i] == '.' {
-		i++
-		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-			i++
-			digitsAfter++
-		}
-	}
-	if digitsBefore+digitsAfter == 0 {
-		return false
-	}
-	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
-		i++
-		if i < len(s) && (s[i] == '+' || s[i] == '-') {
-			i++
-		}
-		expDigits := 0
-		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-			i++
-			expDigits++
-		}
-		if expDigits == 0 {
-			return false
-		}
-	}
-	return i == len(s)
-}
-
 // NormalizeUTCOffset normalizes a fixed UTC offset string to AFDATA canonical form.
 // It returns "UTC" for zero offset, or ±HH:MM for non-zero offsets. This helper
 // handles fixed offsets only; IANA timezone names and DST rules are out of scope.
@@ -818,6 +723,105 @@ func IsValidRFC3339Time(s string) bool {
 		return false
 	}
 	return isASCIIDigits(s[9:])
+}
+
+// IsValidRFC3339 reports whether s is a complete RFC 3339 date-time, such as
+// 2026-02-14T10:30:00Z or 2026-02-14T10:30:00.5+08:00. Composed from
+// IsValidRFC3339Date and IsValidRFC3339Time: a full-date, a T/t separator, a
+// partial-time (with optional fractional seconds), and a mandatory time-offset
+// (Z/z or ±HH:MM with HH in 00..23 and MM in 00..59). The offset is required, so
+// a bare 2026-02-14T10:30:00 is rejected; a space separator is rejected; and a
+// leap second (:60) is rejected, matching IsValidRFC3339Time. Non-ASCII input is
+// rejected.
+func IsValidRFC3339(s string) bool {
+	if len(s) < 20 || !isASCIIString(s) {
+		return false
+	}
+	if !IsValidRFC3339Date(s[0:10]) {
+		return false
+	}
+	if s[10] != 'T' && s[10] != 't' {
+		return false
+	}
+	rest := s[11:]
+	var partial string
+	if last := rest[len(rest)-1]; last == 'Z' || last == 'z' {
+		partial = rest[:len(rest)-1]
+	} else {
+		if len(rest) < 6 || !isRFC3339NumOffset(rest[len(rest)-6:]) {
+			return false
+		}
+		partial = rest[:len(rest)-6]
+	}
+	return IsValidRFC3339Time(partial)
+}
+
+func isRFC3339NumOffset(o string) bool {
+	if len(o) != 6 || (o[0] != '+' && o[0] != '-') || o[3] != ':' {
+		return false
+	}
+	hours, ok := parseASCIIInt(o[1:3])
+	if !ok {
+		return false
+	}
+	minutes, ok := parseASCIIInt(o[4:6])
+	if !ok {
+		return false
+	}
+	return hours <= 23 && minutes <= 59
+}
+
+func isASCIIString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// IsValidBCP47 reports whether s is a structurally well-formed BCP 47 (RFC 5646)
+// language tag. This is a grammar-level check, not a registry lookup: it accepts
+// hyphen-separated ASCII-alphanumeric subtags (each 1-8 characters) whose primary
+// subtag is a 2-3 letter language code, or the x/i privateuse/grandfathered lead.
+// It rejects the POSIX underscore form (zh_CN), empty or misplaced hyphens, non-ASCII,
+// and out-of-range primaries such as chinese. It does not verify that subtags are
+// registered with IANA.
+func IsValidBCP47(s string) bool {
+	if s == "" {
+		return false
+	}
+	for index, subtag := range strings.Split(s, "-") {
+		if len(subtag) < 1 || len(subtag) > 8 || !isASCIIAlnumString(subtag) {
+			return false
+		}
+		if index == 0 {
+			isLanguage := len(subtag) >= 2 && len(subtag) <= 3 && isASCIIAlphaString(subtag)
+			isSpecial := subtag == "x" || subtag == "i"
+			if !isLanguage && !isSpecial {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isASCIIAlnumString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isASCIIAlphanumeric(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIAlphaString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isASCIIAlpha(s[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseUTCOffsetBody(body string) (int, int, bool) {

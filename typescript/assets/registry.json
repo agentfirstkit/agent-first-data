@@ -132,7 +132,7 @@
       "unit": "bcp47_language_tag",
       "formatting": {"strip_key": false, "plain_yaml": "pass_through"},
       "redaction": {"mode": "none"},
-      "constraints": {"string": true}
+      "constraints": {"bcp47": true}
     },
     {
       "suffix": "_utc_offset",
@@ -153,17 +153,8 @@
       "constraints": {"integer": true, "minimum": 0}
     },
     {
-      "suffix": "_size",
-      "category": "size",
-      "json_types": ["string"],
-      "unit": "byte_size_input",
-      "formatting": {"strip_key": false, "plain_yaml": "pass_through"},
-      "redaction": {"mode": "none"},
-      "constraints": {"parse_size_units": ["B", "kB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB"]}
-    },
-    {
       "suffix": "_percent",
-      "category": "ratio",
+      "category": "percentage",
       "json_types": ["number"],
       "unit": "percent",
       "formatting": {"strip_key": true, "plain_yaml": "append_percent"},

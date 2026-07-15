@@ -271,14 +271,6 @@
       "go": "OutputOptions"
     },
     {
-      "id": "parse_size",
-      "kind": "fn",
-      "rust": "parse_size",
-      "python": "parse_size",
-      "typescript": "parseSize",
-      "go": "ParseSize"
-    },
-    {
       "id": "normalize_utc_offset",
       "kind": "fn",
       "rust": "normalize_utc_offset",
@@ -301,6 +293,22 @@
       "python": "is_valid_rfc3339_time",
       "typescript": "isValidRfc3339Time",
       "go": "IsValidRFC3339Time"
+    },
+    {
+      "id": "is_valid_rfc3339",
+      "kind": "fn",
+      "rust": "is_valid_rfc3339",
+      "python": "is_valid_rfc3339",
+      "typescript": "isValidRfc3339",
+      "go": "IsValidRFC3339"
+    },
+    {
+      "id": "is_valid_bcp47",
+      "kind": "fn",
+      "rust": "is_valid_bcp47",
+      "python": "is_valid_bcp47",
+      "typescript": "isValidBcp47",
+      "go": "IsValidBCP47"
     },
     {
       "id": "output_format",

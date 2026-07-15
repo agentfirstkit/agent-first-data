@@ -1,80 +1,3 @@
-pub fn parse_size(s: &str) -> Option<u64> {
-    const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let units = [
-        ("KiB", 1024u64),
-        ("MiB", 1024u64.pow(2)),
-        ("GiB", 1024u64.pow(3)),
-        ("TiB", 1024u64.pow(4)),
-        ("kB", 1000u64),
-        ("MB", 1000u64.pow(2)),
-        ("GB", 1000u64.pow(3)),
-        ("TB", 1000u64.pow(4)),
-        ("B", 1u64),
-    ];
-    let (unit, mult) = units
-        .iter()
-        .find(|(unit, _mult)| s.strip_suffix(unit).is_some())?;
-    let num_str = &s[..s.len() - unit.len()];
-    if num_str.is_empty() || !is_decimal_number(num_str) {
-        return None;
-    }
-    if let Ok(n) = num_str.parse::<u64>() {
-        let result = n.checked_mul(*mult)?;
-        return (result <= MAX_SAFE_INTEGER).then_some(result);
-    }
-    // Integer overflow must not silently fall back to float parsing.
-    if !num_str.contains('.') && !num_str.contains('e') && !num_str.contains('E') {
-        return None;
-    }
-    let f: f64 = num_str.parse().ok()?;
-    if f < 0.0 || f.is_nan() || f.is_infinite() {
-        return None;
-    }
-    let result = f * *mult as f64;
-    if result > MAX_SAFE_INTEGER as f64 {
-        return None;
-    }
-    Some(result as u64)
-}
-
-fn is_decimal_number(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    let mut digits = 0;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-        digits += 1;
-    }
-    if i < bytes.len() && bytes[i] == b'.' {
-        i += 1;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
-            digits += 1;
-        }
-    }
-    if digits == 0 {
-        return false;
-    }
-    if i < bytes.len() && matches!(bytes[i], b'e' | b'E') {
-        i += 1;
-        if i < bytes.len() && matches!(bytes[i], b'+' | b'-') {
-            i += 1;
-        }
-        let exp_start = i;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i == exp_start {
-            return false;
-        }
-    }
-    i == bytes.len()
-}
-
 /// Normalize a fixed UTC offset string to AFDATA canonical form.
 ///
 /// Returns `"UTC"` for zero offset. Non-zero offsets return `+HH:MM` or
@@ -144,6 +67,87 @@ pub fn is_valid_rfc3339_time(s: &str) -> bool {
         return true;
     }
     bytes[8] == b'.' && bytes.len() > 9 && bytes[9..].iter().all(u8::is_ascii_digit)
+}
+
+/// Return true when `s` is a complete RFC 3339 `date-time`, such as
+/// `2026-02-14T10:30:00Z` or `2026-02-14T10:30:00.5+08:00`.
+///
+/// Composed from [`is_valid_rfc3339_date`] and [`is_valid_rfc3339_time`]: a
+/// `full-date`, a `T`/`t` separator, a `partial-time` (with optional fractional
+/// seconds), and a **mandatory** `time-offset` — either `Z`/`z` or `±HH:MM` with
+/// `HH` in `00..23` and `MM` in `00..59`. The offset is required, so a bare
+/// `2026-02-14T10:30:00` is rejected; a space separator is rejected (only `T`/`t`
+/// is accepted); and a leap second (`:60`) is rejected, matching
+/// [`is_valid_rfc3339_time`]. Non-ASCII input is rejected.
+pub fn is_valid_rfc3339(s: &str) -> bool {
+    if !s.is_ascii() || s.len() < 20 {
+        return false;
+    }
+    if !is_valid_rfc3339_date(&s[0..10]) {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    if bytes[10] != b'T' && bytes[10] != b't' {
+        return false;
+    }
+    let rest = &s[11..];
+    let last = rest.as_bytes()[rest.len() - 1];
+    let partial = if last == b'Z' || last == b'z' {
+        &rest[..rest.len() - 1]
+    } else {
+        if rest.len() < 6 {
+            return false;
+        }
+        if !is_rfc3339_numoffset(&rest[rest.len() - 6..]) {
+            return false;
+        }
+        &rest[..rest.len() - 6]
+    };
+    is_valid_rfc3339_time(partial)
+}
+
+/// Return true when `o` is an RFC 3339 `time-numoffset` (`±HH:MM`).
+fn is_rfc3339_numoffset(o: &str) -> bool {
+    let b = o.as_bytes();
+    if b.len() != 6 || (b[0] != b'+' && b[0] != b'-') || b[3] != b':' {
+        return false;
+    }
+    let (Some(hours), Some(minutes)) = (
+        parse_ascii_u8_bytes(&b[1..3]),
+        parse_ascii_u8_bytes(&b[4..6]),
+    ) else {
+        return false;
+    };
+    hours <= 23 && minutes <= 59
+}
+
+/// Return true when `s` is a structurally well-formed BCP 47 (RFC 5646) language tag.
+///
+/// This is a grammar-level check, not a registry lookup. It accepts hyphen-separated
+/// ASCII-alphanumeric subtags (each 1-8 characters) whose primary subtag is a 2-3
+/// letter language code, or the `x`/`i` privateuse/grandfathered lead. It rejects the
+/// common mistakes: the POSIX-locale underscore form (`zh_CN`), empty or misplaced
+/// hyphens, non-ASCII, and out-of-range primaries such as `chinese`. It does not check
+/// that subtags are registered with IANA; a tool needing that guarantee validates further.
+pub fn is_valid_bcp47(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    for (index, subtag) in s.split('-').enumerate() {
+        let len = subtag.len();
+        if len == 0 || len > 8 || !subtag.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return false;
+        }
+        if index == 0 {
+            let is_language =
+                (2..=3).contains(&len) && subtag.bytes().all(|b| b.is_ascii_alphabetic());
+            let is_special = subtag == "x" || subtag == "i";
+            if !is_language && !is_special {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn parse_utc_offset_body(body: &str) -> Option<(u8, u8)> {

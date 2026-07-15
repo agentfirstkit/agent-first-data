@@ -388,24 +388,6 @@ func TestHelperFixtures(t *testing.T) {
 					}
 				})
 			}
-		case "parse_size":
-			for _, c := range cases {
-				pair := c.([]any)
-				input := pair[0].(string)
-				t.Run(fmt.Sprintf("parse_size_%s", input), func(t *testing.T) {
-					got, ok := ParseSize(input)
-					if pair[1] == nil {
-						if ok {
-							t.Errorf("ParseSize(%q) = %d, want error", input, got)
-						}
-					} else {
-						expected := uint64(pair[1].(float64))
-						if !ok || got != expected {
-							t.Errorf("ParseSize(%q) = (%d, %v), want %d", input, got, ok, expected)
-						}
-					}
-				})
-			}
 		case "normalize_utc_offset":
 			for _, c := range cases {
 				pair := c.([]any)
@@ -445,6 +427,30 @@ func TestHelperFixtures(t *testing.T) {
 					got := IsValidRFC3339Time(input)
 					if got != expected {
 						t.Errorf("IsValidRFC3339Time(%q) = %v, want %v", input, got, expected)
+					}
+				})
+			}
+		case "is_valid_bcp47":
+			for _, c := range cases {
+				pair := c.([]any)
+				input := pair[0].(string)
+				expected := pair[1].(bool)
+				t.Run(fmt.Sprintf("is_valid_bcp47_%s", input), func(t *testing.T) {
+					got := IsValidBCP47(input)
+					if got != expected {
+						t.Errorf("IsValidBCP47(%q) = %v, want %v", input, got, expected)
+					}
+				})
+			}
+		case "is_valid_rfc3339":
+			for _, c := range cases {
+				pair := c.([]any)
+				input := pair[0].(string)
+				expected := pair[1].(bool)
+				t.Run(fmt.Sprintf("is_valid_rfc3339_%s", input), func(t *testing.T) {
+					got := IsValidRFC3339(input)
+					if got != expected {
+						t.Errorf("IsValidRFC3339(%q) = %v, want %v", input, got, expected)
 					}
 				})
 			}
@@ -897,11 +903,6 @@ func TestOutputYamlStripDays(t *testing.T) {
 	assertNotContains(t, got, "cert_days:")
 }
 
-func TestOutputYamlNoStripSize(t *testing.T) {
-	got := OutputYaml(map[string]any{"buffer_size": "10M"})
-	assertContains(t, got, "buffer_size:")
-}
-
 func TestOutputYamlNoStripNoSuffix(t *testing.T) {
 	got := OutputYaml(map[string]any{"user_name": "alice"})
 	assertContains(t, got, "user_name:")
@@ -1040,11 +1041,6 @@ func TestOutputYamlFmtSecret(t *testing.T) {
 func TestOutputYamlFmtRfc3339Passthrough(t *testing.T) {
 	got := OutputYaml(map[string]any{"expires_rfc3339": "2026-02-14T10:30:00Z"})
 	assertContains(t, got, "2026-02-14T10:30:00Z")
-}
-
-func TestOutputYamlFmtSizePassthrough(t *testing.T) {
-	got := OutputYaml(map[string]any{"buffer_size": "10M"})
-	assertContains(t, got, `buffer_size: "10M"`)
 }
 
 func TestOutputYamlStringsQuoted(t *testing.T) {

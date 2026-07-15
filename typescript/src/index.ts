@@ -33,10 +33,11 @@ export {
   outputPlain,
   redactedValue,
   redactUrlSecrets,
-  parseSize,
   normalizeUtcOffset,
   isValidRfc3339Date,
   isValidRfc3339Time,
+  isValidRfc3339,
+  isValidBcp47,
 } from "./format.js";
 export {
   type OutputFormat,

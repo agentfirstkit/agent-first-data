@@ -37,6 +37,10 @@ The field name is the schema. Always encode units and semantics in the field nam
 | `_epoch_ns` | nanoseconds since Unix epoch as a decimal string | `created_epoch_ns: "1707868800000000000"` |
 | `_rfc3339` | RFC 3339 date-time string | `expires_rfc3339: "2026-02-14T10:30:00Z"` |
 
+Integer vs string is not uniform across siblings: `_epoch_s` and `_epoch_ms` are JSON integers, but `_epoch_ns` is a decimal **string** because nanoseconds exceed the 2⁵³−1 safe-integer range. The same rule applies to large `_sats`/`_msats` (integer when safe, decimal string when not). Writing `_epoch_ns` as a bare JSON number silently loses precision — `afdata lint` rejects it (`suffix_type_mismatch`).
+
+`_rfc3339` needs a **mandatory** offset: `YYYY-MM-DDThh:mm:ss[.fff]` followed by `Z` or `±HH:MM`. A bare `2026-02-14T10:30:00` (no offset), a space instead of `T`, or a trailing IANA name (`...Asia/Shanghai`) is rejected by `afdata lint`. `afdata lint` also type-checks the numeric suffixes (durations `_s`/`_ms`/…, currency `_cents`/`_micro`/`_jpy`) and rejects a `_url` with internal whitespace or bare `user:pass@host` credentials.
+
 ### Strict string formats
 
 | Suffix | Format | Example |
@@ -46,7 +50,7 @@ The field name is the schema. Always encode units and semantics in the field nam
 | `_rfc3339_date` | RFC 3339 full-date string | `invoice_due_rfc3339_date: "2026-06-13"` |
 | `_rfc3339_time` | RFC 3339 partial-time string | `market_open_rfc3339_time: "09:30:00"` |
 
-`*_bcp47` identifies a BCP-47 language tag string. AFDATA does not implement the full BCP-47 registry; tools may validate tags when needed.
+`*_bcp47` identifies a BCP-47 language tag string. AFDATA validates structure (hyphen-separated subtags, 2–3 letter primary language), so the POSIX form `zh_CN` and an over-long primary like `chinese` are rejected; use `zh-CN`. It does not check the IANA registry, so a well-formed-but-unregistered tag like `zz-ZZ` still passes. `is_valid_bcp47` and `afdata lint` apply this check.
 
 `*_utc_offset` identifies a fixed UTC offset. Canonical persisted and structured output values are `"UTC"` or `±HH:MM`, with `HH` in `00..23` and `MM` in `00..59`; zero offsets normalize to `"UTC"`. This is not an IANA timezone name, DST rule, or timezone database field.
 
@@ -63,17 +67,16 @@ Avoid magic string sentinels such as `"auto"` inside strict-format fields. If a 
 | Suffix | Example |
 |:-------|:--------|
 | `_bytes` | `payload_bytes: 456789` (non-negative integer) |
-| `_size` | `buffer_size: "10MiB"` or `"10MB"` (config files only, human-readable) |
 
-`_size` parsing requires explicit units: `B`, decimal `kB/MB/GB/TB`, or binary `KiB/MiB/GiB/TiB`. Bare numbers and ambiguous `K/M/G/T` are invalid.
-
-`parse_size("10MiB")` → `10485760`; `parse_size("10MB")` → `10000000`. Returns null for invalid or negative input.
+Byte sizes are always integer `_bytes`, in config and output alike. There is no unit-in-value size string: never write `buffer_size: "10MiB"`. Encode the unit in the key (`buffer_bytes: 10485760`), the same way durations use `timeout_s: 30`.
 
 ### Percentage
 
 | Suffix | Example |
 |:-------|:--------|
 | `_percent` | `cpu_percent: 85` |
+
+Value is in units of percent: `1` = 1%, `0.2` = 0.2%, `85` = 85%. Decimals, negatives, and values >100 are all valid; no fixed range. `%` is exactly 0.01, so `_percent` is never a 0–1 fraction — if the underlying ratio is `0.999`, multiply by 100 and write `success_percent: 99.9`. Writing `0.85` for 85% is a producer-side conversion bug, not a convention ambiguity.
 
 ### Currency
 
@@ -150,7 +153,6 @@ ORM struct fields preserve the suffix: `duration_ms: i64`, not `duration: i64`.
 | `latency: 142` | `latency_ms: 142` | seconds? milliseconds? |
 | `api_key: "sk-..."` | `api_key_secret: "sk-..."` | won't be auto-redacted |
 | `cpu: 85` | `cpu_percent: 85` | 85 what? |
-| `buffer: "10MiB"` | `buffer_size: "10MiB"` | only `_size` gets parsed |
 
 ---
 
@@ -174,7 +176,7 @@ Remove recognized formatting suffix from key. Longest match first, exact lowerca
 4. `_msats`, `_sats`, `_bytes`, `_percent`, `_secret`
 5. `_jpy`, `_ns`, `_us`, `_ms`, `_s`
 
-`_size`, `_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are NOT stripped (pass through). If two keys collide after stripping, both revert to original key AND raw value (no formatting). Redaction runs before collision handling, so fallback never restores a secret.
+`_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are NOT stripped (pass through). If two keys collide after stripping, both revert to original key AND raw value (no formatting). Redaction runs before collision handling, so fallback never restores a secret.
 
 ### Value formatting (YAML and Plain)
 
@@ -184,7 +186,6 @@ Remove recognized formatting suffix from key. Longest match first, exact lowerca
 - `_epoch_ms`/`_epoch_s`/decimal-string `_epoch_ns` → RFC 3339 (negative = pre-1970)
 - `_rfc3339` → pass through
 - `_bytes` → human-readable (`456789` → `446.1KiB`); negative and fractional byte values fall through raw
-- `_size` → pass through
 - `_percent` → append `%`
 - `_msats` → `{n}msats`, `_sats` → `{n}sats`
 - `_usd_cents` → `$X.XX`, `_eur_cents` → `€X.XX`, `_jpy` → `¥X,XXX`, `_{code}_cents` → `X.XX CODE`, `_{code}_micro` → `X.XXXXXX CODE` where `code` is 3-4 ASCII letters
@@ -340,7 +341,7 @@ Use this checklist when the skill is evaluating a change, not just documenting c
 3. Require secret-bearing values to be named with `_secret` or configured exact secret names before serialization. Do not rely on arbitrary free-text scanning or `Debug`/string-rendered objects.
 4. Run `afdata lint` for JSON/JSONL samples, JSON Schema, MCP schemas, or serialized outputs when available; run `afdata validate` for finite protocol events/streams. If unavailable, report the skipped check.
 5. Before changing an external project's public API, wire format, database schema, or persisted field names, report the compatibility impact and request approval before editing.
-6. Config size values use `_size` suffix (`buffer_size: "10MiB"`, not `buffer: "10MiB"`)
+6. Byte sizes use integer `_bytes` everywhere, config included (`buffer_bytes: 10485760`, never `buffer_size: "10MiB"`)
 7. Environment variables follow `UPPER_SNAKE_CASE` with the same suffixes
 8. One-time CLI output uses `json_log()`/`CliEmitter` + output helpers; long-running services use `afdata_tracing::try_init()` (Rust) to capture via tracing; other languages emit log events explicitly via builders
 9. Database columns use AFDATA suffixes on generic types (`duration_ms INTEGER`, not `duration INTEGER`); native types like `TIMESTAMPTZ` don't need suffixes

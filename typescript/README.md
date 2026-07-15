@@ -17,7 +17,7 @@ console.log(outputJson(event.toJSON()));
 console.log(outputPlain(event.toJSON()));
 ```
 
-Useful names use TypeScript casing: `outputJson`, `outputYaml`, `outputPlain`, `outputOptionsForPolicy`, `redactedValue`, `redactUrlSecrets`, `parseSize`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `decodeProtocolEvent`, `cliParseOutput`, `cliParseLogFilters`, `cliOutput`, `buildCliError`, `buildCliVersion`, and `cliHandleVersionOrContinue`.
+Useful names use TypeScript casing: `outputJson`, `outputYaml`, `outputPlain`, `outputOptionsForPolicy`, `redactedValue`, `redactUrlSecrets`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `decodeProtocolEvent`, `cliParseOutput`, `cliParseLogFilters`, `cliOutput`, `buildCliError`, `buildCliVersion`, and `cliHandleVersionOrContinue`.
 
 Skill admin and stream redirection are not re-exported from the package root; import them from their own subpaths:
 

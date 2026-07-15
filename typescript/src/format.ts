@@ -2,8 +2,8 @@
  * AFDATA output formatting and protocol templates.
  *
  * Public APIs include protocol event builders, redactedValue (covers _secret
- * and _url fields), output formatters, redactUrlSecrets, parseSize,
- * normalizeUtcOffset, isValidRfc3339Date, isValidRfc3339Time,
+ * and _url fields), output formatters, redactUrlSecrets,
+ * normalizeUtcOffset, isValidRfc3339Date, isValidRfc3339Time, isValidRfc3339, isValidBcp47,
  * RedactionPolicy, OutputStyle, and OutputOptions.
  */
 
@@ -538,38 +538,6 @@ export function redactUrlSecrets(url: string, options?: { secretNames?: readonly
 }
 
 /**
- * Parse a human-readable size string into bytes.
- * Accepts numbers followed by explicit units. Decimal units are
- * B/kB/MB/GB/TB; binary units are KiB/MiB/GiB/TiB.
- * Trims whitespace and rejects ambiguous K/M/G/T units.
- */
-export function parseSize(s: string): number | null {
-  s = s.trim();
-  if (!s) return null;
-  const multipliers: Record<string, number> = {
-    KiB: 1024,
-    MiB: 1024 ** 2,
-    GiB: 1024 ** 3,
-    TiB: 1024 ** 4,
-    kB: 1000,
-    MB: 1000 ** 2,
-    GB: 1000 ** 3,
-    TB: 1000 ** 4,
-    B: 1,
-  };
-  const unit = Object.keys(multipliers).find((candidate) => s.endsWith(candidate));
-  if (unit === undefined) return null;
-  const numStr = s.slice(0, -unit.length);
-  const mult = multipliers[unit];
-  if (!numStr || !/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(numStr)) return null;
-  const n = Number(numStr);
-  if (isNaN(n) || n < 0 || !isFinite(n)) return null;
-  const result = Math.trunc(n * mult);
-  if (!Number.isSafeInteger(result)) return null;
-  return result;
-}
-
-/**
  * Normalize a fixed UTC offset string to "UTC" or ±HH:MM.
  * This helper handles fixed offsets only; IANA timezone names and DST rules
  * are intentionally out of scope.
@@ -606,6 +574,66 @@ export function isValidRfc3339Time(value: string): boolean {
   if (hour > 23 || minute > 59 || second > 59) return false;
   if (value.length === 8) return true;
   return value[8] === "." && value.length > 9 && /^[0-9]+$/.test(value.slice(9));
+}
+
+/**
+ * Return true when value is a complete RFC 3339 date-time, such as
+ * 2026-02-14T10:30:00Z or 2026-02-14T10:30:00.5+08:00. Composed from
+ * isValidRfc3339Date and isValidRfc3339Time: a full-date, a T/t separator, a
+ * partial-time (with optional fractional seconds), and a mandatory time-offset
+ * (Z/z or ±HH:MM with HH in 00..23 and MM in 00..59). The offset is required, so
+ * a bare 2026-02-14T10:30:00 is rejected; a space separator is rejected; and a
+ * leap second (:60) is rejected, matching isValidRfc3339Time. Non-ASCII is rejected.
+ */
+export function isValidRfc3339(value: string): boolean {
+  if (value.length < 20 || !/^[\x00-\x7F]*$/.test(value)) return false;
+  if (!isValidRfc3339Date(value.slice(0, 10))) return false;
+  if (value[10] !== "T" && value[10] !== "t") return false;
+  const rest = value.slice(11);
+  const last = rest[rest.length - 1];
+  let partial: string;
+  if (last === "Z" || last === "z") {
+    partial = rest.slice(0, -1);
+  } else {
+    if (rest.length < 6 || !isRfc3339NumOffset(rest.slice(-6))) return false;
+    partial = rest.slice(0, -6);
+  }
+  return isValidRfc3339Time(partial);
+}
+
+function isRfc3339NumOffset(offset: string): boolean {
+  if (offset.length !== 6 || (offset[0] !== "+" && offset[0] !== "-") || offset[3] !== ":") {
+    return false;
+  }
+  const hours = parseFixedDigits(offset.slice(1, 3));
+  const minutes = parseFixedDigits(offset.slice(4, 6));
+  if (hours === null || minutes === null) return false;
+  return hours <= 23 && minutes <= 59;
+}
+
+/**
+ * Return true when value is a structurally well-formed BCP 47 (RFC 5646) language tag.
+ * A grammar-level check, not a registry lookup: hyphen-separated ASCII-alphanumeric
+ * subtags (each 1-8 chars) whose primary subtag is a 2-3 letter language code or the
+ * x/i privateuse/grandfathered lead. Rejects the POSIX underscore form (zh_CN), empty
+ * or misplaced hyphens, non-ASCII, and out-of-range primaries such as chinese. Does not
+ * verify that subtags are registered with IANA.
+ */
+export function isValidBcp47(value: string): boolean {
+  if (!value) return false;
+  const subtags = value.split("-");
+  for (let index = 0; index < subtags.length; index++) {
+    const subtag = subtags[index];
+    if (subtag.length < 1 || subtag.length > 8 || !/^[A-Za-z0-9]+$/.test(subtag)) {
+      return false;
+    }
+    if (index === 0) {
+      const isLanguage = subtag.length >= 2 && subtag.length <= 3 && /^[A-Za-z]+$/.test(subtag);
+      const isSpecial = subtag === "x" || subtag === "i";
+      if (!isLanguage && !isSpecial) return false;
+    }
+  }
+  return true;
 }
 
 function parseUtcOffsetBody(body: string): [number, number] | null {

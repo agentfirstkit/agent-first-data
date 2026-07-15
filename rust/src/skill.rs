@@ -719,98 +719,16 @@ fn validate_installed_skill(spec: &SkillSpec, path: &Path) -> Result<(), SkillEr
 }
 
 fn validate_skill_text(spec: &SkillSpec, text: &str) -> Result<(), SkillError> {
-    let frontmatter = validate_skill_frontmatter(text).map_err(|err| {
+    crate::skill::validate_skill_named(text, spec.name).map_err(|err| {
         SkillError::invalid_request(
             format!("invalid {} skill front matter: {err}", spec.title),
-            Some("quote scalar values that contain ': ', especially description".to_string()),
+            Some(format!(
+                "make SKILL.md metadata conform to the Agent Skills specification and set name to {}",
+                spec.name
+            )),
         )
     })?;
-    if frontmatter.name != spec.name {
-        return Err(SkillError::invalid_request(
-            format!(
-                "invalid {} skill front matter: name {:?} does not match expected {:?}",
-                spec.title, frontmatter.name, spec.name
-            ),
-            Some(format!("set front matter name to {}", spec.name)),
-        ));
-    }
     Ok(())
-}
-
-struct SkillFrontmatter {
-    name: String,
-}
-
-fn validate_skill_frontmatter(text: &str) -> Result<SkillFrontmatter, String> {
-    let mut lines = text.lines().enumerate();
-    let Some((_, first)) = lines.next() else {
-        return Err("missing YAML front matter".to_string());
-    };
-    if first.trim() != "---" {
-        return Err("missing opening --- YAML front matter delimiter".to_string());
-    }
-    let mut found_end = false;
-    let mut name = None;
-    let mut has_description = false;
-    for (idx, line) in lines {
-        let line_no = idx + 1;
-        let trimmed = line.trim();
-        if trimmed == "---" {
-            found_end = true;
-            break;
-        }
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if line.starts_with(' ') || line.starts_with('\t') {
-            return Err(format!("line {line_no}: nested YAML is not supported here"));
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            return Err(format!("line {line_no}: expected key: value"));
-        };
-        let key = key.trim();
-        if key.is_empty() {
-            return Err(format!("line {line_no}: empty key"));
-        }
-        let value = value.trim_start();
-        if key == "name" {
-            name = Some(parse_frontmatter_scalar(value));
-        }
-        if key == "description" {
-            has_description = true;
-        }
-        if value.starts_with('"') || value.starts_with('\'') {
-            continue;
-        }
-        if value.contains(": ") {
-            return Err(format!(
-                "line {line_no}: unquoted scalar contains ': '; quote the value"
-            ));
-        }
-    }
-    if !found_end {
-        return Err("missing closing --- YAML front matter delimiter".to_string());
-    }
-    let Some(name) = name else {
-        return Err("missing required name field".to_string());
-    };
-    if !has_description {
-        return Err("missing required description field".to_string());
-    }
-    Ok(SkillFrontmatter { name })
-}
-
-fn parse_frontmatter_scalar(value: &str) -> String {
-    let value = value.trim();
-    if value.len() >= 2 {
-        let bytes = value.as_bytes();
-        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
-        {
-            return value[1..value.len() - 1].to_string();
-        }
-    }
-    value.to_string()
 }
 
 fn is_managed_or_bundled_skill(spec: &SkillSpec, path: &Path) -> Result<bool, SkillError> {
@@ -1093,13 +1011,13 @@ mod tests {
 
     #[test]
     fn validates_bundled_frontmatter() {
-        assert!(validate_skill_frontmatter(SKILL_SOURCE).is_ok());
+        assert!(crate::skill::validate_skill_named(SKILL_SOURCE, "agent-first-test").is_ok());
     }
 
     #[test]
     fn rejects_unquoted_colon_space() {
         let bad = "---\nname: x\ndescription: broken: yaml\n---\n";
-        assert!(validate_skill_frontmatter(bad).is_err());
+        assert!(crate::skill::validate_skill(bad).is_err());
     }
 
     fn install_status_uninstall_for(agent: SkillAgentSelection, expect: SkillAgent, tag: &str) {

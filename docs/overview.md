@@ -65,7 +65,7 @@ Language names follow each ecosystem's casing. The shared contract is:
 | Protocol reader | `decode_protocol_event(text)` → typed DecodedResult \| DecodedError \| DecodedProgress \| DecodedLog; raises EventDecodeError on invalid input |
 | Output | `output_json`, `output_yaml`, `output_plain` (options optional in Python/TS; Rust/Go pass `OutputOptions` via `_with_options`) |
 | Redaction | `redacted_value`, `redact_url_secrets` (defaults; options are keyword args in Python/TS, a configured `Redactor` value in Rust/Go: `.value()`/`.url()`) |
-| CLI helpers | `parse_size`, `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue`, `CliEmitter` |
+| CLI helpers | `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `is_valid_rfc3339`, `is_valid_bcp47`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue`, `CliEmitter` |
 | Types | `OutputFormat`, `VersionConfig` (Rust), `RedactionPolicy`, `OutputStyle`, `OutputOptions`, `LogFilters` |
 | Skill admin & stream redirect | Moved to submodules: Python `agent_first_data.skill` / `agent_first_data.stream_redirect`, TS `agent-first-data/skill` / `agent-first-data/stream-redirect`, Go `go/skill` / `go/streamredirect`, Rust feature-gated |
 | Logging init | Rust only: `afdata_tracing::try_init(filter, format, redactor)` |
@@ -83,7 +83,7 @@ Canonical CLIs default to one terminal protocol event. They do not add
 requested through explicit diagnostics such as `--log ...` or `--verbose`.
 TTY detection and stdout/stderr redirection do not change that policy.
 
-The Rust `cli-help` and `skill-admin` features are implementation utilities for spore binaries. They are intentionally separate from the cross-language AFDATA formatting contract; language README files point back here instead of duplicating the full reference.
+The Rust `cli-help`, `skill`, and `skill-admin` features are implementation utilities for spore binaries. `skill` provides strict `SKILL.md` validation, while `skill-admin` includes it and adds install/uninstall/status operations. They are intentionally separate from the cross-language AFDATA formatting contract; language README files point back here instead of duplicating the full reference.
 
 Optional stream redirection uses canonical CLI names:
 
@@ -116,7 +116,7 @@ Name secret log fields explicitly (`api_key_secret`, `db_url`) so redaction can 
 |:--|:--|
 | Duration | `_ns`, `_us`, `_ms`, `_s`, `_minutes`, `_hours`, `_days` |
 | Timestamps | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` |
-| Size | `_bytes` for numeric output, `_size` for config input strings |
+| Size | `_bytes` (integer, everywhere — config and output alike) |
 | Currency | `_msats`, `_sats`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents`, `_{code}_micro` where `code` is 3-4 ASCII letters |
 | Strict strings | `_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time` |
 | Other | `_percent`, `_secret`, `_url` |

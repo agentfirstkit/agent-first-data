@@ -239,6 +239,63 @@ def assert_afdata_lint_schema_secret() -> None:
     assert findings[0]["rule_id"] == "secret_schema_value_exposed", f"wrong lint finding: {findings!r}"
 
 
+def assert_afdata_lint_bcp47() -> None:
+    proc = run_afdata(("lint",), '{"language_bcp47":"zh_CN"}\n')
+    assert proc.returncode != 0, "afdata lint accepted malformed BCP 47 tag"
+    events = parse_events(proc.stdout)
+    assert events[0]["kind"] == "error", f"afdata lint error missing: {events!r}"
+    findings = events[0]["error"]["findings"]
+    assert findings[0]["rule_id"] == "suffix_type_mismatch", f"wrong lint finding: {findings!r}"
+    ok = run_afdata(("lint",), '{"language_bcp47":"zh-CN"}\n')
+    assert ok.returncode == 0, f"afdata lint rejected valid BCP 47 tag: {ok.stdout!r}"
+
+
+def assert_afdata_lint_strict_strings() -> None:
+    for payload in (
+        '{"timezone_utc_offset":"Asia/Shanghai"}\n',
+        '{"market_open_rfc3339_time":"09:30:00Z"}\n',
+        '{"invoice_due_rfc3339_date":"2026-13-01"}\n',
+        # RFC 3339 date-time with no offset — the offset is mandatory.
+        '{"expires_rfc3339":"2026-02-14T10:30:00"}\n',
+        # Space separator instead of T.
+        '{"expires_rfc3339":"2026-02-14 10:30:00Z"}\n',
+    ):
+        proc = run_afdata(("lint",), payload)
+        assert proc.returncode != 0, f"afdata lint accepted malformed strict string: {payload!r}"
+        events = parse_events(proc.stdout)
+        findings = events[0]["error"]["findings"]
+        assert findings[0]["rule_id"] == "suffix_type_mismatch", f"wrong lint finding: {findings!r}"
+    ok = run_afdata(
+        ("lint",),
+        '{"timezone_utc_offset":"+08:00","market_open_rfc3339_time":"09:30:00","invoice_due_rfc3339_date":"2026-06-13","expires_rfc3339":"2026-02-14T10:30:00.5+08:00"}\n',
+    )
+    assert ok.returncode == 0, f"afdata lint rejected valid strict strings: {ok.stdout!r}"
+
+
+def assert_afdata_lint_numeric_and_url() -> None:
+    for payload in (
+        # Durations must be numeric, not unit-in-value strings.
+        '{"timeout_s":"30"}\n',
+        '{"retry_after_ms":"100ms"}\n',
+        # Minor-unit currency amounts must be integers.
+        '{"price_usd_cents":12.5}\n',
+        '{"fee_jpy":"100"}\n',
+        # A _url must be a single URL: no internal whitespace, no bare credentials.
+        '{"callback_url":"https://example.com/a b"}\n',
+        '{"db_url":"user:pass@host:5432/db"}\n',
+    ):
+        proc = run_afdata(("lint",), payload)
+        assert proc.returncode != 0, f"afdata lint accepted malformed numeric/url field: {payload!r}"
+        events = parse_events(proc.stdout)
+        findings = events[0]["error"]["findings"]
+        assert findings[0]["rule_id"] == "suffix_type_mismatch", f"wrong lint finding: {findings!r}"
+    ok = run_afdata(
+        ("lint",),
+        '{"timeout_s":30,"retry_after_ms":100,"price_usd_cents":1250,"fee_jpy":100,"callback_url":"https://example.com/cb?page=2","final_url":"/relative/path"}\n',
+    )
+    assert ok.returncode == 0, f"afdata lint rejected valid numeric/url fields: {ok.stdout!r}"
+
+
 def assert_afdata_format_redacts() -> None:
     proc = run_afdata(("format", "--output", "json"), '{"api_key_secret":"sk-live","ok":true}\n')
     assert proc.returncode == 0, f"afdata format failed: stderr={proc.stderr!r}, stdout={proc.stdout!r}"
@@ -316,6 +373,9 @@ def main() -> None:
         assert_afdata_validate_strict_event,
         assert_afdata_validate_stream_error,
         assert_afdata_lint_schema_secret,
+        assert_afdata_lint_bcp47,
+        assert_afdata_lint_strict_strings,
+        assert_afdata_lint_numeric_and_url,
         assert_afdata_format_redacts,
         assert_afdata_parse_error,
         assert_afdata_skill_status_feature,

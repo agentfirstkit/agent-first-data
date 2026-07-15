@@ -19,7 +19,7 @@ print(output_json(value))
 print(output_plain(value))
 ```
 
-Useful names use Python casing: `output_json`, `output_yaml`, `output_plain` (each takes an optional keyword-only `options=`), `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `parse_size`, `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `cli_parse_output`, `cli_output`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue`, `decode_protocol_event`. Skill admin and stream-redirect helpers live in `agent_first_data.skill` and `agent_first_data.stream_redirect` (import the submodule directly).
+Useful names use Python casing: `output_json`, `output_yaml`, `output_plain` (each takes an optional keyword-only `options=`), `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `cli_parse_output`, `cli_output`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue`, `decode_protocol_event`. Skill admin and stream-redirect helpers live in `agent_first_data.skill` and `agent_first_data.stream_redirect` (import the submodule directly).
 
 Logging is available through `init_logging_json`, `init_logging_plain`, `init_logging_yaml`, `span`, and `get_logger`.
 

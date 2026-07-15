@@ -24,10 +24,11 @@ import {
   outputPlain,
   redactUrlSecrets,
   type JsonValue,
-  parseSize,
   normalizeUtcOffset,
   isValidRfc3339Date,
   isValidRfc3339Time,
+  isValidRfc3339,
+  isValidBcp47,
   decodeProtocolEvent,
   EventDecodeError,
 } from "./format.ts";
@@ -248,13 +249,6 @@ describe("helper fixtures", () => {
         });
       }
     }
-    if (tc.name === "parse_size") {
-      for (const [input, expected] of tc.cases) {
-        it(`parseSize ${JSON.stringify(input)} → ${expected}`, () => {
-          assert.equal(parseSize(input), expected);
-        });
-      }
-    }
     if (tc.name === "normalize_utc_offset") {
       for (const [input, expected] of tc.cases) {
         it(`normalizeUtcOffset ${JSON.stringify(input)} → ${expected}`, () => {
@@ -273,6 +267,20 @@ describe("helper fixtures", () => {
       for (const [input, expected] of tc.cases) {
         it(`isValidRfc3339Time ${JSON.stringify(input)} → ${expected}`, () => {
           assert.equal(isValidRfc3339Time(input), expected);
+        });
+      }
+    }
+    if (tc.name === "is_valid_bcp47") {
+      for (const [input, expected] of tc.cases) {
+        it(`isValidBcp47 ${JSON.stringify(input)} → ${expected}`, () => {
+          assert.equal(isValidBcp47(input), expected);
+        });
+      }
+    }
+    if (tc.name === "is_valid_rfc3339") {
+      for (const [input, expected] of tc.cases) {
+        it(`isValidRfc3339 ${JSON.stringify(input)} → ${expected}`, () => {
+          assert.equal(isValidRfc3339(input), expected);
         });
       }
     }
@@ -340,14 +348,6 @@ describe("output options", () => {
     );
     assert.ok(out.includes('duration: "42ms"'));
     assert.ok(!out.includes("duration_ms:"));
-  });
-});
-
-describe("parseSize safety", () => {
-  it("returns null for unsafe integers", () => {
-    assert.equal(parseSize("9007199254740993"), null);
-    assert.equal(parseSize("9007199254740992"), null);
-    assert.equal(parseSize("9007199255MB"), null);
   });
 });
 

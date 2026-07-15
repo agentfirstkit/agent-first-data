@@ -24,7 +24,7 @@ Agent-First Data has three parts:
 |:---------|:---------|:-------------------|
 | **Duration** | `_ns`, `_us`, `_ms`, `_s`, `_minutes`, `_hours`, `_days` | `latency_ms: 1280` → `latency: 1.28s` |
 | **Timestamps** | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` | `created_at_epoch_ms: 1707868800000` → `created_at: 2024-02-14T...` |
-| **Size** | `_bytes` (output), `_size` (config input) | `file_size_bytes: 5242880` → `file_size: 5.0MiB` |
+| **Size** | `_bytes` | `file_size_bytes: 5242880` → `file_size: 5.0MiB` |
 | **Currency** | `_msats`, `_sats`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents`, `_{code}_micro` | `price_usd_cents: 999` → `price: $9.99` |
 | **String formats** | `_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time` | `language_bcp47: "zh-CN"`, `invoice_due_rfc3339_date: "2026-06-13"` |
 | **Other** | `_percent`, `_secret`, `_url` | `cpu_percent: 85` → `cpu: 85%` |
@@ -74,6 +74,8 @@ Applies to all structured data: JSON, YAML, TOML, CLI arguments, environment var
 
 `_epoch_s` and `_epoch_ms` use JSON integers. Current-era `_epoch_ns` values exceed JSON's cross-language safe integer range, so `_epoch_ns` uses a decimal string.
 
+`*_rfc3339` names an RFC 3339 `date-time`: a `full-date`, a `T` (or `t`) separator, a `partial-time` with optional fractional seconds, and a **mandatory** `time-offset` — either `Z`/`z` or `±HH:MM`. AFDATA validates this structure: `2026-02-14T10:30:00Z` and `2026-02-14T10:30:00.5+08:00` pass, while a bare `2026-02-14T10:30:00` (no offset), a space separator, or a trailing IANA name is rejected. A leap second (`:60`) is rejected, as for `_rfc3339_time`. For an instant with no wall-clock form, prefer `_epoch_*`. The `is_valid_rfc3339` helper and `afdata lint` apply exactly this check.
+
 ### Strict string formats
 
 These suffixes identify strings with a strict external format. They are semantic field-name conventions, not YAML/Plain formatting suffixes: readable output keeps the full key and raw string value.
@@ -85,7 +87,7 @@ These suffixes identify strings with a strict external format. They are semantic
 | `_rfc3339_date` | RFC 3339 full-date string | `invoice_due_rfc3339_date: "2026-06-13"` |
 | `_rfc3339_time` | RFC 3339 partial-time string | `market_open_rfc3339_time: "09:30:00"` |
 
-`*_bcp47` names a field whose string value is a BCP-47 language tag, such as `language_bcp47: "zh-CN"` or `content_language_bcp47: "en-US"`. AFDATA does not implement the full BCP-47 registry; tools may validate tags when they need stronger guarantees.
+`*_bcp47` names a field whose string value is a BCP-47 language tag, such as `language_bcp47: "zh-CN"` or `content_language_bcp47: "en-US"`. AFDATA validates the tag's *structure* — hyphen-separated ASCII-alphanumeric subtags with a 2–3 letter primary language subtag — which rejects the common POSIX-locale form `zh_CN` (underscore), an over-long primary like `chinese`, and other malformed tags. It does **not** check the IANA subtag registry, so a structurally well-formed but unregistered tag like `zz-ZZ` still passes; a tool needing that stronger guarantee validates further. The `is_valid_bcp47` helper and `afdata lint` apply exactly this structural check.
 
 `*_utc_offset` names a fixed offset from UTC. Canonical persisted and structured output values are `"UTC"` or `±HH:MM`, with `HH` in `00..23` and `MM` in `00..59`; zero offsets normalize to `"UTC"`. Examples: `timezone_utc_offset: "+08:00"`, `report_utc_offset: "-05:00"`. This is intentionally not an IANA timezone name: do not use `Asia/Shanghai`, `America/Los_Angeles`, DST rules, or timezone databases in this field.
 
@@ -101,35 +103,9 @@ Tools should avoid magic string sentinels such as `"auto"` inside strict-format 
 
 | Suffix | Value type | Usage | Example |
 |:-------|:-----------|:------|:--------|
-| `_bytes` | non-negative integer | Output, APIs | `payload_bytes: 456789` |
-| `_size` | string with explicit unit | Config input | `buffer_size: "10MiB"` |
+| `_bytes` | non-negative integer | Output, APIs, config | `payload_bytes: 456789` |
 
-**Simple rule:**
-
-- **Output/APIs** → use `_bytes` (numeric, agents compute on this)
-- **Config files** → use `_size` (string like "10MiB" or "10MB", humans write this)
-
-Programs parse `_size` at load time using `parse_size()` and convert to bytes for internal use.
-
-**Parsing rules for `_size`:**
-
-| Unit | Multiplier | Example |
-|:-----|:-----------|:--------|
-| `B` | 1 | `"512B"` → 512 |
-| `kB`/`MB`/`GB`/`TB` | decimal powers of 1000 | `"10MB"` → 10000000 |
-| `KiB`/`MiB`/`GiB`/`TiB` | binary powers of 1024 | `"10MiB"` → 10485760 |
-
-Ambiguous `K/M/G/T` units and bare numbers are rejected. Supports decimals (`"1.5MiB"`). Returns null for invalid, negative, or overflow/unrepresentable input. To keep the helper byte-identical across all four ports, parsed sizes above JSON's safe integer ceiling (`2^53 - 1`) are rejected.
-
-**Example config file:**
-
-```json
-{
-  "shared_buffers_size": "128MiB",
-  "max_wal_size": "1GiB",
-  "archive_retention_size": "2TiB"
-}
-```
+Byte sizes are always integer `_bytes`, in inputs and outputs alike. AFDATA has no unit-in-value size string: a field like `buffer_size: "10MiB"` would force every reader to parse units before comparing or summing, and the `_size` name collides with count-style fields (`page_size`, `batch_size`, `pool_size`) that are quantities, not byte sizes. Pick the unit once at schema-design time and encode it in the key, exactly as durations do (`timeout_s`, not `timeout: "30 minutes"`).
 
 In YAML and Plain output, `_bytes` values auto-scale to human-readable format (5.0MiB, 2.0GiB).
 
@@ -138,6 +114,8 @@ In YAML and Plain output, `_bytes` values auto-scale to human-readable format (5
 | Suffix | Unit | Example |
 |:-------|:-----|:--------|
 | `_percent` | percentage | `cpu_percent: 85` |
+
+The value is *in units of percent*: `1` means 1%, `0.2` means 0.2%, `85` means 85%. The `%` unit is exactly 0.01, so a `_percent` value is never a 0–1 fraction — a producer holding a ratio such as `0.999` multiplies by 100 (`99.9`) before writing it. Decimals, negatives, and values above 100 are all valid (a multi-core CPU can report `800`, a delta can be `-5`); AFDATA fixes no global range. Writing `0.85` when you mean 85% is a unit-conversion error on the producer's side, not an ambiguity in the field convention.
 
 ### Currency
 
@@ -219,7 +197,7 @@ Same suffixes, kebab-case. An agent reading `--help` output understands units an
 --cache-ttl-s 3600         # seconds
 --max-size-bytes 1048576   # bytes
 --api-key-secret sk-xxx    # redact from logs and process listings
---buffer-size 10MiB        # human-readable config input (parse_size)
+--max-buffer-bytes 1048576 # bytes as an integer, never a "10MiB" string
 --port 8080                # no suffix needed — meaning obvious
 --verbose                  # boolean flag — no suffix needed
 ```
@@ -485,7 +463,6 @@ Strict string suffixes (`_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time
 | `price_usd_cents` | `price` | value shows `$9.99` |
 | `DATABASE_URL_SECRET` | `DATABASE_URL` | uppercase `_SECRET` matched |
 | `CACHE_TTL_S` | `CACHE_TTL` | uppercase `_S` matched |
-| `buffer_size` | `buffer_size` | `_size` passes through, key unchanged |
 | `language_bcp47` | `language_bcp47` | strict string format, key unchanged |
 | `timezone_utc_offset` | `timezone_utc_offset` | fixed-offset string, key unchanged |
 | `invoice_due_rfc3339_date` | `invoice_due_rfc3339_date` | RFC 3339 full-date string, key unchanged |
@@ -501,7 +478,6 @@ Strict string suffixes (`_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time
 - `_epoch_ms` / `_epoch_s` / decimal-string `_epoch_ns` → RFC 3339 (`2024-02-14T00:00:00.000Z`), negative values produce pre-1970 dates
 - `_rfc3339` → pass through
 - `_bytes` → human-readable (`456789` → `446.1KiB`); negative and fractional byte values fall through as raw values
-- `_size` → pass through (config input string, e.g. `"10MiB"` stays `"10MiB"`)
 - `_percent` → append `%` (`85` → `85%`, `99.9` → `99.9%`)
 - `_msats` → append unit (`2056msats`)
 - `_sats` → append unit (`1234sats`)

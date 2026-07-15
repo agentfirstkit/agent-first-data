@@ -78,7 +78,7 @@ fn run_case(
             "kind": "result",
             "result": {
                 "operation": operation,
-                "input_size": size.name,
+                "input_scale": size.name,
                 "rows": size.rows,
                 "iterations": size.iterations,
                 "elapsed_ns": elapsed_ns,

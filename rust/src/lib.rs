@@ -11,14 +11,16 @@
 //!   [`Redactor::url`] (URL strings) — `Redactor` carries custom `secret_names`/`policy`
 //! - Output formatters: [`output_json`], [`output_yaml`], [`output_plain`] and their
 //!   `_with_options` variants
-//! - Parse utilities: [`parse_size`], [`normalize_utc_offset`], [`is_valid_rfc3339_date`],
-//!   [`is_valid_rfc3339_time`]
+//! - Parse utilities: [`normalize_utc_offset`], [`is_valid_rfc3339_date`],
+//!   [`is_valid_rfc3339_time`], [`is_valid_rfc3339`], [`is_valid_bcp47`]
 //! - CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`] (returns [`LogFilters`]),
 //!   [`cli_output`], [`cli_output_with_options`], [`build_cli_error`], [`build_cli_version`],
 //!   [`cli_render_version`], [`cli_handle_version_or_continue`]
 //! - (feature `cli-help`): configurable clap help rendering via [`cli_render_help_with_options`]
 //!   and [`cli_handle_help_or_continue`]
 //! - (feature `cli-help-markdown`): [`cli_render_help_markdown`] — recursive Markdown help
+//! - (feature `skill`): [`skill::validate_skill`] / [`skill::validate_skill_named`] — strict
+//!   Agent Skills `SKILL.md` front-matter validation
 //! - (feature `skill-admin`): [`skill::run_skill_admin`] — install/uninstall/status a spore's
 //!   embedded Agent Skill across Codex, Claude Code, opencode, and Hermes; returns a typed
 //!   [`skill::SkillReport`]
@@ -36,6 +38,11 @@ pub mod afdata_tracing;
 pub mod stream_redirect;
 
 #[cfg(feature = "skill-admin")]
+#[path = "skill.rs"]
+mod skill_admin;
+
+#[cfg(feature = "skill")]
+#[path = "skill_validation.rs"]
 pub mod skill;
 
 mod cli;
@@ -70,7 +77,8 @@ pub use redaction::{
     OutputOptions, OutputStyle, RedactionPolicy, Redactor, redact_url_secrets, redacted_value,
 };
 pub use validation::{
-    is_valid_rfc3339_date, is_valid_rfc3339_time, normalize_utc_offset, parse_size,
+    is_valid_bcp47, is_valid_rfc3339, is_valid_rfc3339_date, is_valid_rfc3339_time,
+    normalize_utc_offset,
 };
 
 #[cfg(test)]

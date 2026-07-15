@@ -515,22 +515,6 @@ fn test_helper_fixtures() {
                     );
                 }
             }
-            "parse_size" => {
-                for tc in test_cases {
-                    let arr = tc.as_array().expect("case must be [input, expected]");
-                    let input = arr[0].as_str().expect("input must be string");
-                    let expected = if arr[1].is_null() {
-                        None
-                    } else {
-                        arr[1].as_u64()
-                    };
-                    assert_eq!(
-                        parse_size(input),
-                        expected,
-                        "[helpers/parse_size({input:?})]"
-                    );
-                }
-            }
             "normalize_utc_offset" => {
                 for tc in test_cases {
                     let arr = tc.as_array().expect("case must be [input, expected]");
@@ -568,6 +552,30 @@ fn test_helper_fixtures() {
                         is_valid_rfc3339_time(input),
                         expected,
                         "[helpers/is_valid_rfc3339_time({input:?})]"
+                    );
+                }
+            }
+            "is_valid_bcp47" => {
+                for tc in test_cases {
+                    let arr = tc.as_array().expect("case must be [input, expected]");
+                    let input = arr[0].as_str().expect("input must be string");
+                    let expected = arr[1].as_bool().expect("expected must be bool");
+                    assert_eq!(
+                        is_valid_bcp47(input),
+                        expected,
+                        "[helpers/is_valid_bcp47({input:?})]"
+                    );
+                }
+            }
+            "is_valid_rfc3339" => {
+                for tc in test_cases {
+                    let arr = tc.as_array().expect("case must be [input, expected]");
+                    let input = arr[0].as_str().expect("input must be string");
+                    let expected = arr[1].as_bool().expect("expected must be bool");
+                    assert_eq!(
+                        is_valid_rfc3339(input),
+                        expected,
+                        "[helpers/is_valid_rfc3339({input:?})]"
                     );
                 }
             }
@@ -922,12 +930,6 @@ fn yaml_strip_days() {
 }
 
 #[test]
-fn yaml_no_strip_size() {
-    let out = output_yaml(&json!({"buffer_size": "10M"}));
-    assert!(out.contains("buffer_size:"));
-}
-
-#[test]
 fn yaml_no_strip_no_suffix() {
     let out = output_yaml(&json!({"user_id": 123, "config_path": "a.yml"}));
     assert!(out.contains("user_id:"));
@@ -1137,12 +1139,6 @@ fn yaml_fmt_secret() {
 fn yaml_fmt_rfc3339_passthrough() {
     let out = output_yaml(&json!({"expires_rfc3339": "2026-02-14T10:30:00Z"}));
     assert!(out.contains("\"2026-02-14T10:30:00Z\""));
-}
-
-#[test]
-fn yaml_fmt_size_passthrough() {
-    let out = output_yaml(&json!({"buffer_size": "10M"}));
-    assert!(out.contains("\"10M\""));
 }
 
 #[test]

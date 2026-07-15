@@ -16,7 +16,7 @@ usage() {
 
 ensure_typescript_deps() {
   if [ ! -d "$ROOTPATH/typescript/node_modules" ]; then
-    (cd "$ROOTPATH/typescript" && npm ci)
+    (cd "$ROOTPATH/typescript" && npm ci --ignore-scripts)
   fi
 }
 
@@ -114,11 +114,13 @@ run_package() {
     fi
   done
   rust_smoke="$(mktemp -d)"
-  (cd "$ROOTPATH" && cargo install --path . --root "$rust_smoke/cargo-root" --locked >/dev/null)
+  (cd "$ROOTPATH" && cargo install --path . --root "$rust_smoke/cargo-root" --locked --features skill >/dev/null)
   if [ -x "$rust_smoke/cargo-root/bin/afdata.exe" ]; then
     "$rust_smoke/cargo-root/bin/afdata.exe" --version >/dev/null
+    "$rust_smoke/cargo-root/bin/afdata.exe" skill validate "$ROOTPATH/skills/agent-first-data"
   else
     "$rust_smoke/cargo-root/bin/afdata" --version >/dev/null
+    "$rust_smoke/cargo-root/bin/afdata" skill validate "$ROOTPATH/skills/agent-first-data"
   fi
   mkdir -p "$rust_smoke/lib/src"
   cat > "$rust_smoke/lib/Cargo.toml" <<EOF
@@ -192,6 +194,8 @@ PY
   had_ts_dist=0
   [ -d "$ROOTPATH/typescript/dist" ] && had_ts_dist=1
   ts_pack_json="$(cd "$ROOTPATH/typescript" && npm run build >/dev/null && npm pack --dry-run --json)"
+  # JavaScript source is intentionally single-quoted shell text.
+  # shellcheck disable=SC2016
   node -e '
 const pack = JSON.parse(process.argv[1])[0];
 const files = new Set(pack.files.map((file) => file.path));

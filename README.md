@@ -71,6 +71,22 @@ scoop bucket add agentfirstkit https://github.com/agentfirstkit/scoop-bucket && 
 cargo install agent-first-data
 ```
 
+## Validate an Agent Skill
+
+The optional Rust `skill` feature validates an Agent Skills `SKILL.md` with a
+strict YAML parser and checks the official metadata constraints. Passing a
+skill directory also verifies that its directory name matches front-matter
+`name`:
+
+```bash
+cargo run --features skill -- skill validate skills/agent-first-data
+```
+
+Library users can call `skill::validate_skill` for text-only validation or
+`skill::validate_skill_named` when the expected directory name is known. The
+`skill-admin` feature includes `skill` and reuses the same validator before
+installing or reporting a bundled skill.
+
 ## Docs
 
 - [Overview](docs/overview.md) — the full guide: examples, the complete API, every supported suffix, and logging

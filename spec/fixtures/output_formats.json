@@ -127,7 +127,6 @@
   {
     "name": "registry_suffix_coverage",
     "input": {
-      "buffer_size": "10MiB",
       "cached_epoch_s": 0,
       "cert_days": 365,
       "invoice_eur_cents": 12345,
@@ -137,7 +136,6 @@
       "validity_hours": 24
     },
     "expected_json": {
-      "buffer_size": "10MiB",
       "cached_epoch_s": 0,
       "cert_days": 365,
       "invoice_eur_cents": 12345,
@@ -146,8 +144,8 @@
       "timeout_minutes": 30,
       "validity_hours": 24
     },
-    "expected_yaml": "---\nbuffer_size: \"10MiB\"\ncached: \"1970-01-01T00:00:00.000Z\"\ncert: \"365 days\"\ninvoice: \"€123.45\"\npause: \"450000ns\"\nquery: \"830μs\"\ntimeout: \"30 minutes\"\nvalidity: \"24 hours\"",
-    "expected_plain": "buffer_size=10MiB cached=1970-01-01T00:00:00.000Z cert=\"365 days\" invoice=€123.45 pause=450000ns query=830μs timeout=\"30 minutes\" validity=\"24 hours\""
+    "expected_yaml": "---\ncached: \"1970-01-01T00:00:00.000Z\"\ncert: \"365 days\"\ninvoice: \"€123.45\"\npause: \"450000ns\"\nquery: \"830μs\"\ntimeout: \"30 minutes\"\nvalidity: \"24 hours\"",
+    "expected_plain": "cached=1970-01-01T00:00:00.000Z cert=\"365 days\" invoice=€123.45 pause=450000ns query=830μs timeout=\"30 minutes\" validity=\"24 hours\""
   },
   {
     "name": "integral_floats_satisfy_integer_required_suffixes",

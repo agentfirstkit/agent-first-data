@@ -2,7 +2,7 @@
 
 Protocol builders, value redactors (copy and in-place; cover _secret and
 _url fields), output formatters, URL-string redactors (redact_url_secrets),
-parse_size, normalize_utc_offset, is_valid_rfc3339_date,
+normalize_utc_offset, is_valid_rfc3339_date,
 is_valid_rfc3339_time, RedactionPolicy, OutputStyle, and
 OutputOptions. Each formatter/redactor concept is a single function taking
 a keyword-only ``options`` parameter.
@@ -557,58 +557,6 @@ def _apply_redaction_policy_with_context(
     _redact_secrets(value, context)
 
 
-def parse_size(s: str) -> int | None:
-    """Parse a human-readable size string into bytes.
-
-    Accepts numbers followed by explicit units. Decimal units are
-    B/kB/MB/GB/TB; binary units are KiB/MiB/GiB/TiB. Trims whitespace and
-    rejects ambiguous K/M/G/T units.
-    """
-    _multipliers = {
-        "KiB": 1024,
-        "MiB": 1024**2,
-        "GiB": 1024**3,
-        "TiB": 1024**4,
-        "kB": 1000,
-        "MB": 1000**2,
-        "GB": 1000**3,
-        "TB": 1000**4,
-        "B": 1,
-    }
-    _max_safe_integer = (1 << 53) - 1
-    s = s.strip()
-    if not s:
-        return None
-    matched = next(((unit, mult) for unit, mult in _multipliers.items() if s.endswith(unit)), None)
-    if matched is None:
-        return None
-    unit, mult = matched
-    num_str = s[: -len(unit)]
-    if not num_str:
-        return None
-    if not re.fullmatch(r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", num_str):
-        return None
-    try:
-        n = int(num_str)
-        if n < 0:
-            return None
-        if n > _max_safe_integer // mult:
-            return None
-        return n * mult
-    except ValueError:
-        pass
-    try:
-        f = float(num_str)
-        if f < 0 or not math.isfinite(f):
-            return None
-        result = f * mult
-        if not math.isfinite(result) or result > _max_safe_integer:
-            return None
-        return int(result)
-    except (ValueError, OverflowError):
-        return None
-
-
 def normalize_utc_offset(value: str) -> str | None:
     """Normalize a fixed UTC offset string to "UTC" or ±HH:MM.
 
@@ -661,6 +609,64 @@ def is_valid_rfc3339_time(value: str) -> bool:
     if len(value) == 8:
         return True
     return value[8] == "." and len(value) > 9 and value[9:].isdigit()
+
+
+def is_valid_rfc3339(value: str) -> bool:
+    """Return true when value is a complete RFC 3339 date-time.
+
+    Composed from is_valid_rfc3339_date and is_valid_rfc3339_time: a full-date, a
+    T/t separator, a partial-time (with optional fractional seconds), and a
+    mandatory time-offset (Z/z or ±HH:MM with HH in 00..23 and MM in 00..59).
+    The offset is required, so a bare 2026-02-14T10:30:00 is rejected; a space
+    separator is rejected; and a leap second (:60) is rejected, matching
+    is_valid_rfc3339_time. Non-ASCII input is rejected.
+    """
+    if not isinstance(value, str) or len(value) < 20 or not value.isascii():
+        return False
+    if not is_valid_rfc3339_date(value[0:10]):
+        return False
+    if value[10] not in ("T", "t"):
+        return False
+    rest = value[11:]
+    if rest[-1] in ("Z", "z"):
+        partial = rest[:-1]
+    else:
+        if len(rest) < 6 or not _is_rfc3339_numoffset(rest[-6:]):
+            return False
+        partial = rest[:-6]
+    return is_valid_rfc3339_time(partial)
+
+
+def _is_rfc3339_numoffset(offset: str) -> bool:
+    if len(offset) != 6 or offset[0] not in ("+", "-") or offset[3] != ":":
+        return False
+    hours = _parse_ascii_int(offset[1:3])
+    minutes = _parse_ascii_int(offset[4:6])
+    if hours is None or minutes is None:
+        return False
+    return hours <= 23 and minutes <= 59
+
+
+def is_valid_bcp47(value: str) -> bool:
+    """Return true when value is a structurally well-formed BCP 47 language tag.
+
+    A grammar-level check, not a registry lookup: hyphen-separated ASCII-alphanumeric
+    subtags (each 1-8 chars) whose primary subtag is a 2-3 letter language code or the
+    x/i privateuse/grandfathered lead. Rejects the POSIX underscore form (zh_CN), empty
+    or misplaced hyphens, non-ASCII, and out-of-range primaries such as chinese. Does
+    not verify that subtags are registered with IANA.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    for index, subtag in enumerate(value.split("-")):
+        if not (1 <= len(subtag) <= 8) or not subtag.isascii() or not subtag.isalnum():
+            return False
+        if index == 0:
+            is_language = 2 <= len(subtag) <= 3 and subtag.isalpha()
+            is_special = subtag in ("x", "i")
+            if not is_language and not is_special:
+                return False
+    return True
 
 
 def _parse_utc_offset_body(body: str) -> tuple[int, int] | None:

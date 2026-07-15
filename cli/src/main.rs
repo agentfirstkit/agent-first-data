@@ -1,7 +1,8 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use agent_first_data::{
-    OutputFormat, build_cli_error, cli_output, cli_parse_output, json_error, json_result,
+    OutputFormat, build_cli_error, cli_output, cli_parse_output, is_valid_bcp47, is_valid_rfc3339,
+    is_valid_rfc3339_date, is_valid_rfc3339_time, json_error, json_result, normalize_utc_offset,
     output_json, output_plain, output_yaml, validate_protocol_event, validate_protocol_stream,
 };
 use clap::{Parser, Subcommand};
@@ -52,11 +53,13 @@ enum Command {
         /// Input file; stdin is used when omitted
         input: Option<PathBuf>,
     },
-    /// Manage the bundled Agent Skill
-    #[cfg(feature = "skill-admin")]
+    /// Validate an Agent Skill or manage the bundled Agent Skill
+    #[cfg(feature = "skill")]
     Skill {
-        /// Action: status, install, or uninstall
+        /// Action: validate, status, install, or uninstall
         action: String,
+        /// SKILL.md file or skill directory for the validate action; stdin when omitted
+        input: Option<PathBuf>,
         /// Agent target: all, codex, claude-code, opencode, or hermes
         #[arg(long, default_value = "all")]
         agent: String,
@@ -142,14 +145,23 @@ fn main() -> ExitCode {
             event,
         } => run_validate(input.as_deref(), format, strict, event),
         Command::Format { input } => run_format(input.as_deref(), format),
-        #[cfg(feature = "skill-admin")]
+        #[cfg(feature = "skill")]
         Command::Skill {
             action,
+            input,
             agent,
             scope,
             skills_dir,
             force,
-        } => run_skill(&action, &agent, &scope, skills_dir, force, format),
+        } => run_skill(
+            &action,
+            input.as_deref(),
+            &agent,
+            &scope,
+            skills_dir,
+            force,
+            format,
+        ),
     }
 }
 
@@ -294,8 +306,143 @@ fn run_format(input: Option<&Path>, format: OutputFormat) -> ExitCode {
     }
 }
 
-#[cfg(feature = "skill-admin")]
+#[cfg(feature = "skill")]
 fn run_skill(
+    action: &str,
+    input: Option<&Path>,
+    agent: &str,
+    scope: &str,
+    skills_dir: Option<String>,
+    force: bool,
+    format: OutputFormat,
+) -> ExitCode {
+    if action == "validate" {
+        return run_skill_validate(input, format);
+    }
+
+    #[cfg(not(feature = "skill-admin"))]
+    {
+        let _ = (agent, scope, skills_dir, force);
+        let event = build_cli_error(
+            &format!("invalid skill action '{action}'"),
+            Some("valid action: validate; status/install/uninstall require feature skill-admin"),
+        );
+        return emit_event(&event, format, 2);
+    }
+
+    #[cfg(feature = "skill-admin")]
+    {
+        if input.is_some() {
+            let event = build_cli_error(
+                "a SKILL.md path is only accepted by 'skill validate'",
+                Some("remove the path argument for status, install, or uninstall"),
+            );
+            return emit_event(&event, format, 2);
+        }
+        run_skill_admin_action(action, agent, scope, skills_dir, force, format)
+    }
+}
+
+#[cfg(feature = "skill")]
+fn run_skill_validate(input: Option<&Path>, format: OutputFormat) -> ExitCode {
+    let (text, expected_name, display_path) = match read_skill_input(input) {
+        Ok(value) => value,
+        Err(message) => {
+            #[allow(clippy::expect_used)]
+            let event = json_error("read_failed", &message)
+                .build()
+                .expect("json_error: builder failed unexpectedly");
+            return emit_event(&event, format, 1);
+        }
+    };
+    let validation = match expected_name.as_deref() {
+        Some(name) => agent_first_data::skill::validate_skill_named(&text, name),
+        None => agent_first_data::skill::validate_skill(&text),
+    };
+    let metadata = match validation {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            #[allow(clippy::expect_used)]
+            let event = json_error("skill_invalid", error.message())
+                .hint("make SKILL.md front matter conform to the Agent Skills specification")
+                .build()
+                .expect("json_error: builder failed unexpectedly");
+            return emit_event(&event, format, 1);
+        }
+    };
+    #[allow(clippy::expect_used)]
+    let event = json_result(json!({
+        "code": "skill_valid",
+        "path": display_path,
+        "name": metadata.name,
+        "description": metadata.description,
+        "license": metadata.license,
+        "compatibility": metadata.compatibility,
+        "metadata": metadata.metadata,
+        "allowed_tools": metadata.allowed_tools,
+        "disable_model_invocation": metadata.disable_model_invocation,
+        "user_invocable": metadata.user_invocable,
+    }))
+    .build()
+    .expect("json_result: builder failed unexpectedly");
+    emit_event(&event, format, 0)
+}
+
+#[cfg(feature = "skill")]
+fn read_skill_input(input: Option<&Path>) -> Result<(String, Option<String>, String), String> {
+    let Some(input) = input else {
+        return read_input(None).map(|text| (text, None, "<stdin>".to_string()));
+    };
+    let input_metadata = std::fs::symlink_metadata(input)
+        .map_err(|error| format!("failed to inspect {}: {error}", input.display()))?;
+    if input_metadata.file_type().is_symlink() {
+        return Err(format!(
+            "refusing to validate symlinked skill input at {}",
+            input.display()
+        ));
+    }
+
+    let (skill_path, expected_name) = if input_metadata.is_dir() {
+        let name = path_file_name(input)?;
+        (input.join("SKILL.md"), Some(name))
+    } else if input_metadata.is_file() {
+        let expected_name = if input.file_name().and_then(|name| name.to_str()) == Some("SKILL.md")
+        {
+            input.parent().map(path_file_name).transpose()?
+        } else {
+            None
+        };
+        (input.to_path_buf(), expected_name)
+    } else {
+        return Err(format!(
+            "skill input is not a regular file or directory: {}",
+            input.display()
+        ));
+    };
+
+    let skill_metadata = std::fs::symlink_metadata(&skill_path)
+        .map_err(|error| format!("failed to inspect {}: {error}", skill_path.display()))?;
+    if skill_metadata.file_type().is_symlink() || !skill_metadata.is_file() {
+        return Err(format!(
+            "skill document is not a regular file: {}",
+            skill_path.display()
+        ));
+    }
+    let text = std::fs::read_to_string(&skill_path)
+        .map_err(|error| format!("failed to read {}: {error}", skill_path.display()))?;
+    Ok((text, expected_name, skill_path.display().to_string()))
+}
+
+#[cfg(feature = "skill")]
+fn path_file_name(path: &Path) -> Result<String, String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("path has no UTF-8 directory name: {}", path.display()))
+}
+
+#[cfg(feature = "skill-admin")]
+fn run_skill_admin_action(
     action: &str,
     agent: &str,
     scope: &str,
@@ -669,9 +816,73 @@ fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<
         } else {
             Some(format!("{key:?} must be numeric"))
         }
-    } else if key.ends_with("_rfc3339") || key.ends_with("_url") {
-        if value.is_string() {
+    } else if is_duration_suffix(key) {
+        if value.is_number() {
             None
+        } else {
+            Some(format!("{key:?} must be a numeric duration"))
+        }
+    } else if is_currency_minor_unit_suffix(key) {
+        if is_integer(value) {
+            None
+        } else {
+            Some(format!("{key:?} must be an integer currency amount"))
+        }
+    } else if key.ends_with("_rfc3339") {
+        if value.as_str().is_some_and(is_valid_rfc3339) {
+            None
+        } else if value.is_string() {
+            Some(format!(
+                "{key:?} must be an RFC 3339 date-time with a mandatory offset (e.g. 2026-02-14T10:30:00Z)"
+            ))
+        } else {
+            Some(format!("{key:?} must be a string"))
+        }
+    } else if key.ends_with("_url") {
+        if value.as_str().is_some_and(is_wellformed_url_field) {
+            None
+        } else if value.is_string() {
+            Some(format!(
+                "{key:?} must be a single URL (no internal whitespace or bare credentials)"
+            ))
+        } else {
+            Some(format!("{key:?} must be a string"))
+        }
+    } else if key.ends_with("_bcp47") {
+        if value.as_str().is_some_and(is_valid_bcp47) {
+            None
+        } else if value.is_string() {
+            Some(format!("{key:?} must be a well-formed BCP 47 language tag"))
+        } else {
+            Some(format!("{key:?} must be a string"))
+        }
+    } else if key.ends_with("_rfc3339_date") {
+        if value.as_str().is_some_and(is_valid_rfc3339_date) {
+            None
+        } else if value.is_string() {
+            Some(format!(
+                "{key:?} must be an RFC 3339 full-date (YYYY-MM-DD)"
+            ))
+        } else {
+            Some(format!("{key:?} must be a string"))
+        }
+    } else if key.ends_with("_rfc3339_time") {
+        if value.as_str().is_some_and(is_valid_rfc3339_time) {
+            None
+        } else if value.is_string() {
+            Some(format!(
+                "{key:?} must be an RFC 3339 partial-time (HH:MM:SS[.fraction], no Z or offset)"
+            ))
+        } else {
+            Some(format!("{key:?} must be a string"))
+        }
+    } else if key.ends_with("_utc_offset") {
+        if value.as_str().and_then(normalize_utc_offset).is_some() {
+            None
+        } else if value.is_string() {
+            Some(format!(
+                "{key:?} must be a fixed UTC offset (\"UTC\" or ±HH:MM)"
+            ))
         } else {
             Some(format!("{key:?} must be a string"))
         }
@@ -732,11 +943,123 @@ fn is_decimal_integer_string(value: &Value) -> bool {
     !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
 }
 
+/// A numeric duration suffix (`timeout_s`, `retry_after_ms`, `ttl_minutes`, …).
+/// The epoch suffixes (`_epoch_s`/`_epoch_ms`/`_epoch_ns`) are matched earlier in
+/// the chain, so they never reach here.
+fn is_duration_suffix(key: &str) -> bool {
+    key.ends_with("_ns")
+        || key.ends_with("_us")
+        || key.ends_with("_ms")
+        || key.ends_with("_s")
+        || key.ends_with("_minutes")
+        || key.ends_with("_hours")
+        || key.ends_with("_days")
+}
+
+/// An integer minor-unit currency suffix (`price_usd_cents`, `fee_jpy`,
+/// `budget_btc_micro`, …). `_sats`/`_msats` allow a decimal-string form and are
+/// matched earlier in the chain.
+fn is_currency_minor_unit_suffix(key: &str) -> bool {
+    key.ends_with("_cents") || key.ends_with("_micro") || key.ends_with("_jpy")
+}
+
+/// True when a `_url` field value is a single URL: a scheme-prefixed absolute URL,
+/// or a schemeless relative reference with no internal whitespace and no bare `@`
+/// credential sigil. This mirrors the redaction gate in the library's
+/// `redaction.rs`: a value this rejects is exactly one redaction would blanket-
+/// redact (internal whitespace, or a schemeless `user:pass@host` connection
+/// string) rather than surgically clean.
+fn is_wellformed_url_field(s: &str) -> bool {
+    if is_scheme_prefixed_url(s) || is_scheme_prefixed_url(s.trim()) {
+        return true;
+    }
+    !s.chars().any(char::is_whitespace) && !s.contains('@')
+}
+
+/// True when `s` begins with a URL scheme (`ALPHA *(ALPHA / DIGIT / "+" / "-" /
+/// ".") "://"`) and contains no ASCII whitespace — a single bare absolute URL.
+fn is_scheme_prefixed_url(s: &str) -> bool {
+    if s.bytes().any(|b| b.is_ascii_whitespace()) {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return false;
+    }
+    let mut i = 1;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.') {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    s[i..].starts_with("://")
+}
+
 fn join_pointer(base: &str, token: &str) -> String {
     let escaped = token.replace('~', "~0").replace('/', "~1");
     if base.is_empty() {
         format!("/{escaped}")
     } else {
         format!("{base}/{escaped}")
+    }
+}
+
+#[cfg(all(test, feature = "skill"))]
+mod skill_tests {
+    use super::*;
+
+    #[test]
+    fn parses_and_validates_skill_directory() {
+        let parsed =
+            Cli::try_parse_from(["afdata", "skill", "validate", "skills/agent-first-data"]);
+        assert!(matches!(
+            parsed,
+            Ok(Cli {
+                command: Command::Skill {
+                    action,
+                    input: Some(input),
+                    ..
+                },
+                ..
+            }) if action == "validate" && input == Path::new("skills/agent-first-data")
+        ));
+
+        let loaded = read_skill_input(Some(Path::new("skills/agent-first-data")));
+        assert!(matches!(
+            loaded,
+            Ok((text, Some(expected_name), _))
+                if expected_name == "agent-first-data"
+                    && agent_first_data::skill::validate_skill_named(&text, &expected_name).is_ok()
+        ));
+    }
+
+    #[cfg(feature = "skill-admin")]
+    #[test]
+    fn keeps_existing_skill_admin_command_shape() {
+        let parsed = Cli::try_parse_from([
+            "afdata",
+            "skill",
+            "status",
+            "--agent",
+            "opencode",
+            "--scope",
+            "workspace",
+        ]);
+        assert!(matches!(
+            parsed,
+            Ok(Cli {
+                command: Command::Skill {
+                    action,
+                    input: None,
+                    agent,
+                    scope,
+                    ..
+                },
+                ..
+            }) if action == "status" && agent == "opencode" && scope == "workspace"
+        ));
     }
 }
