@@ -73,19 +73,22 @@ cargo install agent-first-data
 
 ## Validate an Agent Skill
 
-The optional Rust `skill` feature validates an Agent Skills `SKILL.md` with a
-strict YAML parser and checks the official metadata constraints. Passing a
-skill directory also verifies that its directory name matches front-matter
-`name`:
+Every install of `afdata` — Homebrew, Scoop, the GitHub release archives, and
+`cargo install agent-first-data` — is full-featured by default. It manages Agent
+Skills directly: `afdata skill validate` checks a `SKILL.md` against the official
+metadata constraints with a strict YAML parser (passing a directory also verifies
+its name matches the front-matter `name`), and `afdata skill install` / `status`
+/ `uninstall` manage the bundled skill.
 
 ```bash
-cargo run --features skill -- skill validate skills/agent-first-data
+afdata skill validate skills/agent-first-data
 ```
 
-Library users can call `skill::validate_skill` for text-only validation or
-`skill::validate_skill_named` when the expected directory name is known. The
-`skill-admin` feature includes `skill` and reuses the same validator before
-installing or reporting a bundled skill.
+The default feature set also enables `--help --output markdown` and
+`--stdout-file` / `--stderr-file`. Library consumers get every helper by default
+too — including `skill::validate_skill` / `skill::validate_skill_named` and
+tracing — so depend with `default-features = false` when you want only the core
+formatting, redaction, and protocol surface.
 
 ## Docs
 

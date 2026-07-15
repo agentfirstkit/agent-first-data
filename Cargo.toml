@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-data"
-version = "0.17.0"
+version = "0.17.1"
 edition = "2024"
 description = "A naming convention that lets AI agents understand your data without being told what it means."
 license = "MIT"
@@ -25,7 +25,12 @@ name = "afdata_bench"
 path = "rust/examples/afdata_bench.rs"
 
 [features]
-default = ["cli"]
+# Batteries included by default, for both the binary and the library:
+# `cargo install agent-first-data` gets the full CLI (skill management, markdown
+# help, stream redirection) and `cargo add agent-first-data` gets every helper
+# including tracing. Consumers that want only the core formatting/redaction/
+# protocol surface opt out with `default-features = false`.
+default = ["cli", "tracing", "cli-help-markdown", "skill-admin", "stream-redirect"]
 cli = ["dep:clap"]
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
 cli-help = ["dep:clap"]

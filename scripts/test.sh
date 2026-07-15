@@ -28,12 +28,18 @@ ensure_python_test_deps() {
     return
   fi
   local venv="${AFDATA_PYVENV:-$ROOTPATH/python/.venv}"
-  if ! "$venv/bin/python" -c 'import pytest, build, twine, setuptools' >/dev/null 2>&1; then
+  # venv layout differs by platform: bin/python on Unix, Scripts/python.exe on
+  # Windows. Resolve through venv_python instead of hardcoding bin/python, or the
+  # provision path 127s on Windows CI.
+  local py
+  py="$(venv_python "$venv")"
+  if ! "$py" -c 'import pytest, build, twine, setuptools' >/dev/null 2>&1; then
     echo "Provisioning Python venv at $venv (pytest, build, twine, setuptools)..."
     python3 -m venv "$venv"
-    "$venv/bin/python" -m pip install -q --upgrade pip pytest build twine setuptools
+    py="$(venv_python "$venv")"
+    "$py" -m pip install -q --upgrade pip pytest build twine setuptools
   fi
-  PYTOOL="$venv/bin/python"
+  PYTOOL="$py"
 }
 
 venv_python() {

@@ -104,6 +104,23 @@ def run_afdata_skill(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def run_afdata_minimal(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """Run the afdata binary built with only the core CLI (default features off)."""
+    return subprocess.run(
+        [
+            "cargo", "run", "--quiet",
+            "--no-default-features", "--features", "cli",
+            "--bin", "afdata", "--", *args,
+        ],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=120,
+        check=False,
+    )
+
+
 def parse_events(stdout: str) -> list[dict[str, object]]:
     lines = [line for line in stdout.splitlines() if line.strip()]
     return [json.loads(line) for line in lines]
@@ -296,6 +313,19 @@ def assert_afdata_lint_numeric_and_url() -> None:
     assert ok.returncode == 0, f"afdata lint rejected valid numeric/url fields: {ok.stdout!r}"
 
 
+def assert_afdata_cli_capabilities() -> None:
+    # The default binary is full-featured, so every capability is present.
+    ver = run_afdata(("--version", "--output", "json"), "")
+    assert ver.returncode == 0, f"afdata --version --output json failed: {ver.stderr!r}"
+    payload = json.loads(ver.stdout)
+    assert payload["result"]["version"], f"no version in {ver.stdout!r}"
+    md = run_afdata(("--help", "--output", "markdown"), "")
+    assert md.returncode == 0, f"afdata --help --output markdown failed: {md.stderr!r}"
+    assert md.stdout.lstrip().startswith("# afdata"), f"help is not markdown: {md.stdout[:80]!r}"
+    assert "--stdout-file" in md.stdout, f"stream-redirect flag missing from help: {md.stdout[:200]!r}"
+    assert "skill" in md.stdout, f"skill command missing from help: {md.stdout[:200]!r}"
+
+
 def assert_afdata_format_redacts() -> None:
     proc = run_afdata(("format", "--output", "json"), '{"api_key_secret":"sk-live","ok":true}\n')
     assert proc.returncode == 0, f"afdata format failed: stderr={proc.stderr!r}, stdout={proc.stdout!r}"
@@ -345,12 +375,14 @@ def assert_afdata_skill_error_includes_partial_report() -> None:
 
 
 def assert_afdata_skill_help_is_feature_gated() -> None:
-    default_help = run_afdata(("--help",), "")
-    assert default_help.returncode == 0, f"default afdata help failed: {default_help.stderr!r}"
-    assert "skill" not in default_help.stdout, "default afdata help must not show skill subcommand"
-    feature_help = run_afdata_skill(("--help",))
-    assert feature_help.returncode == 0, f"feature afdata help failed: {feature_help.stderr!r}"
-    assert "skill" in feature_help.stdout, "feature afdata help must show skill subcommand"
+    # Default build is full-featured: skill management is present.
+    full_help = run_afdata(("--help",), "")
+    assert full_help.returncode == 0, f"default afdata help failed: {full_help.stderr!r}"
+    assert "skill" in full_help.stdout, "default afdata help must show skill subcommand"
+    # Opting out (default-features = false) drops back to the core CLI.
+    minimal_help = run_afdata_minimal(("--help",))
+    assert minimal_help.returncode == 0, f"minimal afdata help failed: {minimal_help.stderr!r}"
+    assert "skill" not in minimal_help.stdout, "minimal afdata help must not show skill subcommand"
 
 
 def main() -> None:
@@ -376,6 +408,7 @@ def main() -> None:
         assert_afdata_lint_bcp47,
         assert_afdata_lint_strict_strings,
         assert_afdata_lint_numeric_and_url,
+        assert_afdata_cli_capabilities,
         assert_afdata_format_redacts,
         assert_afdata_parse_error,
         assert_afdata_skill_status_feature,

@@ -5,6 +5,8 @@ use agent_first_data::{
     is_valid_rfc3339_date, is_valid_rfc3339_time, json_error, json_result, normalize_utc_offset,
     output_json, output_plain, output_yaml, validate_protocol_event, validate_protocol_stream,
 };
+#[cfg(feature = "cli-help")]
+use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -22,9 +24,19 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
     disable_help_subcommand = true
 )]
 struct Cli {
-    /// Output format: json, yaml, or plain
+    /// Output format: json, yaml, or plain (help also accepts markdown)
     #[arg(long, global = true, default_value = "json")]
     output: String,
+
+    /// Redirect stdout to this file
+    #[cfg(feature = "stream-redirect")]
+    #[arg(long, value_name = "PATH", global = true)]
+    stdout_file: Option<std::path::PathBuf>,
+
+    /// Redirect stderr to this file
+    #[cfg(feature = "stream-redirect")]
+    #[arg(long, value_name = "PATH", global = true)]
+    stderr_file: Option<std::path::PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -116,6 +128,43 @@ struct ParseError {
 }
 
 fn main() -> ExitCode {
+    let raw: Vec<String> = std::env::args().collect();
+
+    // Redirect stdout/stderr before any output, per --stdout-file/--stderr-file.
+    #[cfg(feature = "stream-redirect")]
+    let _stream_redirect =
+        match agent_first_data::stream_redirect::install_from_raw_args(raw.clone()) {
+            Ok(installed) => installed,
+            Err(err) => {
+                let event = build_cli_error(&err.to_string(), None);
+                return emit_event(&event, OutputFormat::Json, 2);
+            }
+        };
+
+    // Handle --version through AFDATA so `--version --output json` works too.
+    match agent_first_data::cli_handle_version_or_continue(
+        &raw,
+        "afdata",
+        env!("CARGO_PKG_VERSION"),
+        &agent_first_data::VersionConfig::conventional_default(),
+    ) {
+        Ok(Some(version)) => return write_text_exit(&version, 0),
+        Ok(None) => {}
+        Err(err) => return emit_event(&err, OutputFormat::Json, 2),
+    }
+
+    // Handle --help before clap so `--help --output markdown` works.
+    #[cfg(feature = "cli-help")]
+    match agent_first_data::cli_handle_help_or_continue(
+        &raw,
+        &Cli::command(),
+        &agent_first_data::HelpConfig::human_cli_default(),
+    ) {
+        Ok(Some(help)) => return write_text_exit(&help, 0),
+        Ok(None) => {}
+        Err(err) => return emit_event(&err, OutputFormat::Json, 2),
+    }
+
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {
@@ -128,6 +177,11 @@ fn main() -> ExitCode {
             return emit_event(&event, OutputFormat::Json, 2);
         }
     };
+
+    // Redirection is installed from raw args above; these fields exist for
+    // clap's --help listing only.
+    #[cfg(feature = "stream-redirect")]
+    let _ = (&cli.stdout_file, &cli.stderr_file);
 
     let format = match cli_parse_output(&cli.output) {
         Ok(format) => format,

@@ -67,7 +67,7 @@ Language names follow each ecosystem's casing. The shared contract is:
 | Redaction | `redacted_value`, `redact_url_secrets` (defaults; options are keyword args in Python/TS, a configured `Redactor` value in Rust/Go: `.value()`/`.url()`) |
 | CLI helpers | `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `is_valid_rfc3339`, `is_valid_bcp47`, `cli_parse_output`, `cli_parse_log_filters`, `cli_output`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue`, `CliEmitter` |
 | Types | `OutputFormat`, `VersionConfig` (Rust), `RedactionPolicy`, `OutputStyle`, `OutputOptions`, `LogFilters` |
-| Skill admin & stream redirect | Moved to submodules: Python `agent_first_data.skill` / `agent_first_data.stream_redirect`, TS `agent-first-data/skill` / `agent-first-data/stream-redirect`, Go `go/skill` / `go/streamredirect`, Rust feature-gated |
+| Skill admin & stream redirect | Moved to submodules: Python `agent_first_data.skill` / `agent_first_data.stream_redirect`, TS `agent-first-data/skill` / `agent-first-data/stream-redirect`, Go `go/skill` / `go/streamredirect`, Rust feature-gated (on by default; opt out with `default-features = false`) |
 | Logging init | Rust only: `afdata_tracing::try_init(filter, format, redactor)` |
 
 Built-in redaction applies to `_secret` (whole value → `***`) and `_url` (scrub userinfo password and secret-named query parameters). Field-based redaction is the only mechanism: custom sensitive names are explicit exact-name lists configured at the redactor or output boundary. `RedactionPolicy` has two explicit overrides: `RedactionTraceOnly` and `RedactionNone`; the default is full redaction.
@@ -83,7 +83,7 @@ Canonical CLIs default to one terminal protocol event. They do not add
 requested through explicit diagnostics such as `--log ...` or `--verbose`.
 TTY detection and stdout/stderr redirection do not change that policy.
 
-The Rust `cli-help`, `skill`, and `skill-admin` features are implementation utilities for spore binaries. `skill` provides strict `SKILL.md` validation, while `skill-admin` includes it and adds install/uninstall/status operations. They are intentionally separate from the cross-language AFDATA formatting contract; language README files point back here instead of duplicating the full reference.
+The Rust `cli-help`, `skill`, `skill-admin`, `stream-redirect`, and `tracing` features are all on by default, so the published `afdata` binary and `cargo install agent-first-data` are full-featured, and `cargo add agent-first-data` pulls every helper. `skill` provides strict `SKILL.md` validation, while `skill-admin` includes it and adds install/uninstall/status operations. They are intentionally separate from the cross-language AFDATA formatting contract; a consumer that wants only that core surface disables them with `default-features = false`, and language README files point back here instead of duplicating the full reference.
 
 Optional stream redirection uses canonical CLI names:
 

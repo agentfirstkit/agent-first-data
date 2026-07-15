@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,13 +13,9 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Remove the _size config suffix and the parse_size/ParseSize/parseSize helper from all four SDKs — byte sizes are now always an integer _bytes field, in config and output alike, keeping the unit in the key instead of a parseable string in the value (breaking)",
-    "Add is_valid_rfc3339 and validate complete _rfc3339 date-times in afdata lint, requiring the mandatory RFC 3339 offset and rejecting a missing offset, a space separator, or a trailing timezone name",
-    "Add is_valid_bcp47 and validate _bcp47 language-tag structure in afdata lint, rejecting the POSIX underscore form (zh_CN) and other malformed tags while still allowing well-formed-but-unregistered tags",
-    "Complete strict-string format linting for _utc_offset, _rfc3339_date, and _rfc3339_time, which were previously type-checked only",
-    "Enforce single-URL structure for _url fields in afdata lint — reject internal whitespace and bare user:pass@host credential strings while allowing scheme-prefixed and relative URLs",
-    "Type-check numeric suffixes in afdata lint — durations must be numbers and minor-unit currency (_cents/_micro/_jpy) must be integers",
-    "Pin _percent as a value in units of percent (recategorized from ratio to percentage), and clarify integer-vs-string encoding across the _epoch_, _sats, and _msats siblings"
+    "Ship the afdata binary full-featured: skill validate/install/status/uninstall, --help --output markdown, --version --output json, and --stdout-file/--stderr-file stream redirection are now wired into the binary itself",
+    "Make the complete feature set the default so cargo install agent-first-data, Homebrew, and Scoop are all batteries-included and cargo add pulls every helper; consumers wanting only the core formatting/redaction/protocol surface opt out with default-features = false",
+    "Fix the Windows release and CI Python venv provisioning to resolve the interpreter via Scripts/python.exe instead of a hardcoded bin/python, unbreaking the windows-latest test leg"
   ],
   "bonds": [],
   "tree": {

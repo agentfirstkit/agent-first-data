@@ -26,7 +26,7 @@ func main() {
 }
 ```
 
-Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `OutputOptionsForPolicy`, `RedactedValue`, `RedactURLSecrets`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, `CliHandleVersionOrContinue`, and `DecodeProtocolEvent`.
+Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `OutputOptionsForPolicy`, `RedactedValue`, `RedactURLSecrets`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `IsValidRFC3339`, `IsValidBCP47`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, `CliHandleVersionOrContinue`, and `DecodeProtocolEvent`.
 
 Skill admin (`RunSkillAdmin`, `SkillSpec`, ...) lives in the `github.com/agentfirstkit/agent-first-data/go/skill` subpackage; stdout/stderr file redirection (`ParseStreamRedirectArgs`, `InstallStreamRedirectFromArgs`, ...) lives in `github.com/agentfirstkit/agent-first-data/go/streamredirect`.
 
