@@ -148,15 +148,18 @@ def _prepare_target(target_fd: int, path: str | None) -> _PreparedTarget | None:
 
 def _open_append_secure(path: str) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
+    # O_BINARY is 0 on POSIX; on Windows it stops the C runtime from translating
+    # redirected `\n` into `\r\n`, so the redirect stays byte-exact.
+    binary = getattr(os, "O_BINARY", 0)
     try:
         info = os.lstat(path)
     except FileNotFoundError:
-        return os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_APPEND | nofollow, 0o600)
+        return os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_APPEND | nofollow | binary, 0o600)
     if stat.S_ISLNK(info.st_mode):
         raise OSError("stream redirection target must not be a symbolic link")
     if not stat.S_ISREG(info.st_mode):
         raise OSError("stream redirection target must be a regular file")
-    return os.open(path, os.O_WRONLY | os.O_APPEND | nofollow)
+    return os.open(path, os.O_WRONLY | os.O_APPEND | nofollow | binary)
 
 
 def _close_prepared(target: _PreparedTarget | None) -> None:

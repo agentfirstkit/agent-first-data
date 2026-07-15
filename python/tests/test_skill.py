@@ -250,7 +250,7 @@ def test_codex_workspace_scope_uses_codex_skills_dir():
     targets = _resolve_targets(spec(), opts)
     assert [t.agent for t in targets] == [SkillAgent.CODEX]
     assert targets[0].scope is SkillScope.WORKSPACE
-    assert str(targets[0].skills_dir).endswith(".codex/skills")
+    assert targets[0].skills_dir.parts[-2:] == (".codex", "skills")
 
 
 def test_hermes_workspace_scope_uses_hermes_skills_dir():
@@ -258,7 +258,7 @@ def test_hermes_workspace_scope_uses_hermes_skills_dir():
     targets = _resolve_targets(spec(), opts)
     assert [t.agent for t in targets] == [SkillAgent.HERMES]
     assert targets[0].scope is SkillScope.WORKSPACE
-    assert str(targets[0].skills_dir).endswith(".hermes/skills")
+    assert targets[0].skills_dir.parts[-2:] == (".hermes", "skills")
 
 
 def test_skills_dir_requires_single_agent():
