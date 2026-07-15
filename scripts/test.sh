@@ -133,6 +133,12 @@ run_package() {
     "$rust_smoke/cargo-root/bin/afdata" skill validate "$ROOTPATH/skills/agent-first-data"
   fi
   mkdir -p "$rust_smoke/lib/src"
+  # Cargo reads this path natively; on Windows it must be a real drive path, not
+  # the MSYS /d/a/... form (which Cargo resolves against C:\ and fails to find).
+  smoke_dep_path="$ROOTPATH"
+  if command -v cygpath >/dev/null 2>&1; then
+    smoke_dep_path="$(cygpath -m "$ROOTPATH")"
+  fi
   cat > "$rust_smoke/lib/Cargo.toml" <<EOF
 [package]
 name = "afdata-rust-smoke"
@@ -140,7 +146,7 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-agent-first-data = { path = "$ROOTPATH", default-features = false }
+agent-first-data = { path = "$smoke_dep_path", default-features = false }
 EOF
   cat > "$rust_smoke/lib/src/lib.rs" <<'RS'
 pub fn smoke() {
