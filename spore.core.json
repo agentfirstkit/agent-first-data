@@ -13,7 +13,7 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Upgrade GitHub Actions to Node 24-based releases and point setup-go caching at go/go.sum, removing CI deprecation and missing dependency-file warnings"
+    "Upgrade GitHub Actions to Node 24-based releases and disable setup-go caching for the dependency-free Go module, removing CI deprecation and unresolved cache-path warnings"
   ],
   "bonds": [],
   "tree": {

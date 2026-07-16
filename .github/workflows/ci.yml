@@ -37,7 +37,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go/go.mod
-          cache-dependency-path: go/go.sum
+          cache: false
 
       - name: Setup Python
         uses: actions/setup-python@v6
