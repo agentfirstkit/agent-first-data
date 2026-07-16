@@ -13,9 +13,7 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Improve Windows compatibility across Python, TypeScript, Rust smoke, and CLI end-to-end tests, including UTF-8, line-ending, signal, path, permission, and npx executable handling",
-    "Expand the Agent-First Data skill and installation guide with specification-first guidance, cross-language library workflows, Rust integration examples, and deterministic CLI validation commands",
-    "Upgrade Rust dependencies, including noyalib to 0.0.15 and current compatible clap, regex-automata, and syn releases"
+    "Upgrade GitHub Actions to Node 24-based releases and point setup-go caching at go/go.sum, removing CI deprecation and missing dependency-file warnings"
   ],
   "bonds": [],
   "tree": {
