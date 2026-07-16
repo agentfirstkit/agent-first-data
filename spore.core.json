@@ -13,7 +13,7 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Fix a Windows-only clippy failure in the stream-redirect module: the non-Unix code path left the Write import unused and open_append uncalled, so cargo clippy -- -D warnings now passes on every platform and the windows-latest CI leg goes green"
+    "fix(afdata): guard SIGPIPE setup on Windows"
   ],
   "bonds": [],
   "tree": {

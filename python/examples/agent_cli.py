@@ -874,7 +874,8 @@ def test_error_round_trip_is_valid_jsonl():
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     try:
         main()
     except BrokenPipeError:
