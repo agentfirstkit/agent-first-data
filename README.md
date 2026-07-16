@@ -51,16 +51,19 @@ Agent-First Data is a convention, not a dependency you wire in by hand — and a
 
 > Learn the Agent-First Data convention: read https://agentfirstkit.com/agent-first-data/docs/overview and https://agentfirstkit.com/agent-first-data/docs/agent-skill. Then look at the codebase we're working in and tell me whether adopting the convention would help it — and if so, how: which fields and config keys to rename, and where the output and logging helpers fit.
 
-The library, if you want it:
+## Install the Libraries
 
 ```bash
-cargo add agent-first-data       # Rust
+cargo add agent-first-data --no-default-features   # Rust library
 pip install agent-first-data     # Python
 npm install agent-first-data     # TypeScript
 go get github.com/agentfirstkit/agent-first-data/go   # Go
 ```
 
-Or the `afdata` CLI — the same formatting, redaction, and protocol-event helpers from any shell, no toolchain required:
+## Install the CLI
+
+The `afdata` CLI provides the same formatting, redaction, and protocol-event
+helpers from any shell, with no toolchain required:
 
 ```bash
 # prebuilt binary
@@ -71,24 +74,19 @@ scoop bucket add agentfirstkit https://github.com/agentfirstkit/scoop-bucket && 
 cargo install agent-first-data
 ```
 
+Prebuilt archives are also available from
+[GitHub Releases](https://github.com/agentfirstkit/agent-first-data/releases).
+
 ## Validate an Agent Skill
 
-Every install of `afdata` — Homebrew, Scoop, the GitHub release archives, and
-`cargo install agent-first-data` — is full-featured by default. It manages Agent
-Skills directly: `afdata skill validate` checks a `SKILL.md` against the official
-metadata constraints with a strict YAML parser (passing a directory also verifies
-its name matches the front-matter `name`), and `afdata skill install` / `status`
-/ `uninstall` manage the bundled skill.
+`afdata skill validate` checks a `SKILL.md` against the official metadata
+constraints with a strict YAML parser. Passing a directory also verifies that
+its name matches the front-matter `name`. Use `afdata skill install`, `status`,
+and `uninstall` to manage the bundled skill.
 
 ```bash
 afdata skill validate skills/agent-first-data
 ```
-
-The default feature set also enables `--help --output markdown` and
-`--stdout-file` / `--stderr-file`. Library consumers get every helper by default
-too — including `skill::validate_skill` / `skill::validate_skill_named` and
-tracing — so depend with `default-features = false` when you want only the core
-formatting, redaction, and protocol surface.
 
 ## Docs
 

@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.17.2",
+  "version": "0.17.3",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
@@ -13,7 +13,8 @@
   ],
   "license": "MIT",
   "mutations": [
-    "fix(afdata): resolve npx executable in Windows e2e"
+    "Improve Windows compatibility across Python, TypeScript, Rust smoke, and CLI end-to-end tests, including UTF-8, line-ending, signal, path, permission, and npx executable handling",
+    "Expand the Agent-First Data skill and installation guide with specification-first guidance, cross-language library workflows, Rust integration examples, and deterministic CLI validation commands"
   ],
   "bonds": [],
   "tree": {
