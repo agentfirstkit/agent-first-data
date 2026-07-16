@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,7 @@ class CliCase:
 
 def cli_cases() -> list[CliCase]:
     pytool = os.environ.get("AFDATA_PYTOOL", sys.executable)
+    npx = shutil.which("npx") or "npx"
     return [
         CliCase(
             name="rust",
@@ -57,7 +59,7 @@ def cli_cases() -> list[CliCase]:
         CliCase(
             name="typescript",
             cwd=ROOT / "typescript",
-            command_prefix=("npx", "tsx", "examples/agent_cli.ts"),
+            command_prefix=(npx, "tsx", "examples/agent_cli.ts"),
             success_args=("echo",),
         ),
     ]

@@ -13,7 +13,7 @@
   ],
   "license": "MIT",
   "mutations": [
-    "fix(afdata): guard SIGPIPE setup on Windows"
+    "fix(afdata): resolve npx executable in Windows e2e"
   ],
   "bonds": [],
   "tree": {
