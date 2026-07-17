@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.17.3",
+  "version": "0.18.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,7 +13,17 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Upgrade GitHub Actions to Node 24-based releases and disable setup-go caching for the dependency-free Go module, removing CI deprecation and unresolved cache-path warnings"
+    "Add a document CLI and library for reading and editing config/data files (show/get/value/set/add/remove/unset) over JSON, TOML, YAML, dotenv, and INI, with a format-neutral Value model, dot-path grammar, keyed lists, typed serde, schema, and source-preserving atomic edits guarded against symlink/hardlink attacks",
+    "Rename the format subcommand to render, and make AFDATA YAML output structure-preserving (raw keys and types) across all four languages, with lossy transforms confined to plain",
+    "Result, progress, and log builders build() now return an Event directly instead of a Result since they cannot fail; only the error builder stays fallible and defers empty code/message errors to build()",
+    "Protocol validation now returns a typed ProtocolViolation (stable rule slug, JSON pointer, and message) instead of a plain string, and the stream validator collects every violation instead of failing fast, so agents can distinguish kind_invalid, unexpected_field, error_code_invalid, and stream_duplicate_terminal",
+    "Collapse the eight output functions (output_json/output_yaml/output_plain plus their variants and cli_output) into a single render(value, format, options) entry point across all four languages",
+    "Rename and default the redaction policy to { All (default), TraceOnly, Off }, and rename OutputStyle to PlainStyle to state its plain-only scope",
+    "Document mutation verbs now take a typed Value instead of CLI strings, with string coercion moved to the CLI layer, and the verb vocabulary unified to get/set/unset/add/remove",
+    "Simplify version and help handling: bare --version prints conventional text while --output json|yaml emits a protocol-v1 result event, and --help --output json|yaml wraps the help schema in the same envelope, removing the old configurable and legacy modes",
+    "Surface polish: drop the Event Deref impl (keeping as_value/into_value/From), rename Document::from_str to Document::parse, make \"all\" the only LogFilters wildcard, and make Redactor::redact_in_place public",
+    "Fix the version pre-parser to stop at the first subcommand boundary (like git and cargo), so a subcommand --version value is no longer hijacked as a top-level version request",
+    "Refresh docs for the new document CLI (keyed add/remove is JSON/YAML only) and upgrade GitHub Actions to Node 24 releases"
   ],
   "bonds": [],
   "tree": {
