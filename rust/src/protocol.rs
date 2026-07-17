@@ -1,7 +1,6 @@
 use serde::Serialize;
 use serde_json::Value;
 use std::fmt;
-use std::ops::Deref;
 
 // ═══════════════════════════════════════════
 // Event Type and Build Errors (0.16 API)
@@ -29,14 +28,6 @@ impl Event {
 impl From<Event> for Value {
     fn from(event: Event) -> Self {
         event.0
-    }
-}
-
-impl Deref for Event {
-    type Target = Value;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }
 
@@ -109,8 +100,8 @@ impl ResultBuilder {
         self
     }
 
-    /// Build the event.
-    pub fn build(self) -> Result<Event, BuildError> {
+    /// Build the event. This builder cannot fail.
+    pub fn build(self) -> Event {
         let trace = self
             .trace
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
@@ -118,7 +109,7 @@ impl ResultBuilder {
         obj.insert("kind".to_string(), Value::String("result".to_string()));
         obj.insert("result".to_string(), self.payload);
         obj.insert("trace".to_string(), trace);
-        Ok(Event(Value::Object(obj)))
+        Event(Value::Object(obj))
     }
 }
 
@@ -286,15 +277,21 @@ impl ErrorBuilder {
 
 /// Fluent builder: start building an error event.
 ///
-/// Panics if `code` or `message` is empty (required by protocol contract).
-#[allow(clippy::panic)]
+/// An empty `code` or `message` does not panic here; it seeds a deferred
+/// [`BuildError::EmptyRequiredField`] that is surfaced when [`ErrorBuilder::build`]
+/// is called.
 pub fn json_error(code: &str, message: &str) -> ErrorBuilder {
-    if code.is_empty() {
-        panic!("json_error: code must not be empty");
-    }
-    if message.is_empty() {
-        panic!("json_error: message must not be empty");
-    }
+    let build_error = if code.is_empty() {
+        Some(BuildError::EmptyRequiredField(
+            "error code must not be empty".to_string(),
+        ))
+    } else if message.is_empty() {
+        Some(BuildError::EmptyRequiredField(
+            "error message must not be empty".to_string(),
+        ))
+    } else {
+        None
+    };
     ErrorBuilder {
         code: code.to_string(),
         message: message.to_string(),
@@ -302,7 +299,7 @@ pub fn json_error(code: &str, message: &str) -> ErrorBuilder {
         hint: None,
         fields: serde_json::Map::new(),
         trace: None,
-        build_error: None,
+        build_error,
     }
 }
 
@@ -323,8 +320,8 @@ impl ProgressBuilder {
         self
     }
 
-    /// Build the event.
-    pub fn build(self) -> Result<Event, BuildError> {
+    /// Build the event. This builder cannot fail.
+    pub fn build(self) -> Event {
         let trace = self
             .trace
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
@@ -333,7 +330,7 @@ impl ProgressBuilder {
         obj.insert("progress".to_string(), self.payload);
         obj.insert("trace".to_string(), trace);
 
-        Ok(Event(Value::Object(obj)))
+        Event(Value::Object(obj))
     }
 }
 
@@ -363,8 +360,8 @@ impl LogBuilder {
         self
     }
 
-    /// Build the event.
-    pub fn build(self) -> Result<Event, BuildError> {
+    /// Build the event. This builder cannot fail.
+    pub fn build(self) -> Event {
         let trace = self
             .trace
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
@@ -373,7 +370,7 @@ impl LogBuilder {
         obj.insert("log".to_string(), self.payload);
         obj.insert("trace".to_string(), trace);
 
-        Ok(Event(Value::Object(obj)))
+        Event(Value::Object(obj))
     }
 }
 
@@ -392,35 +389,86 @@ pub fn json_log(payload: Value) -> LogBuilder {
 
 /// Build a CLI error event with optional hint.
 ///
-/// Equivalent to: `json_error("cli_error", message).hint_if_some(hint).build()`
-///
-/// Always returns an event with:
-/// - code: "cli_error"
-/// - retryable: false
-/// - trace: {}
-///
-/// Panics if `message` is empty (required by protocol contract).
-#[allow(clippy::panic, clippy::expect_used)]
+/// Always returns a strict-valid `kind:"error"` event with code `"cli_error"`,
+/// `retryable: false`, and an empty `trace`. An empty `message` is replaced with
+/// a generic placeholder so the returned event stays strict-valid without panicking.
 pub fn build_cli_error(message: &str, hint: Option<&str>) -> Event {
-    if message.is_empty() {
-        panic!("build_cli_error: message must not be empty");
+    let message = if message.is_empty() {
+        "unspecified error"
+    } else {
+        message
+    };
+    match json_error("cli_error", message).hint_if_some(hint).build() {
+        Ok(event) => event,
+        // Unreachable in practice (non-empty code+message, no reserved fields);
+        // construct a minimal valid envelope directly rather than panic.
+        Err(_) => {
+            let mut error_obj = serde_json::Map::new();
+            error_obj.insert("code".to_string(), Value::String("cli_error".to_string()));
+            error_obj.insert(
+                "message".to_string(),
+                Value::String("unspecified error".to_string()),
+            );
+            error_obj.insert("retryable".to_string(), Value::Bool(false));
+            let mut obj = serde_json::Map::new();
+            obj.insert("kind".to_string(), Value::String("error".to_string()));
+            obj.insert("error".to_string(), Value::Object(error_obj));
+            obj.insert("trace".to_string(), Value::Object(serde_json::Map::new()));
+            Event(Value::Object(obj))
+        }
     }
-    json_error("cli_error", message)
-        .hint_if_some(hint)
-        .build()
-        .expect("build_cli_error: builder returned error unexpectedly")
 }
 
 // ═══════════════════════════════════════════
 // Validation
 // ═══════════════════════════════════════════
 
+/// A single protocol-validation violation: a stable machine-readable `rule`
+/// slug, a JSON pointer to the offending location (`""` = the whole event),
+/// and a human-readable `message`.
+///
+/// The `rule` slugs are a stable contract (the CLI maps them 1:1 onto its
+/// `validate` finding `rule_id`s). The full set:
+/// `event_not_object`, `kind_invalid`, `kind_unsupported`, `payload_missing`,
+/// `unexpected_field`, `trace_not_object`, `trace_required`, `error_not_object`,
+/// `error_code_invalid`, `error_message_invalid`, `error_hint_invalid`,
+/// `error_retryable_invalid`, `stream_non_terminal_after_terminal`,
+/// `stream_duplicate_terminal`, `stream_missing_terminal`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProtocolViolation {
+    pub rule: &'static str,
+    pub pointer: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for ProtocolViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ProtocolViolation {}
+
+fn violation(
+    rule: &'static str,
+    pointer: impl Into<String>,
+    message: impl Into<String>,
+) -> ProtocolViolation {
+    ProtocolViolation {
+        rule,
+        pointer: pointer.into(),
+        message: message.into(),
+    }
+}
+
 /// Validate one protocol v1 event envelope.
 ///
 /// `strict` additionally enforces the recommended strict profile: `trace` is
 /// required, and kind-specific payload shapes are checked (see
 /// [`validate_protocol_event_strict_payload`]).
-pub fn validate_protocol_event(event: &Value, strict: bool) -> Result<(), String> {
+///
+/// Returns the first [`ProtocolViolation`] found, or `Ok(())`.
+pub fn validate_protocol_event(event: &Value, strict: bool) -> Result<(), ProtocolViolation> {
     validate_protocol_event_base(event)?;
     if strict {
         validate_protocol_event_strict_payload(event)?;
@@ -428,28 +476,52 @@ pub fn validate_protocol_event(event: &Value, strict: bool) -> Result<(), String
     Ok(())
 }
 
-fn validate_protocol_event_base(event: &Value) -> Result<(), String> {
+fn validate_protocol_event_base(event: &Value) -> Result<(), ProtocolViolation> {
     let Some(obj) = event.as_object() else {
-        return Err("event must be a JSON object".to_string());
+        return Err(violation(
+            "event_not_object",
+            "",
+            "event must be a JSON object",
+        ));
     };
     let Some(kind) = obj.get("kind").and_then(Value::as_str) else {
-        return Err("event.kind must be one of result, error, progress, log".to_string());
+        return Err(violation(
+            "kind_invalid",
+            "/kind",
+            "event.kind must be one of result, error, progress, log",
+        ));
     };
     if !matches!(kind, "result" | "error" | "progress" | "log") {
-        return Err(format!("unsupported event kind {kind:?}"));
+        return Err(violation(
+            "kind_unsupported",
+            "/kind",
+            format!("unsupported event kind {kind:?}"),
+        ));
     }
     if !obj.contains_key(kind) {
-        return Err(format!("event payload field {kind:?} is required"));
+        return Err(violation(
+            "payload_missing",
+            format!("/{kind}"),
+            format!("event payload field {kind:?} is required"),
+        ));
     }
     for key in obj.keys() {
         if key != "kind" && key != kind && key != "trace" {
-            return Err(format!("unexpected top-level field {key:?}"));
+            return Err(violation(
+                "unexpected_field",
+                format!("/{key}"),
+                format!("unexpected top-level field {key:?}"),
+            ));
         }
     }
     if let Some(trace) = obj.get("trace")
         && !trace.is_object()
     {
-        return Err("event.trace must be a JSON object when present".to_string());
+        return Err(violation(
+            "trace_not_object",
+            "/trace",
+            "event.trace must be a JSON object when present",
+        ));
     }
     if kind == "error" {
         validate_error_payload(obj.get("error"))?;
@@ -457,20 +529,40 @@ fn validate_protocol_event_base(event: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_error_payload(error: Option<&Value>) -> Result<(), String> {
+fn validate_error_payload(error: Option<&Value>) -> Result<(), ProtocolViolation> {
     let Some(error) = error.and_then(Value::as_object) else {
-        return Err("event.error must be a JSON object".to_string());
+        return Err(violation(
+            "error_not_object",
+            "/error",
+            "event.error must be a JSON object",
+        ));
     };
     match error.get("code").and_then(Value::as_str) {
         Some(code) if !code.is_empty() => {}
-        _ => return Err("event.error.code must be a non-empty string".to_string()),
+        _ => {
+            return Err(violation(
+                "error_code_invalid",
+                "/error/code",
+                "event.error.code must be a non-empty string",
+            ));
+        }
     }
     match error.get("message").and_then(Value::as_str) {
         Some(message) if !message.is_empty() => {}
-        _ => return Err("event.error.message must be a non-empty string".to_string()),
+        _ => {
+            return Err(violation(
+                "error_message_invalid",
+                "/error/message",
+                "event.error.message must be a non-empty string",
+            ));
+        }
     }
     if error.get("hint").is_some_and(|hint| !hint.is_string()) {
-        return Err("event.error.hint must be a string when present".to_string());
+        return Err(violation(
+            "error_hint_invalid",
+            "/error/hint",
+            "event.error.hint must be a string when present",
+        ));
     }
     Ok(())
 }
@@ -479,40 +571,72 @@ fn validate_error_payload(error: Option<&Value>) -> Result<(), String> {
 /// `(log | progress)* -> exactly one (result | error) -> end`.
 ///
 /// `strict` is forwarded to [`validate_protocol_event`] for every event.
-pub fn validate_protocol_stream(events: &[Value], strict: bool) -> Result<(), String> {
-    let mut terminal_kind: Option<&str> = None;
+///
+/// Unlike [`validate_protocol_event`], this collects every violation across
+/// the whole stream instead of failing fast on the first one; per-event
+/// violation pointers are prefixed with the event's index (`/{idx}{pointer}`).
+pub fn validate_protocol_stream(
+    events: &[Value],
+    strict: bool,
+) -> Result<(), Vec<ProtocolViolation>> {
+    let mut violations = Vec::new();
+    let mut terminal_seen = false;
     for (idx, event) in events.iter().enumerate() {
-        validate_protocol_event(event, strict).map_err(|err| format!("event {idx}: {err}"))?;
-        let Some(kind) = event.get("kind").and_then(Value::as_str) else {
-            return Err(format!("event {idx}: missing kind"));
-        };
-        match kind {
-            "log" | "progress" => {
-                if terminal_kind.is_some() {
-                    return Err(format!("event {idx}: non-terminal event after terminal"));
+        if let Err(v) = validate_protocol_event(event, strict) {
+            violations.push(ProtocolViolation {
+                rule: v.rule,
+                pointer: format!("/{idx}{}", v.pointer),
+                message: v.message,
+            });
+        }
+        match event.get("kind").and_then(Value::as_str) {
+            Some("log") | Some("progress") => {
+                if terminal_seen {
+                    violations.push(violation(
+                        "stream_non_terminal_after_terminal",
+                        format!("/{idx}"),
+                        "non-terminal event after terminal",
+                    ));
                 }
             }
-            "result" | "error" => {
-                if terminal_kind.is_some() {
-                    return Err(format!("event {idx}: duplicate terminal event"));
+            Some("result") | Some("error") => {
+                if terminal_seen {
+                    violations.push(violation(
+                        "stream_duplicate_terminal",
+                        format!("/{idx}"),
+                        "duplicate terminal event",
+                    ));
+                } else {
+                    terminal_seen = true;
                 }
-                terminal_kind = Some(kind);
             }
-            _ => return Err(format!("event {idx}: unsupported event kind {kind:?}")),
+            _ => {} // an invalid/absent kind is already recorded by validate_protocol_event above
         }
     }
-    if terminal_kind.is_none() {
-        return Err("event stream must contain exactly one terminal result or error".to_string());
+    if !terminal_seen {
+        violations.push(violation(
+            "stream_missing_terminal",
+            String::new(),
+            "event stream must contain exactly one terminal result or error",
+        ));
     }
-    Ok(())
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(violations)
+    }
 }
 
 /// Validate one protocol v1 event's payload against the recommended strict profile.
 ///
 /// Assumes the base envelope shape (see [`validate_protocol_event_base`]) already passed.
-fn validate_protocol_event_strict_payload(event: &Value) -> Result<(), String> {
+fn validate_protocol_event_strict_payload(event: &Value) -> Result<(), ProtocolViolation> {
     if !event.get("trace").is_some_and(Value::is_object) {
-        return Err("event.trace is required by the strict profile".to_string());
+        return Err(violation(
+            "trace_required",
+            "/trace",
+            "event.trace is required by the strict profile",
+        ));
     }
     match event.get("kind").and_then(Value::as_str) {
         Some("error") => validate_strict_error_payload(event.get("error")),
@@ -520,17 +644,41 @@ fn validate_protocol_event_strict_payload(event: &Value) -> Result<(), String> {
     }
 }
 
-fn validate_strict_error_payload(error: Option<&Value>) -> Result<(), String> {
+fn validate_strict_error_payload(error: Option<&Value>) -> Result<(), ProtocolViolation> {
     let Some(error) = error.and_then(Value::as_object) else {
-        return Err("event.error must be a JSON object in the strict profile".to_string());
+        return Err(violation(
+            "error_not_object",
+            "/error",
+            "event.error must be a JSON object in the strict profile",
+        ));
     };
-    require_non_empty_string(error, "code", "event.error")?;
-    require_non_empty_string(error, "message", "event.error")?;
+    require_non_empty_string(
+        error,
+        "code",
+        "error_code_invalid",
+        "/error/code",
+        "event.error",
+    )?;
+    require_non_empty_string(
+        error,
+        "message",
+        "error_message_invalid",
+        "/error/message",
+        "event.error",
+    )?;
     if error.get("retryable").and_then(Value::as_bool).is_none() {
-        return Err("event.error.retryable must be a boolean in the strict profile".to_string());
+        return Err(violation(
+            "error_retryable_invalid",
+            "/error/retryable",
+            "event.error.retryable must be a boolean in the strict profile",
+        ));
     }
     if error.contains_key("hint") && !error.get("hint").is_some_and(Value::is_string) {
-        return Err("event.error.hint must be a string when present".to_string());
+        return Err(violation(
+            "error_hint_invalid",
+            "/error/hint",
+            "event.error.hint must be a string when present",
+        ));
     }
     Ok(())
 }
@@ -538,8 +686,10 @@ fn validate_strict_error_payload(error: Option<&Value>) -> Result<(), String> {
 fn require_non_empty_string(
     payload: &serde_json::Map<String, Value>,
     field: &str,
+    rule: &'static str,
+    pointer: &'static str,
     path: &str,
-) -> Result<(), String> {
+) -> Result<(), ProtocolViolation> {
     if payload
         .get(field)
         .and_then(Value::as_str)
@@ -547,8 +697,10 @@ fn require_non_empty_string(
     {
         return Ok(());
     }
-    Err(format!(
-        "{path}.{field} must be a non-empty string in the strict profile"
+    Err(violation(
+        rule,
+        pointer,
+        format!("{path}.{field} must be a non-empty string in the strict profile"),
     ))
 }
 
@@ -631,7 +783,8 @@ impl std::error::Error for EventDecodeError {}
 pub fn decode_protocol_event(text: &str) -> Result<DecodedEvent, EventDecodeError> {
     let value: Value =
         serde_json::from_str(text).map_err(|err| EventDecodeError::InvalidJson(err.to_string()))?;
-    validate_protocol_event(&value, true).map_err(EventDecodeError::InvalidEvent)?;
+    validate_protocol_event(&value, true)
+        .map_err(|v| EventDecodeError::InvalidEvent(v.to_string()))?;
 
     // Strict validation above guarantees the envelope is an object with a
     // recognized `kind`; the `ok_or_else` fallbacks below are defensive only.

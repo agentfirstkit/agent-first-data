@@ -1,8 +1,8 @@
 [package]
 name = "agent-first-data"
-version = "0.17.3"
+version = "0.18.0"
 edition = "2024"
-description = "A naming convention that lets AI agents understand your data without being told what it means."
+description = "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents."
 license = "MIT"
 repository = "https://github.com/agentfirstkit/agent-first-data"
 readme = "README.md"
@@ -30,7 +30,17 @@ path = "rust/examples/afdata_bench.rs"
 # help, stream redirection) and `cargo add agent-first-data` gets every helper
 # including tracing. Consumers that want only the core formatting/redaction/
 # protocol surface opt out with `default-features = false`.
-default = ["cli", "tracing", "cli-help-markdown", "skill-admin", "stream-redirect"]
+default = [
+    "cli",
+    "tracing",
+    "cli-help-markdown",
+    "skill-admin",
+    "stream-redirect",
+    "yaml",
+    "toml",
+    "dotenv",
+    "ini",
+]
 cli = ["dep:clap"]
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
 cli-help = ["dep:clap"]
@@ -38,6 +48,11 @@ cli-help-markdown = ["cli-help", "dep:clap-markdown"]
 skill = ["dep:noyalib"]
 skill-admin = ["skill"]
 stream-redirect = ["dep:libc"]
+yaml = ["dep:noyalib"]
+toml = ["dep:toml", "dep:toml_edit"]
+dotenv = []
+ini = []
+schema = []
 
 [dependencies]
 serde_json = "1"
@@ -49,11 +64,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"], o
 clap = { version = "4", features = ["derive"], optional = true }
 clap-markdown = { version = "0.1.5", optional = true }
 libc = { version = "0.2", optional = true }
-noyalib = { version = "0.0.15", optional = true }
+noyalib = { version = "0.0.15", features = ["lossless-u64"], optional = true }
+toml = { version = "1", optional = true }
+toml_edit = { version = "0.25", optional = true }
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
 clap-markdown = "0.1.5"
+tempfile = "3"
 
 [lints.clippy]
 unwrap_used = "deny"

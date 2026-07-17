@@ -44,10 +44,10 @@ func redactorFromCase(tc map[string]any) Redactor {
 	redactor := Redactor{}
 	if policy, ok := opts["policy"].(string); ok {
 		switch policy {
-		case "RedactionTraceOnly":
+		case "TraceOnly":
 			redactor.Policy = RedactionTraceOnly
-		case "RedactionNone":
-			redactor.Policy = RedactionNone
+		case "Off":
+			redactor.Policy = RedactionOff
 		default:
 			panic(fmt.Sprintf("unknown redaction policy: %s", policy))
 		}
@@ -110,7 +110,7 @@ func TestRedactionOptionsFixtures(t *testing.T) {
 			options := redactorFromCase(tc)
 			outputOptions := OutputOptions{
 				Redaction: options,
-				Style:     OutputStyleReadable,
+				Style:     PlainStyleReadable,
 			}
 			expected := tc["expected"]
 
@@ -121,7 +121,7 @@ func TestRedactionOptionsFixtures(t *testing.T) {
 				t.Errorf("redacted value got %s, want %s", gotJSON, expJSON)
 			}
 
-			jsonLine := OutputJsonWithOptions(tc["input"], outputOptions)
+			jsonLine := Render(tc["input"], OutputFormatJson, outputOptions)
 			var gotOutput any
 			if err := json.Unmarshal([]byte(jsonLine), &gotOutput); err != nil {
 				t.Fatalf("invalid JSON output: %v (%s)", err, jsonLine)
@@ -132,12 +132,12 @@ func TestRedactionOptionsFixtures(t *testing.T) {
 			}
 
 			if expectedYAML, ok := tc["expected_yaml"].(string); ok {
-				if got := OutputYamlWithOptions(tc["input"], outputOptions); got != expectedYAML {
+				if got := Render(tc["input"], OutputFormatYaml, outputOptions); got != expectedYAML {
 					t.Errorf("yaml got %q, want %q", got, expectedYAML)
 				}
 			}
 			if expectedPlain, ok := tc["expected_plain"].(string); ok {
-				if got := OutputPlainWithOptions(tc["input"], outputOptions); got != expectedPlain {
+				if got := Render(tc["input"], OutputFormatPlain, outputOptions); got != expectedPlain {
 					t.Errorf("plain got %q, want %q", got, expectedPlain)
 				}
 			}
@@ -151,7 +151,7 @@ func TestSecurityFixtures(t *testing.T) {
 		name := tc["name"].(string)
 		t.Run("redaction/"+name, func(t *testing.T) {
 			options := redactorFromCase(tc)
-			outputOptions := OutputOptions{Redaction: options, Style: OutputStyleReadable}
+			outputOptions := OutputOptions{Redaction: options, Style: PlainStyleReadable}
 			expected := tc["expected"]
 			got := options.Value(tc["input"])
 			gotJSON, _ := json.Marshal(got)
@@ -160,9 +160,9 @@ func TestSecurityFixtures(t *testing.T) {
 				t.Fatalf("redacted value got %s, want %s", gotJSON, expJSON)
 			}
 			outputs := []string{
-				OutputJsonWithOptions(tc["input"], outputOptions),
-				OutputYamlWithOptions(tc["input"], outputOptions),
-				OutputPlainWithOptions(tc["input"], outputOptions),
+				Render(tc["input"], OutputFormatJson, outputOptions),
+				Render(tc["input"], OutputFormatYaml, outputOptions),
+				Render(tc["input"], OutputFormatPlain, outputOptions),
 			}
 			for _, output := range outputs {
 				for _, needle := range stringSliceFromAny(t, tc["must_contain"]) {
@@ -232,10 +232,10 @@ func TestProtocolFixtures(t *testing.T) {
 			var result map[string]any
 			switch typ {
 			case "result":
-				event, _ := NewJSONResult(args["result"]).Build()
+				event := NewJSONResult(args["result"]).Build()
 				result = event.Value()
 			case "result_trace":
-				event, _ := NewJSONResult(args["result"]).Trace(args["trace"]).Build()
+				event := NewJSONResult(args["result"]).Trace(args["trace"]).Build()
 				result = event.Value()
 			case "error":
 				event, _ := NewJSONError(args["code"].(string), args["message"].(string)).Build()
@@ -272,7 +272,7 @@ func TestProtocolFixtures(t *testing.T) {
 						payload[key] = value
 					}
 				}
-				event, _ := NewJSONProgress(payload).Build()
+				event := NewJSONProgress(payload).Build()
 				result = event.Value()
 			case "log":
 				payload := map[string]any{"level": args["level"], "message": args["message"]}
@@ -281,7 +281,7 @@ func TestProtocolFixtures(t *testing.T) {
 						payload[key] = value
 					}
 				}
-				event, _ := NewJSONLog(payload).Build()
+				event := NewJSONLog(payload).Build()
 				result = event.Value()
 			default:
 				t.Fatalf("unknown type: %s", typ)
@@ -467,7 +467,7 @@ func TestOutputFormatFixtures(t *testing.T) {
 			expectedYAML := tc["expected_yaml"].(string)
 			expectedPlain := tc["expected_plain"].(string)
 
-			jsonLine := OutputJson(input)
+			jsonLine := Render(input, OutputFormatJson, OutputOptions{})
 			var gotJSON any
 			if err := json.Unmarshal([]byte(jsonLine), &gotJSON); err != nil {
 				t.Fatalf("invalid JSON output: %v (%s)", err, jsonLine)
@@ -478,10 +478,10 @@ func TestOutputFormatFixtures(t *testing.T) {
 				t.Errorf("json mismatch: got %s, want %s", gotJSONBytes, expJSONBytes)
 			}
 
-			if got := OutputYaml(input); got != expectedYAML {
+			if got := Render(input, OutputFormatYaml, OutputOptions{}); got != expectedYAML {
 				t.Errorf("yaml mismatch: got %q, want %q", got, expectedYAML)
 			}
-			if got := OutputPlain(input); got != expectedPlain {
+			if got := Render(input, OutputFormatPlain, OutputOptions{}); got != expectedPlain {
 				t.Errorf("plain mismatch: got %q, want %q", got, expectedPlain)
 			}
 		})
@@ -491,16 +491,16 @@ func TestOutputFormatFixtures(t *testing.T) {
 func TestOutputYamlRawKeepsSuffixKeysAndStructure(t *testing.T) {
 	options := OutputOptions{
 		Redaction: Redactor{Policy: RedactionTraceOnly},
-		Style:     OutputStyleRaw,
+		Style:     PlainStyleRaw,
 	}
-	out := OutputYamlWithOptions(map[string]any{
+	out := Render(map[string]any{
 		"code": "result",
 		"rows": []any{map[string]any{
 			"api_key_secret": "sk-live-1",
 			"duration_ms":    int64(42),
 		}},
 		"trace": map[string]any{"request_secret": "top-secret"},
-	}, options)
+	}, OutputFormatYaml, options)
 
 	assertContains(t, out, "rows:\n  -")
 	assertContains(t, out, `api_key_secret: "sk-live-1"`)
@@ -512,34 +512,22 @@ func TestOutputYamlRawKeepsSuffixKeysAndStructure(t *testing.T) {
 func TestOutputPlainRawKeepsSuffixKeysAndRedactsTrace(t *testing.T) {
 	options := OutputOptions{
 		Redaction: Redactor{Policy: RedactionTraceOnly},
-		Style:     OutputStyleRaw,
+		Style:     PlainStyleRaw,
 	}
-	out := OutputPlainWithOptions(map[string]any{
+	out := Render(map[string]any{
 		"duration_ms": int64(42),
 		"trace":       map[string]any{"request_secret": "top-secret"},
-	}, options)
+	}, OutputFormatPlain, options)
 
 	assertContains(t, out, "duration_ms=42")
 	assertContains(t, out, "trace.request_secret=***")
 	assertNotContains(t, out, "duration=42ms")
 }
 
-func TestOutputWithOptionsDefaultsToReadableStyle(t *testing.T) {
-	out := OutputYamlWithOptions(
-		map[string]any{"duration_ms": int64(42)},
-		OutputOptions{
-			Redaction: Redactor{Policy: RedactionNone},
-			Style:     OutputStyleReadable,
-		},
-	)
-	assertContains(t, out, `duration: "42ms"`)
-	assertNotContains(t, out, "duration_ms:")
-}
-
 // --- Output JSON tests ---
 
 func TestOutputJsonSingleLine(t *testing.T) {
-	got := OutputJson(map[string]any{"a": 1, "b": 2})
+	got := Render(map[string]any{"a": 1, "b": 2}, OutputFormatJson, OutputOptions{})
 	if got[0] != '{' || got[len(got)-1] != '}' {
 		t.Errorf("expected JSON object, got %s", got)
 	}
@@ -551,48 +539,48 @@ func TestOutputJsonSingleLine(t *testing.T) {
 }
 
 func TestOutputJsonSecretsRedacted(t *testing.T) {
-	got := OutputJson(map[string]any{"api_key_secret": "sk-123", "name": "alice"})
+	got := Render(map[string]any{"api_key_secret": "sk-123", "name": "alice"}, OutputFormatJson, OutputOptions{})
 	assertContains(t, got, `"api_key_secret":"***"`)
 	assertContains(t, got, `"name":"alice"`)
 }
 
 func TestOutputJsonOriginalKeys(t *testing.T) {
-	got := OutputJson(map[string]any{"latency_ms": 150})
+	got := Render(map[string]any{"latency_ms": 150}, OutputFormatJson, OutputOptions{})
 	assertContains(t, got, `"latency_ms"`)
 }
 
 func TestOutputJsonRawValues(t *testing.T) {
-	got := OutputJson(map[string]any{"latency_ms": 1500})
+	got := Render(map[string]any{"latency_ms": 1500}, OutputFormatJson, OutputOptions{})
 	assertContains(t, got, `"latency_ms":1500`)
 }
 
 func TestOutputJsonNonStringSecretRedacted(t *testing.T) {
-	got := OutputJson(map[string]any{"count_secret": 42})
+	got := Render(map[string]any{"count_secret": 42}, OutputFormatJson, OutputOptions{})
 	assertContains(t, got, `"count_secret":"***"`)
 }
 
 func TestOutputJsonNestedSecretsRedacted(t *testing.T) {
-	got := OutputJson(map[string]any{
+	got := Render(map[string]any{
 		"trace": map[string]any{"api_key_secret": "sk-123", "duration_ms": 150},
-	})
+	}, OutputFormatJson, OutputOptions{})
 	assertContains(t, got, `"api_key_secret":"***"`)
 	assertContains(t, got, `"duration_ms":150`)
 }
 
 func TestOutputJsonWithTraceOnlyRedactsTraceOnly(t *testing.T) {
-	got := OutputJsonWithOptions(map[string]any{
+	got := Render(map[string]any{
 		"code":   "ok",
 		"result": map[string]any{"api_key_secret": "sk-live-123"},
 		"trace":  map[string]any{"request_secret": "top-secret"},
-	}, OutputOptionsForPolicy(RedactionTraceOnly))
+	}, OutputFormatJson, OutputOptionsForPolicy(RedactionTraceOnly))
 	assertContains(t, got, `"request_secret":"***"`)
 	assertContains(t, got, `"api_key_secret":"sk-live-123"`)
 }
 
 func TestOutputJsonWithNoneKeepsSecrets(t *testing.T) {
-	got := OutputJsonWithOptions(map[string]any{
+	got := Render(map[string]any{
 		"api_key_secret": "sk-live-123",
-	}, OutputOptionsForPolicy(RedactionNone))
+	}, OutputFormatJson, OutputOptionsForPolicy(RedactionOff))
 	assertContains(t, got, `"api_key_secret":"sk-live-123"`)
 	assertNotContains(t, got, `"***"`)
 }
@@ -630,7 +618,7 @@ func TestMaxDepthMarkerIsNotSecretRedactionMarker(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		input = map[string]any{"next": input}
 	}
-	out := OutputJson(input)
+	out := Render(input, OutputFormatJson, OutputOptions{})
 	if !strings.Contains(out, `<afdata:max-depth>`) && !strings.Contains(out, `\u003cafdata:max-depth\u003e`) {
 		t.Fatalf("missing max-depth marker: %s", out)
 	}
@@ -640,14 +628,14 @@ func TestMaxDepthMarkerIsNotSecretRedactionMarker(t *testing.T) {
 }
 
 func TestOutputJsonUnsupportedValueDoesNotCollapseToNull(t *testing.T) {
-	got := OutputJson(map[string]any{
+	got := Render(map[string]any{
 		"message": "bad",
 		"code":    "info",
 		"meta": map[string]any{
 			"api_key_secret": "sk-live-123",
 			"bad":            func() {},
 		},
-	})
+	}, OutputFormatJson, OutputOptions{})
 
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
@@ -677,12 +665,12 @@ func TestOutputJsonStructWithUnsupportedFieldDoesNotLeakSecrets(t *testing.T) {
 		Fn           func() `json:"fn"`
 	}
 
-	got := OutputJson(map[string]any{
+	got := Render(map[string]any{
 		"meta": badMeta{
 			APIKeySecret: "sk-live-123",
 			Fn:           func() {},
 		},
-	})
+	}, OutputFormatJson, OutputOptions{})
 
 	assertNotContains(t, got, "sk-live-123")
 
@@ -708,9 +696,9 @@ func TestOutputYamlUnsupportedStructDoesNotLeakSecrets(t *testing.T) {
 		Fn           func() `json:"fn"`
 	}
 
-	got := OutputYaml(map[string]any{
+	got := Render(map[string]any{
 		"meta": badMeta{APIKeySecret: "sk-live-123", Fn: func() {}},
-	})
+	}, OutputFormatYaml, OutputOptions{})
 
 	assertContains(t, got, "<unsupported:")
 	assertNotContains(t, got, "sk-live-123")
@@ -723,9 +711,9 @@ func TestOutputPlainUnsupportedStructDoesNotLeakSecrets(t *testing.T) {
 		Fn           func() `json:"fn"`
 	}
 
-	got := OutputPlain(map[string]any{
+	got := Render(map[string]any{
 		"meta": badMeta{APIKeySecret: "sk-live-123", Fn: func() {}},
-	})
+	}, OutputFormatPlain, OutputOptions{})
 
 	assertContains(t, got, "<unsupported:")
 	assertNotContains(t, got, "sk-live-123")
@@ -733,7 +721,7 @@ func TestOutputPlainUnsupportedStructDoesNotLeakSecrets(t *testing.T) {
 }
 
 func TestOutputPlainUnsupportedStringerDoesNotLeakSecrets(t *testing.T) {
-	got := OutputPlain(map[string]any{"meta": secretStringFunc(func() {})})
+	got := Render(map[string]any{"meta": secretStringFunc(func() {})}, OutputFormatPlain, OutputOptions{})
 
 	assertContains(t, got, "<unsupported:")
 	assertNotContains(t, got, "sk-live-123")
@@ -743,7 +731,7 @@ func TestOutputJsonCircularReferenceMapDoesNotCrash(t *testing.T) {
 	v := map[string]any{}
 	v["self"] = v
 
-	got := OutputJson(v)
+	got := Render(v, OutputFormatJson, OutputOptions{})
 
 	var parsed map[string]any
 	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
@@ -760,7 +748,7 @@ func TestOutputJsonCircularReferenceStillRedactsSecrets(t *testing.T) {
 	}
 	v["self"] = v
 
-	got := OutputJson(v)
+	got := Render(v, OutputFormatJson, OutputOptions{})
 	assertNotContains(t, got, "sk-live-123")
 
 	var parsed map[string]any
@@ -778,293 +766,212 @@ func TestOutputJsonCircularReferenceStillRedactsSecrets(t *testing.T) {
 // --- Output YAML tests ---
 
 func TestOutputYamlStartsWithSeparator(t *testing.T) {
-	got := OutputYaml(map[string]any{"a": 1})
+	got := Render(map[string]any{"a": 1}, OutputFormatYaml, OutputOptions{})
 	if len(got) < 3 || got[:3] != "---" {
 		t.Errorf("expected YAML to start with ---, got %s", got)
 	}
 }
 
-func TestOutputYamlStripMs(t *testing.T) {
-	got := OutputYaml(map[string]any{"latency_ms": 150})
-	assertContains(t, got, "latency:")
-	assertNotContains(t, got, "latency_ms:")
+// YAML never strips AFDATA suffixes or renames keys: unlike `plain`, it is
+// structure-preserving, the same semantics as `json`.
+
+func TestOutputYamlKeepsSuffixKeysUnstripped(t *testing.T) {
+	got := Render(map[string]any{
+		"latency_ms":         150,
+		"ttl_s":              3600,
+		"pause_ns":           450000,
+		"query_us":           830,
+		"file_bytes":         5242880,
+		"cpu_percent":        85,
+		"balance_msats":      50000,
+		"withdrawn_sats":     1234,
+		"reserve_btc":        0.5,
+		"price_usd_cents":    999,
+		"price_eur_cents":    850,
+		"price_jpy":          1500,
+		"deposit_usdt_cents": 1000,
+		"timeout_minutes":    30,
+		"validity_hours":     24,
+		"cert_days":          365,
+		"created_epoch_ms":   float64(1738886400000),
+		"cached_epoch_s":     float64(1707868800),
+		"expires_rfc3339":    "2026-02-14T10:30:00Z",
+		"api_key_secret":     "sk-123",
+		"user_name":          "alice",
+	}, OutputFormatYaml, OutputOptions{})
+	for _, key := range []string{
+		"latency_ms", "ttl_s", "pause_ns", "query_us", "file_bytes",
+		"cpu_percent", "balance_msats", "withdrawn_sats", "reserve_btc",
+		"price_usd_cents", "price_eur_cents", "price_jpy", "deposit_usdt_cents",
+		"timeout_minutes", "validity_hours", "cert_days", "created_epoch_ms",
+		"cached_epoch_s", "expires_rfc3339", "api_key_secret", "user_name",
+	} {
+		if !strings.Contains(got, key+":") {
+			t.Errorf("missing key %s: %s", key, got)
+		}
+	}
+	// The secret value is still redacted; only its key is left alone.
+	assertContains(t, got, `api_key_secret: "***"`)
+	assertNotContains(t, got, "sk-123")
 }
 
-func TestOutputYamlStripS(t *testing.T) {
-	got := OutputYaml(map[string]any{"ttl_s": 3600})
-	assertContains(t, got, "ttl:")
-	assertNotContains(t, got, "ttl_s:")
+func TestOutputYamlNoSuffixKeysPassThrough(t *testing.T) {
+	got := Render(map[string]any{"user_id": 123, "config_path": "a.yml"}, OutputFormatYaml, OutputOptions{})
+	assertContains(t, got, "user_id: 123")
+	assertContains(t, got, `config_path: "a.yml"`)
 }
 
-func TestOutputYamlStripNs(t *testing.T) {
-	got := OutputYaml(map[string]any{"pause_ns": 450000})
-	assertContains(t, got, "pause:")
-	assertNotContains(t, got, "pause_ns:")
+func TestOutputYamlUppercaseSecretKeyUnstripped(t *testing.T) {
+	got := Render(map[string]any{"API_KEY_SECRET": "sk-123"}, OutputFormatYaml, OutputOptions{})
+	assertContains(t, got, `API_KEY_SECRET: "***"`)
+	assertNotContains(t, got, "sk-123")
 }
 
-func TestOutputYamlStripUs(t *testing.T) {
-	got := OutputYaml(map[string]any{"query_us": 830})
-	assertContains(t, got, "query:")
-	assertNotContains(t, got, "query_us:")
-}
-
-func TestOutputYamlStripBytes(t *testing.T) {
-	got := OutputYaml(map[string]any{"file_bytes": 5242880})
-	assertContains(t, got, "file:")
-	assertNotContains(t, got, "file_bytes:")
-}
-
-func TestOutputYamlStripEpochMs(t *testing.T) {
-	got := OutputYaml(map[string]any{"created_epoch_ms": float64(1738886400000)})
-	assertContains(t, got, "created:")
-	assertNotContains(t, got, "created_epoch_ms:")
-}
-
-func TestOutputYamlStripEpochS(t *testing.T) {
-	got := OutputYaml(map[string]any{"cached_epoch_s": float64(1707868800)})
-	assertContains(t, got, "cached:")
-	assertNotContains(t, got, "cached_epoch_s:")
-}
-
-func TestOutputYamlStripRfc3339(t *testing.T) {
-	got := OutputYaml(map[string]any{"expires_rfc3339": "2026-02-14T10:30:00Z"})
-	assertContains(t, got, "expires:")
-	assertNotContains(t, got, "expires_rfc3339:")
-}
-
-func TestOutputYamlStripSecret(t *testing.T) {
-	got := OutputYaml(map[string]any{"api_key_secret": "sk-123"})
-	assertContains(t, got, "api_key:")
-	assertNotContains(t, got, "api_key_secret:")
-}
-
-func TestOutputYamlStripPercent(t *testing.T) {
-	got := OutputYaml(map[string]any{"cpu_percent": 85})
-	assertContains(t, got, "cpu:")
-	assertNotContains(t, got, "cpu_percent:")
-}
-
-func TestOutputYamlStripMsats(t *testing.T) {
-	got := OutputYaml(map[string]any{"balance_msats": 50000})
-	assertContains(t, got, "balance:")
-	assertNotContains(t, got, "balance_msats:")
-}
-
-func TestOutputYamlStripSats(t *testing.T) {
-	got := OutputYaml(map[string]any{"withdrawn_sats": 1234})
-	assertContains(t, got, "withdrawn:")
-	assertNotContains(t, got, "withdrawn_sats:")
-}
-
-func TestOutputYamlStripBtc(t *testing.T) {
-	got := OutputYaml(map[string]any{"reserve_btc": 0.5})
-	assertContains(t, got, "reserve_btc:")
-}
-
-func TestOutputYamlStripUsdCents(t *testing.T) {
-	got := OutputYaml(map[string]any{"price_usd_cents": 999})
-	assertContains(t, got, "price:")
-	assertNotContains(t, got, "price_usd_cents:")
-}
-
-func TestOutputYamlStripEurCents(t *testing.T) {
-	got := OutputYaml(map[string]any{"price_eur_cents": 850})
-	assertContains(t, got, "price:")
-	assertNotContains(t, got, "price_eur_cents:")
-}
-
-func TestOutputYamlStripJpy(t *testing.T) {
-	got := OutputYaml(map[string]any{"price_jpy": 1500})
-	assertContains(t, got, "price:")
-	assertNotContains(t, got, "price_jpy:")
-}
-
-func TestOutputYamlStripGenericCents(t *testing.T) {
-	got := OutputYaml(map[string]any{"deposit_usdt_cents": 1000})
-	assertContains(t, got, "deposit:")
-	assertNotContains(t, got, "deposit_usdt_cents:")
-}
-
-func TestOutputYamlStripMinutes(t *testing.T) {
-	got := OutputYaml(map[string]any{"timeout_minutes": 30})
-	assertContains(t, got, "timeout:")
-	assertNotContains(t, got, "timeout_minutes:")
-}
-
-func TestOutputYamlStripHours(t *testing.T) {
-	got := OutputYaml(map[string]any{"validity_hours": 24})
-	assertContains(t, got, "validity:")
-	assertNotContains(t, got, "validity_hours:")
-}
-
-func TestOutputYamlStripDays(t *testing.T) {
-	got := OutputYaml(map[string]any{"cert_days": 365})
-	assertContains(t, got, "cert:")
-	assertNotContains(t, got, "cert_days:")
-}
-
-func TestOutputYamlNoStripNoSuffix(t *testing.T) {
-	got := OutputYaml(map[string]any{"user_name": "alice"})
-	assertContains(t, got, "user_name:")
-}
-
-func TestOutputYamlStripUppercaseSecret(t *testing.T) {
-	got := OutputYaml(map[string]any{"API_KEY_SECRET": "sk-123"})
-	assertContains(t, got, "API_KEY:")
-	assertNotContains(t, got, "API_KEY_SECRET:")
-}
-
-func TestOutputYamlStripUppercaseS(t *testing.T) {
-	got := OutputYaml(map[string]any{"CACHE_TTL_S": 3600})
-	assertContains(t, got, "CACHE_TTL:")
-	assertNotContains(t, got, "CACHE_TTL_S:")
+func TestOutputYamlUppercaseSuffixKeyUnstripped(t *testing.T) {
+	got := Render(map[string]any{"CACHE_TTL_S": 3600}, OutputFormatYaml, OutputOptions{})
+	assertContains(t, got, "CACHE_TTL_S: 3600")
 }
 
 // --- YAML value formatting tests ---
+// Every one of these values would be reformatted into a human string by
+// `plain`; YAML must keep them as plain JSON-equivalent numbers/strings.
 
-func TestOutputYamlFmtMsSmall(t *testing.T) {
-	got := OutputYaml(map[string]any{"latency_ms": 150})
-	assertContains(t, got, `"150ms"`)
+func TestOutputYamlNumbersStayRawNotFormatted(t *testing.T) {
+	got := Render(map[string]any{
+		"latency_ms":         1280,
+		"ttl_s":              3600,
+		"pause_ns":           450000,
+		"query_us":           830,
+		"file_bytes":         5242880,
+		"cpu_percent":        85,
+		"success_percent":    95.5,
+		"balance_msats":      50000000,
+		"withdrawn_sats":     1234,
+		"price_usd_cents":    9999,
+		"price_eur_cents":    850,
+		"price_jpy":          1500,
+		"deposit_usdt_cents": 1000,
+		"timeout_minutes":    30,
+		"validity_hours":     24,
+		"cert_days":          365,
+	}, OutputFormatYaml, OutputOptions{})
+	assertContains(t, got, "latency_ms: 1280")
+	assertContains(t, got, "ttl_s: 3600")
+	assertContains(t, got, "pause_ns: 450000")
+	assertContains(t, got, "query_us: 830")
+	assertContains(t, got, "file_bytes: 5242880")
+	assertContains(t, got, "cpu_percent: 85")
+	assertContains(t, got, "success_percent: 95.5")
+	assertContains(t, got, "balance_msats: 50000000")
+	assertContains(t, got, "withdrawn_sats: 1234")
+	assertContains(t, got, "price_usd_cents: 9999")
+	assertContains(t, got, "price_eur_cents: 850")
+	assertContains(t, got, "price_jpy: 1500")
+	assertContains(t, got, "deposit_usdt_cents: 1000")
+	assertContains(t, got, "timeout_minutes: 30")
+	assertContains(t, got, "validity_hours: 24")
+	assertContains(t, got, "cert_days: 365")
+	for _, lossy := range []string{
+		"1.28s", "3600s", "450000ns", "830\u03bcs", "5.0MiB", "85%", "95.5%",
+		"50000000msats", "1234sats", "$99.99", "\u20ac8.50", "\u00a51,500",
+		"10.00 USDT", "30 minutes", "24 hours", "365 days",
+	} {
+		assertNotContains(t, got, lossy)
+	}
 }
 
-func TestOutputYamlFmtMsToSeconds(t *testing.T) {
-	got := OutputYaml(map[string]any{"latency_ms": 1280})
-	assertContains(t, got, `"1.28s"`)
-}
-
-func TestOutputYamlFmtMs5000(t *testing.T) {
-	got := OutputYaml(map[string]any{"latency_ms": 5000})
-	assertContains(t, got, `"5.0s"`)
-}
-
-func TestOutputYamlFmtS(t *testing.T) {
-	got := OutputYaml(map[string]any{"ttl_s": 3600})
-	assertContains(t, got, `"3600s"`)
-}
-
-func TestOutputYamlFmtNs(t *testing.T) {
-	got := OutputYaml(map[string]any{"pause_ns": 450000})
-	assertContains(t, got, `"450000ns"`)
-}
-
-func TestOutputYamlFmtUs(t *testing.T) {
-	got := OutputYaml(map[string]any{"query_us": 830})
-	assertContains(t, got, "830\u03bcs")
-}
-
-func TestOutputYamlFmtMinutes(t *testing.T) {
-	got := OutputYaml(map[string]any{"timeout_minutes": 30})
-	assertContains(t, got, "30 minutes")
-}
-
-func TestOutputYamlFmtHours(t *testing.T) {
-	got := OutputYaml(map[string]any{"validity_hours": 24})
-	assertContains(t, got, "24 hours")
-}
-
-func TestOutputYamlFmtDays(t *testing.T) {
-	got := OutputYaml(map[string]any{"cert_days": 365})
-	assertContains(t, got, "365 days")
-}
-
-func TestOutputYamlFmtEpochMs(t *testing.T) {
-	got := OutputYaml(map[string]any{"created_epoch_ms": float64(1738886400000)})
-	assertContains(t, got, "2025-02-07T00:00:00.000Z")
-}
-
-func TestOutputYamlFmtEpochS(t *testing.T) {
-	got := OutputYaml(map[string]any{"cached_epoch_s": float64(1707868800)})
-	assertContains(t, got, "2024-02-14T00:00:00.000Z")
-}
-
-func TestOutputYamlFmtBytes(t *testing.T) {
-	got := OutputYaml(map[string]any{"file_bytes": 5242880})
-	assertContains(t, got, "5.0MiB")
-}
-
-func TestOutputYamlFmtBytesKb(t *testing.T) {
-	got := OutputYaml(map[string]any{"file_bytes": 456789})
-	assertContains(t, got, "446.1KiB")
-}
-
-func TestOutputYamlFmtUsdCents(t *testing.T) {
-	got := OutputYaml(map[string]any{"price_usd_cents": 9999})
-	assertContains(t, got, "$99.99")
-}
-
-func TestOutputYamlFmtEurCents(t *testing.T) {
-	got := OutputYaml(map[string]any{"price_eur_cents": 850})
-	assertContains(t, got, "\u20ac8.50")
-}
-
-func TestOutputYamlFmtJpy(t *testing.T) {
-	got := OutputYaml(map[string]any{"price_jpy": 1500})
-	assertContains(t, got, "\u00a51,500")
-}
-
-func TestOutputYamlFmtGenericCents(t *testing.T) {
-	got := OutputYaml(map[string]any{"deposit_usdt_cents": 1000})
-	assertContains(t, got, "10.00 USDT")
-}
-
-func TestOutputYamlFmtMsats(t *testing.T) {
-	got := OutputYaml(map[string]any{"balance_msats": 50000})
-	assertContains(t, got, "50000msats")
-}
-
-func TestOutputYamlFmtSats(t *testing.T) {
-	got := OutputYaml(map[string]any{"withdrawn_sats": 1234})
-	assertContains(t, got, "1234sats")
+func TestOutputYamlEpochAndRfc3339StayAsWrittenNotReformatted(t *testing.T) {
+	got := Render(map[string]any{
+		"created_epoch_ms": float64(1738886400000),
+		"cached_epoch_s":   float64(1707868800),
+		"expires_rfc3339":  "2026-02-14T10:30:00Z",
+	}, OutputFormatYaml, OutputOptions{})
+	assertContains(t, got, "created_epoch_ms: 1738886400000")
+	assertContains(t, got, "cached_epoch_s: 1707868800")
+	assertContains(t, got, `expires_rfc3339: "2026-02-14T10:30:00Z"`)
+	assertNotContains(t, got, "2025-02-07T00:00:00.000Z")
+	assertNotContains(t, got, "2024-02-14T00:00:00.000Z")
 }
 
 func TestOutputYamlFmtBtc(t *testing.T) {
-	got := OutputYaml(map[string]any{"reserve_btc": 0.5})
+	got := Render(map[string]any{"reserve_btc": 0.5}, OutputFormatYaml, OutputOptions{})
 	assertContains(t, got, "reserve_btc: 0.5")
 }
 
-func TestOutputYamlFmtPercentInt(t *testing.T) {
-	got := OutputYaml(map[string]any{"cpu_percent": 85})
-	assertContains(t, got, "85%")
-}
-
-func TestOutputYamlFmtPercentFloat(t *testing.T) {
-	got := OutputYaml(map[string]any{"success_percent": 95.5})
-	assertContains(t, got, "95.5%")
-}
-
 func TestOutputYamlFmtSecret(t *testing.T) {
-	got := OutputYaml(map[string]any{"api_key_secret": "sk-123"})
+	got := Render(map[string]any{"api_key_secret": "sk-123"}, OutputFormatYaml, OutputOptions{})
 	assertContains(t, got, `"***"`)
 	assertNotContains(t, got, "sk-123")
 }
 
 func TestOutputYamlFmtRfc3339Passthrough(t *testing.T) {
-	got := OutputYaml(map[string]any{"expires_rfc3339": "2026-02-14T10:30:00Z"})
+	got := Render(map[string]any{"expires_rfc3339": "2026-02-14T10:30:00Z"}, OutputFormatYaml, OutputOptions{})
 	assertContains(t, got, "2026-02-14T10:30:00Z")
 }
 
 func TestOutputYamlStringsQuoted(t *testing.T) {
-	got := OutputYaml(map[string]any{"name": "alice"})
+	got := Render(map[string]any{"name": "alice"}, OutputFormatYaml, OutputOptions{})
 	assertContains(t, got, `"alice"`)
 }
 
 func TestOutputYamlNumbersUnquoted(t *testing.T) {
-	got := OutputYaml(map[string]any{"count": 42})
+	got := Render(map[string]any{"count": 42}, OutputFormatYaml, OutputOptions{})
 	assertContains(t, got, "count: 42")
 }
 
-func TestOutputYamlNestedKeyStripping(t *testing.T) {
-	got := OutputYaml(map[string]any{
+func TestOutputYamlNestedKeysNotStripped(t *testing.T) {
+	got := Render(map[string]any{
 		"trace": map[string]any{"duration_ms": 1500, "source": "db"},
+	}, OutputFormatYaml, OutputOptions{})
+	assertContains(t, got, "trace:")
+	assertContains(t, got, "  duration_ms: 1500")
+	assertContains(t, got, `  source: "db"`)
+}
+
+func TestOutputYamlIgnoresPlainStyle(t *testing.T) {
+	// Unlike `plain`, YAML renders identically regardless of PlainStyle: it
+	// is always structure-preserving.
+	value := map[string]any{"duration_ms": 42, "name": "alice"}
+	readable := Render(value, OutputFormatYaml, OutputOptions{
+		Redaction: Redactor{Policy: RedactionOff},
+		Style:     PlainStyleReadable,
 	})
-	assertContains(t, got, "duration:")
-	assertContains(t, got, `"1.5s"`)
+	raw := Render(value, OutputFormatYaml, OutputOptions{
+		Redaction: Redactor{Policy: RedactionOff},
+		Style:     PlainStyleRaw,
+	})
+	if readable != raw {
+		t.Errorf("readable and raw yaml differ:\nreadable: %q\nraw: %q", readable, raw)
+	}
+	assertContains(t, readable, "duration_ms: 42")
+	assertNotContains(t, readable, "42ms")
+}
+
+func TestOutputYamlStreamOfRecordsHasStableSeparatorFraming(t *testing.T) {
+	// Simulates how a CLI streams multiple AFDATA records: each record is
+	// rendered independently and concatenated. `---` framing must stay
+	// stable and each record's raw keys must stay intact and in order.
+	first := Render(map[string]any{"kind": "log", "duration_ms": 1}, OutputFormatYaml, OutputOptions{})
+	second := Render(map[string]any{"kind": "result", "duration_ms": 2}, OutputFormatYaml, OutputOptions{})
+	stream := first + "\n" + second + "\n"
+
+	if got := strings.Count(stream, "---"); got != 2 {
+		t.Fatalf("expected 2 document separators, got %d: %s", got, stream)
+	}
+	firstIdx := strings.Index(stream, "duration_ms: 1")
+	secondIdx := strings.Index(stream, "duration_ms: 2")
+	if firstIdx == -1 || secondIdx == -1 {
+		t.Fatalf("expected both records present: %s", stream)
+	}
+	if firstIdx >= secondIdx {
+		t.Fatalf("records out of order: %s", stream)
+	}
 }
 
 // --- Collision tests ---
 
 func TestOutputYamlCollisionKeepsOriginals(t *testing.T) {
-	got := OutputYaml(map[string]any{"response_ms": 150, "response_bytes": 1024})
+	got := Render(map[string]any{"response_ms": 150, "response_bytes": 1024}, OutputFormatYaml, OutputOptions{})
 	assertContains(t, got, "response_ms:")
 	assertContains(t, got, "response_bytes:")
 	// Values should be raw, not formatted
@@ -1073,7 +980,7 @@ func TestOutputYamlCollisionKeepsOriginals(t *testing.T) {
 }
 
 func TestOutputPlainCollisionKeepsOriginals(t *testing.T) {
-	got := OutputPlain(map[string]any{"response_ms": 150, "response_bytes": 1024})
+	got := Render(map[string]any{"response_ms": 150, "response_bytes": 1024}, OutputFormatPlain, OutputOptions{})
 	assertContains(t, got, "response_ms=150")
 	assertContains(t, got, "response_bytes=1024")
 }
@@ -1081,7 +988,7 @@ func TestOutputPlainCollisionKeepsOriginals(t *testing.T) {
 // --- Output Plain tests ---
 
 func TestOutputPlainSingleLine(t *testing.T) {
-	got := OutputPlain(map[string]any{"a": 1, "b": 2})
+	got := Render(map[string]any{"a": 1, "b": 2}, OutputFormatPlain, OutputOptions{})
 	for _, c := range got {
 		if c == '\n' {
 			t.Error("OutputPlain should be single-line")
@@ -1090,62 +997,62 @@ func TestOutputPlainSingleLine(t *testing.T) {
 }
 
 func TestOutputPlainKeyValuePair(t *testing.T) {
-	got := OutputPlain(map[string]any{"name": "alice"})
+	got := Render(map[string]any{"name": "alice"}, OutputFormatPlain, OutputOptions{})
 	assertEqual(t, got, "name=alice")
 }
 
 func TestOutputPlainSortedKeys(t *testing.T) {
-	got := OutputPlain(map[string]any{"z": 1, "a": 2, "m": 3})
+	got := Render(map[string]any{"z": 1, "a": 2, "m": 3}, OutputFormatPlain, OutputOptions{})
 	assertEqual(t, got, "a=2 m=3 z=1")
 }
 
 func TestOutputPlainDotNotation(t *testing.T) {
-	got := OutputPlain(map[string]any{
+	got := Render(map[string]any{
 		"trace": map[string]any{"source": "db"},
-	})
+	}, OutputFormatPlain, OutputOptions{})
 	assertContains(t, got, "trace.source=db")
 }
 
 func TestOutputPlainQuotedSpaces(t *testing.T) {
-	got := OutputPlain(map[string]any{"message": "hello world"})
+	got := Render(map[string]any{"message": "hello world"}, OutputFormatPlain, OutputOptions{})
 	assertContains(t, got, `message="hello world"`)
 }
 
 func TestOutputPlainArraysCommaJoined(t *testing.T) {
-	got := OutputPlain(map[string]any{"fields": []any{"email", "age"}})
+	got := Render(map[string]any{"fields": []any{"email", "age"}}, OutputFormatPlain, OutputOptions{})
 	assertContains(t, got, "fields=email,age")
 }
 
 func TestOutputPlainNullEmpty(t *testing.T) {
-	got := OutputPlain(map[string]any{"value": nil})
+	got := Render(map[string]any{"value": nil}, OutputFormatPlain, OutputOptions{})
 	assertContains(t, got, "value=")
 }
 
 func TestOutputPlainKeyStrippingAndFormatting(t *testing.T) {
-	got := OutputPlain(map[string]any{"latency_ms": 1500})
+	got := Render(map[string]any{"latency_ms": 1500}, OutputFormatPlain, OutputOptions{})
 	assertContains(t, got, "latency=1.5s")
 }
 
 func TestOutputPlainSecretsRedacted(t *testing.T) {
-	got := OutputPlain(map[string]any{"api_key_secret": "sk-123", "name": "alice"})
+	got := Render(map[string]any{"api_key_secret": "sk-123", "name": "alice"}, OutputFormatPlain, OutputOptions{})
 	assertContains(t, got, "api_key=***")
 	assertNotContains(t, got, "sk-123")
 }
 
 func TestOutputPlainEmptyObject(t *testing.T) {
-	got := OutputPlain(map[string]any{})
+	got := Render(map[string]any{}, OutputFormatPlain, OutputOptions{})
 	assertEqual(t, got, "")
 }
 
 func TestOutputPlainBoolUnquoted(t *testing.T) {
-	got := OutputPlain(map[string]any{"enabled": true})
+	got := Render(map[string]any{"enabled": true}, OutputFormatPlain, OutputOptions{})
 	assertContains(t, got, "enabled=true")
 }
 
 func TestOutputPlainNestedSecrets(t *testing.T) {
-	got := OutputPlain(map[string]any{
+	got := Render(map[string]any{
 		"trace": map[string]any{"api_key_secret": "sk-123", "duration_ms": 150},
-	})
+	}, OutputFormatPlain, OutputOptions{})
 	assertContains(t, got, "trace.api_key=***")
 	assertNotContains(t, got, "sk-123")
 }
@@ -1183,7 +1090,7 @@ func TestNormalizePreservesLargeIntegers(t *testing.T) {
 		SizeBytes      uint64 `json:"size_bytes"`
 	}
 	in := event{CreatedEpochNs: 1707868800123456789, SizeBytes: 18446744073709551615}
-	got := OutputJson(in)
+	got := Render(in, OutputFormatJson, OutputOptions{})
 	want := `{"created_epoch_ns":1707868800123456789,"size_bytes":18446744073709551615}`
 	assertEqual(t, got, want)
 }

@@ -5,7 +5,7 @@
   "version": "0.17.3",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
-  "synopsis": "A naming convention that lets AI agents understand your data without being told what it means.",
+  "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
   "intent": [
     "Encode all semantic information in the field name itself so agents parse structured data without external schemas, documentation, or type systems — _ms/_s/_epoch_ms for time, _msats/_sats/_usd_cents for currency, _bytes for size, _secret for auto-redaction",
     "Define a JSONL output protocol where every line carries a code field (startup for config state, tool-defined for status/progress, ok/error for results) plus a trace object for execution context (duration, token counts, cost, data source) — same structure whether the transport is CLI stdout, HTTP response body, MCP tool result, or SSE stream",
@@ -20,13 +20,7 @@
     "algorithm": "blob_tree_blake3_nfc",
     "exclude_names": [
       ".git",
-      ".cmn",
-      "node_modules",
-      "target",
-      "dist",
-      "build",
-      "__pycache__",
-      ".venv"
+      ".cmn"
     ],
     "follow_rules": [
       ".gitignore"

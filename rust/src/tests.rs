@@ -24,8 +24,8 @@ fn redactor_from_case(case: &Value) -> Redactor {
         .and_then(|obj| obj.get("policy"))
         .and_then(Value::as_str)
         .map(|policy| match policy {
-            "RedactionTraceOnly" => RedactionPolicy::RedactionTraceOnly,
-            "RedactionNone" => RedactionPolicy::RedactionNone,
+            "TraceOnly" => RedactionPolicy::TraceOnly,
+            "Off" => RedactionPolicy::Off,
             other => panic!("unknown redaction policy: {other}"),
         });
     let secret_names = options
@@ -94,7 +94,7 @@ fn test_redaction_options_fixtures() {
         let redactor = redactor_from_case(case);
         let output_options = OutputOptions {
             redaction: redactor.clone(),
-            style: OutputStyle::Readable,
+            style: PlainStyle::Readable,
         };
         let expected = &case["expected"];
 
@@ -105,21 +105,21 @@ fn test_redaction_options_fixtures() {
         output_options.redaction.redact_in_place(&mut input);
         assert_eq!(&input, expected, "[redaction_options/{name}] in-place");
 
-        let json_out = output_json_with_options(&case["input"], &output_options);
+        let json_out = render(&case["input"], OutputFormat::Json, &output_options);
         let parsed_json: Value = serde_json::from_str(&json_out)
             .unwrap_or_else(|e| panic!("[redaction_options/{name}] invalid json output: {e}"));
         assert_eq!(parsed_json, *expected, "[redaction_options/{name}] json");
 
         if let Some(expected_yaml) = case.get("expected_yaml").and_then(Value::as_str) {
             assert_eq!(
-                output_yaml_with_options(&case["input"], &output_options),
+                render(&case["input"], OutputFormat::Yaml, &output_options),
                 expected_yaml,
                 "[redaction_options/{name}] yaml"
             );
         }
         if let Some(expected_plain) = case.get("expected_plain").and_then(Value::as_str) {
             assert_eq!(
-                output_plain_with_options(&case["input"], &output_options),
+                render(&case["input"], OutputFormat::Plain, &output_options),
                 expected_plain,
                 "[redaction_options/{name}] plain"
             );
@@ -138,7 +138,7 @@ fn test_security_fixtures() {
         let redactor = redactor_from_case(case);
         let output_options = OutputOptions {
             redaction: redactor.clone(),
-            style: OutputStyle::Readable,
+            style: PlainStyle::Readable,
         };
         let expected = &case["expected"];
         assert_eq!(
@@ -147,11 +147,11 @@ fn test_security_fixtures() {
             "[security/{name}] redacted value"
         );
 
-        let outputs = [
-            output_json_with_options(&case["input"], &output_options),
-            output_yaml_with_options(&case["input"], &output_options),
-            output_plain_with_options(&case["input"], &output_options),
+        let mut outputs = vec![
+            render(&case["input"], OutputFormat::Json, &output_options),
+            render(&case["input"], OutputFormat::Plain, &output_options),
         ];
+        outputs.push(render(&case["input"], OutputFormat::Yaml, &output_options));
         for output in outputs {
             for needle in case["must_contain"]
                 .as_array()
@@ -254,23 +254,23 @@ fn assert_no_property_secret(output: &str, context: &str) {
 fn generated_outputs_are_deterministic_and_do_not_reintroduce_secrets() {
     let options = OutputOptions {
         redaction: Redactor::new().secret_names(vec!["legacy_token".to_string()]),
-        style: OutputStyle::Readable,
+        style: PlainStyle::Readable,
     };
 
     for seed in 0..64 {
         let input = generated_property_value(seed);
-        let json_a = output_json_with_options(&input, &options);
-        let json_b = output_json_with_options(&input, &options);
+        let json_a = render(&input, OutputFormat::Json, &options);
+        let json_b = render(&input, OutputFormat::Json, &options);
         assert_eq!(json_a, json_b, "[seed {seed}] json output changed");
         assert_no_property_secret(&json_a, &format!("[seed {seed}] json"));
 
-        let yaml_a = output_yaml_with_options(&input, &options);
-        let yaml_b = output_yaml_with_options(&input, &options);
+        let yaml_a = render(&input, OutputFormat::Yaml, &options);
+        let yaml_b = render(&input, OutputFormat::Yaml, &options);
         assert_eq!(yaml_a, yaml_b, "[seed {seed}] yaml output changed");
         assert_no_property_secret(&yaml_a, &format!("[seed {seed}] yaml"));
 
-        let plain_a = output_plain_with_options(&input, &options);
-        let plain_b = output_plain_with_options(&input, &options);
+        let plain_a = render(&input, OutputFormat::Plain, &options);
+        let plain_b = render(&input, OutputFormat::Plain, &options);
         assert_eq!(plain_a, plain_b, "[seed {seed}] plain output changed");
         assert_no_property_secret(&plain_a, &format!("[seed {seed}] plain"));
     }
@@ -325,12 +325,10 @@ fn test_protocol_fixtures() {
         let result = match typ {
             "result" => crate::protocol::json_result(args["result"].clone())
                 .build()
-                .expect("builder failed")
                 .into_value(),
             "result_trace" => crate::protocol::json_result(args["result"].clone())
                 .trace(args["trace"].clone())
                 .build()
-                .expect("builder failed")
                 .into_value(),
             "error" => crate::protocol::json_error(
                 args["code"].as_str().expect("missing code"),
@@ -381,7 +379,6 @@ fn test_protocol_fixtures() {
                 }
                 crate::protocol::json_progress(Value::Object(payload))
                     .build()
-                    .expect("builder failed")
                     .into_value()
             }
             "log" => {
@@ -395,7 +392,6 @@ fn test_protocol_fixtures() {
                 }
                 crate::protocol::json_log(Value::Object(payload))
                     .build()
-                    .expect("builder failed")
                     .into_value()
             }
             other => panic!("unknown protocol type: {other}"),
@@ -594,39 +590,47 @@ fn test_output_format_fixtures() {
         let name = case["name"].as_str().expect("missing name");
         let input = case["input"].clone();
         let expected_json = case["expected_json"].clone();
-        let expected_yaml = case["expected_yaml"]
-            .as_str()
-            .expect("expected_yaml must be string");
         let expected_plain = case["expected_plain"]
             .as_str()
             .expect("expected_plain must be string");
 
-        let json_out = output_json(&input);
+        let json_out = render(&input, OutputFormat::Json, &OutputOptions::default());
         let parsed_json: Value = serde_json::from_str(&json_out)
             .unwrap_or_else(|e| panic!("[output/{name}] invalid json output: {e}"));
         assert_eq!(parsed_json, expected_json, "[output/{name}] json mismatch");
 
-        let yaml_out = output_yaml(&input);
+        let expected_yaml = case["expected_yaml"]
+            .as_str()
+            .expect("expected_yaml must be string");
+        let yaml_out = render(&input, OutputFormat::Yaml, &OutputOptions::default());
         assert_eq!(yaml_out, expected_yaml, "[output/{name}] yaml mismatch");
 
-        let plain_out = output_plain(&input);
+        let plain_out = render(&input, OutputFormat::Plain, &OutputOptions::default());
         assert_eq!(plain_out, expected_plain, "[output/{name}] plain mismatch");
     }
 }
 
 // ═══════════════════════════════════════════
-// output_json
+// render: OutputFormat::Json
 // ═══════════════════════════════════════════
 
 #[test]
 fn json_single_line() {
-    let out = output_json(&json!({"a": 1, "b": {"c": 2}}));
+    let out = render(
+        &json!({"a": 1, "b": {"c": 2}}),
+        OutputFormat::Json,
+        &OutputOptions::default(),
+    );
     assert!(!out.contains('\n'));
 }
 
 #[test]
 fn json_secrets_redacted() {
-    let out = output_json(&json!({"api_key_secret": "sk-123", "name": "test"}));
+    let out = render(
+        &json!({"api_key_secret": "sk-123", "name": "test"}),
+        OutputFormat::Json,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("\"***\""));
     assert!(!out.contains("sk-123"));
     assert!(out.contains("\"name\""));
@@ -634,14 +638,22 @@ fn json_secrets_redacted() {
 
 #[test]
 fn json_nested_secrets_redacted() {
-    let out = output_json(&json!({"config": {"password_secret": "real"}}));
+    let out = render(
+        &json!({"config": {"password_secret": "real"}}),
+        OutputFormat::Json,
+        &OutputOptions::default(),
+    );
     assert!(!out.contains("real"));
     assert!(out.contains("***"));
 }
 
 #[test]
 fn json_original_keys_preserved() {
-    let out = output_json(&json!({"duration_ms": 1280}));
+    let out = render(
+        &json!({"duration_ms": 1280}),
+        OutputFormat::Json,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("\"duration_ms\""));
     assert!(out.contains("1280"));
     assert!(!out.contains("\"duration\":"));
@@ -649,27 +661,36 @@ fn json_original_keys_preserved() {
 
 #[test]
 fn json_raw_values_not_formatted() {
-    let out = output_json(&json!({"size_bytes": 5242880}));
+    let out = render(
+        &json!({"size_bytes": 5242880}),
+        OutputFormat::Json,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("5242880"));
     assert!(!out.contains("MiB"));
 }
 
 #[test]
 fn json_non_string_secret_redacted() {
-    let out = output_json(&json!({"count_secret": 42}));
+    let out = render(
+        &json!({"count_secret": 42}),
+        OutputFormat::Json,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("\"***\""));
     assert!(!out.contains("42"));
 }
 
 #[test]
 fn json_with_trace_only_redacts_trace_only() {
-    let out = output_json_with_options(
+    let out = render(
         &json!({
             "code": "ok",
             "result": {"api_key_secret": "sk-live-123"},
             "trace": {"request_secret": "top-secret"}
         }),
-        &RedactionPolicy::RedactionTraceOnly.into(),
+        OutputFormat::Json,
+        &RedactionPolicy::TraceOnly.into(),
     );
     assert!(out.contains("\"request_secret\":\"***\""));
     assert!(out.contains("\"api_key_secret\":\"sk-live-123\""));
@@ -677,9 +698,10 @@ fn json_with_trace_only_redacts_trace_only() {
 
 #[test]
 fn json_with_none_keeps_secret_values() {
-    let out = output_json_with_options(
+    let out = render(
         &json!({"api_key_secret": "sk-live-123"}),
-        &RedactionPolicy::RedactionNone.into(),
+        OutputFormat::Json,
+        &RedactionPolicy::Off.into(),
     );
     assert!(out.contains("\"api_key_secret\":\"sk-live-123\""));
     assert!(!out.contains("\"***\""));
@@ -687,21 +709,18 @@ fn json_with_none_keeps_secret_values() {
 
 #[test]
 fn redaction_policy_into_redactor() {
-    let redactor: Redactor = RedactionPolicy::RedactionTraceOnly.into();
-    assert_eq!(
-        redactor,
-        Redactor::new().policy(RedactionPolicy::RedactionTraceOnly)
-    );
+    let redactor: Redactor = RedactionPolicy::TraceOnly.into();
+    assert_eq!(redactor, Redactor::new().policy(RedactionPolicy::TraceOnly));
 }
 
 #[test]
 fn redaction_policy_into_output_options() {
-    let options: OutputOptions = RedactionPolicy::RedactionNone.into();
+    let options: OutputOptions = RedactionPolicy::Off.into();
     assert_eq!(
         options.redaction,
-        Redactor::new().policy(RedactionPolicy::RedactionNone)
+        Redactor::new().policy(RedactionPolicy::Off)
     );
-    assert_eq!(options.style, OutputStyle::Readable);
+    assert_eq!(options.style, PlainStyle::Readable);
 }
 
 #[test]
@@ -726,228 +745,312 @@ fn max_depth_marker_is_not_secret_redaction_marker() {
     for _ in 0..300 {
         input = json!({"next": input});
     }
-    let out = output_json(&input);
+    let out = render(&input, OutputFormat::Json, &OutputOptions::default());
     assert!(out.contains("<afdata:max-depth>"), "{out}");
     assert!(!out.contains("***"), "{out}");
 }
 
 #[test]
 fn json_default_output_redacts_secrets() {
-    let out = output_json(&json!({"api_key_secret": "sk-live-123"}));
+    let out = render(
+        &json!({"api_key_secret": "sk-live-123"}),
+        OutputFormat::Json,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("\"api_key_secret\":\"***\""));
 }
 
 // ═══════════════════════════════════════════
-// output_yaml: key stripping
+// render: OutputFormat::Yaml — structure-preserving (same semantics as JSON)
 // ═══════════════════════════════════════════
+mod yaml_output_tests {
+    use super::*;
 
-#[test]
-fn yaml_starts_with_separator() {
-    let out = output_yaml(&json!({"a": 1}));
-    assert!(out.starts_with("---\n"));
-}
+    #[test]
+    fn yaml_starts_with_separator() {
+        let out = render(
+            &json!({"a": 1}),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        assert!(out.starts_with("---\n"));
+    }
 
-#[test]
-fn yaml_strip_ms() {
-    let out = output_yaml(&json!({"duration_ms": 42}));
-    assert!(out.contains("duration:"));
-    assert!(!out.contains("duration_ms"));
-}
+    #[test]
+    fn yaml_keeps_suffix_keys_unstripped() {
+        // No suffix is stripped from any key: unlike `plain`, YAML never applies
+        // suffix-driven key rewriting.
+        let out = render(
+            &json!({
+                "duration_ms": 42,
+                "timeout_s": 30,
+                "gc_pause_ns": 450000,
+                "query_us": 830,
+                "file_size_bytes": 5242880,
+                "cpu_percent": 85,
+                "balance_msats": 50000,
+                "withdrawn_sats": 1234,
+                "reserve_btc": 0.5,
+                "price_usd_cents": 999,
+                "price_eur_cents": 850,
+                "price_jpy": 1500,
+                "fare_thb_cents": 15050,
+                "timeout_minutes": 30,
+                "validity_hours": 24,
+                "cert_days": 365,
+                "created_at_epoch_ms": 1738886400000i64,
+                "cached_epoch_s": 1738886400,
+                "created_epoch_ns": "1707868800000000000",
+                "expires_rfc3339": "2026-02-14T10:30:00Z",
+                "api_key_secret": "sk-123",
+                "user_id": 123,
+                "config_path": "a.yml"
+            }),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        for key in [
+            "duration_ms",
+            "timeout_s",
+            "gc_pause_ns",
+            "query_us",
+            "file_size_bytes",
+            "cpu_percent",
+            "balance_msats",
+            "withdrawn_sats",
+            "reserve_btc",
+            "price_usd_cents",
+            "price_eur_cents",
+            "price_jpy",
+            "fare_thb_cents",
+            "timeout_minutes",
+            "validity_hours",
+            "cert_days",
+            "created_at_epoch_ms",
+            "cached_epoch_s",
+            "created_epoch_ns",
+            "expires_rfc3339",
+            "api_key_secret",
+            "user_id",
+            "config_path",
+        ] {
+            assert!(out.contains(&format!("{key}:")), "missing key {key}: {out}");
+        }
+        // The secret value is still redacted; only its key is left alone.
+        assert!(out.contains("api_key_secret: \"***\""));
+        assert!(!out.contains("sk-123"));
+    }
 
-#[test]
-fn yaml_raw_keeps_suffix_keys_and_structure() {
-    let options = OutputOptions {
-        redaction: Redactor::new().policy(RedactionPolicy::RedactionTraceOnly),
-        style: OutputStyle::Raw,
-    };
-    let out = output_yaml_with_options(
-        &json!({
-            "code": "result",
-            "rows": [{"api_key_secret": "sk-live-1", "duration_ms": 42}],
-            "trace": {"request_secret": "top-secret"}
-        }),
-        &options,
-    );
+    #[test]
+    fn yaml_strip_uppercase_secret_key_unstripped() {
+        let out = render(
+            &json!({"DATABASE_URL_SECRET": "postgres://..."}),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        assert!(out.contains("DATABASE_URL_SECRET: \"***\""));
+        assert!(!out.contains("postgres://..."));
+    }
 
-    assert!(out.contains("rows:\n  -"));
-    assert!(out.contains("api_key_secret: \"sk-live-1\""));
-    assert!(out.contains("duration_ms: 42"));
-    assert!(out.contains("request_secret: \"***\""));
-    assert!(!out.contains("duration: \"42ms\""));
-    assert!(!out.contains("rows: \"["));
-}
+    #[test]
+    fn yaml_uppercase_suffix_key_unstripped() {
+        let out = render(
+            &json!({"CACHE_TTL_S": 3600}),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        assert!(out.contains("CACHE_TTL_S: 3600"));
+    }
 
-#[test]
-fn yaml_with_options_defaults_to_readable_style() {
-    let out = output_yaml_with_options(
-        &json!({"duration_ms": 42}),
-        &OutputOptions {
-            redaction: Redactor::new().policy(RedactionPolicy::RedactionNone),
-            style: OutputStyle::Readable,
-        },
-    );
-    assert!(out.contains("duration: \"42ms\""));
-    assert!(!out.contains("duration_ms:"));
-}
+    #[test]
+    fn yaml_no_suffix_keys_pass_through() {
+        let out = render(
+            &json!({"user_id": 123, "config_path": "a.yml"}),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        assert!(out.contains("user_id: 123"));
+        assert!(out.contains("config_path: \"a.yml\""));
+    }
 
-#[test]
-fn yaml_strip_s() {
-    let out = output_yaml(&json!({"timeout_s": 30}));
-    assert!(out.contains("timeout:"));
-    assert!(!out.contains("timeout_s"));
-}
+    #[test]
+    fn yaml_raw_keeps_suffix_keys_and_structure() {
+        let options = OutputOptions {
+            redaction: Redactor::new().policy(RedactionPolicy::TraceOnly),
+            style: PlainStyle::Raw,
+        };
+        let out = render(
+            &json!({
+                "code": "result",
+                "rows": [{"api_key_secret": "sk-live-1", "duration_ms": 42}],
+                "trace": {"request_secret": "top-secret"}
+            }),
+            OutputFormat::Yaml,
+            &options,
+        );
 
-#[test]
-fn yaml_strip_ns() {
-    let out = output_yaml(&json!({"gc_pause_ns": 450000}));
-    assert!(out.contains("gc_pause:"));
-    assert!(!out.contains("gc_pause_ns"));
-}
+        assert!(out.contains("rows:\n  -"));
+        assert!(out.contains("api_key_secret: \"sk-live-1\""));
+        assert!(out.contains("duration_ms: 42"));
+        assert!(out.contains("request_secret: \"***\""));
+        assert!(!out.contains("duration: \"42ms\""));
+        assert!(!out.contains("rows: \"["));
+    }
 
-#[test]
-fn yaml_strip_us() {
-    let out = output_yaml(&json!({"query_us": 830}));
-    assert!(out.contains("query:"));
-    assert!(!out.contains("query_us"));
-}
+    #[test]
+    fn yaml_ignores_output_style() {
+        // Unlike `plain`, YAML renders identically regardless of `PlainStyle`: it
+        // is always structure-preserving.
+        let base_redaction = Redactor::new().policy(RedactionPolicy::Off);
+        let value = json!({"duration_ms": 42, "name": "alice"});
+        let readable = render(
+            &value,
+            OutputFormat::Yaml,
+            &OutputOptions {
+                redaction: base_redaction.clone(),
+                style: PlainStyle::Readable,
+            },
+        );
+        let raw = render(
+            &value,
+            OutputFormat::Yaml,
+            &OutputOptions {
+                redaction: base_redaction,
+                style: PlainStyle::Raw,
+            },
+        );
+        assert_eq!(readable, raw);
+        assert!(readable.contains("duration_ms: 42"));
+        assert!(!readable.contains("42ms"));
+    }
 
-#[test]
-fn yaml_strip_bytes() {
-    let out = output_yaml(&json!({"file_size_bytes": 5242880}));
-    assert!(out.contains("file_size:"));
-    assert!(!out.contains("file_size_bytes"));
-}
+    #[test]
+    fn yaml_key_collision_keeps_originals() {
+        let out = render(
+            &json!({"response_ms": 150, "response_s": 1}),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        assert!(out.contains("response_ms: 150"));
+        assert!(out.contains("response_s: 1"));
+    }
 
-#[test]
-fn yaml_strip_epoch_ms() {
-    let out = output_yaml(&json!({"created_at_epoch_ms": 1738886400000i64}));
-    assert!(out.contains("created_at:"));
-    assert!(!out.contains("created_at_epoch_ms"));
-}
+    #[test]
+    fn yaml_numbers_stay_raw_numbers_not_formatted() {
+        // Every one of these would be reformatted into a human string by `plain`;
+        // YAML must keep them as plain JSON-equivalent numbers.
+        let out = render(
+            &json!({
+                "duration_ms": 1280,
+                "cpu_percent": 85,
+                "price_usd_cents": 9999,
+                "file_size_bytes": 5242880,
+                "balance_msats": 50000000
+            }),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        assert!(out.contains("duration_ms: 1280"));
+        assert!(out.contains("cpu_percent: 85"));
+        assert!(out.contains("price_usd_cents: 9999"));
+        assert!(out.contains("file_size_bytes: 5242880"));
+        assert!(out.contains("balance_msats: 50000000"));
+        for lossy in ["1.28s", "85%", "$99.99", "5.0MiB", "50000000msats"] {
+            assert!(
+                !out.contains(lossy),
+                "unexpected lossy formatting {lossy}: {out}"
+            );
+        }
+    }
 
-#[test]
-fn yaml_strip_epoch_s() {
-    let out = output_yaml(&json!({"cached_epoch_s": 1738886400}));
-    assert!(out.contains("cached:"));
-    assert!(!out.contains("cached_epoch_s"));
-}
+    #[test]
+    fn yaml_epoch_and_rfc3339_stay_as_written_not_reformatted() {
+        let out = render(
+            &json!({
+                "created_at_epoch_ms": 1738886400000i64,
+                "expires_rfc3339": "2026-02-14T10:30:00Z"
+            }),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        assert!(out.contains("created_at_epoch_ms: 1738886400000"));
+        assert!(out.contains("expires_rfc3339: \"2026-02-14T10:30:00Z\""));
+        assert!(!out.contains("2025-02-07T00:00:00.000Z"));
+    }
 
-#[test]
-fn yaml_strip_epoch_ns() {
-    let out = output_yaml(&json!({"created_epoch_ns": "1707868800000000000"}));
-    assert!(out.contains("created:"));
-    assert!(!out.contains("created_epoch_ns"));
-}
+    #[test]
+    fn yaml_fmt_secret() {
+        let out = render(
+            &json!({"api_key_secret": "sk-1234567890abcdef"}),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        assert!(out.contains("\"***\""));
+        assert!(!out.contains("sk-1234567890abcdef"));
+    }
 
-#[test]
-fn yaml_strip_rfc3339() {
-    let out = output_yaml(&json!({"expires_rfc3339": "2026-02-14T10:30:00Z"}));
-    assert!(out.contains("expires:"));
-    assert!(!out.contains("expires_rfc3339"));
-}
+    #[test]
+    fn yaml_strings_always_quoted() {
+        let out = render(
+            &json!({"name": "alice"}),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        assert!(out.contains("\"alice\""));
+    }
 
-#[test]
-fn yaml_strip_secret() {
-    let out = output_yaml(&json!({"api_key_secret": "sk-123"}));
-    assert!(out.contains("api_key:"));
-    assert!(!out.contains("api_key_secret"));
-}
+    #[test]
+    fn yaml_numbers_unquoted() {
+        let out = render(
+            &json!({"count": 42}),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        assert!(out.contains("count: 42"));
+        assert!(!out.contains("\"42\""));
+    }
 
-#[test]
-fn yaml_strip_percent() {
-    let out = output_yaml(&json!({"cpu_percent": 85}));
-    assert!(out.contains("cpu:"));
-    assert!(!out.contains("cpu_percent"));
-}
+    #[test]
+    fn yaml_nested_keys_not_stripped() {
+        let out = render(
+            &json!({
+                "config": {
+                    "api_key_secret": "sk-123",
+                    "timeout_s": 30
+                }
+            }),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        assert!(out.contains("config:"));
+        assert!(out.contains("  api_key_secret: \"***\""));
+        assert!(out.contains("  timeout_s: 30"));
+    }
 
-#[test]
-fn yaml_strip_msats() {
-    let out = output_yaml(&json!({"balance_msats": 50000}));
-    assert!(out.contains("balance:"));
-    assert!(!out.contains("balance_msats"));
-}
+    #[test]
+    fn yaml_stream_of_records_has_stable_separator_framing() {
+        // Simulates how a CLI streams multiple AFDATA records: each record is
+        // rendered independently and concatenated. `---` framing must stay
+        // stable and each record's raw keys must stay intact and in order.
+        let first = render(
+            &json!({"kind": "log", "duration_ms": 1}),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        let second = render(
+            &json!({"kind": "result", "duration_ms": 2}),
+            OutputFormat::Yaml,
+            &OutputOptions::default(),
+        );
+        let stream = format!("{first}\n{second}\n");
 
-#[test]
-fn yaml_strip_sats() {
-    let out = output_yaml(&json!({"withdrawn_sats": 1234}));
-    assert!(out.contains("withdrawn:"));
-    assert!(!out.contains("withdrawn_sats"));
-}
-
-#[test]
-fn yaml_strip_btc() {
-    let out = output_yaml(&json!({"reserve_btc": 0.5}));
-    assert!(out.contains("reserve_btc"));
-}
-
-#[test]
-fn yaml_strip_usd_cents() {
-    let out = output_yaml(&json!({"price_usd_cents": 999}));
-    assert!(out.contains("price:"));
-    assert!(!out.contains("price_usd_cents"));
-}
-
-#[test]
-fn yaml_strip_eur_cents() {
-    let out = output_yaml(&json!({"price_eur_cents": 850}));
-    assert!(out.contains("price:"));
-    assert!(!out.contains("price_eur_cents"));
-}
-
-#[test]
-fn yaml_strip_jpy() {
-    let out = output_yaml(&json!({"price_jpy": 1500}));
-    assert!(out.contains("price:"));
-    assert!(!out.contains("price_jpy"));
-}
-
-#[test]
-fn yaml_strip_generic_cents() {
-    let out = output_yaml(&json!({"fare_thb_cents": 15050}));
-    assert!(out.contains("fare:"));
-    assert!(!out.contains("fare_thb_cents"));
-}
-
-#[test]
-fn yaml_strip_minutes() {
-    let out = output_yaml(&json!({"timeout_minutes": 30}));
-    assert!(out.contains("timeout:"));
-    assert!(!out.contains("timeout_minutes"));
-}
-
-#[test]
-fn yaml_strip_hours() {
-    let out = output_yaml(&json!({"validity_hours": 24}));
-    assert!(out.contains("validity:"));
-    assert!(!out.contains("validity_hours"));
-}
-
-#[test]
-fn yaml_strip_days() {
-    let out = output_yaml(&json!({"cert_days": 365}));
-    assert!(out.contains("cert:"));
-    assert!(!out.contains("cert_days"));
-}
-
-#[test]
-fn yaml_no_strip_no_suffix() {
-    let out = output_yaml(&json!({"user_id": 123, "config_path": "a.yml"}));
-    assert!(out.contains("user_id:"));
-    assert!(out.contains("config_path:"));
-}
-
-#[test]
-fn yaml_strip_uppercase_secret() {
-    let out = output_yaml(&json!({"DATABASE_URL_SECRET": "postgres://..."}));
-    assert!(out.contains("DATABASE_URL:"));
-    assert!(!out.contains("DATABASE_URL_SECRET"));
-}
-
-#[test]
-fn yaml_strip_uppercase_s() {
-    let out = output_yaml(&json!({"CACHE_TTL_S": 3600}));
-    assert!(out.contains("CACHE_TTL:"));
-    assert!(!out.contains("CACHE_TTL_S"));
+        assert_eq!(stream.matches("---").count(), 2);
+        let first_idx = stream.find("duration_ms: 1").expect("first record present");
+        let second_idx = stream
+            .find("duration_ms: 2")
+            .expect("second record present");
+        assert!(first_idx < second_idx, "records out of order: {stream}");
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -955,15 +1058,12 @@ fn yaml_strip_uppercase_s() {
 // ═══════════════════════════════════════════
 
 #[test]
-fn yaml_key_collision_keeps_originals() {
-    let out = output_yaml(&json!({"response_ms": 150, "response_s": 1}));
-    assert!(out.contains("response_ms: 150"));
-    assert!(out.contains("response_s: 1"));
-}
-
-#[test]
 fn plain_key_collision_keeps_originals() {
-    let out = output_plain(&json!({"response_ms": 150, "response_s": 1}));
+    let out = render(
+        &json!({"response_ms": 150, "response_s": 1}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("response_ms=150"));
     assert!(out.contains("response_s=1"));
 }
@@ -971,14 +1071,15 @@ fn plain_key_collision_keeps_originals() {
 #[test]
 fn plain_raw_keeps_suffix_keys_and_redacts_trace() {
     let options = OutputOptions {
-        redaction: Redactor::new().policy(RedactionPolicy::RedactionTraceOnly),
-        style: OutputStyle::Raw,
+        redaction: Redactor::new().policy(RedactionPolicy::TraceOnly),
+        style: PlainStyle::Raw,
     };
-    let out = output_plain_with_options(
+    let out = render(
         &json!({
             "duration_ms": 42,
             "trace": {"request_secret": "top-secret"}
         }),
+        OutputFormat::Plain,
         &options,
     );
     assert!(out.contains("duration_ms=42"));
@@ -987,277 +1088,148 @@ fn plain_raw_keeps_suffix_keys_and_redacts_trace() {
 }
 
 // ═══════════════════════════════════════════
-// output_yaml: value formatting
-// ═══════════════════════════════════════════
-
-#[test]
-fn yaml_fmt_ms_small() {
-    let out = output_yaml(&json!({"latency_ms": 42}));
-    assert!(out.contains("\"42ms\""));
-}
-
-#[test]
-fn yaml_fmt_ms_to_seconds() {
-    let out = output_yaml(&json!({"duration_ms": 1280}));
-    assert!(out.contains("\"1.28s\""));
-}
-
-#[test]
-fn yaml_fmt_ms_5000() {
-    let out = output_yaml(&json!({"request_timeout_ms": 5000}));
-    assert!(out.contains("\"5.0s\""));
-}
-
-#[test]
-fn yaml_fmt_ms_1500() {
-    let out = output_yaml(&json!({"duration_ms": 1500}));
-    assert!(out.contains("\"1.5s\""));
-}
-
-#[test]
-fn yaml_fmt_s() {
-    let out = output_yaml(&json!({"cache_ttl_s": 3600}));
-    assert!(out.contains("\"3600s\""));
-}
-
-#[test]
-fn yaml_fmt_ns() {
-    let out = output_yaml(&json!({"gc_pause_ns": 450000}));
-    assert!(out.contains("\"450000ns\""));
-}
-
-#[test]
-fn yaml_fmt_us() {
-    let out = output_yaml(&json!({"query_us": 830}));
-    assert!(out.contains("\"830\u{03bc}s\""));
-}
-
-#[test]
-fn yaml_fmt_minutes() {
-    let out = output_yaml(&json!({"timeout_minutes": 30}));
-    assert!(out.contains("\"30 minutes\""));
-}
-
-#[test]
-fn yaml_fmt_hours() {
-    let out = output_yaml(&json!({"validity_hours": 24}));
-    assert!(out.contains("\"24 hours\""));
-}
-
-#[test]
-fn yaml_fmt_days() {
-    let out = output_yaml(&json!({"cert_days": 365}));
-    assert!(out.contains("\"365 days\""));
-}
-
-#[test]
-fn yaml_fmt_epoch_ms() {
-    let out = output_yaml(&json!({"created_at_epoch_ms": 1738886400000i64}));
-    assert!(out.contains("\"2025-02-07T00:00:00.000Z\""));
-}
-
-#[test]
-fn yaml_fmt_epoch_s() {
-    let out = output_yaml(&json!({"cached_epoch_s": 1738886400}));
-    assert!(out.contains("\"2025-02-07T00:00:00.000Z\""));
-}
-
-#[test]
-fn yaml_fmt_bytes() {
-    let out = output_yaml(&json!({"file_size_bytes": 5242880}));
-    assert!(out.contains("\"5.0MiB\""));
-}
-
-#[test]
-fn yaml_fmt_bytes_kb() {
-    let out = output_yaml(&json!({"payload_bytes": 456789}));
-    assert!(out.contains("\"446.1KiB\""));
-}
-
-#[test]
-fn yaml_fmt_usd_cents() {
-    let out = output_yaml(&json!({"price_usd_cents": 9999}));
-    assert!(out.contains("\"$99.99\""));
-}
-
-#[test]
-fn yaml_fmt_eur_cents() {
-    let out = output_yaml(&json!({"price_eur_cents": 850}));
-    assert!(out.contains("\"\u{20ac}8.50\""));
-}
-
-#[test]
-fn yaml_fmt_jpy() {
-    let out = output_yaml(&json!({"price_jpy": 1500}));
-    assert!(out.contains("\"\u{00a5}1,500\""));
-}
-
-#[test]
-fn yaml_fmt_generic_cents() {
-    let out = output_yaml(&json!({"fare_thb_cents": 15050}));
-    assert!(out.contains("\"150.50 THB\""));
-}
-
-#[test]
-fn yaml_fmt_msats() {
-    let out = output_yaml(&json!({"payment_msats": 50000000}));
-    assert!(out.contains("\"50000000msats\""));
-}
-
-#[test]
-fn yaml_fmt_sats() {
-    let out = output_yaml(&json!({"withdrawn_sats": 1234}));
-    assert!(out.contains("\"1234sats\""));
-}
-
-#[test]
-fn yaml_fmt_btc() {
-    let out = output_yaml(&json!({"reserve_btc": 0.5}));
-    assert!(out.contains("reserve_btc: 0.5"));
-}
-
-#[test]
-fn yaml_fmt_percent_int() {
-    let out = output_yaml(&json!({"cpu_percent": 85}));
-    assert!(out.contains("\"85%\""));
-}
-
-#[test]
-fn yaml_fmt_percent_float() {
-    let out = output_yaml(&json!({"success_rate_percent": 95.5}));
-    assert!(out.contains("\"95.5%\""));
-}
-
-#[test]
-fn yaml_fmt_secret() {
-    let out = output_yaml(&json!({"api_key_secret": "sk-1234567890abcdef"}));
-    assert!(out.contains("\"***\""));
-    assert!(!out.contains("sk-1234567890abcdef"));
-}
-
-#[test]
-fn yaml_fmt_rfc3339_passthrough() {
-    let out = output_yaml(&json!({"expires_rfc3339": "2026-02-14T10:30:00Z"}));
-    assert!(out.contains("\"2026-02-14T10:30:00Z\""));
-}
-
-#[test]
-fn yaml_strings_always_quoted() {
-    let out = output_yaml(&json!({"name": "alice"}));
-    assert!(out.contains("\"alice\""));
-}
-
-#[test]
-fn yaml_numbers_unquoted() {
-    let out = output_yaml(&json!({"count": 42}));
-    assert!(out.contains("count: 42"));
-    assert!(!out.contains("\"42\""));
-}
-
-#[test]
-fn yaml_nested_key_stripping() {
-    let out = output_yaml(&json!({
-        "config": {
-            "api_key_secret": "sk-123",
-            "timeout_s": 30
-        }
-    }));
-    assert!(out.contains("config:"));
-    assert!(out.contains("  api_key: \"***\""));
-    assert!(out.contains("  timeout: \"30s\""));
-}
-
-// ═══════════════════════════════════════════
-// output_plain: logfmt format
+// render: OutputFormat::Plain — logfmt format
 // ═══════════════════════════════════════════
 
 #[test]
 fn plain_single_line() {
-    let out = output_plain(&json!({"a": 1, "b": 2, "c": 3}));
+    let out = render(
+        &json!({"a": 1, "b": 2, "c": 3}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(!out.contains('\n'));
 }
 
 #[test]
 fn plain_key_value_pair() {
-    let out = output_plain(&json!({"user_id": 123}));
+    let out = render(
+        &json!({"user_id": 123}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "user_id=123");
 }
 
 #[test]
 fn plain_sorted_keys() {
-    let out = output_plain(&json!({"z": 1, "a": 2, "m": 3}));
+    let out = render(
+        &json!({"z": 1, "a": 2, "m": 3}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "a=2 m=3 z=1");
 }
 
 #[test]
 fn plain_dot_notation_nesting() {
-    let out = output_plain(&json!({"trace": {"duration_ms": 150, "source": "db"}}));
+    let out = render(
+        &json!({"trace": {"duration_ms": 150, "source": "db"}}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("trace.duration=150ms"));
     assert!(out.contains("trace.source=db"));
 }
 
 #[test]
 fn plain_sorted_by_dot_path() {
-    let out = output_plain(&json!({
-        "kind": "result",
-        "result": {"count": 3},
-        "trace": {"duration_ms": 12}
-    }));
+    let out = render(
+        &json!({
+            "kind": "result",
+            "result": {"count": 3},
+            "trace": {"duration_ms": 12}
+        }),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "kind=result result.count=3 trace.duration=12ms");
 }
 
 #[test]
 fn plain_quoted_spaces() {
-    let out = output_plain(&json!({"message": "uploading chunks"}));
+    let out = render(
+        &json!({"message": "uploading chunks"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("message=\"uploading chunks\""));
 }
 
 #[test]
 fn plain_arrays_comma_joined() {
-    let out = output_plain(&json!({"fields": ["email", "age"]}));
+    let out = render(
+        &json!({"fields": ["email", "age"]}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("fields=email,age"));
 }
 
 #[test]
 fn plain_null_empty() {
-    let out = output_plain(&json!({"RUST_LOG": null}));
+    let out = render(
+        &json!({"RUST_LOG": null}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("RUST_LOG="));
 }
 
 #[test]
 fn plain_key_stripping_and_formatting() {
-    let out = output_plain(&json!({"duration_ms": 1280, "api_key_secret": "sk-123"}));
+    let out = render(
+        &json!({"duration_ms": 1280, "api_key_secret": "sk-123"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "api_key=*** duration=1.28s");
 }
 
 #[test]
 fn plain_deep_nesting() {
-    let out = output_plain(&json!({"a": {"b": {"c": "deep"}}}));
+    let out = render(
+        &json!({"a": {"b": {"c": "deep"}}}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "a.b.c=deep");
 }
 
 #[test]
 fn plain_secrets_redacted() {
-    let out = output_plain(&json!({"api_key_secret": "real-key"}));
+    let out = render(
+        &json!({"api_key_secret": "real-key"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("api_key=***"));
     assert!(!out.contains("real-key"));
 }
 
 #[test]
 fn plain_empty_object() {
-    let out = output_plain(&json!({}));
+    let out = render(&json!({}), OutputFormat::Plain, &OutputOptions::default());
     assert_eq!(out, "");
 }
 
 #[test]
 fn plain_bool_unquoted() {
-    let out = output_plain(&json!({"active": true, "disabled": false}));
+    let out = render(
+        &json!({"active": true, "disabled": false}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "active=true disabled=false");
 }
 
 #[test]
 fn plain_nested_secrets() {
-    let out = output_plain(&json!({"config": {"api_key_secret": "real", "host": "localhost"}}));
+    let out = render(
+        &json!({"config": {"api_key_secret": "real", "host": "localhost"}}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("config.api_key=***"));
     assert!(out.contains("config.host=localhost"));
     assert!(!out.contains("real"));
@@ -1270,103 +1242,171 @@ fn plain_nested_secrets() {
 
 #[test]
 fn fallthrough_bytes_float() {
-    let out = output_plain(&json!({"size_bytes": 1024.5}));
+    let out = render(
+        &json!({"size_bytes": 1024.5}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "size_bytes=1024.5");
 }
 
 #[test]
 fn fallthrough_bytes_string() {
-    let out = output_plain(&json!({"size_bytes": "unknown"}));
+    let out = render(
+        &json!({"size_bytes": "unknown"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "size_bytes=unknown");
 }
 
 #[test]
 fn fallthrough_bytes_bool() {
-    let out = output_plain(&json!({"size_bytes": false}));
+    let out = render(
+        &json!({"size_bytes": false}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "size_bytes=false");
 }
 
 #[test]
 fn fallthrough_epoch_ms_float() {
-    let out = output_plain(&json!({"created_epoch_ms": 1707868800000.5}));
+    let out = render(
+        &json!({"created_epoch_ms": 1707868800000.5}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "created_epoch_ms=1707868800000.5");
 }
 
 #[test]
 fn fallthrough_epoch_ms_bool() {
-    let out = output_plain(&json!({"created_epoch_ms": true}));
+    let out = render(
+        &json!({"created_epoch_ms": true}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "created_epoch_ms=true");
 }
 
 #[test]
 fn fallthrough_epoch_ms_string() {
-    let out = output_plain(&json!({"created_epoch_ms": "yesterday"}));
+    let out = render(
+        &json!({"created_epoch_ms": "yesterday"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "created_epoch_ms=yesterday");
 }
 
 #[test]
 fn fallthrough_ms_string() {
-    let out = output_plain(&json!({"latency_ms": "fast"}));
+    let out = render(
+        &json!({"latency_ms": "fast"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "latency_ms=fast");
 }
 
 #[test]
 fn fallthrough_ms_bool() {
-    let out = output_plain(&json!({"latency_ms": true}));
+    let out = render(
+        &json!({"latency_ms": true}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "latency_ms=true");
 }
 
 #[test]
 fn fallthrough_s_string() {
-    let out = output_plain(&json!({"dns_ttl_s": "auto"}));
+    let out = render(
+        &json!({"dns_ttl_s": "auto"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "dns_ttl_s=auto");
 }
 
 #[test]
 fn fallthrough_usd_cents_negative() {
-    let out = output_plain(&json!({"refund_usd_cents": -499}));
+    let out = render(
+        &json!({"refund_usd_cents": -499}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "refund_usd_cents=-499");
 }
 
 #[test]
 fn fallthrough_eur_cents_negative() {
-    let out = output_plain(&json!({"refund_eur_cents": -100}));
+    let out = render(
+        &json!({"refund_eur_cents": -100}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "refund_eur_cents=-100");
 }
 
 #[test]
 fn fallthrough_jpy_negative() {
-    let out = output_plain(&json!({"refund_jpy": -1500}));
+    let out = render(
+        &json!({"refund_jpy": -1500}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "refund_jpy=-1500");
 }
 
 #[test]
 fn fallthrough_percent_string() {
-    let out = output_plain(&json!({"cpu_percent": "high"}));
+    let out = render(
+        &json!({"cpu_percent": "high"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "cpu_percent=high");
 }
 
 #[test]
 fn fallthrough_percent_bool() {
-    let out = output_plain(&json!({"cpu_percent": true}));
+    let out = render(
+        &json!({"cpu_percent": true}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "cpu_percent=true");
 }
 
 #[test]
 fn fallthrough_btc_string() {
-    let out = output_plain(&json!({"reserve_btc": "pending"}));
+    let out = render(
+        &json!({"reserve_btc": "pending"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "reserve_btc=pending");
 }
 
 #[test]
 fn fallthrough_msats_string() {
-    let out = output_plain(&json!({"cost_msats": "pending"}));
+    let out = render(
+        &json!({"cost_msats": "pending"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "cost_msats=pending");
 }
 
 #[test]
 fn fallthrough_minutes_string() {
-    let out = output_plain(&json!({"timeout_minutes": "infinite"}));
+    let out = render(
+        &json!({"timeout_minutes": "infinite"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "timeout_minutes=infinite");
 }
 
@@ -1377,33 +1417,53 @@ fn fallthrough_minutes_string() {
 
 #[test]
 fn case_lowercase_secret() {
-    let out = output_plain(&json!({"api_key_secret": "real"}));
+    let out = render(
+        &json!({"api_key_secret": "real"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("***"));
     assert!(!out.contains("real"));
 }
 
 #[test]
 fn case_uppercase_secret() {
-    let out = output_plain(&json!({"DATABASE_URL_SECRET": "postgres://..."}));
+    let out = render(
+        &json!({"DATABASE_URL_SECRET": "postgres://..."}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("DATABASE_URL=***"));
 }
 
 #[test]
 fn case_mixed_secret_not_matched() {
-    let out = output_plain(&json!({"api_key_Secret": "real"}));
+    let out = render(
+        &json!({"api_key_Secret": "real"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("api_key_Secret=real"));
     assert!(!out.contains("***"));
 }
 
 #[test]
 fn case_uppercase_s() {
-    let out = output_plain(&json!({"CACHE_TTL_S": 3600}));
+    let out = render(
+        &json!({"CACHE_TTL_S": 3600}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("CACHE_TTL=3600s"));
 }
 
 #[test]
 fn case_mixed_ms_not_matched() {
-    let out = output_plain(&json!({"latency_Ms": 42}));
+    let out = render(
+        &json!({"latency_Ms": 42}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "latency_Ms=42");
 }
 
@@ -1413,25 +1473,41 @@ fn case_mixed_ms_not_matched() {
 
 #[test]
 fn negative_epoch_ms() {
-    let out = output_plain(&json!({"created_epoch_ms": -1000}));
+    let out = render(
+        &json!({"created_epoch_ms": -1000}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "created=1969-12-31T23:59:59.000Z");
 }
 
 #[test]
 fn negative_epoch_s() {
-    let out = output_plain(&json!({"cached_epoch_s": -60}));
+    let out = render(
+        &json!({"cached_epoch_s": -60}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "cached=1969-12-31T23:59:00.000Z");
 }
 
 #[test]
 fn negative_epoch_ns() {
-    let out = output_plain(&json!({"created_epoch_ns": "-60000000000"}));
+    let out = render(
+        &json!({"created_epoch_ns": "-60000000000"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "created=1969-12-31T23:59:00.000Z");
 }
 
 #[test]
 fn negative_epoch_ns_minus_one() {
-    let out = output_plain(&json!({"created_epoch_ns": "-1"}));
+    let out = render(
+        &json!({"created_epoch_ns": "-1"}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "created=1969-12-31T23:59:59.999Z");
 }
 
@@ -1441,13 +1517,21 @@ fn negative_epoch_ns_minus_one() {
 
 #[test]
 fn negative_bytes_small() {
-    let out = output_plain(&json!({"delta_bytes": -100}));
+    let out = render(
+        &json!({"delta_bytes": -100}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "delta_bytes=-100");
 }
 
 #[test]
 fn negative_bytes_mb() {
-    let out = output_plain(&json!({"delta_bytes": -5242880}));
+    let out = render(
+        &json!({"delta_bytes": -5242880}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "delta_bytes=-5242880");
 }
 
@@ -1457,31 +1541,51 @@ fn negative_bytes_mb() {
 
 #[test]
 fn ms_boundary_999() {
-    let out = output_plain(&json!({"latency_ms": 999}));
+    let out = render(
+        &json!({"latency_ms": 999}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "latency=999ms");
 }
 
 #[test]
 fn ms_boundary_1000() {
-    let out = output_plain(&json!({"latency_ms": 1000}));
+    let out = render(
+        &json!({"latency_ms": 1000}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "latency=1.0s");
 }
 
 #[test]
 fn ms_boundary_1001() {
-    let out = output_plain(&json!({"latency_ms": 1001}));
+    let out = render(
+        &json!({"latency_ms": 1001}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "latency=1.001s");
 }
 
 #[test]
 fn ms_float_small() {
-    let out = output_plain(&json!({"latency_ms": 0.5}));
+    let out = render(
+        &json!({"latency_ms": 0.5}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "latency=0.5ms");
 }
 
 #[test]
 fn ms_zero() {
-    let out = output_plain(&json!({"latency_ms": 0}));
+    let out = render(
+        &json!({"latency_ms": 0}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "latency=0ms");
 }
 
@@ -1491,25 +1595,41 @@ fn ms_zero() {
 
 #[test]
 fn zero_bytes() {
-    let out = output_plain(&json!({"size_bytes": 0}));
+    let out = render(
+        &json!({"size_bytes": 0}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "size=0B");
 }
 
 #[test]
 fn zero_percent() {
-    let out = output_plain(&json!({"cpu_percent": 0}));
+    let out = render(
+        &json!({"cpu_percent": 0}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "cpu=0%");
 }
 
 #[test]
 fn zero_usd_cents() {
-    let out = output_plain(&json!({"price_usd_cents": 0}));
+    let out = render(
+        &json!({"price_usd_cents": 0}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "price=$0.00");
 }
 
 #[test]
 fn zero_s() {
-    let out = output_plain(&json!({"timeout_s": 0}));
+    let out = render(
+        &json!({"timeout_s": 0}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "timeout=0s");
 }
 
@@ -1519,20 +1639,32 @@ fn zero_s() {
 
 #[test]
 fn suffix_priority_epoch_ms_over_ms() {
-    let out = output_plain(&json!({"created_at_epoch_ms": 1738886400000i64}));
+    let out = render(
+        &json!({"created_at_epoch_ms": 1738886400000i64}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("2025-02-07"));
     assert!(!out.contains("ms"));
 }
 
 #[test]
 fn suffix_priority_usd_cents_over_s() {
-    let out = output_plain(&json!({"price_usd_cents": 999}));
+    let out = render(
+        &json!({"price_usd_cents": 999}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "price=$9.99");
 }
 
 #[test]
 fn suffix_priority_msats_over_s() {
-    let out = output_plain(&json!({"cost_msats": 2056}));
+    let out = render(
+        &json!({"cost_msats": 2056}),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert_eq!(out, "cost=2056msats");
 }
 
@@ -1627,7 +1759,7 @@ fn cli_parse_log_filters_preserves_order() {
 
 #[test]
 fn build_cli_error_required_fields() {
-    let v = build_cli_error("missing --sql", None);
+    let v = build_cli_error("missing --sql", None).into_value();
     assert_eq!(v["kind"], "error");
     assert_eq!(v["error"]["code"], "cli_error");
     assert_eq!(v["error"]["message"], "missing --sql");
@@ -1646,7 +1778,7 @@ fn build_cli_error_is_valid_json() {
 
 #[test]
 fn build_cli_error_with_hint() {
-    let v = build_cli_error("bad flag", Some("try --help"));
+    let v = build_cli_error("bad flag", Some("try --help")).into_value();
     assert_eq!(v["kind"], "error");
     assert_eq!(v["error"]["hint"], "try --help");
 }
@@ -1658,31 +1790,25 @@ fn build_cli_error_without_hint_has_no_hint_key() {
 }
 
 #[test]
-fn cli_output_dispatches_json() {
-    let v = crate::protocol::json_result(json!({"size_bytes": 1024}))
-        .build()
-        .expect("builder failed");
-    let out = cli_output(v.as_value(), OutputFormat::Json);
+fn render_dispatches_json() {
+    let v = crate::protocol::json_result(json!({"size_bytes": 1024})).build();
+    let out = render(v.as_value(), OutputFormat::Json, &OutputOptions::default());
     assert!(out.contains("size_bytes")); // json: raw keys, no suffix processing
     assert!(!out.contains('\n'));
 }
 
 #[test]
-fn cli_output_dispatches_yaml() {
-    let v = crate::protocol::json_result(json!({"size_bytes": 1024}))
-        .build()
-        .expect("builder failed");
-    let out = cli_output(v.as_value(), OutputFormat::Yaml);
+fn render_dispatches_yaml() {
+    let v = crate::protocol::json_result(json!({"size_bytes": 1024})).build();
+    let out = render(v.as_value(), OutputFormat::Yaml, &OutputOptions::default());
     assert!(out.starts_with("---"));
-    assert!(out.contains("size:")); // yaml: suffix stripped
+    assert!(out.contains("size_bytes: 1024")); // yaml: structure-preserving, like json
 }
 
 #[test]
-fn cli_output_dispatches_plain() {
-    let v = crate::protocol::json_result(json!({"size_bytes": 1024}))
-        .build()
-        .expect("builder failed");
-    let out = cli_output(v.as_value(), OutputFormat::Plain);
+fn render_dispatches_plain() {
+    let v = crate::protocol::json_result(json!({"size_bytes": 1024})).build();
+    let out = render(v.as_value(), OutputFormat::Plain, &OutputOptions::default());
     assert!(!out.contains('\n'));
     assert!(out.contains("kind=result"));
     assert!(out.contains("result.size=1.0KiB")); // plain: suffix processed
@@ -1712,7 +1838,9 @@ fn cli_emitter_writes_events_and_tracks_terminal() {
 
 #[test]
 fn cli_emitter_frames_all_formats() {
-    for format in [OutputFormat::Json, OutputFormat::Plain, OutputFormat::Yaml] {
+    let formats = [OutputFormat::Json, OutputFormat::Plain, OutputFormat::Yaml];
+
+    for format in formats {
         let mut emitter = CliEmitter::new(Vec::new(), format);
         emitter
             .emit_log(LogLevel::Info, "startup")
@@ -1835,25 +1963,21 @@ fn cli_emitter_does_not_commit_terminal_state_when_write_fails() {
 fn build_cli_version_has_standard_shape() {
     let v = build_cli_version("1.2.3");
     assert_eq!(v.as_value()["kind"], "result");
+    assert_eq!(v.as_value()["result"]["code"], "version");
     assert_eq!(v.as_value()["result"]["version"], "1.2.3");
     // 0.16 API: trace is always present
     assert!(v.as_value().get("trace").is_some());
 }
 
 #[test]
-fn cli_handle_version_defaults_to_json_for_agent_cli() {
+fn cli_handle_version_bare_is_conventional_text() {
+    // The one blessed behavior: a bare `--version` is conventional text, never
+    // a structured event.
     let raw = vec!["agent-cli".to_string(), "--version".to_string()];
-    let out = cli_handle_version_or_continue(
-        &raw,
-        "agent-cli",
-        "1.2.3",
-        &VersionConfig::agent_cli_default(),
-    )
-    .expect("valid version request")
-    .expect("version should render");
-    let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
-    assert_eq!(parsed["kind"], "result");
-    assert_eq!(parsed["result"]["version"], "1.2.3");
+    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
+        .expect("valid version request")
+        .expect("version should render");
+    assert_eq!(out, "agent-cli 1.2.3\n");
 }
 
 #[test]
@@ -1864,14 +1988,9 @@ fn cli_handle_version_honors_explicit_output_formats() {
         "--output".to_string(),
         "plain".to_string(),
     ];
-    let out = cli_handle_version_or_continue(
-        &raw,
-        "agent-cli",
-        "1.2.3",
-        &VersionConfig::agent_cli_default(),
-    )
-    .expect("valid version request")
-    .expect("version should render");
+    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
+        .expect("valid version request")
+        .expect("version should render");
     assert!(out.contains("kind=result"), "{out}");
     assert!(out.contains("result.version=1.2.3"), "{out}");
 }
@@ -1883,14 +2002,9 @@ fn cli_handle_version_supports_inline_output_format() {
         "--output=yaml".to_string(),
         "--version".to_string(),
     ];
-    let out = cli_handle_version_or_continue(
-        &raw,
-        "agent-cli",
-        "1.2.3",
-        &VersionConfig::agent_cli_default(),
-    )
-    .expect("valid version request")
-    .expect("version should render");
+    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
+        .expect("valid version request")
+        .expect("version should render");
     assert!(out.starts_with("---\n"), "{out}");
     assert!(out.contains("kind: \"result\""), "{out}");
     assert!(out.contains("version: \"1.2.3\""), "{out}");
@@ -1903,14 +2017,9 @@ fn cli_handle_version_supports_json_alias() {
         "--version".to_string(),
         "--json".to_string(),
     ];
-    let out = cli_handle_version_or_continue(
-        &raw,
-        "agent-cli",
-        "1.2.3",
-        &VersionConfig::conventional_default(),
-    )
-    .expect("valid version request")
-    .expect("version should render");
+    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
+        .expect("valid version request")
+        .expect("version should render");
     let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
     assert_eq!(parsed["kind"], "result");
     assert_eq!(parsed["result"]["version"], "1.2.3");
@@ -1925,13 +2034,9 @@ fn cli_handle_version_rejects_json_alias_conflict() {
         "--output".to_string(),
         "yaml".to_string(),
     ];
-    let err = cli_handle_version_or_continue(
-        &raw,
-        "agent-cli",
-        "1.2.3",
-        &VersionConfig::conventional_default(),
-    )
-    .expect_err("conflicting formats must return error");
+    let err = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
+        .expect_err("conflicting formats must return error")
+        .into_value();
     assert_eq!(err["kind"], "error");
     assert!(
         err["error"]["message"]
@@ -1950,13 +2055,9 @@ fn cli_handle_version_reports_invalid_output_as_cli_error() {
         "--output".to_string(),
         "xml".to_string(),
     ];
-    let err = cli_handle_version_or_continue(
-        &raw,
-        "agent-cli",
-        "1.2.3",
-        &VersionConfig::agent_cli_default(),
-    )
-    .expect_err("invalid version output must return error");
+    let err = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
+        .expect_err("invalid version output must return error")
+        .into_value();
     assert_eq!(err["kind"], "error");
     assert_eq!(err["error"]["code"], "cli_error");
     assert!(
@@ -1970,14 +2071,9 @@ fn cli_handle_version_reports_invalid_output_as_cli_error() {
 #[test]
 fn cli_handle_version_can_preserve_conventional_bare_text() {
     let raw = vec!["agent-cli".to_string(), "--version".to_string()];
-    let out = cli_handle_version_or_continue(
-        &raw,
-        "agent-cli",
-        "1.2.3",
-        &VersionConfig::conventional_default(),
-    )
-    .expect("valid version request")
-    .expect("version should render");
+    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
+        .expect("valid version request")
+        .expect("version should render");
     assert_eq!(out, "agent-cli 1.2.3\n");
 }
 
@@ -1989,14 +2085,9 @@ fn cli_handle_version_conventional_mode_still_honors_json_output() {
         "--output".to_string(),
         "json".to_string(),
     ];
-    let out = cli_handle_version_or_continue(
-        &raw,
-        "agent-cli",
-        "1.2.3",
-        &VersionConfig::conventional_default(),
-    )
-    .expect("valid version request")
-    .expect("version should render");
+    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
+        .expect("valid version request")
+        .expect("version should render");
     let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
     assert_eq!(parsed["kind"], "result");
     assert_eq!(parsed["result"]["version"], "1.2.3");
@@ -2010,14 +2101,9 @@ fn cli_handle_version_protocol_v1_adds_code_and_trace() {
         "--output".to_string(),
         "json".to_string(),
     ];
-    let out = cli_handle_version_or_continue(
-        &raw,
-        "agent-cli",
-        "1.2.3",
-        &VersionConfig::conventional_default().with_protocol_v1(),
-    )
-    .expect("valid version request")
-    .expect("version should render");
+    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
+        .expect("valid version request")
+        .expect("version should render");
     let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
     assert_eq!(parsed["kind"], "result");
     assert_eq!(parsed["result"]["code"], "version");
@@ -2030,15 +2116,59 @@ fn cli_handle_version_protocol_v1_adds_code_and_trace() {
 fn cli_handle_version_without_version_returns_none() {
     let raw = vec!["agent-cli".to_string(), "ping".to_string()];
     assert!(
-        cli_handle_version_or_continue(
-            &raw,
-            "agent-cli",
-            "1.2.3",
-            &VersionConfig::agent_cli_default(),
-        )
-        .expect("valid non-version request")
-        .is_none()
+        cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3",)
+            .expect("valid non-version request")
+            .is_none()
     );
+}
+
+#[test]
+fn cli_handle_version_ignores_version_flag_after_subcommand() {
+    // A subcommand that takes its own `--version <value>` must not be hijacked
+    // by the top-level pre-parser.
+    let raw = vec![
+        "agent-cli".to_string(),
+        "hatch".to_string(),
+        "--version".to_string(),
+        "1.3.0".to_string(),
+    ];
+    assert!(
+        cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3",)
+            .expect("subcommand --version must not be a version request")
+            .is_none()
+    );
+}
+
+#[test]
+fn cli_handle_version_ignores_short_version_flag_after_subcommand() {
+    let raw = vec![
+        "agent-cli".to_string(),
+        "hatch".to_string(),
+        "-V".to_string(),
+        "1.3.0".to_string(),
+    ];
+    assert!(
+        cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3",)
+            .expect("subcommand -V must not be a version request")
+            .is_none()
+    );
+}
+
+#[test]
+fn cli_handle_version_honors_output_flag_before_top_level_version() {
+    // Known output flags consume their value, so a trailing top-level
+    // `--version` is still recognized.
+    let raw = vec![
+        "agent-cli".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+        "--version".to_string(),
+    ];
+    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
+        .expect("valid version request")
+        .expect("version should render");
+    let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
+    assert_eq!(parsed["result"]["version"], "1.2.3");
 }
 
 // ═══════════════════════════════════════════
@@ -2059,17 +2189,19 @@ fn readme_complete_suffix_yaml() {
         "user_name": "alice",
         "count": 42
     });
-    let out = output_yaml(&data);
+    let out = render(&data, OutputFormat::Yaml, &OutputOptions::default());
     assert!(out.starts_with("---\n"));
-    assert!(out.contains("api_key: \"***\""));
-    assert!(out.contains("cache_ttl: \"3600s\""));
+    // Structure-preserving: original keys and raw values/types survive after
+    // redaction; only the secret value is masked, just like `OutputFormat::Json`.
+    assert!(out.contains("api_key_secret: \"***\""));
+    assert!(out.contains("cache_ttl_s: 3600"));
     assert!(out.contains("count: 42"));
-    assert!(out.contains("created_at: \"2025-02-07T00:00:00.000Z\""));
-    assert!(out.contains("file_size: \"5.0MiB\""));
-    assert!(out.contains("payment: \"50000000msats\""));
-    assert!(out.contains("price: \"$99.99\""));
-    assert!(out.contains("request_timeout: \"5.0s\""));
-    assert!(out.contains("success_rate: \"95.5%\""));
+    assert!(out.contains("created_at_epoch_ms: 1738886400000"));
+    assert!(out.contains("file_size_bytes: 5242880"));
+    assert!(out.contains("payment_msats: 50000000"));
+    assert!(out.contains("price_usd_cents: 9999"));
+    assert!(out.contains("request_timeout_ms: 5000"));
+    assert!(out.contains("success_rate_percent: 95.5"));
     assert!(out.contains("user_name: \"alice\""));
 }
 
@@ -2087,7 +2219,7 @@ fn readme_complete_suffix_plain() {
         "user_name": "alice",
         "count": 42
     });
-    let out = output_plain(&data);
+    let out = render(&data, OutputFormat::Plain, &OutputOptions::default());
     assert_eq!(
         out,
         "api_key=*** cache_ttl=3600s count=42 created_at=2025-02-07T00:00:00.000Z file_size=5.0MiB payment=50000000msats price=$99.99 request_timeout=5.0s success_rate=95.5% user_name=alice"
@@ -2102,7 +2234,7 @@ fn readme_json_output() {
         "created_at_epoch_ms": 1738886400000i64,
         "file_size_bytes": 5242880
     });
-    let out = output_json(&data);
+    let out = render(&data, OutputFormat::Json, &OutputOptions::default());
     assert!(out.contains("\"api_key_secret\":\"***\""));
     assert!(out.contains("\"created_at_epoch_ms\":1738886400000"));
     assert!(out.contains("\"file_size_bytes\":5242880"));
@@ -2120,12 +2252,15 @@ fn readme_cli_startup_yaml() {
         "args": {"input_path": "data.json"},
         "env": {"RUST_LOG": "info"}
     }))
-    .build()
-    .expect("builder failed");
-    let out = output_yaml(&startup_val);
+    .build();
+    let out = render(
+        startup_val.as_value(),
+        OutputFormat::Yaml,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("kind: \"log\""));
-    assert!(out.contains("api_key: \"***\""));
-    assert!(out.contains("timeout: \"30s\""));
+    assert!(out.contains("api_key_secret: \"***\""));
+    assert!(out.contains("timeout_s: 30"));
     assert!(out.contains("input_path: \"data.json\""));
     assert!(out.contains("RUST_LOG: \"info\""));
     assert!(!out.contains("sk-sensitive-key"));
@@ -2139,9 +2274,12 @@ fn readme_cli_progress_plain() {
         "total": 10,
     }))
     .trace(json!({"duration_ms": 1500}))
-    .build()
-    .expect("builder failed");
-    let out = output_plain(&progress);
+    .build();
+    let out = render(
+        progress.as_value(),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("kind=progress"));
     assert!(out.contains("progress.current=3"));
     assert!(out.contains("progress.message=processing"));
@@ -2153,9 +2291,12 @@ fn readme_cli_progress_plain() {
 fn readme_jsonl_output() {
     let result = crate::protocol::json_result(json!({"status": "success"}))
         .trace(json!({"duration_ms": 250, "api_key_secret": "sk-123"}))
-        .build()
-        .expect("builder failed");
-    let out = output_json(&result);
+        .build();
+    let out = render(
+        result.as_value(),
+        OutputFormat::Json,
+        &OutputOptions::default(),
+    );
     assert!(out.contains("\"kind\":\"result\""));
     assert!(out.contains("\"status\":\"success\""));
     assert!(out.contains("\"api_key_secret\":\"***\""));
@@ -2171,8 +2312,7 @@ fn readme_jsonl_output() {
 fn decode_result_event() {
     let event = crate::protocol::json_result(json!({"rows": 2}))
         .trace(json!({"duration_ms": 10}))
-        .build()
-        .expect("builder failed");
+        .build();
     let text = serde_json::to_string(&event).expect("serialize");
     match decode_protocol_event(&text).expect("decode result") {
         DecodedEvent::Result(decoded) => {
@@ -2212,8 +2352,7 @@ fn decode_progress_event_with_extension_fields() {
         "current": 3,
         "total": 10,
     }))
-    .build()
-    .expect("builder failed");
+    .build();
     let text = serde_json::to_string(&event).expect("serialize");
     match decode_protocol_event(&text).expect("decode progress") {
         DecodedEvent::Progress(decoded) => {
@@ -2232,8 +2371,7 @@ fn decode_log_event_with_extension_fields() {
         "message": "disk low",
         "free_bytes": 1024,
     }))
-    .build()
-    .expect("builder failed");
+    .build();
     let text = serde_json::to_string(&event).expect("serialize");
     match decode_protocol_event(&text).expect("decode log") {
         DecodedEvent::Log(decoded) => {

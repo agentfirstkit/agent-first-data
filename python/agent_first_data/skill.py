@@ -5,7 +5,7 @@ calls :func:`run_skill_admin` to install, uninstall, or report status of that sk
 across supported coding agents (Codex, Claude Code, opencode, Hermes).
 
 The function performs the filesystem work and returns the protocol ``dict`` (rendered
-by the caller with ``cli_output``) or raises :class:`SkillError`. It never writes to
+by the caller with ``render``) or raises :class:`SkillError`. It never writes to
 stdout/stderr itself.
 """
 
@@ -202,7 +202,7 @@ class SkillUninstallReport:
 
 
 # A skill action result. Read fields directly, or call ``to_dict()`` to serialize
-# with ``cli_output``. The ``code`` field is the protocol discriminator.
+# with ``render``. The ``code`` field is the protocol discriminator.
 SkillReport = Union[SkillStatusReport, SkillInstallReport, SkillUninstallReport]
 
 
@@ -218,7 +218,7 @@ class _SkillTarget:
 def run_skill_admin(spec: SkillSpec, action: SkillAction, options: SkillOptions) -> SkillReport:
     """Install, uninstall, or report status of ``spec``'s skill across the selected
     agent target(s). Returns a typed :data:`SkillReport` (read fields directly, or
-    call ``to_dict()`` to serialize with ``cli_output``) or raises :class:`SkillError`.
+    call ``to_dict()`` to serialize with ``render``) or raises :class:`SkillError`.
     Does not touch stdout/stderr.
     """
     _validate_spec(spec)

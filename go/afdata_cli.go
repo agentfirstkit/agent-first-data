@@ -64,14 +64,17 @@ func CliParseLogFilters(entries []string) LogFilters {
 }
 
 // Enabled returns true if the event is enabled by the filters.
-// Empty filter list returns false; "all" or "*" return true; otherwise prefix-matched against lowercase event.
+// An empty filter list returns false (filtering is opt-in); the single wildcard
+// word "all" returns true ("*" is not special); otherwise the event is
+// prefix-matched (lowercased) against each filter, so a mistyped filter matches
+// nothing and silently emits no output.
 func (lf LogFilters) Enabled(event string) bool {
 	if len(lf.filters) == 0 {
 		return false
 	}
 	lower := strings.ToLower(event)
 	for _, filter := range lf.filters {
-		if filter == "all" || filter == "*" {
+		if filter == "all" {
 			return true
 		}
 		if strings.HasPrefix(lower, filter) {
@@ -91,29 +94,22 @@ func (lf LogFilters) Values() []string {
 	return append([]string(nil), lf.filters...)
 }
 
-// CliOutput dispatches output formatting by OutputFormat.
-// Equivalent to calling OutputJson, OutputYaml, or OutputPlain directly.
-func CliOutput(value any, format OutputFormat) string {
+// Render renders a value as a string in the given format with the given
+// options. The single value × format × options → string entry point,
+// replacing the former OutputJson/OutputYaml/OutputPlain (+WithOptions) and
+// CliOutput/CliOutputWithOptions families. Pass a zero OutputOptions{} for
+// defaults.
+//
+// JSON and YAML are structure-preserving and ignore PlainStyle: they keep
+// original keys and values after redaction. Plain (logfmt) honors PlainStyle.
+func Render(value any, format OutputFormat, options OutputOptions) string {
 	switch format {
 	case OutputFormatYaml:
-		return OutputYaml(value)
+		return renderYaml(value, options)
 	case OutputFormatPlain:
-		return OutputPlain(value)
+		return renderPlain(value, options)
 	default:
-		return OutputJson(value)
-	}
-}
-
-// CliOutputWithOptions dispatches output formatting with explicit redaction and style.
-// JSON ignores OutputStyle and preserves original keys and values after redaction.
-func CliOutputWithOptions(value any, format OutputFormat, outputOptions OutputOptions) string {
-	switch format {
-	case OutputFormatYaml:
-		return OutputYamlWithOptions(value, outputOptions)
-	case OutputFormatPlain:
-		return OutputPlainWithOptions(value, outputOptions)
-	default:
-		return OutputJsonWithOptions(value, outputOptions)
+		return renderJSON(value, options)
 	}
 }
 
@@ -164,7 +160,7 @@ func (e *CliEmitter) Emit(event Event) error {
 	default:
 		return fmt.Errorf("unsupported event kind %q", kind)
 	}
-	_, err := io.WriteString(e.writer, CliOutputWithOptions(envelope, e.format, e.outputOptions)+"\n")
+	_, err := io.WriteString(e.writer, Render(envelope, e.format, e.outputOptions)+"\n")
 	if err != nil {
 		return fmt.Errorf("failed to write CLI event: %w", err)
 	}
@@ -194,7 +190,7 @@ func (e *CliEmitter) EmitValidatedValue(value any) error {
 	default:
 		return fmt.Errorf("unsupported event kind %q", kind)
 	}
-	_, err := io.WriteString(e.writer, CliOutputWithOptions(envelope, e.format, e.outputOptions)+"\n")
+	_, err := io.WriteString(e.writer, Render(envelope, e.format, e.outputOptions)+"\n")
 	if err != nil {
 		return fmt.Errorf("failed to write CLI event: %w", err)
 	}
@@ -206,10 +202,7 @@ func (e *CliEmitter) EmitValidatedValue(value any) error {
 
 // EmitResult emits a result event with the given payload.
 func (e *CliEmitter) EmitResult(payload any) error {
-	event, err := NewJSONResult(payload).Build()
-	if err != nil {
-		return err
-	}
+	event := NewJSONResult(payload).Build()
 	return e.Emit(event)
 }
 
@@ -224,10 +217,7 @@ func (e *CliEmitter) EmitError(code string, message string) error {
 
 // EmitProgress emits a progress event with the given message.
 func (e *CliEmitter) EmitProgress(message string) error {
-	event, err := NewJSONProgress(map[string]any{"message": message}).Build()
-	if err != nil {
-		return err
-	}
+	event := NewJSONProgress(map[string]any{"message": message}).Build()
 	return e.Emit(event)
 }
 
@@ -248,21 +238,21 @@ func (e *CliEmitter) EmitLog(level LogLevel, message string) error {
 		}
 	}
 
-	event, err := NewJSONLog(payload).Build()
-	if err != nil {
-		return err
-	}
+	event := NewJSONLog(payload).Build()
 	return e.Emit(event)
 }
 
 // BuildCliVersion builds a standard CLI version value as a map (for compatibility).
-// Returns a map without trace field for conventional CLI version output.
+// The structured version event follows the protocol-v1 shape shared by the other
+// SDKs: a "version"-coded result plus an empty trace.
 func BuildCliVersion(version string) map[string]any {
 	return map[string]any{
 		"kind": "result",
 		"result": map[string]any{
+			"code":    "version",
 			"version": version,
 		},
+		"trace": map[string]any{},
 	}
 }
 
@@ -274,16 +264,21 @@ func CliRenderVersion(name string, version string, format OutputFormat) string {
 	if format == "" {
 		rendered = fmt.Sprintf("%s %s", name, version)
 	} else {
-		rendered = CliOutput(BuildCliVersion(version), format)
+		rendered = Render(BuildCliVersion(version), format, OutputOptions{})
 	}
 	return strings.TrimRight(rendered, "\n") + "\n"
 }
 
 // CliHandleVersionOrContinue renders version output if --version/-V is present.
-// It returns handled=false when no version flag was present. defaultOutput
-// controls the bare --version format; pass OutputFormatJson for AFDATA-first
-// CLIs or the empty string for conventional text.
-func CliHandleVersionOrContinue(args []string, name string, version string, defaultOutput OutputFormat) (out string, handled bool, err error) {
+// It returns handled=false when no version flag was present. A bare --version/-V
+// always prints conventional "<name> <version>" text; a structured event is
+// emitted only when the output format is requested explicitly via --output or
+// --json.
+//
+// Only a top-level version request is recognized: scanning stops at the first
+// positional argument (the subcommand), so "tool sub --version <value>" leaves
+// --version for the subcommand's parser rather than printing the tool version.
+func CliHandleVersionOrContinue(args []string, name string, version string) (out string, handled bool, err error) {
 	versionRequested := false
 	outputFormat := OutputFormat("")
 	outputExplicit := false
@@ -291,6 +286,12 @@ func CliHandleVersionOrContinue(args []string, name string, version string, defa
 	for i := 0; i < len(args); {
 		arg := args[i]
 		if arg == "--" {
+			break
+		}
+		// The first positional argument marks the subcommand boundary. Past it,
+		// --version and -V belong to the subcommand's own parser, matching
+		// git/cargo/clap: this pre-parser only owns a top-level version request.
+		if !strings.HasPrefix(arg, "-") {
 			break
 		}
 		if arg == "--version" || arg == "-V" {
@@ -344,5 +345,5 @@ func CliHandleVersionOrContinue(args []string, name string, version string, defa
 	if outputExplicit {
 		return CliRenderVersion(name, version, outputFormat), true, nil
 	}
-	return CliRenderVersion(name, version, defaultOutput), true, nil
+	return CliRenderVersion(name, version, ""), true, nil
 }

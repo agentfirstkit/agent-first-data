@@ -5,7 +5,7 @@ npm install agent-first-data
 ```
 
 ```typescript
-import { jsonResult, outputJson, outputPlain } from "agent-first-data";
+import { jsonResult, render } from "agent-first-data";
 
 const event = jsonResult({
   api_key_secret: "sk-123",
@@ -13,11 +13,11 @@ const event = jsonResult({
   db_url: "postgres://user:p@ss@db/app?token_secret=abc",
 }).build();
 
-console.log(outputJson(event.toJSON()));
-console.log(outputPlain(event.toJSON()));
+console.log(render(event.toJSON(), "json"));
+console.log(render(event.toJSON(), "plain"));
 ```
 
-Useful names use TypeScript casing: `outputJson`, `outputYaml`, `outputPlain`, `outputOptionsForPolicy`, `redactedValue`, `redactUrlSecrets`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `isValidRfc3339`, `isValidBcp47`, `decodeProtocolEvent`, `cliParseOutput`, `cliParseLogFilters`, `cliOutput`, `buildCliError`, `buildCliVersion`, and `cliHandleVersionOrContinue`.
+Useful names use TypeScript casing: `render`, `outputOptionsForPolicy`, `redactedValue`, `redactUrlSecrets`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `isValidRfc3339`, `isValidBcp47`, `decodeProtocolEvent`, `cliParseOutput`, `cliParseLogFilters`, `buildCliError`, `buildCliVersion`, and `cliHandleVersionOrContinue`.
 
 Skill admin and stream redirection are not re-exported from the package root; import them from their own subpaths:
 
@@ -30,7 +30,7 @@ import { installStreamRedirectFromRawArgs } from "agent-first-data/stream-redire
 
 - Default redaction replaces every `_secret` or configured secret-name subtree with `***`, including objects and arrays.
 - `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed and internal whitespace redacts the whole field.
-- YAML/plain quote and escape keys as well as values, sort by UTF-16 code unit order, and render nested objects in arrays as canonical JSON.
+- YAML keeps original keys and values (structure-preserving, like JSON), sorting keys by UTF-16 code unit order and quoting/escaping unsafe keys and string scalars. Plain strips formatting suffixes, formats values, sorts the same way, and renders nested objects/arrays as canonical JSON.
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - `buildCliError(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
 - Use `cliHandleVersionOrContinue()` before argument parsing so bare `--version` stays conventional and `--version --output json|yaml|plain` stays structured.

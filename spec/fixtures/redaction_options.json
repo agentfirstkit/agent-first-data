@@ -86,7 +86,7 @@
       }
     },
     "options": {
-      "policy": "RedactionTraceOnly",
+      "policy": "TraceOnly",
       "secret_names": [
         "api_key"
       ]
@@ -108,7 +108,7 @@
       "api_key_secret": "sk-456"
     },
     "options": {
-      "policy": "RedactionNone",
+      "policy": "Off",
       "secret_names": [
         "api_key"
       ]
@@ -192,7 +192,7 @@
       "final_url": "https://h/cb?code_secret=abc"
     },
     "options": {
-      "policy": "RedactionNone"
+      "policy": "Off"
     },
     "expected": {
       "final_url": "https://h/cb?code_secret=abc"
@@ -213,7 +213,7 @@
       }
     },
     "options": {
-      "policy": "RedactionTraceOnly"
+      "policy": "TraceOnly"
     },
     "expected": {
       "result": {

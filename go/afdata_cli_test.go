@@ -162,7 +162,7 @@ func TestBuildCLIError_IsValidJson(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	v := event.Value()
-	s := OutputJson(v)
+	s := Render(v, OutputFormatJson, OutputOptions{})
 	if s == "" {
 		t.Error("OutputJson returned empty string")
 	}
@@ -172,13 +172,13 @@ func TestBuildCLIError_IsValidJson(t *testing.T) {
 }
 
 // ═══════════════════════════════════════════
-// CliOutput
+// Render
 // ═══════════════════════════════════════════
 
 func TestCliOutput_DispatchesJson(t *testing.T) {
-	event, _ := NewJSONResult(map[string]any{"size_bytes": int64(1024)}).Build()
+	event := NewJSONResult(map[string]any{"size_bytes": int64(1024)}).Build()
 	v := event.Value()
-	out := CliOutput(v, OutputFormatJson)
+	out := Render(v, OutputFormatJson, OutputOptions{})
 	if !contains(out, "size_bytes") {
 		t.Errorf("json output should preserve raw keys, got: %s", out)
 	}
@@ -188,21 +188,21 @@ func TestCliOutput_DispatchesJson(t *testing.T) {
 }
 
 func TestCliOutput_DispatchesYaml(t *testing.T) {
-	event, _ := NewJSONResult(map[string]any{"size_bytes": int64(1024)}).Build()
+	event := NewJSONResult(map[string]any{"size_bytes": int64(1024)}).Build()
 	v := event.Value()
-	out := CliOutput(v, OutputFormatYaml)
+	out := Render(v, OutputFormatYaml, OutputOptions{})
 	if !contains(out, "---") {
 		t.Errorf("yaml output should start with ---, got: %s", out)
 	}
-	if !contains(out, "size:") {
-		t.Errorf("yaml output should strip suffix, got: %s", out)
+	if !contains(out, "size_bytes: 1024") {
+		t.Errorf("yaml output should be structure-preserving (raw key, raw value), got: %s", out)
 	}
 }
 
 func TestCliOutput_DispatchesPlain(t *testing.T) {
-	event, _ := NewJSONResult(map[string]any{"ok": true}).Build()
+	event := NewJSONResult(map[string]any{"ok": true}).Build()
 	v := event.Value()
-	out := CliOutput(v, OutputFormatPlain)
+	out := Render(v, OutputFormatPlain, OutputOptions{})
 	if !contains(out, "kind=result") {
 		t.Errorf("plain output should be logfmt, got: %s", out)
 	}
@@ -210,11 +210,7 @@ func TestCliOutput_DispatchesPlain(t *testing.T) {
 
 func TestCliOutputWithOptions_DispatchesRawYaml(t *testing.T) {
 	v := map[string]any{"size_bytes": int64(1024)}
-	out := CliOutputWithOptions(
-		v,
-		OutputFormatYaml,
-		OutputOptions{Style: OutputStyleRaw},
-	)
+	out := Render(v, OutputFormatYaml, OutputOptions{Style: PlainStyleRaw})
 	if !contains(out, "size_bytes: 1024") {
 		t.Errorf("raw yaml output should preserve suffix key, got: %s", out)
 	}
@@ -230,11 +226,11 @@ func TestCliOutputWithOptions_DispatchesRawYaml(t *testing.T) {
 func TestCliEmitterWritesEventsAndTracksTerminal(t *testing.T) {
 	var buf bytes.Buffer
 	emitter := NewCliEmitter(&buf, OutputFormatJson)
-	logEvent, _ := NewJSONLog(map[string]any{"level": "info", "message": "startup"}).Build()
+	logEvent := NewJSONLog(map[string]any{"level": "info", "message": "startup"}).Build()
 	if err := emitter.Emit(logEvent); err != nil {
 		t.Fatalf("log emit: %v", err)
 	}
-	resultEvent, _ := NewJSONResult(map[string]any{"rows": 2}).Build()
+	resultEvent := NewJSONResult(map[string]any{"rows": 2}).Build()
 	if err := emitter.Emit(resultEvent); err != nil {
 		t.Fatalf("result emit: %v", err)
 	}
@@ -245,8 +241,8 @@ func TestCliEmitterWritesEventsAndTracksTerminal(t *testing.T) {
 }
 
 func TestCliEmitterFramingAllFormats(t *testing.T) {
-	logEvent, _ := NewJSONLog(map[string]any{"level": "info", "message": "startup"}).Build()
-	resultEvent, _ := NewJSONResult(map[string]any{"rows": 2}).Build()
+	logEvent := NewJSONLog(map[string]any{"level": "info", "message": "startup"}).Build()
+	resultEvent := NewJSONResult(map[string]any{"rows": 2}).Build()
 	cases := []struct {
 		name   string
 		format OutputFormat
@@ -306,7 +302,7 @@ func TestCliEmitterFramingAllFormats(t *testing.T) {
 func TestCliEmitterRejectsDuplicateTerminal(t *testing.T) {
 	var buf bytes.Buffer
 	emitter := NewCliEmitter(&buf, OutputFormatJson)
-	resultEvent, _ := NewJSONResult(map[string]any{"rows": 2}).Build()
+	resultEvent := NewJSONResult(map[string]any{"rows": 2}).Build()
 	if err := emitter.Emit(resultEvent); err != nil {
 		t.Fatalf("result emit: %v", err)
 	}
@@ -320,11 +316,11 @@ func TestCliEmitterRejectsDuplicateTerminal(t *testing.T) {
 func TestCliEmitterRejectsNonTerminalAfterTerminal(t *testing.T) {
 	var buf bytes.Buffer
 	emitter := NewCliEmitter(&buf, OutputFormatJson)
-	resultEvent, _ := NewJSONResult(map[string]any{"rows": 2}).Build()
+	resultEvent := NewJSONResult(map[string]any{"rows": 2}).Build()
 	if err := emitter.Emit(resultEvent); err != nil {
 		t.Fatalf("result emit: %v", err)
 	}
-	progressEvent, _ := NewJSONProgress(map[string]any{"message": "working"}).Build()
+	progressEvent := NewJSONProgress(map[string]any{"message": "working"}).Build()
 	err := emitter.Emit(progressEvent)
 	if err == nil || !contains(err.Error(), "after terminal") {
 		t.Fatalf("expected after terminal error, got %v", err)
@@ -339,7 +335,7 @@ func (failingWriter) Write(_ []byte) (int, error) {
 
 func TestCliEmitterReturnsWriterErrors(t *testing.T) {
 	emitter := NewCliEmitter(failingWriter{}, OutputFormatJson)
-	event, _ := NewJSONResult(map[string]any{"rows": 2}).Build()
+	event := NewJSONResult(map[string]any{"rows": 2}).Build()
 	err := emitter.Emit(event)
 	if err == nil || !contains(err.Error(), "failed to write") {
 		t.Fatalf("expected writer error, got %v", err)
@@ -362,7 +358,7 @@ func (w *failOnceWriter) Write(value []byte) (int, error) {
 func TestCliEmitterDoesNotCommitTerminalStateWhenWriteFails(t *testing.T) {
 	writer := &failOnceWriter{}
 	emitter := NewCliEmitter(writer, OutputFormatJson)
-	event, _ := NewJSONResult(map[string]any{"rows": 2}).Build()
+	event := NewJSONResult(map[string]any{"rows": 2}).Build()
 	if err := emitter.Emit(event); err == nil {
 		t.Fatal("first write must fail")
 	}
@@ -384,11 +380,14 @@ func TestBuildCliVersion_StandardShape(t *testing.T) {
 		t.Errorf("kind = %v", v["kind"])
 	}
 	result := v["result"].(map[string]any)
+	if result["code"] != "version" {
+		t.Errorf("code = %v", result["code"])
+	}
 	if result["version"] != "1.2.3" {
 		t.Errorf("version = %v", result["version"])
 	}
-	if _, ok := v["trace"]; ok {
-		t.Errorf("unexpected trace = %v", v["trace"])
+	if trace, ok := v["trace"].(map[string]any); !ok || len(trace) != 0 {
+		t.Errorf("trace = %v, want empty object", v["trace"])
 	}
 }
 
@@ -414,7 +413,6 @@ func TestCliHandleVersionOrContinue_HonorsOutputFlag(t *testing.T) {
 		[]string{"--version", "--output", "plain"},
 		"agent-cli",
 		"1.2.3",
-		OutputFormatJson,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -432,7 +430,6 @@ func TestCliHandleVersionOrContinue_JsonAlias(t *testing.T) {
 		[]string{"--version", "--json"},
 		"agent-cli",
 		"1.2.3",
-		"",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -450,7 +447,6 @@ func TestCliHandleVersionOrContinue_JsonAliasConflict(t *testing.T) {
 		[]string{"--version", "--json", "--output", "yaml"},
 		"agent-cli",
 		"1.2.3",
-		"",
 	)
 	if !handled {
 		t.Fatal("expected handled")
@@ -465,7 +461,6 @@ func TestCliHandleVersionOrContinue_ConventionalDefault(t *testing.T) {
 		[]string{"--version"},
 		"agent-cli",
 		"1.2.3",
-		"",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -483,7 +478,6 @@ func TestCliHandleVersionOrContinue_ReturnsNoneWithoutVersion(t *testing.T) {
 		[]string{"ping"},
 		"agent-cli",
 		"1.2.3",
-		OutputFormatJson,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -498,13 +492,48 @@ func TestCliHandleVersionOrContinue_RejectsInvalidOutput(t *testing.T) {
 		[]string{"--version", "--output", "xml"},
 		"agent-cli",
 		"1.2.3",
-		OutputFormatJson,
 	)
 	if !handled {
 		t.Fatal("expected handled")
 	}
 	if err == nil || !contains(err.Error(), "xml") {
 		t.Fatalf("expected xml error, got %v", err)
+	}
+}
+
+func TestCliHandleVersionOrContinue_IgnoresVersionFlagAfterSubcommand(t *testing.T) {
+	// A subcommand that takes its own --version <value> must not be hijacked
+	// by the top-level pre-parser.
+	for _, args := range [][]string{
+		{"hatch", "--version", "1.3.0"},
+		{"hatch", "-V", "1.3.0"},
+	} {
+		_, handled, err := CliHandleVersionOrContinue(args, "agent-cli", "1.2.3")
+		if err != nil {
+			t.Fatalf("unexpected error for %v: %v", args, err)
+		}
+		if handled {
+			t.Fatalf("expected handled=false for %v", args)
+		}
+	}
+}
+
+func TestCliHandleVersionOrContinue_HonorsOutputFlagBeforeTopLevelVersion(t *testing.T) {
+	// A known output flag consumes its value, so a trailing top-level
+	// --version is still recognized.
+	out, handled, err := CliHandleVersionOrContinue(
+		[]string{"--output", "json", "--version"},
+		"agent-cli",
+		"1.2.3",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	if !contains(out, `"version":"1.2.3"`) {
+		t.Fatalf("expected version json, got %q", out)
 	}
 }
 

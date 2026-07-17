@@ -2,9 +2,10 @@
  * AFDATA output formatting and protocol templates.
  *
  * Public APIs include protocol event builders, redactedValue (covers _secret
- * and _url fields), output formatters, redactUrlSecrets,
- * normalizeUtcOffset, isValidRfc3339Date, isValidRfc3339Time, isValidRfc3339, isValidBcp47,
- * RedactionPolicy, OutputStyle, and OutputOptions.
+ * and _url fields), redactUrlSecrets, normalizeUtcOffset, isValidRfc3339Date,
+ * isValidRfc3339Time, isValidRfc3339, isValidBcp47, RedactionPolicy,
+ * PlainStyle, and OutputOptions. The single render entry point (`render`)
+ * lives in cli.ts and calls this module's internal JSON/YAML/plain formatters.
  */
 
 export type JsonValue =
@@ -63,25 +64,18 @@ export class EventBuildError extends Error {
 
 export class JsonResultBuilder {
   private traceValue: Record<string, JsonValue> = {};
-  private issues: string[] = [];
 
   constructor(private readonly payload: JsonValue) {}
 
   trace(value: Record<string, JsonValue> | undefined): this {
     if (value !== undefined) {
-      if (!isObject(value)) {
-        this.issues.push("trace must be a JSON object");
-      } else {
-        this.traceValue = value as Record<string, JsonValue>;
-      }
+      this.traceValue = value;
     }
     return this;
   }
 
+  /** Build the event. This builder cannot fail. */
   build(): Event {
-    if (this.issues.length > 0) {
-      throw new EventBuildError(`Failed to build result event: ${this.issues.join("; ")}`, this.issues);
-    }
     const m: Record<string, JsonValue> = { kind: "result", result: this.payload, trace: this.traceValue };
     return new Event(m);
   }
@@ -198,25 +192,18 @@ export class JsonErrorBuilder {
 
 export class JsonProgressBuilder {
   private traceValue: Record<string, JsonValue> = {};
-  private issues: string[] = [];
 
   constructor(private readonly payload: JsonValue) {}
 
   trace(value: Record<string, JsonValue> | undefined): this {
     if (value !== undefined) {
-      if (!isObject(value)) {
-        this.issues.push("trace must be a JSON object");
-      } else {
-        this.traceValue = value as Record<string, JsonValue>;
-      }
+      this.traceValue = value;
     }
     return this;
   }
 
+  /** Build the event. This builder cannot fail. */
   build(): Event {
-    if (this.issues.length > 0) {
-      throw new EventBuildError(`Failed to build progress event: ${this.issues.join("; ")}`, this.issues);
-    }
     const m: Record<string, JsonValue> = { kind: "progress", progress: this.payload, trace: this.traceValue };
     return new Event(m);
   }
@@ -224,25 +211,18 @@ export class JsonProgressBuilder {
 
 export class JsonLogBuilder {
   private traceValue: Record<string, JsonValue> = {};
-  private issues: string[] = [];
 
   constructor(private readonly payload: JsonValue) {}
 
   trace(value: Record<string, JsonValue> | undefined): this {
     if (value !== undefined) {
-      if (!isObject(value)) {
-        this.issues.push("trace must be a JSON object");
-      } else {
-        this.traceValue = value as Record<string, JsonValue>;
-      }
+      this.traceValue = value;
     }
     return this;
   }
 
+  /** Build the event. This builder cannot fail. */
   build(): Event {
-    if (this.issues.length > 0) {
-      throw new EventBuildError(`Failed to build log event: ${this.issues.join("; ")}`, this.issues);
-    }
     const m: Record<string, JsonValue> = { kind: "log", log: this.payload, trace: this.traceValue };
     return new Event(m);
   }
@@ -443,15 +423,17 @@ export function decodeProtocolEvent(text: string): DecodedEvent {
 }
 
 // ═══════════════════════════════════════════
-// Public API: Output Formatters
+// Internal: Output Formatters (called by render() in cli.ts)
 // ═══════════════════════════════════════════
 
+/** Which fields a redaction pass scrubs. The default is `All`. */
 export enum RedactionPolicy {
-  RedactionTraceOnly = "RedactionTraceOnly",
-  RedactionNone = "RedactionNone",
+  All = "All",
+  TraceOnly = "TraceOnly",
+  Off = "Off",
 }
 
-export enum OutputStyle {
+export enum PlainStyle {
   Readable = "Readable",
   Raw = "Raw",
 }
@@ -467,8 +449,9 @@ export type OutputOptions = {
      */
     secretNames?: readonly string[];
   };
-  /** Rendering style for YAML/plain output. Omitted means readable. */
-  style?: OutputStyle;
+  /** Rendering style for plain (logfmt) output only. Omitted means readable.
+   * JSON and YAML are structure-preserving and ignore this setting. */
+  style?: PlainStyle;
 };
 
 /** Convenience: build OutputOptions scoped to a RedactionPolicy. */
@@ -476,31 +459,42 @@ export function outputOptionsForPolicy(policy: RedactionPolicy): OutputOptions {
   return { redaction: { policy } };
 }
 
-/** Format as single-line JSON. Secrets redacted, original keys, raw values. */
-export function outputJson(value: JsonValue | Event, options: OutputOptions = {}): string {
+/**
+ * Format as single-line JSON. Secrets redacted, original keys, raw values.
+ * Internal: called by `render` in cli.ts, which is the single public render
+ * entry point. Not re-exported from index.ts.
+ */
+export function formatJsonValue(value: JsonValue | Event, options: OutputOptions = {}): string {
   const unwrapped = value instanceof Event ? (value.toJSON() as JsonValue) : value;
   return JSON.stringify(redactedValue(unwrapped, options.redaction ?? {}));
 }
 
-/** Format as multi-line YAML. Keys stripped, values formatted, secrets redacted. */
-export function outputYaml(value: JsonValue | Event, options: OutputOptions = {}): string {
+/**
+ * Format as multi-line YAML. Structure-preserving: like JSON, original keys,
+ * scalar types, and numeric semantics are kept after redaction; secrets are
+ * still redacted. `options.style` is ignored — YAML output does not vary by
+ * PlainStyle.
+ * Internal: called by `render` in cli.ts, which is the single public render
+ * entry point. Not re-exported from index.ts.
+ */
+export function formatYamlValue(value: JsonValue | Event, options: OutputOptions = {}): string {
   const unwrapped = value instanceof Event ? (value.toJSON() as JsonValue) : value;
   const redacted = redactedValue(unwrapped, options.redaction ?? {});
   const lines = ["---"];
-  if (options.style === OutputStyle.Raw) {
-    renderYamlRaw(redacted, 0, lines);
-  } else {
-    renderYamlProcessed(redacted, 0, lines);
-  }
+  renderYamlRaw(redacted, 0, lines);
   return lines.join("\n");
 }
 
-/** Format as single-line logfmt. Keys stripped, values formatted, secrets redacted. */
-export function outputPlain(value: JsonValue | Event, options: OutputOptions = {}): string {
+/**
+ * Format as single-line logfmt. Keys stripped, values formatted, secrets redacted.
+ * Internal: called by `render` in cli.ts, which is the single public render
+ * entry point. Not re-exported from index.ts.
+ */
+export function formatPlainValue(value: JsonValue | Event, options: OutputOptions = {}): string {
   const unwrapped = value instanceof Event ? (value.toJSON() as JsonValue) : value;
   const redacted = redactedValue(unwrapped, options.redaction ?? {});
   const pairs: [string, string][] = [];
-  if (options.style === OutputStyle.Raw) {
+  if (options.style === PlainStyle.Raw) {
     collectPlainPairsRaw(redacted, "", pairs);
   } else {
     collectPlainPairs(redacted, "", pairs);
@@ -744,15 +738,15 @@ function applyRedactionPolicyWithContext(
   context: RedactionContext,
 ): void {
   switch (redactionPolicy) {
-    case RedactionPolicy.RedactionTraceOnly:
+    case RedactionPolicy.TraceOnly:
       if (isObject(value) && value.trace !== undefined) {
         redactSecrets(value.trace, context);
       }
       break;
-    case RedactionPolicy.RedactionNone:
+    case RedactionPolicy.Off:
       break;
     default:
-      // Empty/unknown policy falls back to default full redaction.
+      // undefined or RedactionPolicy.All = full redaction (default).
       redactSecrets(value, context);
       break;
   }
@@ -1234,43 +1228,6 @@ function extractCurrencyCodeFromStem(stem: string): string | null {
 // ═══════════════════════════════════════════
 // YAML Rendering
 // ═══════════════════════════════════════════
-
-function renderYamlProcessed(value: JsonValue, indent: number, lines: string[]): void {
-  const prefix = "  ".repeat(indent);
-  if (!isObject(value)) {
-    lines.push(`${prefix}${yamlScalar(value)}`);
-    return;
-  }
-
-  for (const pf of processObjectFields(value)) {
-    if (pf.formatted !== null) {
-      lines.push(`${prefix}${yamlKey(pf.key)}: "${escapeYamlStr(pf.formatted)}"`);
-    } else if (isObject(pf.value)) {
-      if (Object.keys(pf.value).length > 0) {
-        lines.push(`${prefix}${yamlKey(pf.key)}:`);
-        renderYamlProcessed(pf.value, indent + 1, lines);
-      } else {
-        lines.push(`${prefix}${yamlKey(pf.key)}: {}`);
-      }
-    } else if (Array.isArray(pf.value)) {
-      if (pf.value.length === 0) {
-        lines.push(`${prefix}${yamlKey(pf.key)}: []`);
-      } else {
-        lines.push(`${prefix}${yamlKey(pf.key)}:`);
-        for (const item of pf.value) {
-          if (isObject(item)) {
-            lines.push(`${prefix}  -`);
-            renderYamlProcessed(item, indent + 2, lines);
-          } else {
-            lines.push(`${prefix}  - ${yamlScalar(item)}`);
-          }
-        }
-      }
-    } else {
-      lines.push(`${prefix}${yamlKey(pf.key)}: ${yamlScalar(pf.value)}`);
-    }
-  }
-}
 
 function renderYamlRaw(value: JsonValue, indent: number, lines: string[]): void {
   const prefix = "  ".repeat(indent);

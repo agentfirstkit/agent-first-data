@@ -131,13 +131,13 @@ func TestLeafHelpTargetDocumentsFormats(t *testing.T) {
 // Invariant: every --help output, in every format, documents the help formats.
 func TestHelpAlwaysDocumentsFormats(t *testing.T) {
 	// Structured (json/yaml) schema, root and leaf targets.
-	root := afdata.OutputJson(helpSchema("", "one_level"))
+	root := afdata.Render(helpSchema("", "one_level"), afdata.OutputFormatJson, afdata.OutputOptions{})
 	for _, want := range []string{"--output", "markdown", "--recursive"} {
 		if !containsStr(root, want) {
 			t.Errorf("root help schema missing %q:\n%s", want, root)
 		}
 	}
-	leaf := afdata.OutputJson(helpSchema("echo", "one_level"))
+	leaf := afdata.Render(helpSchema("echo", "one_level"), afdata.OutputFormatJson, afdata.OutputOptions{})
 	if !containsStr(leaf, "--output") || !containsStr(leaf, "markdown") {
 		t.Errorf("leaf help schema must document --output formats:\n%s", leaf)
 	}
@@ -158,8 +158,8 @@ func TestHelpRedactsSecretDefaults(t *testing.T) {
 	rendered := []string{
 		formatRootHelp(true),
 		formatMarkdownHelp("", false),
-		afdata.CliOutput(helpSchema("", "one_level"), afdata.OutputFormatJson),
-		afdata.CliOutput(helpSchema("", "one_level"), afdata.OutputFormatYaml),
+		afdata.Render(helpSchema("", "one_level"), afdata.OutputFormatJson, afdata.OutputOptions{}),
+		afdata.Render(helpSchema("", "one_level"), afdata.OutputFormatYaml, afdata.OutputOptions{}),
 	}
 	for _, text := range rendered {
 		if !containsStr(text, redactionMarker) {
@@ -273,11 +273,16 @@ func TestLogEnabledWildcards(t *testing.T) {
 	if logEnabled(startupFilters, "request") {
 		t.Error("startup must not enable request")
 	}
-	for _, all := range []string{"all", "*"} {
-		allFilters := afdata.CliParseLogFilters([]string{all})
-		if !logEnabled(allFilters, "startup") || !logEnabled(allFilters, "request") {
-			t.Errorf("%q must enable every category", all)
-		}
+	// "all" is the single wildcard word; it enables every category.
+	allFilters := afdata.CliParseLogFilters([]string{"all"})
+	if !logEnabled(allFilters, "startup") || !logEnabled(allFilters, "request") {
+		t.Error(`"all" must enable every category`)
+	}
+	// "*" is not special — it is a literal prefix, so it enables nothing
+	// unless an event name actually starts with it.
+	starFilters := afdata.CliParseLogFilters([]string{"*"})
+	if logEnabled(starFilters, "request") {
+		t.Error(`"*" must not be a wildcard`)
 	}
 }
 
@@ -440,12 +445,12 @@ func TestBuildJsonErrorWithoutHint(t *testing.T) {
 }
 
 func TestCliOutputAllFormats(t *testing.T) {
-	event, _ := afdata.NewJSONResult(map[string]any{"ok": true}).Build()
+	event := afdata.NewJSONResult(map[string]any{"ok": true}).Build()
 	v := event.Value()
 	for _, f := range []afdata.OutputFormat{afdata.OutputFormatJson, afdata.OutputFormatYaml, afdata.OutputFormatPlain} {
-		out := afdata.CliOutput(v, f)
+		out := afdata.Render(v, f, afdata.OutputOptions{})
 		if out == "" {
-			t.Errorf("CliOutput(%v) returned empty string", f)
+			t.Errorf("Render(%v) returned empty string", f)
 		}
 	}
 }
@@ -453,7 +458,7 @@ func TestCliOutputAllFormats(t *testing.T) {
 func TestErrorRoundTripIsValidJsonl(t *testing.T) {
 	event, _ := afdata.BuildCLIError("oops", "")
 	v := event.Value()
-	s := afdata.OutputJson(v)
+	s := afdata.Render(v, afdata.OutputFormatJson, afdata.OutputOptions{})
 	if len(s) == 0 {
 		t.Error("empty json")
 	}

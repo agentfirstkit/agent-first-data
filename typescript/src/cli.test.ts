@@ -3,15 +3,14 @@ import assert from "node:assert/strict";
 import {
   cliParseOutput,
   cliParseLogFilters,
-  cliOutput,
-  OutputStyle,
+  render,
+  PlainStyle,
   CliEmitter,
   jsonError,
   buildCliError,
   buildCliVersion,
   cliRenderVersion,
   cliHandleVersionOrContinue,
-  outputJson,
   jsonLog,
   jsonProgress,
   jsonResult,
@@ -77,11 +76,13 @@ describe("cliParseLogFilters", () => {
     assert.equal(lf.enabled("query"), false);
   });
 
-  it("enabled() returns true for 'all' or '*'", () => {
+  it("enabled() returns true for the 'all' wildcard, but '*' is not special", () => {
     const lf1 = cliParseLogFilters(["all"]);
     assert.equal(lf1.enabled("anything"), true);
+    // "*" is a literal prefix now, not a wildcard.
     const lf2 = cliParseLogFilters(["*"]);
-    assert.equal(lf2.enabled("anything"), true);
+    assert.equal(lf2.enabled("anything"), false);
+    assert.equal(lf2.enabled("*special"), true);
   });
 
   it("enabled() checks prefix match case-insensitively", () => {
@@ -110,7 +111,7 @@ describe("buildCliError", () => {
 
   it("produces valid JSONL", () => {
     const event = buildCliError("oops");
-    const line = outputJson(event.toJSON() as Record<string, unknown>);
+    const line = render(event.toJSON() as Record<string, unknown>, "json");
     const parsed = JSON.parse(line);
     assert.equal(parsed.kind, "error");
     assert.equal(parsed.error.code, "cli_error");
@@ -130,35 +131,47 @@ describe("buildCliError", () => {
     assert.equal(err["hint"], undefined);
     assert.ok(!("hint" in err));
   });
+
+  it("never throws on an empty message", () => {
+    // L1: buildCliError must never throw. An empty message is substituted
+    // with a placeholder so the internal jsonError(...).build() cannot fail.
+    const event = buildCliError("");
+    const v = event.toJSON() as Record<string, unknown>;
+    const err = v["error"] as Record<string, unknown>;
+    assert.equal(v["kind"], "error");
+    assert.equal(err["code"], "cli_error");
+    assert.equal(err["message"], "unspecified error");
+  });
 });
 
-// ── cliOutput ─────────────────────────────────────────────────────────────────
+// ── render ────────────────────────────────────────────────────────────────────
 
-describe("cliOutput", () => {
+describe("render", () => {
   it("dispatches json (raw keys, single line)", () => {
     const v = jsonResult({ size_bytes: 1024 }).build();
-    const out = cliOutput(v, "json");
+    const out = render(v, "json");
     assert.ok(out.includes("size_bytes"));  // json: no suffix processing
     assert.ok(!out.includes("\n"));
   });
 
-  it("dispatches yaml (suffix stripped)", () => {
+  it("dispatches yaml (structure-preserving, raw keys)", () => {
     const v = jsonResult({ size_bytes: 1024 }).build();
-    const out = cliOutput(v, "yaml");
+    const out = render(v, "yaml");
     assert.ok(out.startsWith("---"));
-    assert.ok(out.includes("size:"));       // yaml: suffix stripped
+    assert.ok(out.includes("size_bytes: 1024"));  // yaml: no suffix processing
+    assert.ok(!out.includes("size:"));
   });
 
   it("dispatches plain (logfmt)", () => {
     const v = jsonResult({ ok: true }).build();
-    const out = cliOutput(v, "plain");
+    const out = render(v, "plain");
     assert.ok(!out.includes("\n"));
     assert.ok(out.includes("kind=result"));
   });
 
   it("dispatches raw yaml with output options", () => {
     const v = { size_bytes: 1024 };
-    const out = cliOutput(v, "yaml", { style: OutputStyle.Raw });
+    const out = render(v, "yaml", { style: PlainStyle.Raw });
     assert.ok(out.includes("size_bytes: 1024"));
     assert.ok(!out.includes("size:"));
   });
@@ -247,6 +260,7 @@ describe("version helpers", () => {
     const event = buildCliVersion("1.2.3");
     const v = event.toJSON() as Record<string, unknown>;
     assert.equal(v["kind"], "result");
+    assert.equal((v["result"] as Record<string, unknown>)["code"], "version");
     assert.equal((v["result"] as Record<string, unknown>)["version"], "1.2.3");
     assert.deepEqual(v["trace"], {});
   });
@@ -294,5 +308,17 @@ describe("version helpers", () => {
       () => cliHandleVersionOrContinue(["--version", "--output", "xml"], "agent-cli", "1.2.3"),
       /xml/
     );
+  });
+
+  it("ignores a --version flag after a subcommand", () => {
+    // A subcommand that takes its own --version <value> must not be hijacked
+    // by the top-level pre-parser.
+    assert.equal(cliHandleVersionOrContinue(["hatch", "--version", "1.3.0"], "agent-cli", "1.2.3"), undefined);
+    assert.equal(cliHandleVersionOrContinue(["hatch", "-V", "1.3.0"], "agent-cli", "1.2.3"), undefined);
+  });
+
+  it("still honors a top-level --version after a value-consuming output flag", () => {
+    const out = cliHandleVersionOrContinue(["--output", "json", "--version"], "agent-cli", "1.2.3");
+    assert.ok(out?.includes('"version":"1.2.3"'));
   });
 });

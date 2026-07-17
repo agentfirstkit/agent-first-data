@@ -1,6 +1,6 @@
 # Agent-First Data
 
-A naming convention that lets AI agents understand your data without being told what it means.
+A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.
 
 > **Ask your agent:** "Apply the Agent-First Data convention across my project's fields, config, and logs."
 
@@ -21,7 +21,7 @@ Agent-First Data puts the meaning into the field name itself. Call the field `ti
 It is a convention, not a framework — a small set of name endings, plus a tiny library in four languages that reads and formats them.
 
 - **Names carry meaning.** Endings like `_ms`, `_bytes`, `_secret`, `_usd_cents`, and `_percent` put units and intent directly into the field name.
-- **One set of data, three ways to show it.** The same fields render as JSON for machines, YAML for people, or a single log line for scanning — units formatted, secrets removed.
+- **One set of data, three ways to show it.** The same fields render as JSON or YAML — both keep original keys and types, for machines — or as a single human log line with units formatted for scanning. Secrets are removed in every form.
 - **Secrets stay secret.** Anything ending in `_secret` is hidden automatically, in output and in logs. A `_url` field keeps its address but scrubs the userinfo password and secret-named query parameters. Legacy names like `api_key` can be protected by passing an explicit secret-name list.
 - **Logging agents can read.** Structured logs that follow the same rules, with request-scoped fields.
 - **The same in four languages.** One identical API across Rust, Go, Python, and TypeScript.
@@ -35,7 +35,7 @@ AFDATA redaction is intentionally field-name based:
 - `_url` fields scrub the userinfo password and query parameters whose names end in `_secret` or appear in `secret_names`; broad names such as `api_key`, `token`, or `password` are not hidden by default.
 - Free-form strings are not scanned for arbitrary secrets. If a secret URL is embedded in prose, redact the URL first with `redact_url_secrets`.
 
-There are no named redaction profiles. Use the default policy, an explicit `secret_names` list, or the documented scoped policies (`RedactionTraceOnly`, `RedactionNone`) for deliberate exceptions.
+There are no named redaction profiles. Use the default policy (`All`), an explicit `secret_names` list, or the documented scoped policies (`TraceOnly`, `Off`) for deliberate exceptions.
 
 ## Where to use it: CLI flags, config files, logs, and API responses
 

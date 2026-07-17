@@ -1,8 +1,7 @@
-use crate::cli::CliProtocolMode;
-use crate::formatting::{output_yaml_with_options, serialize_json_output};
+use crate::formatting::{render_yaml, serialize_json_output};
 use crate::protocol::build_cli_error;
 use crate::redaction::{
-    OutputOptions, OutputStyle, RedactionContext, RedactionPolicy, Redactor, is_secret_flag_name,
+    OutputOptions, PlainStyle, RedactionContext, RedactionPolicy, Redactor, is_secret_flag_name,
 };
 use serde_json::Value;
 
@@ -89,41 +88,15 @@ impl HelpOptions {
 #[cfg(feature = "cli-help")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HelpConfig {
-    /// Scope used for `--help` / `-h` when neither `--recursive` nor a
-    /// configured `recursive_flag` is present.
+    /// Scope used for `--help` / `-h` when `--recursive` is absent.
     pub default_scope: HelpScope,
-    /// Format used for help when no explicit output flag is present.
+    /// Format used for help when no explicit `--output` is present.
     pub default_format: HelpFormat,
-    /// Optional extra alias for the built-in `--recursive` scope modifier.
-    ///
-    /// `--recursive` is always recognized; set this only to accept an
-    /// additional custom flag name (for example `--full`). Like `--recursive`,
-    /// the alias is a *modifier* that selects recursive scope when `--help` is
-    /// present; on its own it does not trigger help.
-    pub recursive_flag: Option<&'static str>,
-    /// Optional output flag to read help format from, for example `--output`.
-    pub output_flag: Option<&'static str>,
-    /// Whether an explicit output flag can override `default_format`.
-    pub allow_output_format: bool,
-    /// Envelope mode for structured help output and early errors.
-    pub protocol_mode: CliProtocolMode,
 }
 
 #[cfg(feature = "cli-help")]
 impl HelpConfig {
-    /// Construct a custom help handler configuration.
-    pub const fn new(default_scope: HelpScope, default_format: HelpFormat) -> Self {
-        Self {
-            default_scope,
-            default_format,
-            recursive_flag: None,
-            output_flag: None,
-            allow_output_format: false,
-            protocol_mode: CliProtocolMode::Legacy,
-        }
-    }
-
-    /// Recommended preset for human-facing CLIs.
+    /// The blessed preset for CLIs.
     ///
     /// `--help` renders one-level plain help by default. Scope and format are
     /// orthogonal: `--recursive` expands the selected command subtree, while
@@ -134,59 +107,7 @@ impl HelpConfig {
         Self {
             default_scope: HelpScope::OneLevel,
             default_format: HelpFormat::Plain,
-            recursive_flag: None,
-            output_flag: Some("--output"),
-            allow_output_format: true,
-            protocol_mode: CliProtocolMode::Legacy,
         }
-    }
-
-    /// Recommended preset for agent-first CLIs that want full surface help by default.
-    pub const fn agent_cli_default() -> Self {
-        Self {
-            default_scope: HelpScope::Recursive,
-            default_format: HelpFormat::Plain,
-            recursive_flag: None,
-            output_flag: Some("--output"),
-            allow_output_format: true,
-            protocol_mode: CliProtocolMode::Legacy,
-        }
-    }
-
-    /// Return a copy with a different default scope.
-    pub const fn with_default_scope(mut self, scope: HelpScope) -> Self {
-        self.default_scope = scope;
-        self
-    }
-
-    /// Return a copy with a different default format.
-    pub const fn with_default_format(mut self, format: HelpFormat) -> Self {
-        self.default_format = format;
-        self
-    }
-
-    /// Return a copy with a different recursive-help flag.
-    pub const fn with_recursive_flag(mut self, flag: Option<&'static str>) -> Self {
-        self.recursive_flag = flag;
-        self
-    }
-
-    /// Return a copy with a different output flag.
-    pub const fn with_output_flag(mut self, flag: Option<&'static str>) -> Self {
-        self.output_flag = flag;
-        self
-    }
-
-    /// Return a copy that enables or disables help format overrides.
-    pub const fn with_output_format_override(mut self, enabled: bool) -> Self {
-        self.allow_output_format = enabled;
-        self
-    }
-
-    /// Return a copy that wraps JSON/YAML help in a protocol-v1 result event.
-    pub const fn with_protocol_v1(mut self) -> Self {
-        self.protocol_mode = CliProtocolMode::ProtocolV1;
-        self
     }
 }
 
@@ -225,11 +146,11 @@ pub fn cli_render_help_with_options(
         HelpFormat::Json => {
             serialize_json_output(&build_help_schema(cmd, subcommand_path, options.scope))
         }
-        HelpFormat::Yaml => output_yaml_with_options(
+        HelpFormat::Yaml => render_yaml(
             &build_help_schema(cmd, subcommand_path, options.scope),
             &OutputOptions {
-                redaction: Redactor::new().policy(RedactionPolicy::RedactionNone),
-                style: OutputStyle::Raw,
+                redaction: Redactor::new().policy(RedactionPolicy::Off),
+                style: PlainStyle::Raw,
             },
         ),
     };
@@ -311,7 +232,7 @@ pub fn cli_handle_help_or_continue(
     cmd: &clap::Command,
     config: &HelpConfig,
 ) -> Result<Option<String>, Value> {
-    let parsed = parse_help_request(raw_args, cmd, config);
+    let parsed = parse_help_request(raw_args, cmd);
     if !parsed.help_requested {
         return Ok(None);
     }
@@ -320,42 +241,35 @@ pub fn cli_handle_help_or_continue(
             &error,
             Some("valid help output formats: plain, markdown, json, yaml"),
         );
-        let mut event_value: Value = event.into();
-        if config.protocol_mode == CliProtocolMode::ProtocolV1
-            && let Some(obj) = event_value.as_object_mut()
-        {
-            obj.insert("trace".to_string(), serde_json::json!({}));
-        }
-        return Err(event_value);
+        return Err(event.into());
     }
 
     let (scope, format) = resolve_help_options(&parsed, config);
     let path: Vec<&str> = parsed.subcommand_path.iter().map(String::as_str).collect();
-    let options = HelpOptions { scope, format };
-    if config.protocol_mode == CliProtocolMode::ProtocolV1
-        && matches!(format, HelpFormat::Json | HelpFormat::Yaml)
-    {
-        #[allow(clippy::expect_used)]
+    // The one blessed structured shape: `--help --output json|yaml` wraps the
+    // help schema in a protocol-v1 `kind:"result"` event (`code:"help"`), the
+    // same envelope discipline as the version handler. Plain/Markdown stay text.
+    if matches!(format, HelpFormat::Json | HelpFormat::Yaml) {
         let event = crate::protocol::json_result(serde_json::json!({
             "code": "help",
             "help": build_help_schema(cmd, &path, scope),
         }))
         .trace(serde_json::json!({}))
-        .build()
-        .expect("help builder failed");
+        .build();
         let rendered = match format {
-            HelpFormat::Json => serialize_json_output(&event),
-            HelpFormat::Yaml => output_yaml_with_options(
-                &event,
+            HelpFormat::Json => serialize_json_output(event.as_value()),
+            HelpFormat::Yaml => render_yaml(
+                event.as_value(),
                 &OutputOptions {
-                    redaction: Redactor::new().policy(RedactionPolicy::RedactionNone),
-                    style: OutputStyle::Raw,
+                    redaction: Redactor::new().policy(RedactionPolicy::Off),
+                    style: PlainStyle::Raw,
                 },
             ),
             HelpFormat::Plain | HelpFormat::Markdown => unreachable!(),
         };
         return Ok(Some(format!("{rendered}\n")));
     }
+    let options = HelpOptions { scope, format };
     Ok(Some(cli_render_help_with_options(cmd, &path, &options)))
 }
 
@@ -364,19 +278,14 @@ fn resolve_help_options(
     parsed: &ParsedHelpRequest,
     config: &HelpConfig,
 ) -> (HelpScope, HelpFormat) {
-    // Scope and format are orthogonal: `--recursive` (or the configured
-    // recursive flag, or a recursive default_scope) decides one-level vs
+    // Scope and format are orthogonal: `--recursive` selects one-level vs
     // recursive, while `--output` independently decides the format.
     let scope = if parsed.recursive_requested {
         HelpScope::Recursive
     } else {
         config.default_scope
     };
-    let format = if config.allow_output_format {
-        parsed.output_format.unwrap_or(config.default_format)
-    } else {
-        config.default_format
-    };
+    let format = parsed.output_format.unwrap_or(config.default_format);
     (scope, format)
 }
 
@@ -648,11 +557,7 @@ struct ParsedHelpRequest {
 }
 
 #[cfg(feature = "cli-help")]
-fn parse_help_request(
-    raw_args: &[String],
-    cmd: &clap::Command,
-    config: &HelpConfig,
-) -> ParsedHelpRequest {
+fn parse_help_request(raw_args: &[String], cmd: &clap::Command) -> ParsedHelpRequest {
     let args = match raw_args.first() {
         Some(first) if first.starts_with('-') || cmd.find_subcommand(first).is_some() => raw_args,
         _ => raw_args.get(1..).unwrap_or(&[]),
@@ -663,8 +568,6 @@ fn parse_help_request(
     let mut output_error = None;
     let mut subcommand_path = Vec::new();
     let mut current = cmd;
-    let output_flag = config.output_flag.map(normalize_long_flag);
-    let recursive_flag = config.recursive_flag.map(normalize_long_flag);
 
     let mut i = 0usize;
     while i < args.len() {
@@ -683,16 +586,12 @@ fn parse_help_request(
         // selects recursive scope when `--help` is also present. A bare
         // `--recursive` leaves help_requested false so the full argv falls
         // through to the application's own parser untouched.
-        if arg == "--recursive"
-            || flag_name
-                .zip(recursive_flag)
-                .is_some_and(|(seen, expected)| seen == expected)
-        {
+        if arg == "--recursive" {
             recursive_requested = true;
             i += 1;
             continue;
         }
-        if config.allow_output_format && arg == "--json" {
+        if arg == "--json" {
             set_help_output_format(
                 &mut output_format,
                 HelpFormat::Json,
@@ -702,11 +601,7 @@ fn parse_help_request(
             i += 1;
             continue;
         }
-        if config.allow_output_format
-            && flag_name
-                .zip(output_flag)
-                .is_some_and(|(seen, expected)| seen == expected)
-        {
+        if flag_name == Some("output") {
             let value = inline_value.or_else(|| {
                 args.get(i + 1)
                     .map(String::as_str)
@@ -717,22 +612,20 @@ fn parse_help_request(
                     Some(format) => set_help_output_format(
                         &mut output_format,
                         format,
-                        &format!("--{} {value}", output_flag.unwrap_or("output")),
+                        &format!("--output {value}"),
                         &mut output_error,
                     ),
                     None => {
                         output_error = Some(format!(
-                            "invalid --{} format '{}': expected plain, json, yaml, or markdown",
-                            output_flag.unwrap_or("output"),
-                            value
+                            "invalid --output format '{value}': expected plain, json, yaml, or markdown"
                         ));
                     }
                 }
             } else {
-                output_error = Some(format!(
-                    "missing value for --{}: expected plain, json, yaml, or markdown",
-                    output_flag.unwrap_or("output")
-                ));
+                output_error = Some(
+                    "missing value for --output: expected plain, json, yaml, or markdown"
+                        .to_string(),
+                );
             }
             i += if inline_value.is_some() || value.is_none() {
                 1
@@ -784,10 +677,6 @@ fn set_help_output_format(
         return;
     }
     *current = Some(next);
-}
-
-fn normalize_long_flag(flag: &str) -> &str {
-    flag.trim_start_matches('-')
 }
 
 fn split_flag(arg: &str) -> (Option<&str>, Option<&str>) {

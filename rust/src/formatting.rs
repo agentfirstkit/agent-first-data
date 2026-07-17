@@ -1,16 +1,18 @@
-use crate::redaction::{OutputOptions, OutputStyle, redacted_value};
+use crate::cli::OutputFormat;
+use crate::redaction::{OutputOptions, PlainStyle};
 use serde_json::Value;
 
-pub fn output_json(value: &Value) -> String {
-    serialize_json_output(&redacted_value(value))
-}
-
-/// Format as single-line JSON with configurable output options.
+/// Render a value as a string in the given format with the given options.
 ///
-/// JSON output ignores [`OutputStyle`] and always preserves original keys and values after
-/// redaction.
-pub fn output_json_with_options(value: &Value, output_options: &OutputOptions) -> String {
-    serialize_json_output(&output_options.redaction.value(value))
+/// The single `value × format × options → String` entry point. JSON and YAML
+/// are structure-preserving and ignore [`PlainStyle`]; plain honors it. All
+/// three redact through `options.redaction` before rendering.
+pub fn render(value: &Value, format: OutputFormat, options: &OutputOptions) -> String {
+    match format {
+        OutputFormat::Json => serialize_json_output(&options.redaction.value(value)),
+        OutputFormat::Yaml => render_yaml(value, options),
+        OutputFormat::Plain => render_plain(value, options),
+    }
 }
 
 pub(crate) fn serialize_json_output(value: &Value) -> String {
@@ -24,34 +26,24 @@ pub(crate) fn serialize_json_output(value: &Value) -> String {
     }
 }
 
-/// Format as multi-line YAML. Keys stripped, values formatted, secrets redacted.
-pub fn output_yaml(value: &Value) -> String {
-    output_yaml_with_options(value, &OutputOptions::default())
-}
-
-/// Format as multi-line YAML with configurable output options.
-pub fn output_yaml_with_options(value: &Value, output_options: &OutputOptions) -> String {
+/// Format as multi-line YAML with the given output options.
+///
+/// YAML output ignores [`PlainStyle`] and always preserves original keys and values after
+/// redaction, the same structure-preserving semantics as JSON.
+pub(crate) fn render_yaml(value: &Value, output_options: &OutputOptions) -> String {
     let mut lines = vec!["---".to_string()];
     let v = output_options.redaction.value(value);
-    match output_options.style {
-        OutputStyle::Readable => render_yaml_processed(&v, 0, &mut lines),
-        OutputStyle::Raw => render_yaml_raw(&v, 0, &mut lines),
-    }
+    render_yaml_raw(&v, 0, &mut lines);
     lines.join("\n")
 }
 
-/// Format as single-line logfmt. Keys stripped, values formatted, secrets redacted.
-pub fn output_plain(value: &Value) -> String {
-    output_plain_with_options(value, &OutputOptions::default())
-}
-
-/// Format as single-line logfmt with configurable output options.
-pub fn output_plain_with_options(value: &Value, output_options: &OutputOptions) -> String {
+/// Format as single-line logfmt with the given output options.
+pub(crate) fn render_plain(value: &Value, output_options: &OutputOptions) -> String {
     let mut pairs: Vec<(String, String)> = Vec::new();
     let v = output_options.redaction.value(value);
     match output_options.style {
-        OutputStyle::Readable => collect_plain_pairs(&v, "", &mut pairs),
-        OutputStyle::Raw => collect_plain_pairs_raw(&v, "", &mut pairs),
+        PlainStyle::Readable => collect_plain_pairs(&v, "", &mut pairs),
+        PlainStyle::Raw => collect_plain_pairs_raw(&v, "", &mut pairs),
     }
     pairs.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
     pairs
@@ -449,63 +441,8 @@ fn extract_currency_code_from_stem(stem: &str) -> Option<&str> {
 }
 
 // ═══════════════════════════════════════════
-// YAML Rendering
+// YAML Rendering (structure-preserving)
 // ═══════════════════════════════════════════
-
-fn render_yaml_processed(value: &Value, indent: usize, lines: &mut Vec<String>) {
-    let prefix = "  ".repeat(indent);
-    match value {
-        Value::Object(map) => {
-            let processed = process_object_fields(map);
-            for (display_key, v, formatted) in processed {
-                if let Some(fv) = formatted {
-                    lines.push(format!(
-                        "{}{}: \"{}\"",
-                        prefix,
-                        yaml_key(&display_key),
-                        escape_yaml_str(&fv)
-                    ));
-                } else {
-                    match v {
-                        Value::Object(inner) if !inner.is_empty() => {
-                            lines.push(format!("{}{}:", prefix, yaml_key(&display_key)));
-                            render_yaml_processed(v, indent + 1, lines);
-                        }
-                        Value::Object(_) => {
-                            lines.push(format!("{}{}: {{}}", prefix, yaml_key(&display_key)));
-                        }
-                        Value::Array(arr) => {
-                            if arr.is_empty() {
-                                lines.push(format!("{}{}: []", prefix, yaml_key(&display_key)));
-                            } else {
-                                lines.push(format!("{}{}:", prefix, yaml_key(&display_key)));
-                                for item in arr {
-                                    if item.is_object() {
-                                        lines.push(format!("{}  -", prefix));
-                                        render_yaml_processed(item, indent + 2, lines);
-                                    } else {
-                                        lines.push(format!("{}  - {}", prefix, yaml_scalar(item)));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            lines.push(format!(
-                                "{}{}: {}",
-                                prefix,
-                                yaml_key(&display_key),
-                                yaml_scalar(v)
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        _ => {
-            lines.push(format!("{}{}", prefix, yaml_scalar(value)));
-        }
-    }
-}
 
 fn render_yaml_raw(value: &Value, indent: usize, lines: &mut Vec<String>) {
     let prefix = "  ".repeat(indent);

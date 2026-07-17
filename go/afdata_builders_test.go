@@ -11,10 +11,7 @@ import (
 
 func TestBuildJSONResult(t *testing.T) {
 	result := map[string]any{"hash": "abc"}
-	event, err := NewJSONResult(result).Build()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	event := NewJSONResult(result).Build()
 	envelope := event.Value()
 	if envelope["kind"] != "result" {
 		t.Errorf("kind = %v, want 'result'", envelope["kind"])
@@ -31,10 +28,7 @@ func TestBuildJSONResultWithTrace(t *testing.T) {
 	result := map[string]any{"hash": "abc"}
 	traceData := map[string]any{"duration_ms": float64(12)}
 	builder := NewJSONResult(result).Trace(traceData)
-	event, err := builder.Build()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	event := builder.Build()
 	envelope := event.Value()
 	if !deepEqual(envelope["trace"], traceData) {
 		t.Errorf("trace mismatch: %v", envelope["trace"])
@@ -127,11 +121,22 @@ func TestBuildJSONErrorRejectsReservedField(t *testing.T) {
 	}
 }
 
-func TestBuildJSONProgress(t *testing.T) {
-	event, err := NewJSONProgress(map[string]any{"message": "working"}).Build()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestBuildJSONErrorRejectsEmptyCode(t *testing.T) {
+	_, err := NewJSONError("", "message").Build()
+	if err == nil {
+		t.Fatalf("expected error for empty code, got nil")
 	}
+}
+
+func TestBuildJSONErrorRejectsEmptyMessage(t *testing.T) {
+	_, err := NewJSONError("code", "").Build()
+	if err == nil {
+		t.Fatalf("expected error for empty message, got nil")
+	}
+}
+
+func TestBuildJSONProgress(t *testing.T) {
+	event := NewJSONProgress(map[string]any{"message": "working"}).Build()
 	envelope := event.Value()
 	if envelope["kind"] != "progress" {
 		t.Errorf("kind = %v, want 'progress'", envelope["kind"])
@@ -143,17 +148,14 @@ func TestBuildJSONProgress(t *testing.T) {
 }
 
 func TestBuildJSONProgressFreePayload(t *testing.T) {
-	event, err := NewJSONProgress("working").Build()
-	if err != nil || event.Value()["progress"] != "working" {
-		t.Fatalf("unexpected free payload event: %#v, %v", event.Value(), err)
+	event := NewJSONProgress("working").Build()
+	if event.Value()["progress"] != "working" {
+		t.Fatalf("unexpected free payload event: %#v", event.Value())
 	}
 }
 
 func TestBuildJSONLog(t *testing.T) {
-	event, err := NewJSONLog(map[string]any{"level": "info", "message": "request started", "code": "cache_miss"}).Build()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	event := NewJSONLog(map[string]any{"level": "info", "message": "request started", "code": "cache_miss"}).Build()
 	envelope := event.Value()
 	if envelope["kind"] != "log" {
 		t.Errorf("kind = %v, want 'log'", envelope["kind"])
@@ -171,10 +173,7 @@ func TestBuildJSONLog(t *testing.T) {
 }
 
 func TestBuildJSONLogFreePayload(t *testing.T) {
-	event, err := NewJSONLog([]any{"custom", float64(1)}).Build()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	event := NewJSONLog([]any{"custom", float64(1)}).Build()
 	if len(event.Value()["log"].([]any)) != 2 {
 		t.Fatalf("unexpected log payload: %#v", event.Value()["log"])
 	}

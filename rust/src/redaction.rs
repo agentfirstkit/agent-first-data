@@ -5,18 +5,22 @@ use std::collections::HashSet;
 // Public API: Output Formatters
 // ═══════════════════════════════════════════
 
-/// Redaction policy. Convert with `.into()` to [`Redactor`] or [`OutputOptions`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which fields a [`Redactor`] scrubs. The default is [`RedactionPolicy::All`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RedactionPolicy {
-    /// Redact only inside top-level `trace`.
-    RedactionTraceOnly,
-    /// Do not redact any fields.
-    RedactionNone,
+    /// Redact every secret field anywhere in the value (the default).
+    #[default]
+    All,
+    /// Redact only inside the top-level `trace` object.
+    TraceOnly,
+    /// Do not redact anything.
+    Off,
 }
 
-/// Rendering style for YAML and plain output.
+/// Rendering style for plain (logfmt) output only. JSON and YAML are always
+/// structure-preserving and ignore this.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum OutputStyle {
+pub enum PlainStyle {
     /// Human-readable AFDATA rendering: strip suffixes and format values.
     #[default]
     Readable,
@@ -31,7 +35,7 @@ pub enum OutputStyle {
 /// redaction functions like [`redacted_value`] or [`redact_url_secrets`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Redactor {
-    policy: Option<RedactionPolicy>,
+    policy: RedactionPolicy,
     secret_names: Vec<String>,
 }
 
@@ -54,11 +58,14 @@ impl Redactor {
     /// Set the redaction policy (default: full redaction).
     /// Builder style: returns `self`.
     pub fn policy(mut self, policy: RedactionPolicy) -> Self {
-        self.policy = Some(policy);
+        self.policy = policy;
         self
     }
 
     /// Redact a JSON value copy using this redactor's policy and secret names.
+    ///
+    /// Clones `value` first; for a large payload you already own and can
+    /// mutate, prefer [`Redactor::redact_in_place`] to avoid the copy.
     pub fn value(&self, value: &Value) -> Value {
         let mut v = value.clone();
         self.redact_in_place(&mut v);
@@ -79,16 +86,33 @@ impl Redactor {
         redact_url_in_str(url, &context).unwrap_or_else(|| url.to_string())
     }
 
-    pub(crate) fn redact_in_place(&self, value: &mut Value) {
+    /// Redact `value` in place, using this redactor's policy and secret names.
+    ///
+    /// The zero-copy counterpart of [`Redactor::value`] — use it on a large
+    /// payload you already own to avoid cloning.
+    pub fn redact_in_place(&self, value: &mut Value) {
         let context = RedactionContext::from_redactor(self);
         apply_redaction_policy_with_context(value, self.policy, &context);
+    }
+
+    /// True when `name` would be treated as a secret field name by this
+    /// redactor: an exact `_secret`/`_SECRET` suffix, or an exact match
+    /// against a configured `secret_names` entry.
+    ///
+    /// Exposed for callers that must gate on a single *targeted* field name
+    /// (for example a CLI dot-path leaf) rather than redact a whole value —
+    /// [`Redactor::value`] only rewrites fields it finds while walking an
+    /// object, so a bare scalar pulled out from under its field name needs
+    /// this explicit check instead.
+    pub fn is_secret_name(&self, name: &str) -> bool {
+        RedactionContext::from_redactor(self).is_secret_key(name)
     }
 }
 
 impl From<RedactionPolicy> for Redactor {
     fn from(policy: RedactionPolicy) -> Self {
         Self {
-            policy: Some(policy),
+            policy,
             secret_names: Vec::new(),
         }
     }
@@ -99,15 +123,15 @@ impl From<RedactionPolicy> for Redactor {
 pub struct OutputOptions {
     /// Redactor applied before rendering.
     pub redaction: Redactor,
-    /// Rendering style for YAML and plain output.
-    pub style: OutputStyle,
+    /// Rendering style for plain output only.
+    pub style: PlainStyle,
 }
 
 impl From<RedactionPolicy> for OutputOptions {
     fn from(policy: RedactionPolicy) -> Self {
         Self {
             redaction: Redactor::from(policy),
-            style: OutputStyle::default(),
+            style: PlainStyle::default(),
         }
     }
 }
@@ -128,11 +152,6 @@ pub fn redacted_value(value: &Value) -> Value {
 pub fn redact_url_secrets(url: &str) -> String {
     Redactor::new().url(url)
 }
-
-/// Parse a human-readable size string into bytes.
-///
-/// Accepts a number followed by an explicit unit. Decimal units are
-/// `B`, `kB`, `MB`, `GB`, `TB`; binary units are `KiB`, `MiB`, `GiB`, `TiB`.
 
 // ═══════════════════════════════════════════
 // Secret Redaction
@@ -331,18 +350,18 @@ fn is_single_url(s: &str) -> bool {
 
 fn apply_redaction_policy_with_context(
     value: &mut Value,
-    redaction_policy: Option<RedactionPolicy>,
+    redaction_policy: RedactionPolicy,
     context: &RedactionContext,
 ) {
     match redaction_policy {
-        Some(RedactionPolicy::RedactionTraceOnly) => {
+        RedactionPolicy::All => redact_secrets_with_context(value, context),
+        RedactionPolicy::TraceOnly => {
             if let Value::Object(map) = value
                 && let Some(trace) = map.get_mut("trace")
             {
                 redact_secrets_with_context(trace, context);
             }
         }
-        Some(RedactionPolicy::RedactionNone) => {}
-        None => redact_secrets_with_context(value, context),
+        RedactionPolicy::Off => {}
     }
 }

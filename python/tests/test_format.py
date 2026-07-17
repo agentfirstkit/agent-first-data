@@ -3,12 +3,15 @@
 import json
 import os
 
+import pytest
+
 from agent_first_data import (
     json_result,
     json_error,
     json_progress,
     json_log,
     LogLevel,
+    EventBuildError,
     validate_protocol_event,
     validate_protocol_stream,
     EventDecodeError,
@@ -18,13 +21,12 @@ from agent_first_data import (
     DecodedLog,
     decode_protocol_event,
     RedactionPolicy,
-    OutputStyle,
+    PlainStyle,
     OutputOptions,
+    OutputFormat,
     redacted_value,
     redact_url_secrets,
-    output_json,
-    output_yaml,
-    output_plain,
+    render,
     normalize_utc_offset,
     is_valid_rfc3339_date,
     is_valid_rfc3339_time,
@@ -71,14 +73,14 @@ def test_redaction_options_fixtures():
         got = redacted_value(case["input"], secret_names=output_options.secret_names, policy=output_options.policy)
         assert got == expected, f"[redaction_options/{name}] value mismatch: {got}"
 
-        got_json = json.loads(output_json(case["input"], options=output_options))
+        got_json = json.loads(render(case["input"], OutputFormat.JSON, options=output_options))
         assert got_json == expected, f"[redaction_options/{name}] json mismatch: {got_json}"
 
         if "expected_yaml" in case:
-            got_yaml = output_yaml(case["input"], options=output_options)
+            got_yaml = render(case["input"], OutputFormat.YAML, options=output_options)
             assert got_yaml == case["expected_yaml"], f"[redaction_options/{name}] yaml mismatch: {got_yaml!r}"
         if "expected_plain" in case:
-            got_plain = output_plain(case["input"], options=output_options)
+            got_plain = render(case["input"], OutputFormat.PLAIN, options=output_options)
             assert got_plain == case["expected_plain"], f"[redaction_options/{name}] plain mismatch: {got_plain!r}"
 
 
@@ -89,9 +91,9 @@ def test_security_fixtures():
         output_options = _redaction_options(case)
         assert redacted_value(case["input"], secret_names=output_options.secret_names, policy=output_options.policy) == case["expected"]
         outputs = (
-            output_json(case["input"], options=output_options),
-            output_yaml(case["input"], options=output_options),
-            output_plain(case["input"], options=output_options),
+            render(case["input"], OutputFormat.JSON, options=output_options),
+            render(case["input"], OutputFormat.YAML, options=output_options),
+            render(case["input"], OutputFormat.PLAIN, options=output_options),
         )
         for output in outputs:
             for needle in case["must_contain"]:
@@ -189,6 +191,41 @@ def test_error_builder_rejects_reserved_extension_fields():
         assert "cannot override reserved field" in str(e)
 
 
+def test_error_builder_empty_code_deferred_to_build():
+    # L1: ErrorBuilder is the only fallible builder. json_error("", ...) must not
+    # fail eagerly at construction; the empty-code error is deferred to build().
+    builder = json_error("", "message")
+    with pytest.raises(EventBuildError, match="error code must not be empty"):
+        builder.build()
+
+
+def test_error_builder_empty_message_deferred_to_build():
+    builder = json_error("code", "")
+    with pytest.raises(EventBuildError, match="error message must not be empty"):
+        builder.build()
+
+
+@pytest.mark.parametrize(
+    "make_builder",
+    [
+        lambda: json_result("ok"),
+        lambda: json_progress({"message": "working"}),
+        lambda: json_log({"level": "info", "message": "hi"}),
+    ],
+    ids=["result", "progress", "log"],
+)
+def test_non_error_builders_never_raise_on_build(make_builder):
+    # L1: ResultBuilder/ProgressBuilder/LogBuilder.build() must never raise, even
+    # after a non-dict trace() — the invalid trace is stored verbatim and only
+    # surfaces later at validate_protocol_event, not at build time.
+    event = make_builder().trace("not-an-object").build()
+    assert event.to_dict()["trace"] == "not-an-object"
+
+    # A dict trace still builds normally.
+    event2 = make_builder().trace({"request_id": "abc"}).build()
+    assert event2.to_dict()["trace"] == {"request_id": "abc"}
+
+
 # --- Helper fixtures ---
 
 
@@ -228,27 +265,28 @@ def test_output_format_fixtures():
         name = case["name"]
         inp = json.loads(json.dumps(case["input"]))
 
-        got_json = json.loads(output_json(inp))
+        got_json = json.loads(render(inp, OutputFormat.JSON))
         assert got_json == case["expected_json"], f"[output/{name}] json mismatch: {got_json}"
 
-        got_yaml = output_yaml(inp)
+        got_yaml = render(inp, OutputFormat.YAML)
         assert got_yaml == case["expected_yaml"], f"[output/{name}] yaml mismatch: {got_yaml!r}"
 
-        got_plain = output_plain(inp)
+        got_plain = render(inp, OutputFormat.PLAIN)
         assert got_plain == case["expected_plain"], f"[output/{name}] plain mismatch: {got_plain!r}"
 
 
-def test_output_yaml_raw_keeps_suffix_keys_and_structure():
+def test_render_yaml_raw_keeps_suffix_keys_and_structure():
     options = OutputOptions(
-        policy=RedactionPolicy.RedactionTraceOnly,
-        style=OutputStyle.Raw,
+        policy=RedactionPolicy.TraceOnly,
+        style=PlainStyle.Raw,
     )
-    out = output_yaml(
+    out = render(
         {
             "code": "result",
             "rows": [{"api_key_secret": "sk-live-1", "duration_ms": 42}],
             "trace": {"request_secret": "top-secret"},
         },
+        OutputFormat.YAML,
         options=options,
     )
 
@@ -259,16 +297,17 @@ def test_output_yaml_raw_keeps_suffix_keys_and_structure():
     assert 'duration: "42ms"' not in out
 
 
-def test_output_plain_raw_keeps_suffix_keys_and_redacts_trace():
+def test_render_plain_raw_keeps_suffix_keys_and_redacts_trace():
     options = OutputOptions(
-        policy=RedactionPolicy.RedactionTraceOnly,
-        style=OutputStyle.Raw,
+        policy=RedactionPolicy.TraceOnly,
+        style=PlainStyle.Raw,
     )
-    out = output_plain(
+    out = render(
         {
             "duration_ms": 42,
             "trace": {"request_secret": "top-secret"},
         },
+        OutputFormat.PLAIN,
         options=options,
     )
 
@@ -277,72 +316,82 @@ def test_output_plain_raw_keeps_suffix_keys_and_redacts_trace():
     assert "duration=42ms" not in out
 
 
-def test_output_with_options_defaults_to_readable_style():
-    out = output_yaml(
-        {"duration_ms": 42},
-        options=OutputOptions(
-            policy=RedactionPolicy.RedactionNone,
-            style=OutputStyle.Readable,
-        ),
+def test_render_yaml_ignores_output_style():
+    """YAML no longer branches on PlainStyle: Readable and Raw produce identical,
+    structure-preserving output (only `plain` still varies by style)."""
+    value = {"duration_ms": 42, "api_key_secret": "sk-live-1"}
+    readable = render(
+        value,
+        OutputFormat.YAML,
+        options=OutputOptions(policy=RedactionPolicy.Off, style=PlainStyle.Readable),
     )
-    assert 'duration: "42ms"' in out
-    assert "duration_ms:" not in out
+    raw = render(
+        value,
+        OutputFormat.YAML,
+        options=OutputOptions(policy=RedactionPolicy.Off, style=PlainStyle.Raw),
+    )
+    assert readable == raw
+    assert "duration_ms: 42" in readable
+    assert 'api_key_secret: "sk-live-1"' in readable
+    assert "duration:" not in readable
 
 
-def test_output_json_exception_field_is_readable():
-    out = output_json({"error": Exception("timeout")})
+def test_render_json_exception_field_is_readable():
+    out = render({"error": Exception("timeout")}, OutputFormat.JSON)
     parsed = json.loads(out)
     assert parsed["error"] == "timeout"
 
 
-def test_output_json_unsupported_value_does_not_leak_secret():
+def test_render_json_unsupported_value_does_not_leak_secret():
     class SecretRepr:
         def __repr__(self) -> str:
             return "Secret(sk-live-123)"
 
-    out = output_json({"meta": SecretRepr(), "api_key_secret": "sk-live-123"})
+    out = render({"meta": SecretRepr(), "api_key_secret": "sk-live-123"}, OutputFormat.JSON)
     assert "sk-live-123" not in out
     parsed = json.loads(out)
     assert parsed["api_key_secret"] == "***"
     assert parsed["meta"].startswith("<unsupported:")
 
 
-def test_output_json_circular_reference():
+def test_render_json_circular_reference():
     v = {}
     v["self"] = v
-    out = output_json(v)
+    out = render(v, OutputFormat.JSON)
     parsed = json.loads(out)
     assert parsed["self"] == "<unsupported:circular>"
 
 
-def test_output_json_with_trace_only_redacts_only_trace():
-    out = output_json(
+def test_render_json_with_trace_only_redacts_only_trace():
+    out = render(
         {
             "code": "ok",
             "result": {"api_key_secret": "sk-live-123"},
             "trace": {"request_secret": "top-secret"},
         },
-        options=OutputOptions.for_policy(RedactionPolicy.RedactionTraceOnly),
+        OutputFormat.JSON,
+        options=OutputOptions.for_policy(RedactionPolicy.TraceOnly),
     )
     parsed = json.loads(out)
     assert parsed["trace"]["request_secret"] == "***"
     assert parsed["result"]["api_key_secret"] == "sk-live-123"
 
 
-def test_output_json_with_none_keeps_secrets():
-    out = output_json(
+def test_render_json_with_none_keeps_secrets():
+    out = render(
         {"api_key_secret": "sk-live-123"},
-        options=OutputOptions.for_policy(RedactionPolicy.RedactionNone),
+        OutputFormat.JSON,
+        options=OutputOptions.for_policy(RedactionPolicy.Off),
     )
     parsed = json.loads(out)
     assert parsed["api_key_secret"] == "sk-live-123"
 
 
 def test_output_options_for_policy_sets_only_redaction_policy():
-    options = OutputOptions.for_policy(RedactionPolicy.RedactionNone)
-    assert options.policy == RedactionPolicy.RedactionNone
+    options = OutputOptions.for_policy(RedactionPolicy.Off)
+    assert options.policy == RedactionPolicy.Off
     assert options.secret_names == ()
-    assert options.style == OutputStyle.Readable
+    assert options.style == PlainStyle.Readable
 
 
 def test_redacted_value_returns_safe_copy():
@@ -363,7 +412,7 @@ def test_max_depth_marker_is_not_secret_redaction_marker():
     inp = "leaf"
     for _ in range(300):
         inp = {"next": inp}
-    out = output_json(inp)
+    out = render(inp, OutputFormat.JSON)
     assert "<afdata:max-depth>" in out
     assert "***" not in out
 
@@ -373,7 +422,7 @@ def test_max_depth_marker_is_not_secret_redaction_marker():
 
 def test_decode_protocol_event_result():
     event = json_result({"rows": 2}).build()
-    decoded = decode_protocol_event(output_json(event.to_dict()))
+    decoded = decode_protocol_event(render(event.to_dict(), OutputFormat.JSON))
     assert isinstance(decoded, DecodedResult)
     assert decoded.result == {"rows": 2}
     assert decoded.trace == {}
@@ -381,7 +430,7 @@ def test_decode_protocol_event_result():
 
 def test_decode_protocol_event_error():
     event = json_error("not_found", "missing").hint("check the id").field("id", "abc").retryable().build()
-    decoded = decode_protocol_event(output_json(event.to_dict()))
+    decoded = decode_protocol_event(render(event.to_dict(), OutputFormat.JSON))
     assert isinstance(decoded, DecodedError)
     assert decoded.code == "not_found"
     assert decoded.message == "missing"
@@ -393,7 +442,7 @@ def test_decode_protocol_event_error():
 
 def test_decode_protocol_event_progress():
     event = json_progress({"message": "halfway", "percent": 50}).build()
-    decoded = decode_protocol_event(output_json(event.to_dict()))
+    decoded = decode_protocol_event(render(event.to_dict(), OutputFormat.JSON))
     assert isinstance(decoded, DecodedProgress)
     assert decoded.progress == {"message": "halfway", "percent": 50}
     assert decoded.trace == {}
@@ -401,7 +450,7 @@ def test_decode_protocol_event_progress():
 
 def test_decode_protocol_event_log():
     event = json_log({"level": "warn", "message": "slow query", "duration_ms": 900}).build()
-    decoded = decode_protocol_event(output_json(event.to_dict()))
+    decoded = decode_protocol_event(render(event.to_dict(), OutputFormat.JSON))
     assert isinstance(decoded, DecodedLog)
     assert decoded.log == {"level": "warn", "message": "slow query", "duration_ms": 900}
     assert decoded.trace == {}

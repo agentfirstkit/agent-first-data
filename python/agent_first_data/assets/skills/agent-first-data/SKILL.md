@@ -1,6 +1,6 @@
 ---
 name: agent-first-data
-description: Apply and review the formal Agent-First Data specification using the Rust/Go/Python/TypeScript libraries or afdata CLI for naming, redaction, formatting, protocol envelopes, logging, linting, and validation. Use proactively when writing or reviewing structured data, configs, logs, transport payloads, database/wire fields, CLI output, or compatibility-sensitive public and persistent field names.
+description: Apply and review the formal Agent-First Data specification using the Rust/Go/Python/TypeScript libraries or afdata CLI for naming, redaction, formatting, protocol envelopes, logging, linting, validation, and reading or safely editing structured JSON/TOML/YAML/dotenv/INI documents by dot-path. Use proactively when writing or reviewing structured data, configs, logs, transport payloads, database/wire fields, CLI output, compatibility-sensitive public and persistent field names, or when reading or editing a config/document file from the shell.
 ---
 
 <!-- Canonical source: skills/agent-first-data/SKILL.md.
@@ -47,22 +47,21 @@ go get github.com/agentfirstkit/agent-first-data/go
 ```
 
 ```rust
-use agent_first_data::{json_result, output_json};
+use agent_first_data::{json_result, render, OutputFormat, OutputOptions};
 use serde_json::json;
 
 let event = json_result(json!({
     "latency_ms": 1280,
     "api_key_secret": "sk-live-example",
-})).build()?;
-let rendered = output_json(event.as_value());
+})).build();
+let rendered = render(event.as_value(), OutputFormat::Json, &OutputOptions::default());
 assert!(rendered.contains("\"api_key_secret\":\"***\""));
-# Ok::<(), agent_first_data::BuildError>(())
 ```
 
 For a finite CLI execution implemented in Rust, create one `CliEmitter`, select
 `OutputFormat` through `cli_parse_output`, enable strict protocol, and emit one
 terminal result or error. Handle version before clap with
-`cli_handle_version_or_continue` and `VersionConfig::conventional_default()`.
+`cli_handle_version_or_continue(raw_args, name, version)`.
 For non-CLI HTTP/MCP/SSE serialization, call `redacted_value()` or
 `redact_url_secrets()` explicitly at the boundary.
 
@@ -94,11 +93,11 @@ working in that runtime.
 
 ## Redaction behavior contract
 
-Fields named `_secret` or `_url` and values passing through AFDATA output formatters (`output_json`, `output_yaml`, `output_plain`) are automatically redacted: secrets become `***`, URL userinfo passwords and suffix-named query parameters are scrubbed. When serializing outside output formatters (HTTP, MCP, SSE), call `redacted_value()` or `redact_url_secrets()` at the serialization boundary. PII redaction, domain-specific privacy policies (header allowlists, API scope sensitivity), and per-field secret naming are each spore's responsibility; the library provides field-name-based mechanics only.
+Fields named `_secret` or `_url` and values passing through AFDATA output rendering (`render`, in any format) are automatically redacted: secrets become `***`, URL userinfo passwords and suffix-named query parameters are scrubbed. When serializing outside output formatters (HTTP, MCP, SSE), call `redacted_value()` or `redact_url_secrets()` at the serialization boundary. PII redaction, domain-specific privacy policies (header allowlists, API scope sensitivity), and per-field secret naming are each spore's responsibility; the library provides field-name-based mechanics only.
 
 ## Logging behavior contract
 
-One-time CLI output uses `json_log()` or `CliEmitter` for a single event; serialization via `cli_output()` applies output formatting. Long-running services or processes depending on structured logging (tonic, sqlx, hyper, etc. via tracing) initialize with `afdata_tracing::try_init()` (Rust only) to wire process-wide logging; other languages emit log events explicitly via builders or integrate their own structured logging.
+One-time CLI output uses `json_log()` or `CliEmitter` for a single event; serialization via `render()` applies output formatting. Long-running services or processes depending on structured logging (tonic, sqlx, hyper, etc. via tracing) initialize with `afdata_tracing::try_init()` (Rust only) to wire process-wide logging; other languages emit log events explicitly via builders or integrate their own structured logging.
 
 ## CLI workflow
 
@@ -114,15 +113,61 @@ Use it for deterministic checks:
 ```bash
 afdata lint payload.json
 afdata validate events.jsonl
-afdata format payload.json --output yaml
+afdata render payload.json --output yaml
 afdata skill validate skills/example-skill
 ```
 
 - Run `afdata lint` for ordinary JSON/JSONL, JSON Schema, or MCP input/output schemas.
 - Run `afdata validate` for AFDATA protocol events or finite event streams.
-- Omit the input path to read stdin. `--output` accepts `json`, `yaml`, or
-  `plain`.
+- Run `afdata render` to apply AFDATA redaction/formatting to arbitrary JSON or JSONL. Omit the input path to read stdin. `--output` accepts `json`, `yaml`, or
+  `plain`; JSON and YAML keep original keys/values (structure-preserving), Plain is the lossy human renderer.
 - Treat findings as contract issues unless the owning tool intentionally documents a non-AFDATA field.
+
+## Document workflow
+
+Use `show`/`get`/`value` to read a JSON, TOML, YAML, dotenv, or INI document
+and `set`/`add`/`remove`/`unset` to edit one in place, instead of `sed`,
+regular expressions, or a generic reserializer — those can reorder keys, drop
+comments, or change quoting/anchors in the rest of the file.
+
+- `show` returns the whole document as one AFDATA record; use it for batch
+  inspection, and pass every known sensitive legacy field name with
+  `--secret-name FIELD` (an exact field name, not a dot-path).
+- `get <KEY>` returns one dot-path value as an AFDATA record. A secret-named
+  leaf (`_secret`/`_SECRET`, or an exact `--secret-name` match) is still
+  redacted to `"***"` even though the caller targeted it directly — use
+  `value --reveal-secret` when the real value is genuinely needed.
+- `value <KEY>` writes only the raw scalar to stdout, with no AFDATA envelope
+  and no forced trailing newline, for direct use in shell substitution:
+  `value=$(afdata value server.host config.toml)` (KEY then FILE). Only
+  scalars are supported; an array or object errors with `path <KEY> is not a
+  scalar` (exit 1) — use `get`/`show` for a subtree. A secret-named leaf errors unless
+  `--reveal-secret` is passed — there is no default bypass for a targeted read.
+- Read commands (`show`/`get`/`value`) take a positional FILE or fall back to
+  piped stdin, defaulting to JSON and rejecting an interactive TTY rather than
+  blocking. Mutation commands (`set`/`add`/`remove`/`unset`) always require
+  `--input-file PATH` and never read stdin.
+- Escape a literal dot as `\.` and a literal backslash as `\\` in a dot-path;
+  every command shares this grammar, so an unrecognized escape or empty
+  segment is always an error, never a guess.
+- `add`/`remove` operate on a keyed list — an array of objects addressed by a
+  slug — and always require an explicit `--slug-field FIELD`; the CLI never
+  infers an identity field. Keyed editing is implemented for JSON and YAML
+  only; TOML, dotenv, and INI return a structured "not implemented" error, so
+  edit their list entries by writing the whole value another way.
+- For `set`, choose exactly one secret source instead of a positional value
+  when the value must not land in shell history or `ps`: `--value-secret
+  VALUE` (convenient, but visible to argv/process listings),
+  `--value-secret-stdin` (pipe), `--value-secret-prompt` (human, terminal echo
+  off), or `--value-secret-fd FD` (Unix automation that needs stdin for
+  something else).
+- Mutations preserve the rest of the source document — comments, key order,
+  unrelated formatting — and refuse to write through a symlink or (on Unix) a
+  multi-link hardlink target. Treat a failed mutation as leaving the original
+  file untouched rather than assuming a partial write, and reread before
+  retrying. A format backend that isn't compiled in, or input outside the
+  documented dotenv/INI dialect, is a structured error to report, not a cue to
+  hand-edit the file.
 
 ## Review checklist
 

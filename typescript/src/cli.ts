@@ -8,9 +8,9 @@ import {
   Event,
   jsonError,
   jsonResult,
-  outputJson,
-  outputYaml,
-  outputPlain,
+  formatJsonValue,
+  formatYamlValue,
+  formatPlainValue,
   validateProtocolEvent,
 } from "./format.js";
 
@@ -51,23 +51,27 @@ export class LogFilters {
 
   /**
    * Check if an event matches the filter set.
-   * Returns false for empty filters, true if "all" or "*" is present,
-   * otherwise checks if event.toLowerCase() starts with any filter.
+   *
+   * An empty filter set returns false (filtering is opt-in). The single
+   * wildcard word "all" returns true ("*" is not special — one wildcard
+   * spelling, not two). Otherwise returns true iff event.toLowerCase() starts
+   * with any filter (prefix match); a mistyped filter simply matches nothing
+   * and silently emits no output.
    *
    * @example
    * const lf = new LogFilters(["query", "error"]);
    * lf.enabled("QueryStarted") // → true (starts with "query")
    * lf.enabled("debug") // → false
    *
-   * const all = new LogFilters([]);
-   * all.enabled("anything") // → false (empty)
+   * const none = new LogFilters([]);
+   * none.enabled("anything") // → false (empty)
    *
-   * const wild = new LogFilters(["*"]);
+   * const wild = new LogFilters(["all"]);
    * wild.enabled("anything") // → true
    */
   enabled(event: string): boolean {
     if (this.filters.length === 0) return false;
-    if (this.filters.includes("all") || this.filters.includes("*")) return true;
+    if (this.filters.includes("all")) return true;
     const eventLower = event.toLowerCase();
     for (const filter of this.filters) {
       if (eventLower.startsWith(filter)) {
@@ -92,17 +96,19 @@ export function cliParseLogFilters(entries: string[]): LogFilters {
 }
 
 /**
- * Dispatch output formatting by OutputFormat, with optional explicit redaction and style.
- * JSON ignores OutputStyle and preserves original keys and values after redaction.
+ * Single public render entry point: dispatch a value or Event to
+ * JSON/YAML/plain text by OutputFormat, with optional explicit redaction and
+ * style. `options.style` (PlainStyle) affects plain (logfmt) output only;
+ * JSON and YAML are structure-preserving and ignore it.
  *
  * @example
- * cliOutput(jsonResult({ ok: true }).build(), "plain") // → "kind=result result.ok=true"
+ * render(jsonResult({ ok: true }).build(), "plain") // → "kind=result result.ok=true"
  */
-export function cliOutput(value: JsonValue | Event, format: OutputFormat, options: OutputOptions = {}): string {
+export function render(value: JsonValue | Event, format: OutputFormat, options: OutputOptions = {}): string {
   const jsonValue = value instanceof Event ? (value.toJSON() as JsonValue) : value;
-  if (format === "yaml") return outputYaml(jsonValue, options);
-  if (format === "plain") return outputPlain(jsonValue, options);
-  return outputJson(jsonValue, options);
+  if (format === "yaml") return formatYamlValue(jsonValue, options);
+  if (format === "plain") return formatPlainValue(jsonValue, options);
+  return formatJsonValue(jsonValue, options);
 }
 
 export type CliEventWriter = (line: string) => void;
@@ -138,7 +144,7 @@ export class CliEmitter {
     } else {
       throw new Error(`unsupported event kind ${JSON.stringify(kind)}`);
     }
-    this.writer(`${cliOutput(jsonValue, this.format, this.outputOptions)}\n`);
+    this.writer(`${render(jsonValue, this.format, this.outputOptions)}\n`);
     if (kind === "result" || kind === "error") this.terminalEmitted = true;
   }
 
@@ -156,14 +162,14 @@ export class CliEmitter {
     } else {
       throw new Error(`unsupported event kind ${JSON.stringify(kind)}`);
     }
-    this.writer(`${cliOutput(value, this.format, this.outputOptions)}\n`);
+    this.writer(`${render(value, this.format, this.outputOptions)}\n`);
     if (kind === "result" || kind === "error") this.terminalEmitted = true;
   }
 }
 
 /** Build a standard CLI version value. */
 export function buildCliVersion(version: string): Event {
-  return jsonResult({ version }).build();
+  return jsonResult({ code: "version", version }).build();
 }
 
 /**
@@ -172,22 +178,25 @@ export function buildCliVersion(version: string): Event {
  * conventional "<name> <version>" text.
  */
 export function cliRenderVersion(name: string, version: string, format: OutputFormat | null = null): string {
-  const rendered = format === null ? `${name} ${version}` : cliOutput(buildCliVersion(version), format);
+  const rendered = format === null ? `${name} ${version}` : render(buildCliVersion(version), format);
   return `${rendered.replace(/\n+$/u, "")}\n`;
 }
 
 /**
  * Render version output if --version/-V is present; otherwise return undefined.
  * Throws for malformed version requests, for example `--version --output xml`.
+ *
+ * One blessed behavior, not configurable: a bare version request renders
+ * conventional "<name> <version>" text; `--json` or `--output <fmt>` /
+ * `--output=<fmt>` alongside it selects the structured AFDATA payload
+ * instead.
+ *
+ * Only a top-level version request is recognized: scanning stops at the first
+ * positional argument (the subcommand) or `--`, so `tool sub --version <value>`
+ * leaves `--version` for the subcommand's parser rather than printing the
+ * tool version.
  */
-export function cliHandleVersionOrContinue(
-  rawArgs: string[],
-  name: string,
-  version: string,
-  defaultOutput: OutputFormat | null = null,
-  outputFlag = "--output",
-  allowOutputFormat = true,
-): string | undefined {
+export function cliHandleVersionOrContinue(rawArgs: string[], name: string, version: string): string | undefined {
   let versionRequested = false;
   let outputFormat: OutputFormat | undefined;
   let outputError: Error | undefined;
@@ -195,12 +204,16 @@ export function cliHandleVersionOrContinue(
   for (let i = 0; i < rawArgs.length;) {
     const arg = rawArgs[i]!;
     if (arg === "--") break;
+    // The first positional argument marks the subcommand boundary. Past it,
+    // --version and -V belong to the subcommand's own parser, matching
+    // git/cargo/clap: this pre-parser only owns a top-level version request.
+    if (!arg.startsWith("-")) break;
     if (arg === "--version" || arg === "-V") {
       versionRequested = true;
       i += 1;
       continue;
     }
-    if (allowOutputFormat && arg === "--json") {
+    if (arg === "--json") {
       if (outputFormat !== undefined && outputFormat !== "json") {
         outputError = new Error("conflicting output formats: --json conflicts with previous output format");
       } else {
@@ -209,22 +222,22 @@ export function cliHandleVersionOrContinue(
       i += 1;
       continue;
     }
-    if (allowOutputFormat && (arg === outputFlag || arg.startsWith(`${outputFlag}=`))) {
+    if (arg === "--output" || arg.startsWith("--output=")) {
       let value: string | undefined;
       let step = 1;
-      if (arg.startsWith(`${outputFlag}=`)) {
-        value = arg.slice(outputFlag.length + 1);
+      if (arg.startsWith("--output=")) {
+        value = arg.slice("--output=".length);
       } else if (rawArgs[i + 1] !== undefined && !rawArgs[i + 1]!.startsWith("-")) {
         value = rawArgs[i + 1];
         step = 2;
       }
       if (value === undefined) {
-        outputError = new Error(`missing value for ${outputFlag}: expected json, yaml, or plain`);
+        outputError = new Error("missing value for --output: expected json, yaml, or plain");
       } else {
         try {
           const parsedOutput = cliParseOutput(value);
           if (outputFormat !== undefined && outputFormat !== parsedOutput) {
-            outputError = new Error(`conflicting output formats: ${outputFlag} ${value} conflicts with previous output format`);
+            outputError = new Error(`conflicting output formats: --output ${value} conflicts with previous output format`);
           } else {
             outputFormat = parsedOutput;
           }
@@ -240,19 +253,24 @@ export function cliHandleVersionOrContinue(
 
   if (!versionRequested) return undefined;
   if (outputError !== undefined) throw outputError;
-  return cliRenderVersion(name, version, allowOutputFormat && outputFormat !== undefined ? outputFormat : defaultOutput);
+  return cliRenderVersion(name, version, outputFormat ?? null);
 }
 
 /**
- * Build a standard CLI parse error value.
+ * Build a standard CLI parse error value. This function cannot fail.
  * Use when flag parsing fails or a flag value is invalid.
- * Print with outputJson and exit with code 2.
+ * Print with render and exit with code 2.
+ *
+ * Always returns a strict-valid `kind:"error"` event with code `"cli_error"`.
+ * An empty `message` is replaced with a generic placeholder so the returned
+ * event stays strict-valid without throwing.
  *
  * @example
  * const err = buildCliError("--output: invalid value 'xml'");
- * console.log(outputJson(err));
+ * console.log(render(err, "json"));
  * process.exit(2);
  */
 export function buildCliError(message: string, hint?: string): Event {
-  return jsonError("cli_error", message).hintIfSome(hint).build();
+  const msg = message && message !== "" ? message : "unspecified error";
+  return jsonError("cli_error", msg).hintIfSome(hint).build();
 }

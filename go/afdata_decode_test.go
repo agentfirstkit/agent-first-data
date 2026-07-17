@@ -6,7 +6,7 @@ import (
 )
 
 func TestDecodeProtocolEventResult(t *testing.T) {
-	event, _ := NewJSONResult(map[string]any{"hash": "abc"}).Trace(map[string]any{"duration_ms": 12}).Build()
+	event := NewJSONResult(map[string]any{"hash": "abc"}).Trace(map[string]any{"duration_ms": 12}).Build()
 	line, _ := json.Marshal(event)
 
 	decoded, err := DecodeProtocolEvent(string(line))
@@ -80,7 +80,7 @@ func TestDecodeProtocolEventErrorWithoutHint(t *testing.T) {
 }
 
 func TestDecodeProtocolEventProgress(t *testing.T) {
-	event, _ := NewJSONProgress(map[string]any{"message": "working", "percent": float64(50)}).Build()
+	event := NewJSONProgress(map[string]any{"message": "working", "percent": float64(50)}).Build()
 	line, _ := json.Marshal(event)
 
 	decoded, err := DecodeProtocolEvent(string(line))
@@ -98,7 +98,7 @@ func TestDecodeProtocolEventProgress(t *testing.T) {
 }
 
 func TestDecodeProtocolEventLog(t *testing.T) {
-	event, _ := NewJSONLog(map[string]any{"level": "warn", "message": "disk low", "free_bytes": float64(1024)}).Build()
+	event := NewJSONLog(map[string]any{"level": "warn", "message": "disk low", "free_bytes": float64(1024)}).Build()
 	line, _ := json.Marshal(event)
 
 	decoded, err := DecodeProtocolEvent(string(line))

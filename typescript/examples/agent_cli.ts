@@ -3,7 +3,7 @@
  *
  * Demonstrates: human --help (one-level) plus orthogonal --recursive scope and
  * --output json|yaml|markdown format for full surface export, cliParseOutput,
- * cliParseLogFilters, cliOutput, buildCliError, --dry-run, and error hints.
+ * cliParseLogFilters, render, buildCliError, --dry-run, and error hints.
  *
  * Run:  npx tsx examples/agent_cli.ts --help
  *       npx tsx examples/agent_cli.ts --help --recursive
@@ -41,11 +41,10 @@ import {
   jsonLog,
   jsonError,
   jsonResult,
-  cliOutput,
+  render,
   cliHandleVersionOrContinue,
   cliParseLogFilters,
   cliParseOutput,
-  outputJson,
   LogFilters,
 } from "../src/index.js";
 import {
@@ -298,7 +297,7 @@ function renderHelpOutput(
   }
   if (outputArg === "markdown") return formatMarkdownHelp(command, recursive);
   const fmt = cliParseOutput(outputArg);
-  return `${cliOutput(helpSchema(command, scope), fmt)}\n`;
+  return `${render(helpSchema(command, scope), fmt)}\n`;
 }
 
 function redactHelpDefault(name: string, value: string): string {
@@ -417,9 +416,9 @@ function renderCliParseError(args: string[], message: string, hint = "try: agent
   try {
     const outputArg = resolveOutputArg(args);
     const fmt = cliParseOutput(outputArg ?? "json");
-    return cliOutput(err, fmt);
+    return render(err, fmt);
   } catch {
-    return outputJson(err);
+    return render(err, "json");
   }
 }
 
@@ -428,7 +427,7 @@ function main(): void {
   try {
     installStreamRedirectFromRawArgs(args);
   } catch (e) {
-    console.log(outputJson(buildCliError((e as Error).message)));
+    console.log(render(buildCliError((e as Error).message), "json"));
     process.exit(2);
   }
 
@@ -439,7 +438,7 @@ function main(): void {
       return;
     }
   } catch (e) {
-    console.log(outputJson(buildCliError((e as Error).message, "valid version output formats: json, yaml, plain")));
+    console.log(render(buildCliError((e as Error).message, "valid version output formats: json, yaml, plain"), "json"));
     process.exit(2);
   }
 
@@ -463,7 +462,7 @@ function main(): void {
     try {
       process.stdout.write(renderHelpOutput(command, resolveOutputArg(args), hasExplicitOutput(args), recursive));
     } catch (e) {
-      console.log(outputJson(buildCliError((e as Error).message)));
+      console.log(render(buildCliError((e as Error).message), "json"));
       process.exit(2);
     }
     return;
@@ -475,7 +474,7 @@ function main(): void {
   try {
     outputArg = resolveOutputArg(args);
   } catch (e) {
-    console.log(outputJson(buildCliError((e as Error).message, "valid output formats: json, yaml, plain")));
+    console.log(render(buildCliError((e as Error).message, "valid output formats: json, yaml, plain"), "json"));
     process.exit(2);
   }
   const logArg = typeof values.log === "string" ? values.log : "";
@@ -486,7 +485,7 @@ function main(): void {
   try {
     fmt = cliParseOutput(outputArg ?? "json");
   } catch (e) {
-    console.log(outputJson(buildCliError((e as Error).message)));
+    console.log(render(buildCliError((e as Error).message), "json"));
     process.exit(2);
   }
 
@@ -501,15 +500,15 @@ function main(): void {
   // Each diagnostic line self-tags with its `category`, so `--log all` reveals
   // the full set from real output rather than a static help list.
   if (logEnabled(log, "request")) {
-    console.log(cliOutput(buildRequestLog(command), fmt));
+    console.log(render(buildRequestLog(command), fmt));
   }
   if (logEnabled(log, "startup")) {
-    console.log(cliOutput(buildStartupLog(args, command, outputArg ?? "json", log, values.verbose === true), fmt));
+    console.log(render(buildStartupLog(args, command, outputArg ?? "json", log, values.verbose === true), fmt));
   }
 
   // Step 3: no subcommand → error with hint
   if (!command) {
-    console.log(cliOutput(buildCliError("no subcommand provided", "try: agent-cli --help"), fmt));
+    console.log(render(buildCliError("no subcommand provided", "try: agent-cli --help"), fmt));
     process.exit(2);
   }
 
@@ -518,11 +517,11 @@ function main(): void {
       // Step 4: --dry-run → preview without executing
       if (dryRun) {
         const preview = jsonResult({ action: "echo", log }).trace({ duration_ms: 0 }).build();
-        console.log(cliOutput(preview, fmt));
+        console.log(render(preview, fmt));
         return;
       }
       const result = jsonResult({ action: "echo", log }).build();
-      console.log(cliOutput(result, fmt));
+      console.log(render(result, fmt));
       break;
     }
     case "ping": {
@@ -536,7 +535,7 @@ function main(): void {
           .hint("set PING_HOST or pass --host")
           .trace({ duration_ms: 0 })
           .build();
-        console.log(cliOutput(err, fmt));
+        console.log(render(err, fmt));
         process.exit(1);
       }
       break;
@@ -549,7 +548,7 @@ function main(): void {
         .hint("the operation was cancelled before completion")
         .trace({ duration_ms: 0 })
         .build();
-      console.log(cliOutput(err, fmt));
+      console.log(render(err, fmt));
       process.exit(1);
     }
     case "skill": {
@@ -562,7 +561,7 @@ function main(): void {
       break;
     }
     default: {
-      console.log(cliOutput(buildCliError(`unknown command: ${command}`, "valid commands: echo, ping, skill"), fmt));
+      console.log(render(buildCliError(`unknown command: ${command}`, "valid commands: echo, ping, skill"), fmt));
       process.exit(2);
     }
   }
@@ -584,24 +583,24 @@ function runSkill(
   const action = verb !== undefined ? actions[verb] : undefined;
   if (action === undefined) {
     const err = buildCliError("skill requires a subcommand: status, install, uninstall", "example: agent-cli skill status --agent opencode");
-    console.log(cliOutput(err, fmt));
+    console.log(render(err, fmt));
     return 2;
   }
 
   const built = buildSkillOptions(agentArg, scopeArg, skillsDir, force);
   if ("error" in built) {
-    console.log(cliOutput(buildCliError(built.error, built.hint), fmt));
+    console.log(render(buildCliError(built.error, built.hint), fmt));
     return 2;
   }
 
   try {
     const report = runSkillAdmin(WIDGET_SPEC, action, built.options);
     // The report is structured; serialize it for output (it is already JSON-shaped).
-    console.log(cliOutput(report as unknown as JsonValue, fmt));
+    console.log(render(report as unknown as JsonValue, fmt));
     return 0;
   } catch (e) {
     if (e instanceof SkillError) {
-      console.log(cliOutput(buildCliError(e.message, e.hint), fmt));
+      console.log(render(buildCliError(e.message, e.hint), fmt));
       return 1;
     }
     throw e;
@@ -831,14 +830,14 @@ if (process.env["NODE_TEST_CONTEXT"]) {
       );
     });
 
-    it("log enabled honors all/* wildcards", () => {
+    it("log enabled honors the 'all' wildcard word", () => {
       assert.ok(!logEnabled(cliParseLogFilters([]), "startup"));
       assert.ok(logEnabled(cliParseLogFilters(["startup"]), "startup"));
       assert.ok(!logEnabled(cliParseLogFilters(["startup"]), "request"));
-      for (const everything of ["all", "*"]) {
-        assert.ok(logEnabled(cliParseLogFilters([everything]), "startup"), `${everything} enables startup`);
-        assert.ok(logEnabled(cliParseLogFilters([everything]), "request"), `${everything} enables request`);
-      }
+      // "all" is the single wildcard word; "*" is not special.
+      assert.ok(logEnabled(cliParseLogFilters(["all"]), "startup"));
+      assert.ok(logEnabled(cliParseLogFilters(["all"]), "request"));
+      assert.ok(!logEnabled(cliParseLogFilters(["*"]), "request"));
     });
 
     it("log lines are category-tagged", () => {
@@ -895,9 +894,9 @@ if (process.env["NODE_TEST_CONTEXT"]) {
 
     it("cli output all formats", () => {
       const event = jsonResult({ ok: true }).build();
-      const jsonOut = cliOutput(event, "json");
-      const yamlOut = cliOutput(event, "yaml");
-      const plainOut = cliOutput(event, "plain");
+      const jsonOut = render(event, "json");
+      const yamlOut = render(event, "yaml");
+      const plainOut = render(event, "plain");
       assert.ok(jsonOut.includes('"kind"'));
       assert.ok(yamlOut.startsWith("---"));
       assert.ok(plainOut.includes("kind=result"));
@@ -905,7 +904,7 @@ if (process.env["NODE_TEST_CONTEXT"]) {
 
     it("error round trip is valid jsonl", () => {
       const event = buildCliError("unknown flag: --foo");
-      const line = outputJson(event.toJSON() as JsonValue);
+      const line = render(event.toJSON() as JsonValue, "json");
       const parsed = JSON.parse(line);
       assert.equal(parsed.kind, "error");
       assert.equal(parsed.error.code, "cli_error");

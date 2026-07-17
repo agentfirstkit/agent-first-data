@@ -2,7 +2,7 @@
 //
 // Demonstrates: human --help (one-level) plus orthogonal --recursive scope and
 // --output json|yaml|markdown format for full surface export,
-// CliParseOutput, CliParseLogFilters, CliOutput, BuildCliError,
+// CliParseOutput, CliParseLogFilters, Render, BuildCliError,
 // --dry-run, error hints, and a `skill` subcommand that installs/uninstalls/
 // reports status of an embedded Agent Skill across Codex, Claude Code, opencode, and Hermes.
 //
@@ -225,7 +225,7 @@ func helpSchema(command, scope string) map[string]any {
 func printHelp(command, output string, outputExplicit bool, outputMissing bool, recursive bool) int {
 	if outputMissing {
 		event, _ := afdata.BuildCLIError("missing value for --output: expected plain, json, yaml, or markdown", "valid help output formats: plain, markdown, json, yaml")
-		fmt.Println(afdata.OutputJson(event.Value()))
+		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
 		return 2
 	}
 	// Scope (one-level vs recursive) is set by --recursive; --output only picks
@@ -253,10 +253,10 @@ func printHelp(command, output string, outputExplicit bool, outputMissing bool, 
 	format, err := afdata.CliParseOutput(output)
 	if err != nil {
 		event, _ := afdata.BuildCLIError(err.Error(), "")
-		fmt.Println(afdata.OutputJson(event.Value()))
+		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
 		return 2
 	}
-	fmt.Println(afdata.CliOutput(helpSchema(command, scope), format))
+	fmt.Println(afdata.Render(helpSchema(command, scope), format, afdata.OutputOptions{}))
 	return 0
 }
 
@@ -283,7 +283,7 @@ func buildRequestLog(command string) map[string]any {
 		"category": "request",
 		"command":  command,
 	})
-	event, _ := builder.Build()
+	event := builder.Build()
 	return event.Value()
 }
 
@@ -309,7 +309,7 @@ func buildStartupLog(args []string, command string, output string, filters afdat
 		},
 		"env": startupEnvSnapshot(),
 	})
-	event, _ := builder.Build()
+	event := builder.Build()
 	return event.Value()
 }
 
@@ -457,14 +457,14 @@ func main() {
 	outputMissing := outputFlagMissing(args)
 	if _, err := streamredirect.InstallStreamRedirectFromArgs(args); err != nil {
 		event, _ := afdata.BuildCLIError(err.Error(), "")
-		fmt.Println(afdata.OutputJson(event.Value()))
+		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
 		os.Exit(2)
 	}
 
-	if out, handled, err := afdata.CliHandleVersionOrContinue(args, "agent-cli", agentCliVersion, ""); handled {
+	if out, handled, err := afdata.CliHandleVersionOrContinue(args, "agent-cli", agentCliVersion); handled {
 		if err != nil {
 			event, _ := afdata.BuildCLIError(err.Error(), "valid version output formats: json, yaml, plain")
-			fmt.Println(afdata.OutputJson(event.Value()))
+			fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
 			os.Exit(2)
 		}
 		fmt.Print(out)
@@ -558,7 +558,7 @@ func main() {
 	if showHelp {
 		if outputConflict != "" {
 			event, _ := afdata.BuildCLIError(outputConflict, "valid output formats: json, yaml, plain")
-			fmt.Println(afdata.OutputJson(event.Value()))
+			fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
 			os.Exit(2)
 		}
 		os.Exit(printHelp(command, output, outputExplicit, outputMissing, recursive))
@@ -567,23 +567,23 @@ func main() {
 	// 1. Parse --output flag with structured error on failure.
 	if outputMissing {
 		event, _ := afdata.BuildCLIError("missing value for --output: expected json, yaml, or plain", "valid output formats: json, yaml, plain")
-		fmt.Println(afdata.OutputJson(event.Value()))
+		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
 		os.Exit(2)
 	}
 	if outputConflict != "" {
 		event, _ := afdata.BuildCLIError(outputConflict, "valid output formats: json, yaml, plain")
-		fmt.Println(afdata.OutputJson(event.Value()))
+		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
 		os.Exit(2)
 	}
 	format, err := afdata.CliParseOutput(output)
 	if err != nil {
 		event, _ := afdata.BuildCLIError(err.Error(), "")
-		fmt.Println(afdata.OutputJson(event.Value()))
+		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
 		os.Exit(2)
 	}
 	if message, hint := validateStrictArgs(args); message != "" {
 		event, _ := afdata.BuildCLIError(message, hint)
-		fmt.Println(afdata.CliOutput(event.Value(), format))
+		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
 		os.Exit(2)
 	}
 
@@ -603,16 +603,16 @@ func main() {
 	// Each diagnostic line self-tags with its `category`, so `--log all` reveals
 	// the full set from real output rather than a static help list.
 	if logEnabled(filters, "request") {
-		fmt.Println(afdata.CliOutput(buildRequestLog(command), format))
+		fmt.Println(afdata.Render(buildRequestLog(command), format, afdata.OutputOptions{}))
 	}
 	if logEnabled(filters, "startup") {
-		fmt.Println(afdata.CliOutput(buildStartupLog(args, command, output, filters, verbose), format))
+		fmt.Println(afdata.Render(buildStartupLog(args, command, output, filters, verbose), format, afdata.OutputOptions{}))
 	}
 
 	// 3. No subcommand → error with hint.
 	if command == "" {
 		event, _ := afdata.BuildCLIError("no subcommand provided", "try: agent-cli --help")
-		fmt.Println(afdata.CliOutput(event.Value(), format))
+		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
 		os.Exit(2)
 	}
 
@@ -624,8 +624,8 @@ func main() {
 				"action": "echo",
 				"log":    filters,
 			}).Trace(map[string]any{"duration_ms": 0})
-			preview, _ := builder.Build()
-			fmt.Println(afdata.CliOutput(preview.Value(), format))
+			preview := builder.Build()
+			fmt.Println(afdata.Render(preview.Value(), format, afdata.OutputOptions{}))
 			return
 		}
 
@@ -633,8 +633,8 @@ func main() {
 			"action": "echo",
 			"log":    filters,
 		})
-		result, _ := resultBuilder.Build()
-		fmt.Println(afdata.CliOutput(result.Value(), format))
+		result := resultBuilder.Build()
+		fmt.Println(afdata.Render(result.Value(), format, afdata.OutputOptions{}))
 
 	case "ping":
 		// 5. Demonstrate a protocol v1 error with hint on failure.
@@ -646,7 +646,7 @@ func main() {
 				Hint("set PING_HOST or pass --host").
 				Trace(map[string]any{"duration_ms": 0})
 			errVal, _ := errBuilder.Build()
-			fmt.Println(afdata.CliOutput(errVal.Value(), format))
+			fmt.Println(afdata.Render(errVal.Value(), format, afdata.OutputOptions{}))
 			os.Exit(1)
 		}
 
@@ -655,7 +655,7 @@ func main() {
 			Hint("the operation was cancelled before completion").
 			Trace(map[string]any{"duration_ms": 0})
 		errVal, _ := errBuilder.Build()
-		fmt.Println(afdata.CliOutput(errVal.Value(), format))
+		fmt.Println(afdata.Render(errVal.Value(), format, afdata.OutputOptions{}))
 		os.Exit(1)
 
 	case "skill":
@@ -664,7 +664,7 @@ func main() {
 	default:
 		hint := "valid commands: echo, ping, cancel, skill"
 		event, _ := afdata.BuildCLIError("unknown command: "+command, hint)
-		fmt.Println(afdata.CliOutput(event.Value(), format))
+		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
 		os.Exit(2)
 	}
 }
@@ -686,24 +686,24 @@ func runSkill(positionals []string, agentStr, scopeStr, skillsDir string, force 
 		action = skill.SkillActionUninstall
 	default:
 		event, _ := afdata.BuildCLIError("skill requires a subcommand: status, install, uninstall", "example: agent-cli skill status --agent opencode")
-		fmt.Println(afdata.CliOutput(event.Value(), format))
+		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
 		return 2
 	}
 
 	opts, message, hint := buildSkillOptions(agentStr, scopeStr, skillsDir, force)
 	if message != "" {
 		event, _ := afdata.BuildCLIError(message, hint)
-		fmt.Println(afdata.CliOutput(event.Value(), format))
+		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
 		return 2
 	}
 
 	report, serr := skill.RunSkillAdmin(widgetSpec, action, opts)
 	if serr != nil {
 		event, _ := afdata.BuildCLIError(serr.Message, serr.Hint)
-		fmt.Println(afdata.CliOutput(event.Value(), format))
+		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
 		return 1
 	}
-	fmt.Println(afdata.CliOutput(report, format))
+	fmt.Println(afdata.Render(report, format, afdata.OutputOptions{}))
 	return 0
 }
 

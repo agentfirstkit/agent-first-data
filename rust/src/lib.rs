@@ -9,13 +9,13 @@
 //!   line into a typed [`DecodedEvent`]
 //! - Redaction: [`redacted_value`] / [`Redactor::value`] (JSON values), [`redact_url_secrets`] /
 //!   [`Redactor::url`] (URL strings) — `Redactor` carries custom `secret_names`/`policy`
-//! - Output formatters: [`output_json`], [`output_yaml`], [`output_plain`] and their
-//!   `_with_options` variants
+//! - Output rendering: [`render`] — the single `value × format × options → String` entry point
+//!   for JSON, YAML, and plain (logfmt) output
 //! - Parse utilities: [`normalize_utc_offset`], [`is_valid_rfc3339_date`],
 //!   [`is_valid_rfc3339_time`], [`is_valid_rfc3339`], [`is_valid_bcp47`]
 //! - CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`] (returns [`LogFilters`]),
-//!   [`cli_output`], [`cli_output_with_options`], [`build_cli_error`], [`build_cli_version`],
-//!   [`cli_render_version`], [`cli_handle_version_or_continue`]
+//!   [`build_cli_error`], [`build_cli_version`], [`cli_render_version`],
+//!   [`cli_handle_version_or_continue`]
 //! - (feature `cli-help`): configurable clap help rendering via [`cli_render_help_with_options`]
 //!   and [`cli_handle_help_or_continue`]
 //! - (feature `cli-help-markdown`): [`cli_render_help_markdown`] — recursive Markdown help
@@ -45,6 +45,10 @@ mod skill_admin;
 #[path = "skill_validation.rs"]
 pub mod skill;
 
+/// Format-independent document values (dot-path access, typed coercion, and
+/// pluggable JSON/TOML/YAML/dotenv/INI backends), ported from `agent-first-config`.
+pub mod document;
+
 mod cli;
 mod formatting;
 #[cfg(feature = "cli-help")]
@@ -54,14 +58,10 @@ mod redaction;
 mod validation;
 
 pub use cli::{
-    CliEmitter, CliEmitterError, CliProtocolMode, LogFilters, OutputFormat, VersionConfig,
-    build_cli_version, cli_handle_version_or_continue, cli_output, cli_output_with_options,
-    cli_parse_log_filters, cli_parse_output, cli_render_version,
+    CliEmitter, CliEmitterError, LogFilters, OutputFormat, build_cli_version,
+    cli_handle_version_or_continue, cli_parse_log_filters, cli_parse_output, cli_render_version,
 };
-pub use formatting::{
-    output_json, output_json_with_options, output_plain, output_plain_with_options, output_yaml,
-    output_yaml_with_options,
-};
+pub use formatting::render;
 #[cfg(feature = "cli-help")]
 pub use help::{
     HelpConfig, HelpFormat, HelpOptions, HelpScope, cli_handle_help_or_continue, cli_render_help,
@@ -69,12 +69,12 @@ pub use help::{
 };
 pub use protocol::{
     BuildError, DecodedError, DecodedEvent, DecodedLog, DecodedProgress, DecodedResult,
-    ErrorBuilder, Event, EventDecodeError, LogBuilder, LogLevel, ProgressBuilder, ResultBuilder,
-    build_cli_error, decode_protocol_event, json_error, json_log, json_progress, json_result,
-    validate_protocol_event, validate_protocol_stream,
+    ErrorBuilder, Event, EventDecodeError, LogBuilder, LogLevel, ProgressBuilder,
+    ProtocolViolation, ResultBuilder, build_cli_error, decode_protocol_event, json_error, json_log,
+    json_progress, json_result, validate_protocol_event, validate_protocol_stream,
 };
 pub use redaction::{
-    OutputOptions, OutputStyle, RedactionPolicy, Redactor, redact_url_secrets, redacted_value,
+    OutputOptions, PlainStyle, RedactionPolicy, Redactor, redact_url_secrets, redacted_value,
 };
 pub use validation::{
     is_valid_bcp47, is_valid_rfc3339, is_valid_rfc3339_date, is_valid_rfc3339_time,

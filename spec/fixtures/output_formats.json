@@ -13,7 +13,7 @@
       "file_size_bytes": 5242880,
       "latency_ms": 1280
     },
-    "expected_yaml": "---\napi_key: \"***\"\ncreated_at: \"2025-02-07T00:00:00.000Z\"\nfile_size: \"5.0MiB\"\nlatency: \"1.28s\"",
+    "expected_yaml": "---\napi_key_secret: \"***\"\ncreated_at_epoch_ms: 1738886400000\nfile_size_bytes: 5242880\nlatency_ms: 1280",
     "expected_plain": "api_key=*** created_at=2025-02-07T00:00:00.000Z file_size=5.0MiB latency=1.28s"
   },
   {
@@ -26,7 +26,7 @@
       "short_ms": -999,
       "long_ms": -1500
     },
-    "expected_yaml": "---\nlong: \"-1.5s\"\nshort: \"-999ms\"",
+    "expected_yaml": "---\nlong_ms: -1500\nshort_ms: -999",
     "expected_plain": "long=-1.5s short=-999ms"
   },
   {
@@ -52,7 +52,7 @@
       "created_epoch_ns": "-1",
       "delta_bytes": -5242880
     },
-    "expected_yaml": "---\ncreated: \"1969-12-31T23:59:59.999Z\"\ndelta_bytes: -5242880",
+    "expected_yaml": "---\ncreated_epoch_ns: \"-1\"\ndelta_bytes: -5242880",
     "expected_plain": "created=1969-12-31T23:59:59.999Z delta_bytes=-5242880"
   },
   {
@@ -80,7 +80,7 @@
       "API_KEY_SECRET": "***",
       "CACHE_TTL_S": 3600
     },
-    "expected_yaml": "---\nAPI_KEY: \"***\"\nCACHE_TTL: \"3600s\"",
+    "expected_yaml": "---\nAPI_KEY_SECRET: \"***\"\nCACHE_TTL_S: 3600",
     "expected_plain": "API_KEY=*** CACHE_TTL=3600s"
   },
   {
@@ -121,7 +121,7 @@
       "timeout_s": 30.0,
       "balance_msats": 50000.0
     },
-    "expected_yaml": "---\nbalance: \"50000msats\"\ncpu: \"95%\"\nreserve_btc: 3\ntimeout: \"30s\"",
+    "expected_yaml": "---\nbalance_msats: 50000\ncpu_percent: 95\nreserve_btc: 3\ntimeout_s: 30",
     "expected_plain": "balance=50000msats cpu=95% reserve_btc=3 timeout=30s"
   },
   {
@@ -144,7 +144,7 @@
       "timeout_minutes": 30,
       "validity_hours": 24
     },
-    "expected_yaml": "---\ncached: \"1970-01-01T00:00:00.000Z\"\ncert: \"365 days\"\ninvoice: \"€123.45\"\npause: \"450000ns\"\nquery: \"830μs\"\ntimeout: \"30 minutes\"\nvalidity: \"24 hours\"",
+    "expected_yaml": "---\ncached_epoch_s: 0\ncert_days: 365\ninvoice_eur_cents: 12345\npause_ns: 450000\nquery_us: 830\ntimeout_minutes: 30\nvalidity_hours: 24",
     "expected_plain": "cached=1970-01-01T00:00:00.000Z cert=\"365 days\" invoice=€123.45 pause=450000ns query=830μs timeout=\"30 minutes\" validity=\"24 hours\""
   },
   {
@@ -161,7 +161,7 @@
       "fee_jpy": 1500.0,
       "created_at_epoch_ms": 1738886400000.0
     },
-    "expected_yaml": "---\ncreated_at: \"2025-02-07T00:00:00.000Z\"\nfee: \"\u00a51,500\"\nfile_size: \"5.0MiB\"\nprice: \"$9.99\"",
+    "expected_yaml": "---\ncreated_at_epoch_ms: 1738886400000\nfee_jpy: 1500\nfile_size_bytes: 5242880\nprice_usd_cents: 999",
     "expected_plain": "created_at=2025-02-07T00:00:00.000Z fee=\u00a51,500 file_size=5.0MiB price=$9.99"
   },
   {
@@ -174,7 +174,7 @@
       "ratio_percent": 99.9,
       "amount_btc": 0.5
     },
-    "expected_yaml": "---\namount_btc: 0.5\nratio: \"99.9%\"",
+    "expected_yaml": "---\namount_btc: 0.5\nratio_percent: 99.9",
     "expected_plain": "amount_btc=0.5 ratio=99.9%"
   },
   {
@@ -189,7 +189,7 @@
       "b_bytes": 3328,
       "c_bytes": 1310720
     },
-    "expected_yaml": "---\na: \"1.2KiB\"\nb: \"3.2KiB\"\nc: \"1.2MiB\"",
+    "expected_yaml": "---\na_bytes: 1280\nb_bytes: 3328\nc_bytes: 1310720",
     "expected_plain": "a=1.2KiB b=3.2KiB c=1.2MiB"
   },
   {
@@ -217,7 +217,7 @@
       "invoice_due_rfc3339_date": "2026-06-13",
       "market_open_rfc3339_time": "09:30:00"
     },
-    "expected_yaml": "---\ncreated_at: \"2026-06-13T09:30:00+08:00\"\ninvoice_due_rfc3339_date: \"2026-06-13\"\nmarket_open_rfc3339_time: \"09:30:00\"",
+    "expected_yaml": "---\ncreated_at_rfc3339: \"2026-06-13T09:30:00+08:00\"\ninvoice_due_rfc3339_date: \"2026-06-13\"\nmarket_open_rfc3339_time: \"09:30:00\"",
     "expected_plain": "created_at=2026-06-13T09:30:00+08:00 invoice_due_rfc3339_date=2026-06-13 market_open_rfc3339_time=09:30:00"
   },
   {
@@ -241,7 +241,7 @@
     "expected_json": {
       "created_epoch_ns": "1707868800000000000"
     },
-    "expected_yaml": "---\ncreated: \"2024-02-14T00:00:00.000Z\"",
+    "expected_yaml": "---\ncreated_epoch_ns: \"1707868800000000000\"",
     "expected_plain": "created=2024-02-14T00:00:00.000Z"
   },
   {
@@ -254,7 +254,7 @@
       "balance_msats": "9007199254740993",
       "withdrawn_sats": "9007199254740993"
     },
-    "expected_yaml": "---\nbalance: \"9007199254740993msats\"\nwithdrawn: \"9007199254740993sats\"",
+    "expected_yaml": "---\nbalance_msats: \"9007199254740993\"\nwithdrawn_sats: \"9007199254740993\"",
     "expected_plain": "balance=9007199254740993msats withdrawn=9007199254740993sats"
   },
   {
@@ -294,7 +294,7 @@
         }
       ]
     },
-    "expected_yaml": "---\nitems:\n  -\n    a: 1\n  -\n    b: \"***\"",
+    "expected_yaml": "---\nitems:\n  -\n    a: 1\n  -\n    b_secret: \"***\"",
     "expected_plain": "items=\"{\\\"a\\\":1},{\\\"b_secret\\\":\\\"***\\\"}\""
   },
   {
@@ -307,7 +307,7 @@
       "small_percent": 1e-07,
       "huge_s": 1e+21
     },
-    "expected_yaml": "---\nhuge: \"1e+21s\"\nsmall: \"1e-7%\"",
+    "expected_yaml": "---\nhuge_s: 1e+21\nsmall_percent: 1e-7",
     "expected_plain": "huge=1e+21s small=1e-7%"
   },
   {
@@ -320,7 +320,7 @@
       "created_at_epoch_ms": 253402300800000,
       "ok_epoch_ms": 253402300799999
     },
-    "expected_yaml": "---\ncreated_at_epoch_ms: 253402300800000\nok: \"9999-12-31T23:59:59.999Z\"",
+    "expected_yaml": "---\ncreated_at_epoch_ms: 253402300800000\nok_epoch_ms: 253402300799999",
     "expected_plain": "created_at_epoch_ms=253402300800000 ok=9999-12-31T23:59:59.999Z"
   },
   {
@@ -348,7 +348,7 @@
       "fare_thb_cents": 15050,
       "total_amount_cents": 15050
     },
-    "expected_yaml": "---\nfare: \"150.50 THB\"\ntotal_amount_cents: 15050",
+    "expected_yaml": "---\nfare_thb_cents: 15050\ntotal_amount_cents: 15050",
     "expected_plain": "fare=\"150.50 THB\" total_amount_cents=15050"
   },
   {
@@ -361,7 +361,7 @@
       "cost_usd_micro": 170000,
       "price_cny_micro": 5000000
     },
-    "expected_yaml": "---\ncost: \"0.170000 USD\"\nprice: \"5.000000 CNY\"",
+    "expected_yaml": "---\ncost_usd_micro: 170000\nprice_cny_micro: 5000000",
     "expected_plain": "cost=\"0.170000 USD\" price=\"5.000000 CNY\""
   },
   {
@@ -374,7 +374,7 @@
       "fare_thb_micro": 15050,
       "total_amount_micro": 15050
     },
-    "expected_yaml": "---\nfare: \"0.015050 THB\"\ntotal_amount_micro: 15050",
+    "expected_yaml": "---\nfare_thb_micro: 15050\ntotal_amount_micro: 15050",
     "expected_plain": "fare=\"0.015050 THB\" total_amount_micro=15050"
   },
   {
@@ -402,7 +402,7 @@
       "latency_ms": 1280,
       "endpoint_url": "https://h/api?timeout_ms=5000&size_bytes=1048576&token_secret=***&page=2"
     },
-    "expected_yaml": "---\nendpoint_url: \"https://h/api?timeout_ms=5000&size_bytes=1048576&token_secret=***&page=2\"\nlatency: \"1.28s\"",
+    "expected_yaml": "---\nendpoint_url: \"https://h/api?timeout_ms=5000&size_bytes=1048576&token_secret=***&page=2\"\nlatency_ms: 1280",
     "expected_plain": "endpoint_url=\"https://h/api?timeout_ms=5000&size_bytes=1048576&token_secret=***&page=2\" latency=1.28s"
   }
 ]

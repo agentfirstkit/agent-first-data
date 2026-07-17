@@ -2,7 +2,7 @@
 
 Demonstrates: human --help (one-level) plus orthogonal --recursive scope and
 --output json|yaml|markdown format for full surface export, cli_parse_output,
-cli_parse_log_filters, cli_output, build_cli_error, --dry-run, and error hints.
+cli_parse_log_filters, render, build_cli_error, --dry-run, and error hints.
 
 Run:  PYTHONPATH=. python3 examples/agent_cli.py --help
       PYTHONPATH=. python3 examples/agent_cli.py --help --recursive
@@ -32,11 +32,10 @@ from agent_first_data import (
     json_error,
     json_log,
     json_result,
-    cli_output,
+    render,
     cli_handle_version_or_continue,
     cli_parse_log_filters,
     cli_parse_output,
-    output_json,
 )
 from agent_first_data.skill import (
     SkillAction,
@@ -266,8 +265,8 @@ def recursive_requested(raw: list[str]) -> bool:
 
 
 def log_enabled(filters: list[str], category: str) -> bool:
-    """`all` / `*` (what --verbose expands to) enable every category."""
-    return any(f in (category, "all", "*") for f in filters)
+    """`all` (what --verbose expands to) is the single wildcard word."""
+    return any(f in (category, "all") for f in filters)
 
 
 def build_request_log(command: str | None) -> dict:
@@ -409,10 +408,10 @@ def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
     scope = "recursive" if recursive else "one_level"
 
     if output_missing(raw) or (explicit and value is None):
-        print(output_json(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml")))
+        print(render(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml"), OutputFormat.JSON))
         sys.exit(2)
     if conflict is not None:
-        print(output_json(build_cli_error(conflict, hint="valid help output formats: plain, markdown, json, yaml")))
+        print(render(build_cli_error(conflict, hint="valid help output formats: plain, markdown, json, yaml"), OutputFormat.JSON))
         sys.exit(2)
 
     if not explicit or value == "plain":
@@ -433,9 +432,9 @@ def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
     try:
         fmt = cli_parse_output(value)
     except ValueError as e:
-        print(output_json(build_cli_error(str(e))))
+        print(render(build_cli_error(str(e)), OutputFormat.JSON))
         sys.exit(2)
-    print(cli_output(help_schema(parser, args.command, scope), fmt))
+    print(render(help_schema(parser, args.command, scope), fmt))
 
 
 def main() -> None:
@@ -444,13 +443,13 @@ def main() -> None:
     try:
         _stream_redirect = install_stream_redirect_from_raw_args(raw)
     except (OSError, ValueError) as e:
-        print(output_json(build_cli_error(str(e))))
+        print(render(build_cli_error(str(e)), OutputFormat.JSON))
         sys.exit(2)
 
     try:
         version = cli_handle_version_or_continue(raw, "agent-cli", AGENT_CLI_VERSION)
     except ValueError as e:
-        print(output_json(build_cli_error(str(e), hint="valid version output formats: json, yaml, plain")))
+        print(render(build_cli_error(str(e), hint="valid version output formats: json, yaml, plain"), OutputFormat.JSON))
         sys.exit(2)
     if version is not None:
         print(version, end="")
@@ -458,19 +457,19 @@ def main() -> None:
 
     if output_missing(raw):
         if help_requested(raw):
-            print(output_json(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml")))
+            print(render(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml"), OutputFormat.JSON))
         else:
-            print(output_json(build_cli_error("missing value for --output: expected json, yaml, or plain", hint="valid output formats: json, yaml, plain")))
+            print(render(build_cli_error("missing value for --output: expected json, yaml, or plain", hint="valid output formats: json, yaml, plain"), OutputFormat.JSON))
         sys.exit(2)
     try:
         args = parse_cli_args(parser, raw)
     except ArgumentParserError as e:
         fmt = cli_error_format_from_raw(raw)
-        print(cli_output(build_cli_error(str(e), hint="try: agent-cli --help"), fmt))
+        print(render(build_cli_error(str(e), hint="try: agent-cli --help"), fmt))
         sys.exit(2)
     conflict = output_conflict(raw)
     if conflict is not None:
-        print(output_json(build_cli_error(conflict, hint="valid output formats: json, yaml, plain")))
+        print(render(build_cli_error(conflict, hint="valid output formats: json, yaml, plain"), OutputFormat.JSON))
         sys.exit(2)
     if args.json:
         args.output = "json"
@@ -485,7 +484,7 @@ def main() -> None:
     try:
         fmt = cli_parse_output(args.output)
     except ValueError as e:
-        print(output_json(build_cli_error(str(e))))
+        print(render(build_cli_error(str(e)), OutputFormat.JSON))
         sys.exit(2)
 
     # Step 2: parse --log with shared helper (trim + lowercase + dedup)
@@ -497,24 +496,24 @@ def main() -> None:
     # Each diagnostic line self-tags with its `category`, so `--log all` reveals
     # the full set from real output rather than a static help list.
     if log_enabled(log, "request"):
-        print(cli_output(build_request_log(args.command), fmt))
+        print(render(build_request_log(args.command), fmt))
     if log_enabled(log, "startup"):
-        print(cli_output(build_startup_log(raw, args, log), fmt))
+        print(render(build_startup_log(raw, args, log), fmt))
 
     # Step 3: no subcommand → error with hint
     if not args.command:
-        print(cli_output(build_cli_error("no subcommand provided", hint="try: agent-cli --help"), fmt))
+        print(render(build_cli_error("no subcommand provided", hint="try: agent-cli --help"), fmt))
         sys.exit(2)
 
     if args.command == "echo":
         # Step 4: --dry-run → preview without executing
         if args.dry_run:
             preview = json_result({"action": "echo", "log": log}).trace({"duration_ms": 0}).build()
-            print(cli_output(preview.to_dict(), fmt))
+            print(render(preview.to_dict(), fmt))
             return
 
         result = json_result({"action": "echo", "log": log}).build()
-        print(cli_output(result.to_dict(), fmt))
+        print(render(result.to_dict(), fmt))
 
     elif args.command == "ping":
         # Step 5: demonstrate a protocol v1 error with hint on failure
@@ -524,7 +523,7 @@ def main() -> None:
                 "ping_target_not_configured",
                 "ping target not configured",
             ).hint("set PING_HOST or pass --host").trace({"duration_ms": 0}).build()
-            print(cli_output(err.to_dict(), fmt))
+            print(render(err.to_dict(), fmt))
             sys.exit(1)
 
     elif args.command == "cancel":
@@ -532,7 +531,7 @@ def main() -> None:
             "cancelled",
             "operation cancelled",
         ).hint("the operation was cancelled before completion").trace({"duration_ms": 0}).build()
-        print(cli_output(err.to_dict(), fmt))
+        print(render(err.to_dict(), fmt))
         sys.exit(1)
 
     elif args.command == "skill":
@@ -581,22 +580,22 @@ def run_skill(args, fmt) -> int:
             "skill requires a subcommand: status, install, uninstall",
             hint="example: agent-cli skill status --agent opencode",
         )
-        print(cli_output(err, fmt))
+        print(render(err, fmt))
         return 2
 
     options, parse_error = build_skill_options(args)
     if parse_error is not None:
         message, hint = parse_error
-        print(cli_output(build_cli_error(message, hint=hint), fmt))
+        print(render(build_cli_error(message, hint=hint), fmt))
         return 2
 
     try:
         report = run_skill_admin(WIDGET_SPEC, action, options)
     except SkillError as e:
-        print(cli_output(build_cli_error(e.message, hint=e.hint), fmt))
+        print(render(build_cli_error(e.message, hint=e.hint), fmt))
         return 1
     # The report is structured; serialize it for output.
-    print(cli_output(report.to_dict(), fmt))
+    print(render(report.to_dict(), fmt))
     return 0
 
 
@@ -748,8 +747,8 @@ def test_help_redacts_secret_defaults_in_every_format():
     for rendered in (
         parser.format_help(),
         format_markdown_help(parser, None, False),
-        cli_output(help_schema(parser, None, "one_level"), OutputFormat.JSON),
-        cli_output(help_schema(parser, None, "one_level"), OutputFormat.YAML),
+        render(help_schema(parser, None, "one_level"), OutputFormat.JSON),
+        render(help_schema(parser, None, "one_level"), OutputFormat.YAML),
     ):
         assert redaction_marker in rendered
         assert secret_default not in rendered
@@ -796,10 +795,10 @@ def test_log_enabled_wildcards():
     assert not log_enabled([], "startup")
     assert log_enabled(["startup"], "startup")
     assert not log_enabled(["startup"], "request")
-    # all / * enable every category, including unnamed ones
-    for everything in ("all", "*"):
-        assert log_enabled([everything], "startup")
-        assert log_enabled([everything], "request")
+    # `all` is the single wildcard word; `*` is not special.
+    assert log_enabled(["all"], "startup")
+    assert log_enabled(["all"], "request")
+    assert not log_enabled(["*"], "request")
 
 
 def test_log_lines_are_category_tagged():
@@ -853,12 +852,12 @@ def test_json_error_builder_without_hint_has_no_hint_key():
     assert "hint" not in v.to_dict()["error"]
 
 
-def test_cli_output_all_formats():
+def test_render_all_formats():
     v = json_result({"ok": True}).build()
     v_dict = v.to_dict()
-    json_out = cli_output(v_dict, OutputFormat.JSON)
-    yaml_out = cli_output(v_dict, OutputFormat.YAML)
-    plain_out = cli_output(v_dict, OutputFormat.PLAIN)
+    json_out = render(v_dict, OutputFormat.JSON)
+    yaml_out = render(v_dict, OutputFormat.YAML)
+    plain_out = render(v_dict, OutputFormat.PLAIN)
     assert '"kind"' in json_out
     assert yaml_out.startswith("---")
     assert "kind=result" in plain_out
@@ -866,7 +865,7 @@ def test_cli_output_all_formats():
 
 def test_error_round_trip_is_valid_jsonl():
     v = build_cli_error("unknown flag: --foo")
-    line = output_json(v)
+    line = render(v, OutputFormat.JSON)
     parsed = json.loads(line)
     assert parsed["kind"] == "error"
     assert parsed["error"]["code"] == "cli_error"

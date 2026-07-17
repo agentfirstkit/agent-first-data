@@ -13,9 +13,9 @@ from agent_first_data.format import (
     json_log,
     json_progress,
     json_result,
-    output_json,
-    output_yaml,
-    output_plain,
+    _format_json,
+    _format_yaml,
+    _format_plain,
     validate_protocol_event,
 )
 
@@ -38,13 +38,15 @@ class LogFilters:
     def enabled(self, event: str) -> bool:
         """Check if event should be logged.
 
-        Empty filter list returns False.
-        Filters containing 'all' or '*' return True.
-        Otherwise returns True if event (lowercased) starts with any filter.
+        An empty filter list returns False (filtering is opt-in). The single
+        wildcard word 'all' returns True ('*' is not special — one wildcard
+        spelling, not two). Otherwise returns True iff event (lowercased) starts
+        with any filter (prefix match); a mistyped filter simply matches nothing
+        and silently emits no output.
         """
         if not self._filters:
             return False
-        if any(f in ("all", "*") for f in self._filters):
+        if "all" in self._filters:
             return True
         event_lower = event.lower()
         return any(event_lower.startswith(f) for f in self._filters)
@@ -104,22 +106,22 @@ def cli_parse_log_filters(entries: list[str]) -> LogFilters:
     return LogFilters(out)
 
 
-def cli_output(value: Any, format: OutputFormat, *, options: OutputOptions | None = None) -> str:
-    """Dispatch output formatting by OutputFormat.
+def render(value: Any, format: OutputFormat, *, options: OutputOptions | None = None) -> str:
+    """Render a value as JSON, YAML, or plain (logfmt) text for OutputFormat.
 
-    Equivalent to calling output_json, output_yaml, or output_plain directly.
-    JSON ignores OutputStyle and preserves original keys and values after redaction.
+    The single public render entry point: value x format x options -> str.
+    JSON ignores PlainStyle and preserves original keys and values after redaction.
 
     >>> import json
     >>> v = {"code": "ok"}
-    >>> cli_output(v, OutputFormat.JSON).startswith('{"code"')
+    >>> render(v, OutputFormat.JSON).startswith('{"code"')
     True
     """
     if format is OutputFormat.YAML:
-        return output_yaml(value, options=options)
+        return _format_yaml(value, options=options)
     if format is OutputFormat.PLAIN:
-        return output_plain(value, options=options)
-    return output_json(value, options=options)
+        return _format_plain(value, options=options)
+    return _format_json(value, options=options)
 
 
 class CliEmitter:
@@ -175,7 +177,7 @@ class CliEmitter:
                 merged_log.update(log_payload)
                 envelope["log"] = merged_log
 
-        self._writer.write(cli_output(envelope, self._format, options=self._output_options) + "\n")
+        self._writer.write(render(envelope, self._format, options=self._output_options) + "\n")
         flush = getattr(self._writer, "flush", None)
         if flush is not None:
             flush()
@@ -219,8 +221,13 @@ class CliEmitter:
 
 
 def build_cli_version(version: str) -> dict:
-    """Build a standard CLI version value."""
-    return json_result({"version": version}).build().to_dict()
+    """Build a standard CLI version result event.
+
+    The result payload always carries ``code: "version"`` alongside
+    ``version``, so structured consumers can dispatch on ``code`` the same
+    way they would for any other result shape.
+    """
+    return json_result({"code": "version", "version": version}).build().to_dict()
 
 
 def cli_render_version(
@@ -234,20 +241,23 @@ def cli_render_version(
     conventional "<name> <version>" text.
     """
     rendered = (
-        f"{name} {version}" if format is None else cli_output(build_cli_version(version), format)
+        f"{name} {version}" if format is None else render(build_cli_version(version), format)
     )
     return rendered.rstrip("\n") + "\n"
 
 
-def cli_handle_version_or_continue(
-    raw_args: list[str],
-    name: str,
-    version: str,
-    default_output: OutputFormat | None = None,
-    output_flag: str = "--output",
-    allow_output_format: bool = True,
-) -> str | None:
+def cli_handle_version_or_continue(raw_args: list[str], name: str, version: str) -> str | None:
     """Render version output if --version/-V is present; otherwise return None.
+
+    One blessed behavior, no configurable knobs: a bare version request
+    (``--version``/``-V`` with no output flag) always renders conventional
+    ``"<name> <version>\\n"`` text; adding ``--json`` or ``--output
+    <json|yaml|plain>`` selects the structured AFDATA rendering instead.
+
+    Only a top-level version request is recognized: scanning stops at the first
+    positional argument (the subcommand), so ``tool sub --version <value>``
+    leaves ``--version`` for the subcommand's parser rather than printing the
+    tool version.
 
     Raises ValueError for malformed version requests, for example
     ``--version --output xml``. The caller should convert that to a CLI error
@@ -262,11 +272,16 @@ def cli_handle_version_or_continue(
         arg = raw_args[i]
         if arg == "--":
             break
+        # The first positional argument marks the subcommand boundary. Past it,
+        # --version and -V belong to the subcommand's own parser, matching
+        # git/cargo/clap: this pre-parser only owns a top-level version request.
+        if not arg.startswith("-"):
+            break
         if arg in ("--version", "-V"):
             version_requested = True
             i += 1
             continue
-        if allow_output_format and arg == "--json":
+        if arg == "--json":
             if output_format is not None and output_format is not OutputFormat.JSON:
                 output_error = ValueError(
                     "conflicting output formats: --json conflicts with previous output format"
@@ -275,9 +290,9 @@ def cli_handle_version_or_continue(
                 output_format = OutputFormat.JSON
             i += 1
             continue
-        if allow_output_format and (arg == output_flag or arg.startswith(f"{output_flag}=")):
+        if arg == "--output" or arg.startswith("--output="):
             value: str | None
-            if arg.startswith(f"{output_flag}="):
+            if arg.startswith("--output="):
                 value = arg.split("=", 1)[1]
                 step = 1
             elif i + 1 < len(raw_args) and not raw_args[i + 1].startswith("-"):
@@ -288,14 +303,14 @@ def cli_handle_version_or_continue(
                 step = 1
             if value is None:
                 output_error = ValueError(
-                    f"missing value for {output_flag}: expected json, yaml, or plain"
+                    "missing value for --output: expected json, yaml, or plain"
                 )
             else:
                 try:
                     parsed_output = cli_parse_output(value)
                     if output_format is not None and output_format is not parsed_output:
                         output_error = ValueError(
-                            f"conflicting output formats: {output_flag} {value} conflicts with previous output format"
+                            f"conflicting output formats: --output {value} conflicts with previous output format"
                         )
                     else:
                         output_format = parsed_output
@@ -309,21 +324,23 @@ def cli_handle_version_or_continue(
         return None
     if output_error is not None:
         raise output_error
-    return cli_render_version(
-        name,
-        version,
-        output_format if allow_output_format and output_format is not None else default_output,
-    )
+    return cli_render_version(name, version, output_format)
 
 
 def build_cli_error(message: str, hint: str | None = None) -> dict | Event:
     """Build a standard CLI parse error event.
 
     Use when argument parsing fails or a flag value is invalid.
-    Print with output_json and exit with code 2.
+    Print with render(..., OutputFormat.JSON) and exit with code 2.
+
+    Always returns a strict-valid ``kind: "error"`` event with code
+    ``"cli_error"``. Never raises: an empty ``message`` is replaced with a
+    generic placeholder so the returned event stays strict-valid.
 
     Returns the event envelope as a dict.
     """
+    if not message:
+        message = "unspecified error"
     event = json_error("cli_error", message)
     if hint is not None:
         event = event.hint(hint)

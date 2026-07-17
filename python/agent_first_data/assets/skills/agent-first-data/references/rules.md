@@ -107,7 +107,7 @@ Sub-cent precision — `_{code}_micro`, integer millionths (10⁻⁶) of the maj
 | `_secret` | redact the entire value/subtree to `***` | `api_key_secret: "sk-or-v1-abc..."` |
 | `_url` | scrub secrets *inside* the URL value, keep the rest | `callback_url: "https://h/cb?code_secret=..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Matching recognizes `_secret` and `_SECRET` only — no mixed case. The entire `_secret` value/subtree becomes `***`, including objects and arrays. For legacy fields that cannot be renamed, configure `OutputOptions.redaction` with `secret_names`/`secretNames` such as `["api_key", "authorization"]`; names match exact field names at any nesting level; no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. AFDATA does not define named redaction profiles; use the default, `secret_names`, `RedactionTraceOnly`, or `RedactionNone` deliberately at the serialization boundary. Callers that need schema-preserving YAML/plain rendering can pass `OutputOptions` with the `Raw` output style.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Matching recognizes `_secret` and `_SECRET` only — no mixed case. The entire `_secret` value/subtree becomes `***`, including objects and arrays. For legacy fields that cannot be renamed, configure `OutputOptions.redaction` with `secret_names`/`secretNames` such as `["api_key", "authorization"]`; names match exact field names at any nesting level; no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. AFDATA does not define named redaction profiles; use the default policy `All`, `secret_names`, `TraceOnly`, or `Off` deliberately at the serialization boundary. YAML is always schema-preserving, like JSON. Callers that need schema-preserving Plain rendering can pass `OutputOptions` with the `Raw` output style.
 
 `***` means only one thing: AFDATA redacted a sensitive value. Do not use it for serialization failure, truncation, unsupported types, or “maybe secret” guesses.
 
@@ -158,15 +158,17 @@ ORM struct fields preserve the suffix: `duration_ms: i64`, not `duration: i64`.
 
 ## Part 2: Output Processing
 
-Three output formats via `output_json()`, `output_yaml()`, `output_plain()`. Default YAML and Plain apply key stripping + value formatting. Optional `options` (Python/TS keyword arg; Rust/Go `_with_options` variant).
+Three output formats via one entry point `render(value, format, options)` (`format` = json/yaml/plain). JSON and YAML are both **structure-preserving**: original keys, scalar types, and numeric semantics survive after redaction. Plain is the one **lossy/human** renderer — it strips formatting suffixes and reformats values for scanning. `options` is an optional keyword arg in Python/TS; Rust/Go pass `OutputOptions` explicitly.
 
 ### Formats
 
 - **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
-- **YAML** — multi-line, formatting suffixes stripped, values formatted, secrets redacted by default
+- **YAML** — multi-line, original keys, raw values (same semantics as JSON), keys sorted, secrets redacted by default
 - **Plain** — single-line logfmt, formatting suffixes stripped, values formatted, secrets redacted by default
 
-### Key stripping (YAML and Plain)
+Rust gates YAML output behind the `yaml` Cargo feature (on by default, along with the rest of the default feature set). With `default-features = false` and `yaml` not re-enabled, `OutputFormat::Yaml` does not exist and `--output yaml` is rejected with a feature-requirement error instead of silently falling back to another format.
+
+### Key stripping (Plain only)
 
 Remove recognized formatting suffix from key. Longest match first, exact lowercase or uppercase only:
 
@@ -176,9 +178,9 @@ Remove recognized formatting suffix from key. Longest match first, exact lowerca
 4. `_msats`, `_sats`, `_bytes`, `_percent`, `_secret`
 5. `_jpy`, `_ns`, `_us`, `_ms`, `_s`
 
-`_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are NOT stripped (pass through). If two keys collide after stripping, both revert to original key AND raw value (no formatting). Redaction runs before collision handling, so fallback never restores a secret.
+`_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are NOT stripped (pass through). If two keys collide after stripping, both revert to original key AND raw value (no formatting). Redaction runs before collision handling, so fallback never restores a secret. JSON and YAML never strip suffixes — every key renders exactly as written.
 
-### Value formatting (YAML and Plain)
+### Value formatting (Plain only)
 
 - `_ms` with absolute value < 1000 → `{n}ms`; absolute value ≥ 1000 → seconds (`1280` → `1.28s`, `-1500` → `-1.5s`)
 - `_s`, `_ns`, `_us` → append unit (`3600s`, `450000ns`, `830μs`)
@@ -192,7 +194,7 @@ Remove recognized formatting suffix from key. Longest match first, exact lowerca
 - `_secret` → `***` (the redaction phase already replaced the subtree)
 - `_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time` → pass through unchanged
 
-**Type constraints**: `_bytes`/`_epoch_*` require integer. `_usd_cents`/`_eur_cents`/`_jpy`/`_{code}_cents`/`_{code}_micro` require non-negative integer. Duration/Bitcoin/`_percent` accept any number. Wrong type → raw value + original key.
+**Type constraints**: `_bytes`/`_epoch_*` require integer. `_usd_cents`/`_eur_cents`/`_jpy`/`_{code}_cents`/`_{code}_micro` require non-negative integer. Duration/Bitcoin/`_percent` accept any number. Wrong type → raw value + original key. JSON and YAML never format values — a value renders exactly as its JSON type (numbers stay numbers, strings stay quoted strings, no unit/date/currency formatting).
 
 ### Plain logfmt details
 
@@ -204,7 +206,11 @@ Remove recognized formatting suffix from key. Longest match first, exact lowerca
 
 ### Key ordering
 
-YAML and Plain sort keys (after stripping) by UTF-16 code unit order (JCS, RFC 8785). For ASCII keys this equals byte-order sorting.
+YAML sorts keys by UTF-16 code unit order (JCS, RFC 8785) without stripping suffixes. Plain sorts keys the same way, but after stripping. For ASCII keys this equals byte-order sorting.
+
+### `PlainStyle` (Plain only)
+
+`PlainStyle` (`Readable`/`Raw`) only affects Plain: `Readable` (default) strips suffixes and formats values; `Raw` keeps original keys/values (still redacted). YAML ignores `PlainStyle` entirely — it is always structure-preserving, matching JSON.
 
 ---
 
@@ -269,17 +275,17 @@ Use the local language README for installation and the full overview/spec for AP
 
 Required cross-language behavior to rely on:
 
-- Output helpers redact before formatting: `output_json()`, `output_yaml()`, `output_plain()` (with optional `options` in Python/TS).
-- Use `redacted_value()` for raw HTTP/MCP/SSE serialization paths that bypass `output_json()`.
+- The single output entry point `render(value, format, options)` redacts before formatting (with optional `options` in Python/TS).
+- Use `redacted_value()` for raw HTTP/MCP/SSE serialization paths that bypass `render()`.
 - Use `redact_url_secrets()` for URLs embedded in log messages or prose before interpolating them into output.
-- Use `cli_parse_output()`, `cli_parse_log_filters()`, `cli_output()`, `build_cli_error()`, and the version helper for CLI tools instead of custom parsing/error envelopes.
+- Use `cli_parse_output()`, `cli_parse_log_filters()`, `render()`, `build_cli_error()`, and the version helper for CLI tools instead of custom parsing/error envelopes.
 - `build_cli_error(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
-- Rust CLIs should call `cli_handle_version_or_continue()` before clap parsing so `--version --output json|yaml|plain` emits a structured `kind:"result"` event with `result.version` instead of clap's plain text. Use `VersionConfig::conventional_default()` so bare `--version` stays human text while explicit `--output` remains structured.
+- Rust CLIs should call `cli_handle_version_or_continue(raw_args, name, version)` before clap parsing so `--version --output json|yaml|plain` emits a structured `kind:"result"` event with `result.code == "version"` and `result.version` instead of clap's plain text. Bare `--version` always stays human `<name> <version>` text; explicit `--output` is always structured — there is no configuration.
 - Use the protocol reader `decode_protocol_event(text)` to parse and strict-validate a single JSON text line, receiving a typed decoded event.
 
 ## AFDATA Logging
 
-Long-running services and processes depending on structured logging (tonic, sqlx, hyper, etc. via tracing) use a logging init function to capture the full process. One-time CLI output uses `json_log()` + `cli_output()` or `CliEmitter`.
+Long-running services and processes depending on structured logging (tonic, sqlx, hyper, etc. via tracing) use a logging init function to capture the full process. One-time CLI output uses `json_log()` + `render()` or `CliEmitter`.
 
 ### Init (Rust only; pick one format per process)
 
@@ -312,7 +318,7 @@ Log redaction is **by field name** (the same `_secret`/`_url` rule as all output
 CLI tools that use AFDATA should support output and logging flags:
 
 ```
---output json|yaml|plain    # default is tool-defined (interactive → yaml, scripting/logging → json)
+--output json|yaml|plain    # default is tool-defined (structured/scripting → json or yaml, human scanning → plain)
 --log startup,request,progress,retry,redirect
 --verbose                   # shorthand for all log categories
 ```

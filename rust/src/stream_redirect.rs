@@ -93,41 +93,23 @@ impl Drop for InstalledStreamRedirect {
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 
-/// Resolve canonical CLI arguments into a config.
-pub fn config_from_cli_args(
-    stdout_file_arg: Option<PathBuf>,
-    stderr_file_arg: Option<PathBuf>,
-) -> io::Result<Option<StreamRedirectConfig>> {
-    StreamRedirectConfig::new(stdout_file_arg, stderr_file_arg)
-}
-
-/// Resolve canonical raw CLI arguments into a config.
+/// Resolve raw CLI argv into a config (the single blessed entry).
 ///
 /// This parser intentionally has no `clap` dependency so callers can install
 /// redirection before help/version handling emits early output. It recognizes
 /// `--stdout-file VALUE`, `--stdout-file=VALUE`, `--stderr-file VALUE`, and
-/// `--stderr-file=VALUE`.
+/// `--stderr-file=VALUE`. Pair it with [`install`] when you need the config
+/// first; otherwise use [`install_from_raw_args`] directly.
 pub fn config_from_raw_args<I, S>(args: I) -> io::Result<Option<StreamRedirectConfig>>
 where
     I: IntoIterator<Item = S>,
     S: Into<OsString>,
 {
     let raw = parse_raw_args(args)?;
-    config_from_cli_args(raw.stdout_file, raw.stderr_file)
+    StreamRedirectConfig::new(raw.stdout_file, raw.stderr_file)
 }
 
-/// Install stdout/stderr redirection from canonical CLI inputs.
-pub fn install_from_cli_args(
-    stdout_file_arg: Option<PathBuf>,
-    stderr_file_arg: Option<PathBuf>,
-) -> io::Result<Option<InstalledStreamRedirect>> {
-    match config_from_cli_args(stdout_file_arg, stderr_file_arg)? {
-        Some(config) => install(&config).map(Some),
-        None => Ok(None),
-    }
-}
-
-/// Install stdout/stderr redirection from canonical raw CLI inputs.
+/// Install stdout/stderr redirection from raw CLI argv.
 pub fn install_from_raw_args<I, S>(args: I) -> io::Result<Option<InstalledStreamRedirect>>
 where
     I: IntoIterator<Item = S>,
@@ -387,6 +369,20 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    /// Test helper: resolve a config from explicit paths and install it, the
+    /// path-based install the public surface no longer exposes as its own
+    /// function (callers now build a `StreamRedirectConfig` or use raw argv).
+    #[cfg(unix)]
+    fn install_paths(
+        stdout_file_arg: Option<PathBuf>,
+        stderr_file_arg: Option<PathBuf>,
+    ) -> io::Result<Option<InstalledStreamRedirect>> {
+        match StreamRedirectConfig::new(stdout_file_arg, stderr_file_arg)? {
+            Some(config) => install(&config).map(Some),
+            None => Ok(None),
+        }
+    }
+
     #[test]
     fn config_builds_optional_paths() {
         let config =
@@ -549,7 +545,7 @@ mod tests {
         fs::write(&real_file, "").expect("create real file");
         symlink(&real_file, &symlink_file).expect("create symlink");
 
-        let err = install_from_cli_args(Some(symlink_file), None::<PathBuf>)
+        let err = install_paths(Some(symlink_file), None::<PathBuf>)
             .expect_err("symlink target must be rejected");
         assert!(
             err.to_string().contains("symbolic link")
@@ -652,7 +648,7 @@ mod tests {
             PathBuf::from(env::var_os("AFDATA_STREAM_REDIRECT_STDOUT").expect("stdout path"));
         let stderr_file =
             PathBuf::from(env::var_os("AFDATA_STREAM_REDIRECT_STDERR").expect("stderr path"));
-        let _redirect = install_from_cli_args(Some(stdout_file), Some(stderr_file))
+        let _redirect = install_paths(Some(stdout_file), Some(stderr_file))
             .expect("install stream redirect")
             .expect("stream redirect enabled");
         io::stdout()
@@ -671,7 +667,7 @@ mod tests {
         }
         let stdout_file =
             PathBuf::from(env::var_os("AFDATA_STREAM_REDIRECT_STDOUT").expect("stdout path"));
-        let redirect = install_from_cli_args(Some(stdout_file), None::<PathBuf>)
+        let redirect = install_paths(Some(stdout_file), None::<PathBuf>)
             .expect("install stream redirect")
             .expect("stream redirect enabled");
         io::stdout()
@@ -694,14 +690,14 @@ mod tests {
             PathBuf::from(env::var_os("AFDATA_STREAM_REDIRECT_STDOUT").expect("stdout path"));
         let stderr_file =
             PathBuf::from(env::var_os("AFDATA_STREAM_REDIRECT_STDERR").expect("stderr path"));
-        let first = install_from_cli_args(Some(stdout_file), None::<PathBuf>)
+        let first = install_paths(Some(stdout_file), None::<PathBuf>)
             .expect("install first stream redirect")
             .expect("first stream redirect enabled");
         io::stdout()
             .write_all(b"first redirect still usable\n")
             .expect("write first redirected stdout bytes");
 
-        let err = install_from_cli_args(None::<PathBuf>, Some(stderr_file.clone()))
+        let err = install_paths(None::<PathBuf>, Some(stderr_file.clone()))
             .expect_err("second install must report an active redirect");
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert!(
@@ -710,7 +706,7 @@ mod tests {
         );
 
         drop(first);
-        let second = install_from_cli_args(None::<PathBuf>, Some(stderr_file))
+        let second = install_paths(None::<PathBuf>, Some(stderr_file))
             .expect("install second stream redirect after drop")
             .expect("second stream redirect enabled");
         io::stderr()

@@ -18,6 +18,13 @@ docs/overview.md's API table. Feature-gated Rust modules (cli-help,
 skill-admin, tracing, stream-redirect) and their Go/Python/TS counterparts
 are intentionally out of scope; they're implementation utilities allowed to
 differ in shape per language.
+
+A Rust `pub use` block directly preceded by `#[cfg(feature = "...")]` is
+"feature-gated": it's never required to have a manifest entry (the reverse
+"undeclared" check ignores it), but if the manifest *does* declare one of its
+names — as it does for `output_yaml`/`output_yaml_with_options`, which are
+gated behind the on-by-default `yaml` feature but still part of the shared
+cross-language contract — that still counts as found.
 """
 
 from __future__ import annotations
@@ -41,9 +48,18 @@ def fail(messages: list[str]) -> None:
     raise SystemExit(1)
 
 
-def extract_rust() -> set[str]:
+def extract_rust() -> tuple[set[str], set[str]]:
+    """Returns `(always_exported, feature_gated_exported)`.
+
+    `always_exported` backs both directions of the cross-check.
+    `feature_gated_exported` (behind a directly-preceding `#[cfg(feature =
+    "...")]`) only backs the forward "manifest name must exist" direction —
+    it's exempt from the reverse "must be declared" direction, so most
+    Rust-only optional-feature symbols never need a manifest entry.
+    """
     text = (ROOT / "rust" / "src" / "lib.rs").read_text()
-    names: set[str] = set()
+    always: set[str] = set()
+    gated: set[str] = set()
     lines = text.splitlines()
     i = 0
     prev_nonblank = ""
@@ -51,7 +67,7 @@ def extract_rust() -> set[str]:
         line = lines[i]
         stripped = line.strip()
         m = re.match(r"pub use (\w+)::\{", stripped)
-        if m and not prev_nonblank.startswith("#[cfg("):
+        if m:
             block = [stripped]
             while "};" not in block[-1] and "}" not in block[-1].split("::", 1)[-1]:
                 i += 1
@@ -60,14 +76,23 @@ def extract_rust() -> set[str]:
                     break
             full = " ".join(block)
             inner = full.split("{", 1)[1].rsplit("}", 1)[0]
+            target = gated if prev_nonblank.startswith("#[cfg(") else always
             for ident in inner.split(","):
                 ident = ident.strip()
                 if ident:
-                    names.add(ident)
+                    target.add(ident)
+        else:
+            # Single-item re-export without braces: `pub use path::name;`
+            # (rustfmt collapses one-item brace lists to this form, so the
+            # brace matcher above never sees them).
+            m_single = re.match(r"pub use (?:\w+::)+(\w+);", stripped)
+            if m_single:
+                target = gated if prev_nonblank.startswith("#[cfg(") else always
+                target.add(m_single.group(1))
         if stripped:
             prev_nonblank = stripped
         i += 1
-    return names
+    return always, gated
 
 
 def extract_python() -> set[str]:
@@ -95,7 +120,7 @@ def extract_typescript() -> set[str]:
 
 def extract_go() -> set[str]:
     names: set[str] = set()
-    for filename in ("afdata.go", "afdata_cli.go"):
+    for filename in ("afdata.go", "afdata_cli.go", "afdata_decode.go"):
         text = (ROOT / "go" / filename).read_text()
         for m in re.finditer(r"^func (New)?([A-Z]\w*)", text, re.MULTILINE):
             names.add((m.group(1) or "") + m.group(2))
@@ -105,7 +130,6 @@ def extract_go() -> set[str]:
 
 
 EXTRACTORS = {
-    "rust": extract_rust,
     "python": extract_python,
     "typescript": extract_typescript,
     "go": extract_go,
@@ -116,7 +140,9 @@ def main() -> int:
     manifest = json.loads(MANIFEST.read_text())
     groups = manifest["groups"]
 
-    real: dict[str, set[str]] = {lang: EXTRACTORS[lang]() for lang in LANGUAGES}
+    real: dict[str, set[str]] = {lang: EXTRACTORS[lang]() for lang in EXTRACTORS}
+    gated: dict[str, set[str]] = {lang: set() for lang in LANGUAGES}
+    real["rust"], gated["rust"] = extract_rust()
     declared: dict[str, set[str]] = {lang: set() for lang in LANGUAGES}
 
     failures: list[str] = []
@@ -128,7 +154,7 @@ def main() -> int:
             if name is None:
                 continue
             declared[lang].add(name)
-            if name not in real[lang]:
+            if name not in real[lang] and name not in gated[lang]:
                 failures.append(
                     f"{lang}: manifest entry '{gid}' names '{name}', which is not "
                     f"in the SDK's actual exports (renamed, deleted, or manifest is stale)"

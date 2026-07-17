@@ -107,6 +107,15 @@
       "go": "ValidateProtocolStream"
     },
     {
+      "id": "protocol_violation",
+      "kind": "type",
+      "rust": "ProtocolViolation",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only typed protocol-validation error (stable rule slug + JSON pointer + message) returned by validate_protocol_event/validate_protocol_stream. Python/TS/Go SDKs still surface validation failures as a plain message (ValueError / Error / error), not yet upgraded to the typed violation — a tracked cross-SDK gap."
+    },
+    {
       "id": "build_cli_error",
       "kind": "fn",
       "rust": "build_cli_error",
@@ -120,8 +129,7 @@
       "rust": "decode_protocol_event",
       "python": "decode_protocol_event",
       "typescript": "decodeProtocolEvent",
-      "go": null,
-      "note": "Go SDK has no protocol-reader API yet (no decode_protocol_event equivalent, no DecodedResult/DecodedError/DecodedProgress/DecodedLog/EventDecodeError types) — a real cross-SDK gap, not an intentional design choice. Tracked here so it stays visible instead of silently drifting further; not fixed in this pass."
+      "go": "DecodeProtocolEvent"
     },
     {
       "id": "event_decode_error",
@@ -129,7 +137,7 @@
       "rust": "EventDecodeError",
       "python": "EventDecodeError",
       "typescript": "EventDecodeError",
-      "go": null
+      "go": "EventDecodeError"
     },
     {
       "id": "decoded_event",
@@ -137,8 +145,8 @@
       "rust": "DecodedEvent",
       "python": null,
       "typescript": "DecodedEvent",
-      "go": null,
-      "note": "Rust and TS use a decoded-event enum/union; Python returns one of DecodedResult/DecodedError/DecodedProgress/DecodedLog directly without a wrapping union type."
+      "go": "DecodedEvent",
+      "note": "Rust/TS/Go use a decoded-event enum/union/interface; Python returns one of DecodedResult/DecodedError/DecodedProgress/DecodedLog directly without a wrapping union type."
     },
     {
       "id": "decoded_result",
@@ -146,7 +154,7 @@
       "rust": "DecodedResult",
       "python": "DecodedResult",
       "typescript": "DecodedResult",
-      "go": null
+      "go": "DecodedResult"
     },
     {
       "id": "decoded_error",
@@ -154,7 +162,7 @@
       "rust": "DecodedError",
       "python": "DecodedError",
       "typescript": "DecodedError",
-      "go": null
+      "go": "DecodedError"
     },
     {
       "id": "decoded_progress",
@@ -162,7 +170,7 @@
       "rust": "DecodedProgress",
       "python": "DecodedProgress",
       "typescript": "DecodedProgress",
-      "go": null
+      "go": "DecodedProgress"
     },
     {
       "id": "decoded_log",
@@ -170,56 +178,16 @@
       "rust": "DecodedLog",
       "python": "DecodedLog",
       "typescript": "DecodedLog",
-      "go": null
+      "go": "DecodedLog"
     },
     {
-      "id": "output_json",
+      "id": "render",
       "kind": "fn",
-      "rust": "output_json",
-      "python": "output_json",
-      "typescript": "outputJson",
-      "go": "OutputJson"
-    },
-    {
-      "id": "output_yaml",
-      "kind": "fn",
-      "rust": "output_yaml",
-      "python": "output_yaml",
-      "typescript": "outputYaml",
-      "go": "OutputYaml"
-    },
-    {
-      "id": "output_plain",
-      "kind": "fn",
-      "rust": "output_plain",
-      "python": "output_plain",
-      "typescript": "outputPlain",
-      "go": "OutputPlain"
-    },
-    {
-      "id": "output_json_with_options",
-      "kind": "fn",
-      "rust": "output_json_with_options",
-      "python": null,
-      "typescript": null,
-      "go": "OutputJsonWithOptions",
-      "note": "Python/TS pass options as an optional keyword/parameter on the base function instead of a separate _with_options entry point."
-    },
-    {
-      "id": "output_yaml_with_options",
-      "kind": "fn",
-      "rust": "output_yaml_with_options",
-      "python": null,
-      "typescript": null,
-      "go": "OutputYamlWithOptions"
-    },
-    {
-      "id": "output_plain_with_options",
-      "kind": "fn",
-      "rust": "output_plain_with_options",
-      "python": null,
-      "typescript": null,
-      "go": "OutputPlainWithOptions"
+      "rust": "render",
+      "python": "render",
+      "typescript": "render",
+      "go": "Render",
+      "note": "The single value × format × options → String entry point. Replaces the former output_json/output_yaml/output_plain (+ _with_options) and cli_output/cli_output_with_options families. Rust/Go take an explicit OutputOptions argument (OutputOptions: Default); Python/TS keep it an optional keyword/parameter."
     },
     {
       "id": "redacted_value",
@@ -255,12 +223,12 @@
       "go": "RedactionPolicy"
     },
     {
-      "id": "output_style",
+      "id": "plain_style",
       "kind": "type",
-      "rust": "OutputStyle",
-      "python": "OutputStyle",
-      "typescript": "OutputStyle",
-      "go": "OutputStyle"
+      "rust": "PlainStyle",
+      "python": "PlainStyle",
+      "typescript": "PlainStyle",
+      "go": "PlainStyle"
     },
     {
       "id": "output_options",
@@ -343,22 +311,6 @@
       "go": "CliParseLogFilters"
     },
     {
-      "id": "cli_output",
-      "kind": "fn",
-      "rust": "cli_output",
-      "python": "cli_output",
-      "typescript": "cliOutput",
-      "go": "CliOutput"
-    },
-    {
-      "id": "cli_output_with_options",
-      "kind": "fn",
-      "rust": "cli_output_with_options",
-      "python": null,
-      "typescript": null,
-      "go": "CliOutputWithOptions"
-    },
-    {
       "id": "cli_emitter",
       "kind": "type",
       "rust": "CliEmitter",
@@ -381,7 +333,8 @@
       "rust": null,
       "python": null,
       "typescript": null,
-      "go": "NewCliEmitterWithOptions"
+      "go": "NewCliEmitterWithOptions",
+      "note": "Go-only free constructor (Go has no constructor methods); Rust/Python/TS use CliEmitter::with_options / CliEmitter(..., options=...) / new CliEmitter(..., options) instead."
     },
     {
       "id": "output_options_for_policy",
@@ -420,15 +373,6 @@
       "note": "Rust-only: a typed write-failure error for CliEmitter. Python/TS/Go raise/return the host language's native I/O error instead."
     },
     {
-      "id": "cli_protocol_mode",
-      "kind": "type",
-      "rust": "CliProtocolMode",
-      "python": null,
-      "typescript": null,
-      "go": null,
-      "note": "Rust-only CliEmitter configuration enum; other languages don't expose this knob yet."
-    },
-    {
       "id": "build_cli_version",
       "kind": "fn",
       "rust": "build_cli_version",
@@ -451,15 +395,6 @@
       "python": "cli_handle_version_or_continue",
       "typescript": "cliHandleVersionOrContinue",
       "go": "CliHandleVersionOrContinue"
-    },
-    {
-      "id": "version_config",
-      "kind": "type",
-      "rust": "VersionConfig",
-      "python": null,
-      "typescript": null,
-      "go": null,
-      "note": "Rust-only: a struct grouping name/version for the version helpers. Other languages pass name/version as plain arguments."
     }
   ]
 }

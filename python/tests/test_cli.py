@@ -5,7 +5,7 @@ import pytest
 from io import StringIO
 from agent_first_data import (
     OutputFormat,
-    OutputStyle,
+    PlainStyle,
     OutputOptions,
     LogLevel,
     CliEmitter,
@@ -14,12 +14,11 @@ from agent_first_data import (
     json_result,
     cli_parse_output,
     cli_parse_log_filters,
-    cli_output,
+    render,
     build_cli_error,
     build_cli_version,
     cli_render_version,
     cli_handle_version_or_continue,
-    output_json,
 )
 
 
@@ -85,7 +84,7 @@ def test_build_cli_error_required_fields():
 def test_build_cli_error_is_valid_json():
     import json
     v = build_cli_error("oops")
-    s = output_json(v)
+    s = render(v, OutputFormat.JSON)
     parsed = json.loads(s)
     assert parsed["kind"] == "error"
     assert parsed["error"]["code"] == "cli_error"
@@ -101,38 +100,57 @@ def test_build_cli_error_without_hint_has_no_hint_key():
     assert "hint" not in v["error"]
 
 
-# ── cli_output ────────────────────────────────────────────────────────────────
+def test_build_cli_error_never_raises_on_empty_message():
+    # L1: build_cli_error must never raise. An empty message is substituted
+    # with a placeholder so the internal json_error(...).build() cannot fail.
+    v = build_cli_error("")
+    assert v["kind"] == "error"
+    assert v["error"]["code"] == "cli_error"
+    assert v["error"]["message"] == "unspecified error"
 
-def test_cli_output_dispatches_json():
+
+# ── render ────────────────────────────────────────────────────────────────────
+
+def test_render_dispatches_json():
     v = json_result({"size_bytes": 1024}).build().to_dict()
-    out = cli_output(v, OutputFormat.JSON)
+    out = render(v, OutputFormat.JSON)
     assert "size_bytes" in out   # json: raw keys, no suffix processing
     assert "\n" not in out
 
 
-def test_cli_output_dispatches_yaml():
+def test_render_dispatches_yaml():
     v = json_result({"size_bytes": 1024}).build().to_dict()
-    out = cli_output(v, OutputFormat.YAML)
+    out = render(v, OutputFormat.YAML)
     assert out.startswith("---")
-    assert "size:" in out        # yaml: suffix stripped
+    assert "size_bytes: 1024" in out   # yaml: structure-preserving, raw keys/values
+    assert "size:" not in out
 
 
-def test_cli_output_dispatches_plain():
+def test_render_dispatches_plain():
     v = json_result({"ok": True}).build().to_dict()
-    out = cli_output(v, OutputFormat.PLAIN)
+    out = render(v, OutputFormat.PLAIN)
     assert "\n" not in out
     assert "kind=result" in out
 
 
-def test_cli_output_dispatches_raw_yaml_with_options():
+def test_render_dispatches_raw_yaml_with_options():
     v = {"size_bytes": 1024}
-    out = cli_output(
+    out = render(
         v,
         OutputFormat.YAML,
-        options=OutputOptions(style=OutputStyle.Raw),
+        options=OutputOptions(style=PlainStyle.Raw),
     )
     assert "size_bytes: 1024" in out
     assert "size:" not in out
+
+
+def test_render_yaml_ignores_style_option():
+    """PlainStyle no longer affects YAML: Readable and Raw dispatch to identical output."""
+    v = {"size_bytes": 1024}
+    readable = render(v, OutputFormat.YAML, options=OutputOptions(style=PlainStyle.Readable))
+    raw = render(v, OutputFormat.YAML, options=OutputOptions(style=PlainStyle.Raw))
+    assert readable == raw
+    assert "size_bytes: 1024" in readable
 
 
 # ── CliEmitter ────────────────────────────────────────────────────────────────
@@ -170,6 +188,11 @@ def test_cli_emitter_framing_all_formats():
             assert lines[1].startswith("kind=result")
         else:
             assert out.count("---") == 2
+            log_idx = out.index('kind: "log"')
+            result_idx = out.index('kind: "result"')
+            assert log_idx < result_idx, "records must stay in emission order"
+            assert 'level: "info"' in out    # yaml: structure-preserving, raw keys
+            assert "rows: 2" in out
 
 
 def test_cli_emitter_rejects_duplicate_terminal():
@@ -259,6 +282,7 @@ def test_cli_emitter_with_log_fields_provider():
 def test_build_cli_version_standard_shape():
     v = build_cli_version("1.2.3")
     assert v["kind"] == "result"
+    assert v["result"]["code"] == "version"
     assert v["result"]["version"] == "1.2.3"
     # 0.16 spec: all events have trace by default
     assert v["trace"] == {}
@@ -272,6 +296,7 @@ def test_cli_render_version_can_render_json():
     out = cli_render_version("agent-cli", "1.2.3", OutputFormat.JSON)
     assert out.endswith("\n")
     assert '"kind":"result"' in out
+    assert '"code":"version"' in out
     assert '"version":"1.2.3"' in out
 
 
@@ -287,6 +312,7 @@ def test_cli_handle_version_honors_output_flag():
     )
     assert out is not None
     assert "kind=result" in out
+    assert "result.code=version" in out
     assert "result.version=1.2.3" in out
 
 
@@ -298,6 +324,7 @@ def test_cli_handle_version_json_alias():
     )
     assert out is not None
     assert '"kind":"result"' in out
+    assert '"code":"version"' in out
     assert '"version":"1.2.3"' in out
 
 
@@ -321,3 +348,36 @@ def test_cli_handle_version_rejects_invalid_output():
             "agent-cli",
             "1.2.3",
         )
+
+
+def test_cli_handle_version_ignores_version_flag_after_subcommand():
+    # A subcommand that takes its own --version <value> must not be hijacked
+    # by the top-level pre-parser.
+    assert (
+        cli_handle_version_or_continue(
+            ["hatch", "--version", "1.3.0"],
+            "agent-cli",
+            "1.2.3",
+        )
+        is None
+    )
+    assert (
+        cli_handle_version_or_continue(
+            ["hatch", "-V", "1.3.0"],
+            "agent-cli",
+            "1.2.3",
+        )
+        is None
+    )
+
+
+def test_cli_handle_version_honors_output_flag_before_top_level_version():
+    # Known output flags consume their value, so a trailing top-level
+    # --version is still recognized.
+    out = cli_handle_version_or_continue(
+        ["--output", "json", "--version"],
+        "agent-cli",
+        "1.2.3",
+    )
+    assert out is not None
+    assert '"version":"1.2.3"' in out

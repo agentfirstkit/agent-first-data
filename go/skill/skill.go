@@ -17,7 +17,7 @@ import (
 // describes itself with a SkillSpec and calls RunSkillAdmin to install, uninstall,
 // or report status of that skill across supported coding agents (Codex, Claude
 // Code, opencode, Hermes). The function performs the filesystem work and returns the
-// protocol map (rendered by the caller with CliOutput) or a *SkillError. It never
+// protocol map (rendered by the caller with Render) or a *SkillError. It never
 // writes to stdout/stderr itself.
 
 const skillFileName = "SKILL.md"
@@ -139,7 +139,7 @@ type SkillUninstallStatus struct {
 
 // SkillReport is the result of a skill action: one of *SkillStatusReport,
 // *SkillInstallReport, or *SkillUninstallReport. Callers can type-switch to read
-// fields, or serialize it with CliOutput; the JSON shape carries a "code"
+// fields, or serialize it with Render; the JSON shape carries a "code"
 // discriminator.
 type SkillReport interface {
 	isSkillReport()
@@ -178,7 +178,7 @@ func (*SkillUninstallReport) isSkillReport() {}
 
 // RunSkillAdmin installs, uninstalls, or reports status of spec's skill across the
 // selected agent target(s). Returns a typed SkillReport (caller reads fields or
-// serializes it with CliOutput) or a *SkillError. Does not touch stdout/stderr.
+// serializes it with Render) or a *SkillError. Does not touch stdout/stderr.
 func RunSkillAdmin(spec SkillSpec, action SkillAction, opts SkillOptions) (SkillReport, *SkillError) {
 	if err := skillValidateSpec(spec); err != nil {
 		return nil, err

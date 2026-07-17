@@ -44,7 +44,7 @@
   {
     "name": "redaction none disables argv redaction",
     "input": ["tool", "--api-key-secret=sk-live", "--api-key", "sk-legacy"],
-    "options": {"policy": "RedactionNone", "secret_names": ["api_key"]},
+    "options": {"policy": "Off", "secret_names": ["api_key"]},
     "expected": ["tool", "--api-key-secret=sk-live", "--api-key", "sk-legacy"]
   }
 ]

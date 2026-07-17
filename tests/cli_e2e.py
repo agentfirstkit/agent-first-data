@@ -328,17 +328,17 @@ def assert_afdata_cli_capabilities() -> None:
     assert "skill" in md.stdout, f"skill command missing from help: {md.stdout[:200]!r}"
 
 
-def assert_afdata_format_redacts() -> None:
-    proc = run_afdata(("format", "--output", "json"), '{"api_key_secret":"sk-live","ok":true}\n')
-    assert proc.returncode == 0, f"afdata format failed: stderr={proc.stderr!r}, stdout={proc.stdout!r}"
+def assert_afdata_render_redacts() -> None:
+    proc = run_afdata(("render", "--output", "json"), '{"api_key_secret":"sk-live","ok":true}\n')
+    assert proc.returncode == 0, f"afdata render failed: stderr={proc.stderr!r}, stdout={proc.stdout!r}"
     value = json.loads(proc.stdout)
-    assert value["api_key_secret"] == "***", f"afdata format did not redact: {value!r}"
-    assert value["ok"] is True, f"afdata format changed non-secret value: {value!r}"
+    assert value["api_key_secret"] == "***", f"afdata render did not redact: {value!r}"
+    assert value["ok"] is True, f"afdata render changed non-secret value: {value!r}"
 
 
 def assert_afdata_parse_error() -> None:
-    proc = run_afdata(("format",), '{"ok":true}\nnot-json\n')
-    assert proc.returncode != 0, "afdata format accepted invalid JSONL"
+    proc = run_afdata(("render",), '{"ok":true}\nnot-json\n')
+    assert proc.returncode != 0, "afdata render accepted invalid JSONL"
     events = parse_events(proc.stdout)
     assert events[0]["kind"] == "error", f"afdata parse error missing: {events!r}"
     assert events[0]["error"]["code"] == "jsonl_parse_failed", f"wrong parse code: {events[0]!r}"
@@ -411,7 +411,7 @@ def main() -> None:
         assert_afdata_lint_strict_strings,
         assert_afdata_lint_numeric_and_url,
         assert_afdata_cli_capabilities,
-        assert_afdata_format_redacts,
+        assert_afdata_render_redacts,
         assert_afdata_parse_error,
         assert_afdata_skill_status_feature,
         assert_afdata_skill_error_includes_partial_report,

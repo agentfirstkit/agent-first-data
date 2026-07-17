@@ -1,9 +1,10 @@
 //! AFDATA-compliant tracing layer.
 //!
-//! Outputs log events using agent-first-data formatting functions:
-//! - JSON: single-line JSONL via `output_json` (secrets redacted, original keys)
-//! - Plain: single-line logfmt via `output_plain` (keys stripped, values formatted)
-//! - YAML: multi-line via `output_yaml` (keys stripped, values formatted)
+//! Outputs log events using agent-first-data's `render` function:
+//! - JSON: single-line JSONL (secrets redacted, original keys)
+//! - Plain: single-line logfmt (keys stripped, values formatted)
+//! - YAML: multi-line, structure-preserving
+//!   (original keys and values kept, secrets redacted)
 //!
 //! Span fields are flattened into every event line (e.g. `request_id`).
 //! All other tracing features (macros, spans, EnvFilter) work unchanged.
@@ -31,6 +32,7 @@ use tracing_subscriber::util::TryInitError;
 pub enum LogFormat {
     Json,
     Plain,
+    /// Structure-preserving YAML.
     Yaml,
 }
 
@@ -68,16 +70,16 @@ impl AfdataLayer {
     fn output_options(&self) -> crate::OutputOptions {
         crate::OutputOptions {
             redaction: self.redactor.clone(),
-            style: crate::OutputStyle::Readable,
+            style: crate::PlainStyle::Readable,
         }
     }
 
     fn format_value(&self, value: &serde_json::Value) -> String {
         let options = self.output_options();
         match self.format {
-            LogFormat::Json => crate::output_json_with_options(value, &options),
-            LogFormat::Plain => crate::output_plain_with_options(value, &options),
-            LogFormat::Yaml => crate::output_yaml_with_options(value, &options),
+            LogFormat::Json => crate::render(value, crate::OutputFormat::Json, &options),
+            LogFormat::Plain => crate::render(value, crate::OutputFormat::Plain, &options),
+            LogFormat::Yaml => crate::render(value, crate::OutputFormat::Yaml, &options),
         }
     }
 }
@@ -185,11 +187,10 @@ where
         );
         map.insert("message".to_string(), serde_json::Value::String(message));
         let builder = crate::json_log(serde_json::Value::Object(map));
-        #[allow(clippy::expect_used)]
-        let value = builder.build().expect("log event builder failed");
+        let value = builder.build();
 
         // Format using the library's own output functions.
-        let line = self.format_value(&value);
+        let line = self.format_value(value.as_value());
 
         let mut out = io::stdout().lock();
         let _ = out.write_all(line.as_bytes());
@@ -219,8 +220,8 @@ impl Visit for JsonVisitor {
             self.message = Some(val);
         } else {
             // Push the raw value under its field name. Redaction happens at emit
-            // time in `on_event` via `output_json`/`output_plain`/`output_yaml`,
-            // which redact by field name (`_secret` suffix, `_url` scrubbing) —
+            // time in `on_event` via `render`, which redacts by field name
+            // (`_secret` suffix, `_url` scrubbing) —
             // exactly like every other AFDATA surface. The visitor never scans
             // rendered values for secret markers.
             self.fields
@@ -283,24 +284,20 @@ mod tests {
 
     #[test]
     fn code_field_is_accepted_by_log_builder() {
-        let result = crate::json_log(json!({"code": "cache_miss"})).build();
-        assert!(
-            result.is_ok(),
-            "builder should accept a tool-defined log code"
-        );
-        let Ok(value) = result else {
-            return;
-        };
-
-        assert_eq!(value["log"]["code"], "cache_miss");
+        let value = crate::json_log(json!({"code": "cache_miss"})).build();
+        assert_eq!(value.as_value()["log"]["code"], "cache_miss");
     }
 
     #[test]
     fn secret_named_field_is_redacted_at_emit() {
-        let line = crate::output_json(&json!({
-            "code": "info",
-            "api_key_secret": "sk-live-123",
-        }));
+        let line = crate::render(
+            &json!({
+                "code": "info",
+                "api_key_secret": "sk-live-123",
+            }),
+            crate::OutputFormat::Json,
+            &crate::OutputOptions::default(),
+        );
         assert!(line.contains("\"api_key_secret\":\"***\""), "{line}");
         assert!(!line.contains("sk-live-123"), "{line}");
     }
@@ -309,10 +306,14 @@ mod tests {
     fn non_secret_field_whose_value_mentions_secret_is_not_redacted() {
         // A real secret value never contains the literal "_secret"; the old
         // substring scan only ever produced false positives like this one.
-        let line = crate::output_json(&json!({
-            "code": "info",
-            "note": "see the api_key_secret field in docs",
-        }));
+        let line = crate::render(
+            &json!({
+                "code": "info",
+                "note": "see the api_key_secret field in docs",
+            }),
+            crate::OutputFormat::Json,
+            &crate::OutputOptions::default(),
+        );
         assert!(
             line.contains("see the api_key_secret field in docs"),
             "{line}"
@@ -323,16 +324,19 @@ mod tests {
     fn secret_typed_field_is_redacted_regardless_of_record_path() {
         // record_str / record_i64 etc. push raw values too; emit-time redaction
         // covers every record_* path, not just record_debug.
-        let line = crate::output_json(&json!({
-            "code": "warn",
-            "db_password_secret": 1234,
-        }));
+        let line = crate::render(
+            &json!({
+                "code": "warn",
+                "db_password_secret": 1234,
+            }),
+            crate::OutputFormat::Json,
+            &crate::OutputOptions::default(),
+        );
         assert!(line.contains("\"db_password_secret\":\"***\""), "{line}");
     }
 
     #[test]
     fn legacy_secret_names_are_redacted_when_layer_has_options() {
-        #[allow(clippy::expect_used)]
         let value = crate::json_log(json!({
             "level": "info",
             "message": "authorization appears in message but is not name-redacted",
@@ -340,16 +344,17 @@ mod tests {
             "authorization": "Bearer legacy",
             "request_url": "https://example.test/path?authorization=legacy&ok=1",
         }))
-        .build()
-        .expect("builder failed");
+        .build();
         let redactor = crate::Redactor::new().secret_names(vec!["authorization".to_string()]);
 
-        for format in [LogFormat::Json, LogFormat::Plain, LogFormat::Yaml] {
+        let formats = [LogFormat::Json, LogFormat::Plain, LogFormat::Yaml];
+
+        for format in formats {
             let layer = AfdataLayer {
                 format,
                 redactor: redactor.clone(),
             };
-            let line = layer.format_value(&value);
+            let line = layer.format_value(value.as_value());
             assert!(line.contains("***"), "{line}");
             assert!(
                 !line.contains("Bearer legacy"),
@@ -368,21 +373,19 @@ mod tests {
 
     #[test]
     fn legacy_secret_names_are_visible_without_layer_options() {
-        #[allow(clippy::expect_used)]
         let value = crate::json_log(json!({
             "level": "info",
             "message": "ready",
             "timestamp_epoch_ms": 1,
             "authorization": "Bearer visible",
         }))
-        .build()
-        .expect("builder failed");
+        .build();
         let layer = AfdataLayer {
             format: LogFormat::Json,
             redactor: crate::Redactor::new(),
         };
 
-        let line = layer.format_value(&value);
+        let line = layer.format_value(value.as_value());
         assert!(
             line.contains("\"authorization\":\"Bearer visible\""),
             "{line}"

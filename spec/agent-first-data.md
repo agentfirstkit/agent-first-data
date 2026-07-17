@@ -20,8 +20,8 @@ Agent-First Data has three parts:
 
 ## Quick Reference: All Suffixes
 
-| Category | Suffixes | YAML/Plain example |
-|:---------|:---------|:-------------------|
+| Category | Suffixes | Plain example |
+|:---------|:---------|:--------------|
 | **Duration** | `_ns`, `_us`, `_ms`, `_s`, `_minutes`, `_hours`, `_days` | `latency_ms: 1280` → `latency: 1.28s` |
 | **Timestamps** | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` | `created_at_epoch_ms: 1707868800000` → `created_at: 2024-02-14T...` |
 | **Size** | `_bytes` | `file_size_bytes: 5242880` → `file_size: 5.0MiB` |
@@ -29,7 +29,7 @@ Agent-First Data has three parts:
 | **String formats** | `_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time` | `language_bcp47: "zh-CN"`, `invoice_due_rfc3339_date: "2026-06-13"` |
 | **Other** | `_percent`, `_secret`, `_url` | `cpu_percent: 85` → `cpu: 85%` |
 
-**In default YAML and Plain:** formatting suffixes are stripped from keys (value already encodes the unit) and values are formatted for readability. JSON preserves original keys and raw values. (`_url`, `_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are not stripped.)
+**JSON and YAML are structure-preserving:** both keep original keys, scalar types, and numeric semantics after redaction — YAML is just JSON's data rendered as a multi-line document. **In default Plain only:** formatting suffixes are stripped from keys (value already encodes the unit) and values are formatted for readability. (`_url`, `_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are never stripped, even in Plain.)
 
 **Secret protection:** All three formats automatically redact `_secret` fields and scrub secret components (userinfo password, secret-named query params) inside `_url` field values.
 
@@ -78,7 +78,7 @@ Applies to all structured data: JSON, YAML, TOML, CLI arguments, environment var
 
 ### Strict string formats
 
-These suffixes identify strings with a strict external format. They are semantic field-name conventions, not YAML/Plain formatting suffixes: readable output keeps the full key and raw string value.
+These suffixes identify strings with a strict external format. They are semantic field-name conventions, not Plain formatting suffixes: Plain's default readable output keeps the full key and raw string value for these (YAML always keeps every key and value as-is, for every suffix).
 
 | Suffix | Format | Example |
 |:-------|:-------|:--------|
@@ -107,7 +107,7 @@ Tools should avoid magic string sentinels such as `"auto"` inside strict-format 
 
 Byte sizes are always integer `_bytes`, in inputs and outputs alike. AFDATA has no unit-in-value size string: a field like `buffer_size: "10MiB"` would force every reader to parse units before comparing or summing, and the `_size` name collides with count-style fields (`page_size`, `batch_size`, `pool_size`) that are quantities, not byte sizes. Pick the unit once at schema-design time and encode it in the key, exactly as durations do (`timeout_s`, not `timeout: "30 minutes"`).
 
-In YAML and Plain output, `_bytes` values auto-scale to human-readable format (5.0MiB, 2.0GiB).
+In Plain output, `_bytes` values auto-scale to human-readable format (5.0MiB, 2.0GiB). JSON and YAML keep the raw integer.
 
 ### Percentage
 
@@ -154,7 +154,7 @@ Sub-cent precision — `_{code}_micro` for integer micro-units, one millionth (1
 | `_secret` | redact the entire value/subtree to `***` | `api_key_secret: "sk-or-v1-abc..."` |
 | `_url` | redact secret components **inside** the URL value (userinfo password, secret-named query params); the rest of the URL is preserved | `callback_url: "https://h/cb?code_secret=..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Any `_secret` value — scalar, object, or array — becomes the scalar string `***`, so a secret-marked container never leaks through JSON, YAML, Plain, or collision fallback. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `OutputOptions.redaction.secret_names` (a configured `Redactor` in Rust/Go, keyword arguments in Python/TS) at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction; formatting suffix stripping is still controlled by AFDATA suffixes in the default readable style. AFDATA does not define named redaction profiles; use the default, `secret_names`, `RedactionTraceOnly`, or `RedactionNone` deliberately at the serialization boundary. Callers that need schema-preserving YAML/plain rendering can use `OutputOptions` with the `Raw` output style.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Any `_secret` value — scalar, object, or array — becomes the scalar string `***`, so a secret-marked container never leaks through JSON, YAML, Plain, or collision fallback. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `OutputOptions.redaction.secret_names` (a configured `Redactor` in Rust/Go, keyword arguments in Python/TS) at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction; formatting suffix stripping is a Plain-only concern, controlled by AFDATA suffixes in Plain's default readable style. AFDATA does not define named redaction profiles; use the default, `secret_names`, `RedactionTraceOnly`, or `RedactionNone` deliberately at the serialization boundary. YAML is always schema-preserving, regardless of style. Callers that need schema-preserving Plain rendering can use `OutputOptions` with the `Raw` output style.
 
 The marker `***` has exactly one meaning in AFDATA output: a value was redacted because its field name, URL query parameter name, or explicit `secret_names` entry made it sensitive. It is not used for serialization failures, truncation, unsupported types, or arbitrary “maybe secret” guesses.
 
@@ -219,17 +219,16 @@ myapp --cache-ttl-s 3600 --api-key-secret sk-xxx --max-size-bytes 1048576
 kind: "log"
 log:
   args:
-    api_key: "***"
-    cache_ttl: "3600s"
-    max_size: "1.0MiB"
+    api_key_secret: "***"
+    cache_ttl_s: 3600
+    max_size_bytes: 1048576
   event: "startup"
   level: "info"
   message: "startup"
-  timestamp: "2024-03-09T16:00:00.000Z"
 trace: {}
 ```
 
-The flag name, the JSON field name, and the formatted output all tell the same story. No mapping table, no `--help` prose explaining "timeout is in milliseconds" — the suffix is the documentation.
+The flag name and the JSON/YAML field name tell the same story — the suffix carries the unit even in structure-preserving output, with no separate mapping table or `--help` prose explaining "timeout is in milliseconds" needed.
 
 **Secret flags** (`--api-key-secret`, `--database-url-secret`) are automatically redacted in startup messages, logs, and YAML/Plain output. Tools should also consider redacting them from `/proc` process listings where possible.
 
@@ -355,7 +354,7 @@ Return JSON values directly (for example via framework serializer or `serde_json
 
 Format JSON values for terminal/log display.
 
-**Automatic processing:** Suffix formatting + secret redaction.
+**Automatic processing:** secret redaction always; suffix formatting only for Plain.
 
 **Input:**
 ```json
@@ -367,8 +366,8 @@ Format JSON values for terminal/log display.
 **YAML:**
 ```yaml
 ---
-api_key: "***"
-balance: "50000msats"
+api_key_secret: "***"
+balance_msats: 50000
 user_id: 123
 ```
 
@@ -384,20 +383,20 @@ CLI tools should support multiple output formats:
 --verbose
 ```
 
-Default is tool-defined. Interactive CLIs default to `yaml`, scripting/logging contexts to `json`.
+Default is tool-defined. Human-facing interactive use commonly defaults to `plain` (human-formatted values); scripting/automation contexts use `json` or `yaml` (both structure-preserving).
 
-JSON is the canonical format. YAML and plain are derived from it.
+JSON is the canonical format. YAML mirrors it exactly — same keys, same values, different syntax. Plain derives a lossy, human-formatted view from it.
 
-**All CLI output formats automatically redact `_secret` fields.** Matching recognizes `_secret` and `_SECRET` only. Any `_secret` value — scalar, object, or array — is replaced with `***`. Legacy field names can be protected by passing `OutputOptions.redaction.secret_names` at serialization time; this opt-in list is exact field-name equality. The `Raw` output style disables YAML/plain formatting suffix stripping while keeping the selected redaction policy.
+**All CLI output formats automatically redact `_secret` fields.** Matching recognizes `_secret` and `_SECRET` only. Any `_secret` value — scalar, object, or array — is replaced with `***`. Legacy field names can be protected by passing `OutputOptions.redaction.secret_names` at serialization time; this opt-in list is exact field-name equality. The `Raw` output style disables Plain's formatting suffix stripping while keeping the selected redaction policy; YAML is always structure-preserving regardless of `OutputStyle`.
 
 **Format characteristics:**
 - **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
-- **YAML** — multi-line, human-readable, formatting suffixes stripped, values formatted, secrets redacted by default
+- **YAML** — multi-line, original keys, raw values (same semantics as JSON), keys sorted, secrets redacted by default
 - **Plain** — single-line logfmt, human-readable, formatting suffixes stripped, values formatted, secrets redacted by default
 
 ### yaml
 
-Each JSON line becomes a YAML document, separated by `---`. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float). In the default readable style, **formatting suffixes are stripped from keys** (value already encodes the unit). **Secrets automatically redacted.**
+Each JSON line becomes a YAML document, separated by `---`. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float). YAML is **structure-preserving**, like JSON: it keeps every key and value exactly as written — no suffix stripping, no value reformatting — regardless of `OutputStyle`. **Secrets automatically redacted.**
 
 ```yaml
 ---
@@ -406,17 +405,17 @@ log:
   args:
     config_path: "config.yml"
   config:
-    api_key: "***"
-    dns_ttl: "3600s"
+    api_key_secret: "***"
+    dns_ttl_s: 3600
   event: "startup"
 ---
 kind: "result"
 result:
   hash: "abc123"
-  size: "446.1KiB"
+  size_bytes: 456789
 trace:
-  duration: "1.28s"
-  cost: "2056msats"
+  cost_msats: 2056
+  duration_ms: 1280
 ```
 
 ### plain
@@ -433,9 +432,9 @@ kind=log log.args.config_path=config.yml log.config.api_key=*** log.config.dns_t
 kind=result result.hash=abc123 result.size=446.1KiB trace.cost=2056msats trace.duration=1.28s
 ```
 
-### Suffix processing (yaml and plain)
+### Suffix processing (plain only)
 
-YAML and plain apply two transformations:
+YAML never strips or reformats any key or value — see the [yaml](#yaml) section above. Plain applies two transformations:
 
 **1. Key stripping** — remove the recognized formatting suffix from the key name. The formatted value already encodes the unit, so the suffix is redundant for human readers.
 
@@ -451,7 +450,7 @@ Strict string suffixes (`_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time
 
 **Collision:** if two keys in the same object produce the same stripped key (e.g., `response_ms` and `response_bytes` both → `response`), revert both to their original key AND raw value (no formatting). Redaction happens before this step, so collision fallback can never restore a secret value.
 
-| JSON key | YAML/Plain key | Why |
+| JSON key | Plain key | Why |
 |:---------|:---------------|:----|
 | `duration_ms` | `duration` | value shows `1.28s` |
 | `size_bytes` | `size` | value shows `446.1KiB` |
@@ -490,7 +489,7 @@ Strict string suffixes (`_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time
 
 Strict string fields such as `_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are not value-formatting suffixes; their string values pass through unchanged.
 
-A `_url` field value is preserved byte-for-byte in YAML and plain except for the redacted secret spans (userinfo password, `_secret`-suffixed/`secret_names` query parameters): the `_url` key is not stripped, and formatting suffixes that appear *inside* the URL — `?timeout_ms=5000`, `?size_bytes=1048576` — are **not** reformatted (`5s`, `1.0MiB`) or stripped, because the URL must round-trip to its server exactly. URL key-stripping/value-formatting applies to JSON object keys, never to query parameters inside a string value. This is pinned by the `url_params_redacted_not_reformatted` case in [`spec/fixtures/output_formats.json`](fixtures/output_formats.json).
+A `_url` field value is preserved byte-for-byte in Plain output except for the redacted secret spans (userinfo password, `_secret`-suffixed/`secret_names` query parameters): the `_url` key is not stripped, and formatting suffixes that appear *inside* the URL — `?timeout_ms=5000`, `?size_bytes=1048576` — are **not** reformatted (`5s`, `1.0MiB`) or stripped, because the URL must round-trip to its server exactly. URL key-stripping/value-formatting applies to JSON object keys, never to query parameters inside a string value. YAML never strips or reformats any key/value in the first place, so a `_url` field renders there exactly like any other field. This is pinned by the `url_params_redacted_not_reformatted` case in [`spec/fixtures/output_formats.json`](fixtures/output_formats.json).
 
 **Type constraints**: `_bytes` and `_epoch_*` require integer values. `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents`, and `_{code}_micro` require non-negative integers. Duration, Bitcoin, and `_percent` suffixes accept any number. When the value type doesn't match, formatting falls through to the raw value with the original key preserved. An **integral-valued float** counts as an integer for the integer-required suffixes (`3.0` is treated as `3`): a JSON number's value, not its lexical form, decides, because JavaScript cannot distinguish `3` from `3.0` after parsing.
 
@@ -498,7 +497,7 @@ A `_url` field value is preserved byte-for-byte in YAML and plain except for the
 
 ### Key ordering
 
-YAML and plain output sort keys (after stripping) by UTF-16 code unit order (JCS, [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785) §3.2.3). For ASCII keys — the common case — this equals simple byte-order sorting.
+YAML sorts keys by UTF-16 code unit order (JCS, [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785) §3.2.3) without stripping suffixes. Plain sorts keys the same way, but after stripping. For ASCII keys — the common case — this equals simple byte-order sorting.
 
 In plain logfmt, nested keys are flattened to dot notation before sorting. Sort by the full dot path: `args.input_path` < `code` < `config.api_key` < `trace.duration`.
 
@@ -812,7 +811,7 @@ Field names encode semantics:
 {"kind":"log","log":{"message":"startup","level":"info","event":"startup","config":{"api_key_secret":"***","endpoint":"https://storage.example.com","timeout_s":30,"max_file_size_bytes":10737418240},"args":{"input_path":"/data/backup.tar.gz","compression_level":9}},"trace":{}}
 ```
 
-**YAML** (structured, formatting suffixes stripped, for human inspection):
+**YAML** (structured, original keys/values — same semantics as JSON, machine-readable):
 ```yaml
 ---
 kind: "log"
@@ -821,10 +820,10 @@ log:
     compression_level: 9
     input_path: "/data/backup.tar.gz"
   config:
-    api_key: "***"
+    api_key_secret: "***"
     endpoint: "https://storage.example.com"
-    max_file_size: "10.0GiB"
-    timeout: "30s"
+    max_file_size_bytes: 10737418240
+    timeout_s: 30
   event: "startup"
   level: "info"
   message: "startup"
@@ -837,9 +836,9 @@ kind=log log.args.compression_level=9 log.args.input_path=/data/backup.tar.gz lo
 ```
 
 Note:
-- **Key stripping**: formatting suffixes such as `api_key_secret` → `api_key`, `timeout_s` → `timeout`, `max_file_size_bytes` → `max_file_size`
+- **Key stripping (Plain only)**: formatting suffixes such as `api_key_secret` → `api_key`, `timeout_s` → `timeout`, `max_file_size_bytes` → `max_file_size`
 - **Secret protection**: `api_key_secret` redacted in all three formats
-- **Suffix formatting**: `_bytes` → `10.0GiB`, `_s` → `30s` in YAML and Plain
+- **Suffix formatting (Plain only)**: `_bytes` → `10.0GiB`, `_s` → `30s`; JSON and YAML keep the raw integer
 
 ## Progress Update (Part 3: Protocol Template)
 
@@ -856,8 +855,8 @@ progress:
   message: "uploading chunks"
   total: 10
 trace:
-  duration: "5.42s"
-  uploaded: "3.0GiB"
+  duration_ms: 5420
+  uploaded_bytes: 3221225472
 ```
 
 Plain:
@@ -878,11 +877,11 @@ kind: "result"
 result:
   backup_url: "https://storage.example.com/backup.tar.gz"
   checksum: "sha256:abc123..."
-  size: "10.0MiB"
-  uploaded_at: "2025-02-07T00:00:00.000Z"
+  size_bytes: 10485760
+  uploaded_at_epoch_ms: 1738886400000
 trace:
   chunks: 10
-  duration: "15.3s"
+  duration_ms: 15300
   retries: 2
 ```
 
@@ -897,10 +896,10 @@ kind=result result.backup_url=https://storage.example.com/backup.tar.gz result.c
 
 2. **Part 2 (Output Processing)**: Three formats for different needs
    - JSON: single-line, original keys, raw values, for programs and logs
-   - YAML: multi-line, formatting suffixes stripped, values formatted, for human inspection
+   - YAML: multi-line, original keys, raw values (same semantics as JSON), for machine-readable multi-line output
    - Plain: single-line logfmt, formatting suffixes stripped, values formatted, for compact scanning
    - All formats protect secrets automatically
 
 3. **Part 3 (Protocol)**: Consistent structure across all output — `code` identifies message type, `trace` provides execution context, other fields flexible
 
-**Key insight**: The same naming convention flows from CLI flag (`--timeout-s 30`) to JSON field (`timeout_s: 30`) to formatted output (`timeout: 30s`). An agent reading `--help`, JSON output, or YAML all gets the same self-describing semantics — no documentation needed at any layer.
+**Key insight**: The same naming convention flows from CLI flag (`--timeout-s 30`) to JSON/YAML field (`timeout_s: 30`) to Plain's human-formatted output (`timeout: 30s`). An agent reading `--help`, JSON, or YAML sees the same self-describing field name; Plain trades the field name for a human-formatted value. No documentation needed at any layer.

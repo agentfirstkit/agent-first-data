@@ -6,7 +6,7 @@
  * supported coding agents (Codex, Claude Code, opencode, Hermes).
  *
  * The function performs the filesystem work and returns the protocol value (rendered by
- * the caller with `cliOutput`) or throws a {@link SkillError}. It never writes to
+ * the caller with `render`) or throws a {@link SkillError}. It never writes to
  * stdout/stderr itself.
  */
 
@@ -89,7 +89,7 @@ export interface SkillUninstallStatus {
 
 /**
  * The result of a skill action. Read fields off the discriminated union (narrow on
- * `code`), or pass it to `cliOutput` to serialize — every field is already JSON-shaped.
+ * `code`), or pass it to `render` to serialize — every field is already JSON-shaped.
  */
 export type SkillReport =
   | {
@@ -124,7 +124,7 @@ interface SkillTarget {
 
 /**
  * Install, uninstall, or report status of `spec`'s skill across the selected agent
- * target(s). Returns the protocol value (caller renders with `cliOutput`) or throws a
+ * target(s). Returns the protocol value (caller renders with `render`) or throws a
  * {@link SkillError}. Does not touch stdout/stderr.
  */
 export function runSkillAdmin(spec: SkillSpec, action: SkillAction, options: SkillOptions): SkillReport {

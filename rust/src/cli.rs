@@ -1,9 +1,6 @@
-use crate::formatting::{
-    output_json, output_json_with_options, output_plain, output_plain_with_options, output_yaml,
-    output_yaml_with_options,
-};
 use crate::protocol::{
-    Event, LogLevel, json_error, json_log, json_progress, json_result, validate_protocol_event,
+    BuildError, Event, LogLevel, ProtocolViolation, build_cli_error, json_error, json_log,
+    json_progress, json_result, validate_protocol_event,
 };
 use crate::redaction::OutputOptions;
 use serde_json::Value;
@@ -16,16 +13,22 @@ use serde_json::Value;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputFormat {
     Json,
+    /// Structure-preserving YAML (same semantics as [`OutputFormat::Json`]).
     Yaml,
     Plain,
 }
 
 /// Parsed and normalized log filters (trimmed, lowercased, deduplicated).
 ///
-/// Filters enable selective tracing output via `--log` flags. An empty set means
-/// no filtering (no logs emitted). The set "all" or "*" means all logs emitted.
-/// Otherwise, a log message is emitted iff its event name (lowercased) starts
-/// with any filter string.
+/// Semantics (a stable contract):
+/// - An **empty** set emits no logs (filtering is opt-in, not opt-out).
+/// - The single wildcard word `"all"` emits every log. (`"*"` is not special —
+///   there is one wildcard spelling, not two.)
+/// - Otherwise a log is emitted iff its lowercased event name **starts with**
+///   any filter string (prefix match).
+///
+/// Consequence to know: a mistyped filter simply matches nothing, so it
+/// silently emits no output — that is the documented behavior, not a bug.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LogFilters(Vec<String>);
 
@@ -49,14 +52,15 @@ impl LogFilters {
 
     /// Check if an event should be logged based on these filters.
     ///
-    /// Returns `false` if empty (no logs). Returns `true` if contains "all" or "*".
-    /// Otherwise returns `true` iff the lowercased event name starts with any filter.
+    /// Returns `false` if empty (no logs). Returns `true` if the set contains
+    /// the wildcard word `"all"`. Otherwise returns `true` iff the lowercased
+    /// event name starts with any filter (prefix match).
     pub fn enabled(&self, event: &str) -> bool {
         if self.0.is_empty() {
             return false;
         }
         let event_lower = event.to_ascii_lowercase();
-        if self.0.contains(&"all".to_string()) || self.0.contains(&"*".to_string()) {
+        if self.0.contains(&"all".to_string()) {
             return true;
         }
         self.0.iter().any(|filter| event_lower.starts_with(filter))
@@ -70,107 +74,6 @@ impl LogFilters {
     /// Access the underlying filter strings as a slice.
     pub fn as_slice(&self) -> &[String] {
         &self.0
-    }
-}
-
-/// Protocol envelope behavior for early CLI exits such as `--version`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CliProtocolMode {
-    /// Preserve the historical structured payload shape.
-    Legacy,
-    /// Emit a strict AFDATA protocol-v1 event with an empty trace object.
-    ProtocolV1,
-}
-
-/// Configuration for pre-parser `--version` handling.
-///
-/// This helper scans raw argv before the application's argument parser so
-/// `--version --output json` can return an AFDATA event instead of letting
-/// clap or another parser print conventional plain text and exit.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VersionConfig {
-    /// Format used for `--version` when no explicit output flag is present.
-    ///
-    /// `Some(format)` renders an AFDATA `kind:"result"` version event in that
-    /// format. `None` preserves conventional CLI output: `<name> <version>`.
-    pub default_output: Option<OutputFormat>,
-    /// Optional long output flag to read, for example `--output`.
-    pub output_flag: Option<&'static str>,
-    /// Optional short output flag to read, for example `-o`.
-    pub output_short: Option<char>,
-    /// Whether an explicit output flag can override `default_output`.
-    pub allow_output_format: bool,
-    /// Envelope mode for structured version output and early errors.
-    pub protocol_mode: CliProtocolMode,
-}
-
-impl VersionConfig {
-    /// Construct a custom version handler configuration.
-    pub const fn new(default_output: Option<OutputFormat>) -> Self {
-        Self {
-            default_output,
-            output_flag: None,
-            output_short: None,
-            allow_output_format: false,
-            protocol_mode: CliProtocolMode::Legacy,
-        }
-    }
-
-    /// Structured bare-version preset.
-    ///
-    /// A bare `--version` is a JSON AFDATA event. Most CLIs should prefer
-    /// [`Self::conventional_default`] so human `--version` stays familiar while
-    /// explicit `--output json|yaml|plain` remains structured.
-    pub const fn agent_cli_default() -> Self {
-        Self {
-            default_output: Some(OutputFormat::Json),
-            output_flag: Some("--output"),
-            output_short: None,
-            allow_output_format: true,
-            protocol_mode: CliProtocolMode::Legacy,
-        }
-    }
-
-    /// Recommended preset: keep conventional bare version text while still
-    /// honoring explicit `--output json|yaml|plain`.
-    pub const fn conventional_default() -> Self {
-        Self {
-            default_output: None,
-            output_flag: Some("--output"),
-            output_short: None,
-            allow_output_format: true,
-            protocol_mode: CliProtocolMode::Legacy,
-        }
-    }
-
-    /// Return a copy with a different default output.
-    pub const fn with_default_output(mut self, default_output: Option<OutputFormat>) -> Self {
-        self.default_output = default_output;
-        self
-    }
-
-    /// Return a copy with a different long output flag.
-    pub const fn with_output_flag(mut self, flag: Option<&'static str>) -> Self {
-        self.output_flag = flag;
-        self
-    }
-
-    /// Return a copy with a different short output flag.
-    pub const fn with_output_short(mut self, flag: Option<char>) -> Self {
-        self.output_short = flag;
-        self
-    }
-
-    /// Return a copy that enables or disables explicit output overrides.
-    pub const fn with_output_format_override(mut self, enabled: bool) -> Self {
-        self.allow_output_format = enabled;
-        self
-    }
-
-    /// Return a copy that emits protocol-v1 structured early exits.
-    pub const fn with_protocol_v1(mut self) -> Self {
-        self.protocol_mode = CliProtocolMode::ProtocolV1;
-        self
     }
 }
 
@@ -207,52 +110,25 @@ pub fn cli_parse_log_filters<S: AsRef<str>>(entries: &[S]) -> LogFilters {
     LogFilters::new(entries.iter().map(AsRef::as_ref))
 }
 
-/// Dispatch output formatting by [`OutputFormat`].
-///
-/// Equivalent to calling [`output_json`], [`output_yaml`], or [`output_plain`] directly.
-///
-/// ```
-/// use agent_first_data::{cli_output, json_result, OutputFormat};
-/// let v = json_result(serde_json::json!({"ok": true})).build().expect("valid afdata event");
-/// let s = cli_output(v.as_value(), OutputFormat::Plain);
-/// assert!(s.contains("kind=result"));
-/// ```
-pub fn cli_output(value: &Value, format: OutputFormat) -> String {
-    match format {
-        OutputFormat::Json => output_json(value),
-        OutputFormat::Yaml => output_yaml(value),
-        OutputFormat::Plain => output_plain(value),
-    }
-}
-
-/// Dispatch output formatting by [`OutputFormat`] with configurable output options.
-///
-/// JSON output ignores [`OutputStyle`] and always preserves original keys and values after
-/// redaction. YAML and plain output use the requested style.
-pub fn cli_output_with_options(
-    value: &Value,
-    format: OutputFormat,
-    output_options: &OutputOptions,
-) -> String {
-    match format {
-        OutputFormat::Json => output_json_with_options(value, output_options),
-        OutputFormat::Yaml => output_yaml_with_options(value, output_options),
-        OutputFormat::Plain => output_plain_with_options(value, output_options),
-    }
-}
-
 /// Error returned by [`CliEmitter`].
 #[derive(Debug)]
 pub enum CliEmitterError {
-    Validation(String),
+    /// A protocol-validation failure.
+    Validation(ProtocolViolation),
+    /// An event builder rejected its inputs (empty code/message, reserved field).
+    Build(BuildError),
+    /// An emitter lifecycle rule was violated (terminal ordering).
     Lifecycle(String),
+    /// Writing the event to the underlying writer failed.
     Write(std::io::Error),
 }
 
 impl std::fmt::Display for CliEmitterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Validation(err) | Self::Lifecycle(err) => f.write_str(err),
+            Self::Validation(v) => write!(f, "{v}"),
+            Self::Build(e) => write!(f, "{e}"),
+            Self::Lifecycle(err) => f.write_str(err),
             Self::Write(err) => write!(f, "failed to write CLI event: {err}"),
         }
     }
@@ -263,7 +139,7 @@ impl CliEmitterError {
     pub const fn io_error(&self) -> Option<&std::io::Error> {
         match self {
             Self::Write(err) => Some(err),
-            Self::Validation(_) | Self::Lifecycle(_) => None,
+            Self::Validation(_) | Self::Build(_) | Self::Lifecycle(_) => None,
         }
     }
 
@@ -357,45 +233,31 @@ impl<W: std::io::Write> CliEmitter<W> {
 
     /// Convenience: build and emit a result event.
     pub fn emit_result(&mut self, payload: Value) -> Result<(), CliEmitterError> {
-        #[allow(clippy::expect_used)]
-        self.emit(
-            json_result(payload)
-                .build()
-                .expect("json_result: builder failed unexpectedly"),
-        )
+        self.emit(json_result(payload).build())
     }
 
     /// Convenience: build and emit an error event.
     pub fn emit_error(&mut self, code: &str, message: &str) -> Result<(), CliEmitterError> {
-        #[allow(clippy::expect_used)]
-        self.emit(
-            json_error(code, message)
-                .build()
-                .expect("json_error: builder failed unexpectedly"),
-        )
+        match json_error(code, message).build() {
+            Ok(event) => self.emit(event),
+            Err(err) => Err(CliEmitterError::Build(err)),
+        }
     }
 
     /// Convenience: build and emit a progress event.
     pub fn emit_progress(&mut self, message: &str) -> Result<(), CliEmitterError> {
-        #[allow(clippy::expect_used)]
-        self.emit(
-            json_progress(serde_json::json!({ "message": message }))
-                .build()
-                .expect("json_progress: builder failed unexpectedly"),
-        )
+        self.emit(json_progress(serde_json::json!({ "message": message })).build())
     }
 
     /// Convenience: build and emit a log event with default fields.
     ///
     /// Applies log_fields_provider if configured; explicit fields take precedence.
     pub fn emit_log(&mut self, level: LogLevel, message: &str) -> Result<(), CliEmitterError> {
-        #[allow(clippy::expect_used)]
         let mut event = json_log(serde_json::json!({
             "level": level.as_str(),
             "message": message,
         }))
         .build()
-        .expect("json_log: builder failed unexpectedly")
         .into_value();
         if let Some(provider) = &self.log_fields_provider {
             let provider_fields = provider();
@@ -418,10 +280,13 @@ impl<W: std::io::Write> CliEmitter<W> {
     fn write_event(&mut self, event: Value) -> Result<(), CliEmitterError> {
         validate_protocol_event(&event, self.strict_protocol)
             .map_err(CliEmitterError::Validation)?;
-        let kind = event
-            .get("kind")
-            .and_then(Value::as_str)
-            .ok_or_else(|| CliEmitterError::Validation("event.kind is required".to_string()))?;
+        let kind = event.get("kind").and_then(Value::as_str).ok_or_else(|| {
+            CliEmitterError::Validation(ProtocolViolation {
+                rule: "kind_invalid",
+                pointer: "/kind".to_string(),
+                message: "event.kind is required".to_string(),
+            })
+        })?;
         match kind {
             "log" | "progress" => {
                 if self.terminal_emitted {
@@ -438,12 +303,14 @@ impl<W: std::io::Write> CliEmitter<W> {
                 }
             }
             _ => {
-                return Err(CliEmitterError::Validation(format!(
-                    "unsupported event kind {kind:?}"
-                )));
+                return Err(CliEmitterError::Validation(ProtocolViolation {
+                    rule: "kind_unsupported",
+                    pointer: "/kind".to_string(),
+                    message: format!("unsupported event kind {kind:?}"),
+                }));
             }
         }
-        let rendered = cli_output_with_options(&event, self.format, &self.output_options);
+        let rendered = crate::formatting::render(&event, self.format, &self.output_options);
         self.writer.write_all(rendered.as_bytes())?;
         self.writer.write_all(b"\n")?;
         self.writer.flush()?;
@@ -454,26 +321,10 @@ impl<W: std::io::Write> CliEmitter<W> {
     }
 }
 
-/// Build a standard CLI version event.
-#[allow(clippy::expect_used)]
+/// Build a standard CLI version event: a `kind:"result"` event whose payload
+/// is `{ "code": "version", "version": <version> }`.
 pub fn build_cli_version(version: &str) -> Event {
-    json_result(serde_json::json!({ "version": version }))
-        .build()
-        .expect("build_cli_version: builder failed unexpectedly")
-}
-
-fn build_cli_version_with_mode(version: &str, mode: CliProtocolMode) -> Event {
-    match mode {
-        CliProtocolMode::Legacy => build_cli_version(version),
-        CliProtocolMode::ProtocolV1 => {
-            let payload = serde_json::json!({ "code": "version", "version": version });
-            #[allow(clippy::expect_used)]
-            json_result(payload)
-                .trace(serde_json::json!({}))
-                .build()
-                .expect("build_cli_version_with_mode: builder failed unexpectedly")
-        }
-    }
+    json_result(serde_json::json!({ "code": "version", "version": version })).build()
 }
 
 /// Render a CLI version response.
@@ -482,7 +333,11 @@ fn build_cli_version_with_mode(version: &str, mode: CliProtocolMode) -> Event {
 /// preserve conventional `<name> <version>` output.
 pub fn cli_render_version(name: &str, version: &str, format: Option<OutputFormat>) -> String {
     let mut rendered = match format {
-        Some(format) => cli_output(build_cli_version(version).as_value(), format),
+        Some(format) => crate::formatting::render(
+            build_cli_version(version).as_value(),
+            format,
+            &OutputOptions::default(),
+        ),
         None => format!("{name} {version}"),
     };
     while rendered.ends_with('\n') {
@@ -499,46 +354,37 @@ pub fn cli_render_version(name: &str, version: &str, format: Option<OutputFormat
 /// parser so explicit `--output json|yaml|plain` is honored instead of being
 /// bypassed by built-in version handling.
 ///
-/// Returns a standard [`build_cli_error`] event when the version request is
-/// malformed, for example `--version --output xml`.
+/// Only a *top-level* version request is recognized: scanning stops at the first
+/// positional argument (the subcommand), so `tool sub --version <value>` leaves
+/// `--version` for the subcommand's parser rather than printing the tool version.
+///
+/// The one blessed behavior: a bare `--version` prints conventional
+/// `<name> <version>` text; an explicit `--output json|yaml|plain` (or `--json`)
+/// prints a protocol-v1 `kind:"result"` version event (payload
+/// `{ "code": "version", "version": ... }`). Returns a standard
+/// [`build_cli_error`] event when the request is malformed, for example
+/// `--version --output xml`.
 pub fn cli_handle_version_or_continue(
     raw_args: &[String],
     name: &str,
     version: &str,
-    config: &VersionConfig,
 ) -> Result<Option<String>, Event> {
-    let parsed = parse_version_request(raw_args, config);
+    let parsed = parse_version_request(raw_args);
     if !parsed.version_requested {
         return Ok(None);
     }
     if let Some(error) = parsed.output_error {
-        #[allow(clippy::expect_used)]
-        let event = json_error("cli_error", &error)
-            .hint_if_some(Some("valid version output formats: json, yaml, plain"))
-            .build()
-            .expect("cli_handle_version_or_continue: builder failed");
+        let event = build_cli_error(
+            &error,
+            Some("valid version output formats: json, yaml, plain"),
+        );
         return Err(event);
     }
-    let format = if config.allow_output_format {
-        parsed.output_format.or(config.default_output)
-    } else {
-        config.default_output
-    };
-    if config.protocol_mode == CliProtocolMode::Legacy {
-        return Ok(Some(cli_render_version(name, version, format)));
-    }
-    let Some(format) = format else {
-        return Ok(Some(cli_render_version(name, version, None)));
-    };
-    let mut rendered = cli_output(
-        build_cli_version_with_mode(version, config.protocol_mode).as_value(),
-        format,
-    );
-    while rendered.ends_with('\n') {
-        rendered.pop();
-    }
-    rendered.push('\n');
-    Ok(Some(rendered))
+    Ok(Some(cli_render_version(
+        name,
+        version,
+        parsed.output_format,
+    )))
 }
 
 struct ParsedVersionRequest {
@@ -547,17 +393,22 @@ struct ParsedVersionRequest {
     output_error: Option<String>,
 }
 
-fn parse_version_request(raw_args: &[String], config: &VersionConfig) -> ParsedVersionRequest {
+fn parse_version_request(raw_args: &[String]) -> ParsedVersionRequest {
     let args = raw_args.get(1..).unwrap_or(&[]);
     let mut version_requested = false;
     let mut output_format = None;
     let mut output_error = None;
-    let output_flag = config.output_flag.map(normalize_long_flag);
 
     let mut i = 0usize;
     while i < args.len() {
         let arg = args[i].as_str();
         if arg == "--" {
+            break;
+        }
+        // The first positional argument marks the subcommand boundary. Past it,
+        // `--version` (and `-V`) belong to the subcommand's own parser, matching
+        // git/cargo/clap: the pre-parser only owns a top-level version request.
+        if !arg.starts_with('-') {
             break;
         }
 
@@ -568,7 +419,7 @@ fn parse_version_request(raw_args: &[String], config: &VersionConfig) -> ParsedV
             continue;
         }
 
-        if config.allow_output_format && arg == "--json" {
+        if arg == "--json" {
             set_version_output_format(
                 &mut output_format,
                 OutputFormat::Json,
@@ -579,9 +430,7 @@ fn parse_version_request(raw_args: &[String], config: &VersionConfig) -> ParsedV
             continue;
         }
 
-        if config.allow_output_format
-            && version_output_flag_matches(flag_name, output_flag, config.output_short)
-        {
+        if flag_name == Some("output") {
             let value = inline_value.or_else(|| {
                 args.get(i + 1)
                     .map(String::as_str)
@@ -592,16 +441,14 @@ fn parse_version_request(raw_args: &[String], config: &VersionConfig) -> ParsedV
                     Ok(format) => set_version_output_format(
                         &mut output_format,
                         format,
-                        &format!("--{} {value}", output_flag.unwrap_or("output")),
+                        &format!("--output {value}"),
                         &mut output_error,
                     ),
                     Err(err) => output_error = Some(err),
                 }
             } else {
-                output_error = Some(format!(
-                    "missing value for --{}: expected json, yaml, or plain",
-                    output_flag.unwrap_or("output")
-                ));
+                output_error =
+                    Some("missing value for --output: expected json, yaml, or plain".to_string());
             }
             i += if inline_value.is_some() || value.is_none() {
                 1
@@ -635,25 +482,6 @@ fn set_version_output_format(
         return;
     }
     *current = Some(next);
-}
-
-fn version_output_flag_matches(
-    flag_name: Option<&str>,
-    output_flag: Option<&str>,
-    output_short: Option<char>,
-) -> bool {
-    let Some(seen) = flag_name else {
-        return false;
-    };
-    output_flag.is_some_and(|expected| seen == expected)
-        || output_short.is_some_and(|short| {
-            let mut chars = seen.chars();
-            chars.next().is_some_and(|seen_short| seen_short == short) && chars.next().is_none()
-        })
-}
-
-fn normalize_long_flag(flag: &str) -> &str {
-    flag.strip_prefix("--").unwrap_or(flag)
 }
 
 fn split_flag(arg: &str) -> (Option<&str>, Option<&str>) {

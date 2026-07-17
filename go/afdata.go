@@ -3,9 +3,9 @@
 //
 // Public APIs include protocol v1 builders + 2 value-copy redactors (redact
 // _secret and _url fields) + 2 URL-string redactors (operate on one URL
-// string; the value redactors apply these to _url fields) + 7 output
-// formatters + 4 utilities + CLI helpers + OutputFormat + RedactionPolicy +
-// Redactor + OutputStyle + OutputOptions + LogFilters.
+// string; the value redactors apply these to _url fields) + the Render output
+// entry point + 4 utilities + CLI helpers + OutputFormat + RedactionPolicy +
+// Redactor + PlainStyle + OutputOptions + LogFilters.
 package afdata
 
 import (
@@ -84,7 +84,6 @@ func BuildCLIError(message string, hint string) (Event, error) {
 type JSONResultBuilder struct {
 	result any
 	trace  any
-	errs   []error
 }
 
 // NewJSONResult creates a builder for a result event.
@@ -98,32 +97,36 @@ func (b *JSONResultBuilder) Trace(trace any) *JSONResultBuilder {
 	return b
 }
 
-// Build constructs the Event, performing strict validation.
-func (b *JSONResultBuilder) Build() (Event, error) {
-	if len(b.errs) > 0 {
-		return Event{}, b.errs[0]
-	}
-	traceObj := map[string]any{}
-	if b.trace != nil {
-		if obj, ok := b.trace.(map[string]any); ok {
-			traceObj = obj
-		} else {
-			// Try to marshal and unmarshal to validate it's object-shaped
-			data, err := json.Marshal(b.trace)
-			if err != nil {
-				return Event{}, &BuilderError{msg: "trace must be serializable: " + err.Error()}
-			}
-			if err := json.Unmarshal(data, &traceObj); err != nil {
-				return Event{}, &BuilderError{msg: "trace must be a JSON object"}
-			}
-		}
-	}
+// Build constructs the Event. This builder cannot fail.
+func (b *JSONResultBuilder) Build() Event {
 	envelope := map[string]any{
 		"kind":   "result",
 		"result": b.result,
-		"trace":  traceObj,
+		"trace":  normalizeTrace(b.trace),
 	}
-	return Event{envelope: envelope}, nil
+	return Event{envelope: envelope}
+}
+
+// normalizeTrace coerces a builder trace into an object when it round-trips
+// through JSON as one, and otherwise returns it unchanged. It never fails: an
+// invalid (non-object) trace surfaces later at ValidateProtocolEvent, not at
+// Build time. A nil trace becomes an empty object.
+func normalizeTrace(trace any) any {
+	if trace == nil {
+		return map[string]any{}
+	}
+	if obj, ok := trace.(map[string]any); ok {
+		return obj
+	}
+	data, err := json.Marshal(trace)
+	if err != nil {
+		return trace
+	}
+	var obj map[string]any
+	if json.Unmarshal(data, &obj) == nil {
+		return obj
+	}
+	return trace
 }
 
 // ═════════════════════════════════════════════
@@ -296,29 +299,14 @@ func (b *JSONProgressBuilder) Trace(trace any) *JSONProgressBuilder {
 	return b
 }
 
-// Build constructs the Event, performing strict validation.
-func (b *JSONProgressBuilder) Build() (Event, error) {
-	traceObj := map[string]any{}
-	if b.trace != nil {
-		if obj, ok := b.trace.(map[string]any); ok {
-			traceObj = obj
-		} else {
-			data, err := json.Marshal(b.trace)
-			if err != nil {
-				return Event{}, &BuilderError{msg: "trace must be serializable: " + err.Error()}
-			}
-			if err := json.Unmarshal(data, &traceObj); err != nil {
-				return Event{}, &BuilderError{msg: "trace must be a JSON object"}
-			}
-		}
-	}
-
+// Build constructs the Event. This builder cannot fail.
+func (b *JSONProgressBuilder) Build() Event {
 	envelope := map[string]any{
 		"kind":     "progress",
 		"progress": b.payload,
-		"trace":    traceObj,
+		"trace":    normalizeTrace(b.trace),
 	}
-	return Event{envelope: envelope}, nil
+	return Event{envelope: envelope}
 }
 
 // ═════════════════════════════════════════════
@@ -342,29 +330,14 @@ func (b *JSONLogBuilder) Trace(trace any) *JSONLogBuilder {
 	return b
 }
 
-// Build constructs the Event, performing strict validation.
-func (b *JSONLogBuilder) Build() (Event, error) {
-	traceObj := map[string]any{}
-	if b.trace != nil {
-		if obj, ok := b.trace.(map[string]any); ok {
-			traceObj = obj
-		} else {
-			data, err := json.Marshal(b.trace)
-			if err != nil {
-				return Event{}, &BuilderError{msg: "trace must be serializable: " + err.Error()}
-			}
-			if err := json.Unmarshal(data, &traceObj); err != nil {
-				return Event{}, &BuilderError{msg: "trace must be a JSON object"}
-			}
-		}
-	}
-
+// Build constructs the Event. This builder cannot fail.
+func (b *JSONLogBuilder) Build() Event {
 	envelope := map[string]any{
 		"kind":  "log",
 		"log":   b.payload,
-		"trace": traceObj,
+		"trace": normalizeTrace(b.trace),
 	}
-	return Event{envelope: envelope}, nil
+	return Event{envelope: envelope}
 }
 
 // ValidateProtocolEvent validates one protocol v1 event envelope. When strict
@@ -507,12 +480,17 @@ func isNonNegativeInteger(value any) bool {
 // Public API: Output Formatters
 // ═══════════════════════════════════════════
 
-// RedactionPolicy controls scoped redaction behavior for OutputJsonWithOptions.
+// RedactionPolicy controls scoped redaction behavior for Render.
 type RedactionPolicy string
 
 const (
-	RedactionTraceOnly RedactionPolicy = "RedactionTraceOnly"
-	RedactionNone      RedactionPolicy = "RedactionNone"
+	// RedactionAll redacts every secret field anywhere in the value (the default;
+	// also the zero value "" of RedactionPolicy behaves as All).
+	RedactionAll RedactionPolicy = "All"
+	// RedactionTraceOnly redacts only inside the top-level trace object.
+	RedactionTraceOnly RedactionPolicy = "TraceOnly"
+	// RedactionOff redacts nothing.
+	RedactionOff RedactionPolicy = "Off"
 )
 
 // Redactor configures scoped redaction and extra secret field names.
@@ -549,20 +527,21 @@ func (r Redactor) URL(rawURL string) string {
 	return rawURL
 }
 
-// OutputStyle controls YAML/plain rendering style.
-type OutputStyle string
+// PlainStyle controls plain (logfmt) rendering style. It affects plain output
+// ONLY; JSON and YAML are structure-preserving and ignore it.
+type PlainStyle string
 
 const (
-	// OutputStyleReadable strips AFDATA suffixes and formats values.
-	OutputStyleReadable OutputStyle = "Readable"
-	// OutputStyleRaw preserves keys and values after redaction.
-	OutputStyleRaw OutputStyle = "Raw"
+	// PlainStyleReadable strips AFDATA suffixes and formats values.
+	PlainStyleReadable PlainStyle = "Readable"
+	// PlainStyleRaw preserves keys and values after redaction.
+	PlainStyleRaw PlainStyle = "Raw"
 )
 
 // OutputOptions combines redaction and rendering style.
 type OutputOptions struct {
 	Redaction Redactor
-	Style     OutputStyle
+	Style     PlainStyle
 }
 
 // OutputOptionsForPolicy returns OutputOptions with the given redaction policy
@@ -571,15 +550,10 @@ func OutputOptionsForPolicy(p RedactionPolicy) OutputOptions {
 	return OutputOptions{Redaction: Redactor{Policy: p}}
 }
 
-// OutputJson formats as single-line JSON. Secrets redacted, original keys, raw values.
-func OutputJson(value any) string {
-	return marshalOutputJSON(RedactedValue(value))
-}
-
-// OutputJsonWithOptions formats as single-line JSON with explicit output options.
-// JSON ignores OutputStyle and preserves original keys and values after redaction.
-func OutputJsonWithOptions(value any, outputOptions OutputOptions) string {
-	return marshalOutputJSON(outputOptions.Redaction.Value(value))
+// renderJSON formats value as single-line JSON with the given output options.
+// JSON ignores PlainStyle and preserves original keys and values after redaction.
+func renderJSON(value any, options OutputOptions) string {
+	return marshalOutputJSON(options.Redaction.Value(value))
 }
 
 func marshalOutputJSON(value any) string {
@@ -595,33 +569,24 @@ func marshalOutputJSON(value any) string {
 	return string(out)
 }
 
-// OutputYaml formats as multi-line YAML. Keys stripped, values formatted, secrets redacted.
-func OutputYaml(value any) string {
-	return OutputYamlWithOptions(value, OutputOptions{})
-}
-
-// OutputYamlWithOptions formats as multi-line YAML with explicit output options.
-func OutputYamlWithOptions(value any, outputOptions OutputOptions) string {
+// renderYaml formats value as multi-line YAML with the given output options.
+// Structure-preserving: like JSON, original keys, scalar types, and numeric
+// semantics are kept after redaction; secrets are still redacted. YAML output
+// ignores PlainStyle.
+func renderYaml(value any, options OutputOptions) string {
 	lines := []string{"---"}
-	v := outputOptions.Redaction.Value(value)
-	if outputOptions.Style == OutputStyleRaw {
-		renderYamlRaw(v, 0, &lines)
-	} else {
-		renderYamlProcessed(v, 0, &lines)
-	}
+	v := options.Redaction.Value(value)
+	renderYamlRaw(v, 0, &lines)
 	return strings.Join(lines, "\n")
 }
 
-// OutputPlain formats as single-line logfmt. Keys stripped, values formatted, secrets redacted.
-func OutputPlain(value any) string {
-	return OutputPlainWithOptions(value, OutputOptions{})
-}
-
-// OutputPlainWithOptions formats as single-line logfmt with explicit output options.
-func OutputPlainWithOptions(value any, outputOptions OutputOptions) string {
+// renderPlain formats value as single-line logfmt with the given output
+// options. Keys are stripped and values formatted unless PlainStyleRaw is
+// set; secrets are always redacted.
+func renderPlain(value any, options OutputOptions) string {
 	var pairs [][2]string
-	v := outputOptions.Redaction.Value(value)
-	if outputOptions.Style == OutputStyleRaw {
+	v := options.Redaction.Value(value)
+	if options.Style == PlainStyleRaw {
 		collectPlainPairsRaw(v, "", &pairs)
 	} else {
 		collectPlainPairs(v, "", &pairs)
@@ -988,11 +953,11 @@ func applyRedactionPolicyWithContext(value any, redactionPolicy RedactionPolicy,
 			}
 		}
 		return value
-	case RedactionNone:
+	case RedactionOff:
 		// Explicitly disabled.
 		return value
 	default:
-		// Empty/unknown policy falls back to default full redaction.
+		// Zero value "" or RedactionAll falls back to full redaction.
 		return redactSecretsWithContext(value, context)
 	}
 }
@@ -1539,49 +1504,8 @@ func extractCurrencyCodeFromStem(stem string) string {
 }
 
 // ═══════════════════════════════════════════
-// YAML Rendering
+// YAML Rendering (structure-preserving)
 // ═══════════════════════════════════════════
-
-func renderYamlProcessed(value any, indent int, lines *[]string) {
-	prefix := strings.Repeat("  ", indent)
-	m, ok := value.(map[string]any)
-	if !ok {
-		*lines = append(*lines, fmt.Sprintf("%s%s", prefix, yamlScalar(value)))
-		return
-	}
-
-	for _, pf := range processObjectFields(m) {
-		if pf.isFormatted {
-			*lines = append(*lines, fmt.Sprintf("%s%s: \"%s\"", prefix, yamlKey(pf.key), escapeYamlStr(pf.formatted)))
-		} else {
-			switch v := pf.value.(type) {
-			case map[string]any:
-				if len(v) > 0 {
-					*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, yamlKey(pf.key)))
-					renderYamlProcessed(v, indent+1, lines)
-				} else {
-					*lines = append(*lines, fmt.Sprintf("%s%s: {}", prefix, yamlKey(pf.key)))
-				}
-			case []any:
-				if len(v) == 0 {
-					*lines = append(*lines, fmt.Sprintf("%s%s: []", prefix, yamlKey(pf.key)))
-				} else {
-					*lines = append(*lines, fmt.Sprintf("%s%s:", prefix, yamlKey(pf.key)))
-					for _, item := range v {
-						if _, ok := item.(map[string]any); ok {
-							*lines = append(*lines, fmt.Sprintf("%s  -", prefix))
-							renderYamlProcessed(item, indent+2, lines)
-						} else {
-							*lines = append(*lines, fmt.Sprintf("%s  - %s", prefix, yamlScalar(item)))
-						}
-					}
-				}
-			default:
-				*lines = append(*lines, fmt.Sprintf("%s%s: %s", prefix, yamlKey(pf.key), yamlScalar(pf.value)))
-			}
-		}
-	}
-}
 
 func renderYamlRaw(value any, indent int, lines *[]string) {
 	prefix := strings.Repeat("  ", indent)

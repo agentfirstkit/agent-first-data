@@ -1,11 +1,13 @@
 """AFDATA output formatting and protocol templates.
 
 Protocol builders, value redactors (copy and in-place; cover _secret and
-_url fields), output formatters, URL-string redactors (redact_url_secrets),
+_url fields), URL-string redactors (redact_url_secrets),
 normalize_utc_offset, is_valid_rfc3339_date,
-is_valid_rfc3339_time, RedactionPolicy, OutputStyle, and
-OutputOptions. Each formatter/redactor concept is a single function taking
-a keyword-only ``options`` parameter.
+is_valid_rfc3339_time, RedactionPolicy, PlainStyle, and
+OutputOptions. Each redactor concept is a single function taking a
+keyword-only ``options`` parameter. The single public render entry point
+(``render``) lives in :mod:`agent_first_data.cli`; this module holds the
+private per-format renderers it dispatches to.
 """
 
 from __future__ import annotations
@@ -61,20 +63,14 @@ class ResultBuilder:
     def __init__(self, result: Any) -> None:
         self._result = result
         self._trace: dict = {}
-        self._errors: list[str] = []
 
     def trace(self, obj: Any) -> ResultBuilder:
         """Set trace context (merged at build time)."""
-        if not isinstance(obj, dict):
-            self._errors.append("trace must be a JSON object")
-        else:
-            self._trace = dict(obj)
+        self._trace = dict(obj) if isinstance(obj, dict) else obj
         return self
 
     def build(self) -> Event:
-        """Build and return the Event, raising EventBuildError if there are errors."""
-        if self._errors:
-            raise EventBuildError("; ".join(self._errors))
+        """Build and return the Event. This builder cannot fail."""
         envelope = {
             "kind": "result",
             "result": self._result,
@@ -94,6 +90,10 @@ class ErrorBuilder:
         self._trace: dict = {}
         self._fields: dict[str, Any] = {}
         self._errors: list[str] = []
+        if not code:
+            self._errors.append("error code must not be empty")
+        if not message:
+            self._errors.append("error message must not be empty")
 
     def retryable(self) -> ErrorBuilder:
         """Mark this error as retryable."""
@@ -186,20 +186,14 @@ class ProgressBuilder:
     def __init__(self, payload: Any) -> None:
         self._payload = payload
         self._trace: dict = {}
-        self._errors: list[str] = []
 
     def trace(self, obj: Any) -> ProgressBuilder:
         """Set trace context."""
-        if not isinstance(obj, dict):
-            self._errors.append("trace must be a JSON object")
-        else:
-            self._trace = dict(obj)
+        self._trace = dict(obj) if isinstance(obj, dict) else obj
         return self
 
     def build(self) -> Event:
-        """Build and return the Event, raising EventBuildError if there are errors."""
-        if self._errors:
-            raise EventBuildError("; ".join(self._errors))
+        """Build and return the Event. This builder cannot fail."""
         envelope = {
             "kind": "progress",
             "progress": self._payload,
@@ -214,20 +208,14 @@ class LogBuilder:
     def __init__(self, payload: Any) -> None:
         self._payload = payload
         self._trace: dict = {}
-        self._errors: list[str] = []
 
     def trace(self, obj: Any) -> LogBuilder:
         """Set trace context."""
-        if not isinstance(obj, dict):
-            self._errors.append("trace must be a JSON object")
-        else:
-            self._trace = dict(obj)
+        self._trace = dict(obj) if isinstance(obj, dict) else obj
         return self
 
     def build(self) -> Event:
-        """Build and return the Event, raising EventBuildError if there are errors."""
-        if self._errors:
-            raise EventBuildError("; ".join(self._errors))
+        """Build and return the Event. This builder cannot fail."""
         envelope = {
             "kind": "log",
             "log": self._payload,
@@ -242,7 +230,11 @@ def json_result(result: Any) -> ResultBuilder:
 
 
 def json_error(code: str, message: str) -> ErrorBuilder:
-    """Create a fluent error builder."""
+    """Create a fluent error builder.
+
+    An empty ``code`` or ``message`` does not raise here; it seeds a deferred
+    error that is surfaced when :meth:`ErrorBuilder.build` is called.
+    """
     return ErrorBuilder(code, message)
 
 
@@ -436,16 +428,22 @@ def decode_protocol_event(
 
 
 # ═══════════════════════════════════════════
-# Public API: Output Formatters
+# Public API: Output Option Types
 # ═══════════════════════════════════════════
 
 class RedactionPolicy(str, Enum):
-    RedactionTraceOnly = "RedactionTraceOnly"
-    RedactionNone = "RedactionNone"
+    """Which fields a redaction pass scrubs. Default (absent policy) is All."""
+    All = "All"
+    TraceOnly = "TraceOnly"
+    Off = "Off"
 
 
-class OutputStyle(str, Enum):
-    """Rendering style for YAML and plain output."""
+class PlainStyle(str, Enum):
+    """Rendering style for plain (logfmt) output only.
+
+    JSON and YAML are structure-preserving and ignore this; only the plain
+    renderer varies by style.
+    """
 
     Readable = "Readable"
     Raw = "Raw"
@@ -458,8 +456,9 @@ class OutputOptions:
     # Exact field-name matches at any nesting level. The same list also matches
     # URL query-parameter names inside _url fields (see redact_url_secrets).
     secret_names: Sequence[str] = ()
+    # None or RedactionPolicy.All = full redaction (default).
     policy: RedactionPolicy | None = None
-    style: OutputStyle = OutputStyle.Readable
+    style: PlainStyle = PlainStyle.Readable
 
     @classmethod
     def for_policy(cls, policy: RedactionPolicy) -> OutputOptions:
@@ -467,32 +466,39 @@ class OutputOptions:
         return cls(policy=policy)
 
 
-def output_json(value: Any, *, options: OutputOptions | None = None) -> str:
-    """Format as single-line JSON. Secrets redacted, original keys, raw values."""
+def _format_json(value: Any, *, options: OutputOptions | None = None) -> str:
+    """Internal: JSON rendering used by agent_first_data.cli.render.
+
+    Single-line JSON. Secrets redacted, original keys, raw values.
+    """
     output_options = options or OutputOptions()
     return json.dumps(
         redacted_value(value, secret_names=output_options.secret_names, policy=output_options.policy), ensure_ascii=False, separators=(",", ":")
     )
 
 
-def output_yaml(value: Any, *, options: OutputOptions | None = None) -> str:
-    """Format as multi-line YAML. Keys stripped, values formatted, secrets redacted."""
+def _format_yaml(value: Any, *, options: OutputOptions | None = None) -> str:
+    """Internal: YAML rendering used by agent_first_data.cli.render.
+
+    Multi-line YAML. Structure-preserving like JSON: original keys, raw scalar
+    types, secrets redacted. `PlainStyle` has no effect on YAML.
+    """
     output_options = options or OutputOptions()
     value = redacted_value(value, secret_names=output_options.secret_names, policy=output_options.policy)
     lines = ["---"]
-    if output_options.style is OutputStyle.Raw:
-        _render_yaml_raw(value, 0, lines)
-    else:
-        _render_yaml_processed(value, 0, lines)
+    _render_yaml_raw(value, 0, lines)
     return "\n".join(lines)
 
 
-def output_plain(value: Any, *, options: OutputOptions | None = None) -> str:
-    """Format as single-line logfmt. Keys stripped, values formatted, secrets redacted."""
+def _format_plain(value: Any, *, options: OutputOptions | None = None) -> str:
+    """Internal: plain (logfmt) rendering used by agent_first_data.cli.render.
+
+    Single-line logfmt. Keys stripped, values formatted, secrets redacted.
+    """
     output_options = options or OutputOptions()
     value = redacted_value(value, secret_names=output_options.secret_names, policy=output_options.policy)
     pairs: list[tuple[str, str]] = []
-    if output_options.style is OutputStyle.Raw:
+    if output_options.style is PlainStyle.Raw:
         _collect_plain_pairs_raw(value, "", pairs)
     else:
         _collect_plain_pairs(value, "", pairs)
@@ -547,13 +553,13 @@ def _apply_redaction_policy_with_context(
     redaction_policy: RedactionPolicy | None,
     context: _RedactionContext,
 ) -> None:
-    if redaction_policy == RedactionPolicy.RedactionTraceOnly:
+    if redaction_policy == RedactionPolicy.TraceOnly:
         if isinstance(value, dict) and "trace" in value:
             _redact_secrets(value["trace"], context)
         return
-    if redaction_policy == RedactionPolicy.RedactionNone:
+    if redaction_policy == RedactionPolicy.Off:
         return
-    # Empty/unknown policy falls back to default full redaction.
+    # None (absent) or RedactionPolicy.All -> full redaction.
     _redact_secrets(value, context)
 
 
@@ -1300,36 +1306,6 @@ def _extract_currency_code_from_stem(stem: str) -> str | None:
 # ═══════════════════════════════════════════
 # YAML Rendering
 # ═══════════════════════════════════════════
-
-
-def _render_yaml_processed(value: Any, indent: int, lines: list[str]) -> None:
-    prefix = "  " * indent
-    if not isinstance(value, dict):
-        lines.append(f"{prefix}{_yaml_scalar(value)}")
-        return
-
-    for display_key, v, formatted in _process_object_fields(value):
-        if formatted is not None:
-            lines.append(f'{prefix}{_yaml_key(display_key)}: "{_escape_yaml_str(formatted)}"')
-        elif isinstance(v, dict):
-            if v:
-                lines.append(f"{prefix}{_yaml_key(display_key)}:")
-                _render_yaml_processed(v, indent + 1, lines)
-            else:
-                lines.append(f"{prefix}{_yaml_key(display_key)}: {{}}")
-        elif isinstance(v, list):
-            if not v:
-                lines.append(f"{prefix}{_yaml_key(display_key)}: []")
-            else:
-                lines.append(f"{prefix}{_yaml_key(display_key)}:")
-                for item in v:
-                    if isinstance(item, dict):
-                        lines.append(f"{prefix}  -")
-                        _render_yaml_processed(item, indent + 2, lines)
-                    else:
-                        lines.append(f"{prefix}  - {_yaml_scalar(item)}")
-        else:
-            lines.append(f"{prefix}{_yaml_key(display_key)}: {_yaml_scalar(v)}")
 
 
 def _render_yaml_raw(value: Any, indent: int, lines: list[str]) -> None:

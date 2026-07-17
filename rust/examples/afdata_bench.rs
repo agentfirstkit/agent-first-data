@@ -1,6 +1,4 @@
-use agent_first_data::{
-    OutputOptions, OutputStyle, output_json, output_plain, output_yaml, redacted_value,
-};
+use agent_first_data::{OutputFormat, OutputOptions, PlainStyle, redacted_value, render};
 use serde_json::{Value, json};
 use std::hint::black_box;
 use std::io::{self, Write};
@@ -48,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for size in INPUT_SIZES {
         let input = build_input(*size);
         run_case(&mut stdout, "json", *size, &input, bench_json)?;
+        #[cfg(feature = "yaml")]
         run_case(&mut stdout, "yaml", *size, &input, bench_yaml)?;
         run_case(&mut stdout, "plain", *size, &input, bench_plain)?;
         run_case(&mut stdout, "redaction", *size, &input, bench_redaction)?;
@@ -90,15 +89,31 @@ fn run_case(
 }
 
 fn bench_json(value: &Value) -> usize {
-    output_json(black_box(value)).len()
+    render(
+        black_box(value),
+        OutputFormat::Json,
+        &OutputOptions::default(),
+    )
+    .len()
 }
 
+#[cfg(feature = "yaml")]
 fn bench_yaml(value: &Value) -> usize {
-    output_yaml(black_box(value)).len()
+    render(
+        black_box(value),
+        OutputFormat::Yaml,
+        &OutputOptions::default(),
+    )
+    .len()
 }
 
 fn bench_plain(value: &Value) -> usize {
-    output_plain(black_box(value)).len()
+    render(
+        black_box(value),
+        OutputFormat::Plain,
+        &OutputOptions::default(),
+    )
+    .len()
 }
 
 fn bench_redaction(value: &Value) -> usize {
@@ -132,7 +147,7 @@ fn build_input(size: InputSize) -> Value {
 
     let output_options = OutputOptions {
         redaction: Default::default(),
-        style: OutputStyle::Readable,
+        style: PlainStyle::Readable,
     };
 
     json!({
