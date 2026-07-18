@@ -7,15 +7,13 @@
 )]
 //! End-to-end integration tests for `agent_first_data::document`.
 //!
-//! Ported from `agent-first-config`'s `tests/e2e.rs`: library-level coverage
-//! (format read/write, dot-path get/set, keyed lists, coercion, source
-//! preservation) is kept equivalent here. The CLI-invoking cases from that
-//! suite are ported separately (rewritten to the `afdata` command surface)
-//! in `tests/cli_document.rs`.
+//! Library-level coverage: format read/write, dot-path get/set, keyed lists,
+//! coercion, and source preservation. The CLI-invoking cases live in
+//! `tests/cli_document.rs` (the `afdata` command surface).
 //!
-//! Unlike `agent-first-config`, JSON support is a core (always-compiled)
-//! dependency of `agent_first_data`, not an optional `json` feature — so
-//! JSON-only tests below carry no feature gate.
+//! JSON support is a core (always-compiled) dependency of `agent_first_data`,
+//! not an optional `json` feature — so JSON-only tests below carry no feature
+//! gate.
 
 use agent_first_data::document::{
     DocumentError, Format, KeyedList, Value, add_keyed, get_path, remove_keyed, set_path,

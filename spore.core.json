@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.19.0",
+  "version": "0.19.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,11 +13,8 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Output-stream contract: a finite one-shot CLI routes result to stdout and error/progress/log to stderr; event-stream mode keeps all events on one ordered stream; the global --output-to <split|stdout|stderr> selects it",
-    "CliEmitter finish/finish_result map a run outcome to an exit code (success to code, broken pipe to 0, other write error to 4) without the library ever calling process::exit",
-    "Frontmatter mode: --input-format toml-frontmatter/yaml-frontmatter reads and edits dot-paths inside a Markdown page's +++/--- block with the usual document verbs, leaving the body byte-for-byte untouched (never auto-detected)",
-    "Secret-safe config reads: DocumentFile::open_capped guards size and regular-file before reading, value_at reads a dot-path in one call, and DocumentError::redacted_message()/location() report a parse failure position without the source line",
-    "DocumentError::code(), Format::name(), Value::kind_name() are now methods on the document types, replacing external match-on-enum helpers"
+    "Add coerce_toward/coerce_values_toward: type-directed coercion of CLI strings toward an existing or known type (no scalar shape-guessing) for consumers building config setters",
+    "Add DocumentFile::value_at_typed/set_typed and value_matches_type: typed read/write that validates a value against an explicit ValueType"
   ],
   "bonds": [],
   "tree": {

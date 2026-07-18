@@ -152,6 +152,24 @@ impl ScalarKind {
     }
 }
 
+/// Whether `value` satisfies `expected` for a typed read — the GET-side
+/// counterpart to [`value_from_type`]. `Json` matches any value; `Number`
+/// matches every numeric representation; the rest match their one kind. A
+/// consumer that asks for a type gets a value back only when it actually is
+/// that type, so a wrong-typed leaf is a caught error rather than a surprise.
+pub fn value_matches_type(value: &Value, expected: ValueType) -> bool {
+    match expected {
+        ValueType::Json => true,
+        ValueType::String => matches!(value, Value::String(_)),
+        ValueType::Bool => matches!(value, Value::Bool(_)),
+        ValueType::Null => matches!(value, Value::Null),
+        ValueType::Number => matches!(
+            value,
+            Value::Integer(_) | Value::Unsigned(_) | Value::Float(_) | Value::Number(_)
+        ),
+    }
+}
+
 /// The scalar kind of `value`, or `None` for an array/object (the guard
 /// does not apply to containers — see `cli-shell-config-todo.md` §3).
 pub fn scalar_kind(value: &Value) -> Option<ScalarKind> {
@@ -182,6 +200,65 @@ pub fn guard_bare_overwrite(existing: Option<&Value>) -> Result<(), ScalarKind> 
     match existing.and_then(scalar_kind) {
         Some(ScalarKind::String) | None => Ok(()),
         Some(other) => Err(other),
+    }
+}
+
+/// Coerce a CLI string toward the type already present at `existing`, for a
+/// consumer that *knows* the target type from the value it is replacing (a
+/// config setter reading typed leaves out of a serialized document).
+///
+/// This is the library counterpart to the CLI's explicit `--value-type`: the
+/// generic `afdata` CLI must ask the user for the type because it cannot know
+/// it, but a consumer that does — because it holds the existing typed leaf, or
+/// its own schema — should neither add a flag nor re-parse. It is **type
+/// directed, not shape guessing**: the existing leaf's [`scalar_kind`] selects
+/// the parse; a `bool`/`number` literal that does not match falls back to a
+/// string; a string, `null`, or absent leaf yields a string; a container leaf
+/// is replaced with a JSON literal.
+pub fn coerce_toward(raw: &str, existing: Option<&Value>) -> DocumentResult<Value> {
+    match existing.and_then(scalar_kind) {
+        Some(ScalarKind::Bool) => Ok(value_from_type(ValueType::Bool, Some(raw))
+            .unwrap_or_else(|_| Value::String(raw.to_string()))),
+        Some(ScalarKind::Number) => Ok(value_from_type(ValueType::Number, Some(raw))
+            .unwrap_or_else(|_| Value::String(raw.to_string()))),
+        Some(ScalarKind::String | ScalarKind::Null) => Ok(Value::String(raw.to_string())),
+        // A container leaf (array/object) or a brand-new key with no type to
+        // aim at: a structured literal (`[`/`{`) is parsed as JSON so the value
+        // round-trips, while a bare scalar stays a string — no scalar
+        // shape-guessing (`007` never becomes `7`).
+        None => coerce_structured_or_string(raw),
+    }
+}
+
+/// A structured literal (`[`/`{`) parses as a JSON array/object; anything else
+/// is taken verbatim as a string. Used where no scalar type is known, so a
+/// bare value is never shape-guessed into a number/bool.
+fn coerce_structured_or_string(raw: &str) -> DocumentResult<Value> {
+    let trimmed = raw.trim_start();
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        value_from_type(ValueType::Json, Some(raw))
+    } else {
+        Ok(Value::String(raw.to_string()))
+    }
+}
+
+/// Coerce a CLI value slice toward the type at `existing` via [`coerce_toward`]:
+/// one value becomes a scalar, several become an array whose elements are each
+/// coerced toward the existing array's element type. An empty slice is an error.
+pub fn coerce_values_toward(values: &[String], existing: Option<&Value>) -> DocumentResult<Value> {
+    match values {
+        [] => Err(DocumentError::EmptyValues),
+        [one] => coerce_toward(one, existing),
+        many => {
+            let element = existing
+                .and_then(Value::as_array)
+                .and_then(|array| array.first());
+            Ok(Value::Array(
+                many.iter()
+                    .map(|value| coerce_toward(value, element))
+                    .collect::<DocumentResult<Vec<_>>>()?,
+            ))
+        }
     }
 }
 
@@ -278,6 +355,63 @@ mod tests {
         assert_eq!(
             guard_bare_overwrite(Some(&Value::Null)),
             Err(ScalarKind::Null)
+        );
+    }
+
+    #[test]
+    fn coerce_toward_is_type_directed_not_shape_guessing() {
+        // Toward an existing scalar's kind: bool/number parse toward it, a
+        // non-matching literal falls back to a string, a string leaf stays a
+        // string.
+        assert_eq!(
+            coerce_toward("false", Some(&Value::Bool(true))).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            coerce_toward("5432", Some(&Value::Integer(1))).unwrap(),
+            Value::from(serde_json::json!(5432))
+        );
+        assert_eq!(
+            coerce_toward("not-a-number", Some(&Value::Integer(1))).unwrap(),
+            Value::String("not-a-number".to_string())
+        );
+        assert_eq!(
+            coerce_toward("007", Some(&Value::String("x".to_string()))).unwrap(),
+            Value::String("007".to_string())
+        );
+        // No existing type: a bare scalar is a string (no `007` -> `7`), but a
+        // structured literal parses as JSON.
+        assert_eq!(
+            coerce_toward("007", None).unwrap(),
+            Value::String("007".to_string())
+        );
+        assert!(matches!(
+            coerce_toward("[]", None).unwrap(),
+            Value::Array(_)
+        ));
+        assert!(matches!(
+            coerce_toward("{\"a\":1}", Some(&Value::Object(Default::default()))).unwrap(),
+            Value::Object(_)
+        ));
+    }
+
+    #[test]
+    fn coerce_values_toward_scalar_vs_array() {
+        assert!(matches!(
+            coerce_values_toward(&[], None),
+            Err(DocumentError::EmptyValues)
+        ));
+        assert_eq!(
+            coerce_values_toward(&["x".to_string()], None).unwrap(),
+            Value::String("x".to_string())
+        );
+        // Several values become an array, each coerced toward the existing
+        // array's element type.
+        let existing = Value::Array(vec![Value::Bool(true)]);
+        assert_eq!(
+            coerce_values_toward(&["false".to_string(), "true".to_string()], Some(&existing))
+                .unwrap(),
+            Value::Array(vec![Value::Bool(false), Value::Bool(true)])
         );
     }
 }

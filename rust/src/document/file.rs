@@ -193,6 +193,45 @@ impl DocumentFile {
         crate::document::get_path(&self.value, path, &[])
     }
 
+    /// [`value_at`](DocumentFile::value_at) that also asserts the value at `path`
+    /// satisfies `expected`, returning a [`DocumentError::TypeMismatch`]
+    /// otherwise. The read counterpart to [`set_typed`](DocumentFile::set_typed):
+    /// a caller that knows the type it wants gets a wrong-typed leaf as a caught
+    /// error, not a silent surprise.
+    pub fn value_at_typed(
+        &self,
+        path: &str,
+        expected: crate::document::ValueType,
+    ) -> DocumentResult<Value> {
+        let value = self.value_at(path)?;
+        if crate::document::value_matches_type(&value, expected) {
+            Ok(value)
+        } else {
+            Err(DocumentError::TypeMismatch {
+                path: path.to_string(),
+                expected: expected.name().to_string(),
+                got: value.kind_name().to_string(),
+                hint: None,
+            })
+        }
+    }
+
+    /// Build a value from the CLI string `raw` per an explicit
+    /// [`ValueType`](crate::document::ValueType) — via
+    /// [`value_from_type`](crate::document::value_from_type), which validates the
+    /// literal parses as that type — and [`set`](DocumentFile::set) it. The
+    /// typed-set counterpart to [`value_at_typed`]: the caller states the type
+    /// once and both the parse and the store enforce it.
+    pub fn set_typed(
+        &mut self,
+        key: &str,
+        raw: Option<&str>,
+        value_type: crate::document::ValueType,
+    ) -> DocumentResult<()> {
+        let value = crate::document::value_from_type(value_type, raw)?;
+        self.set(key, value)
+    }
+
     /// The format this file was opened as.
     pub fn format(&self) -> Format {
         self.format
@@ -650,6 +689,39 @@ mod tests {
         // A directory is not a regular file.
         let dir_err = DocumentFile::open_capped(dir.path(), Some(Format::Json), 1024).unwrap_err();
         assert_eq!(dir_err.code(), "document_io_failed");
+    }
+
+    #[test]
+    fn typed_get_and_set_enforce_the_stated_type() {
+        use crate::document::ValueType;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(dir.path(), "config.json", r#"{"port": 8080, "host": "x"}"#);
+        let mut doc = DocumentFile::open(&path, None).unwrap();
+
+        // Typed get: matching type returns, wrong type is a caught error, Json
+        // matches anything.
+        assert!(doc.value_at_typed("port", ValueType::Number).is_ok());
+        assert_eq!(
+            doc.value_at_typed("port", ValueType::String)
+                .unwrap_err()
+                .code(),
+            "document_type_mismatch"
+        );
+        assert!(doc.value_at_typed("host", ValueType::Json).is_ok());
+
+        // Typed set: the literal is validated against the stated type.
+        doc.set_typed("port", Some("9090"), ValueType::Number)
+            .unwrap();
+        assert_eq!(
+            doc.value_at("port").unwrap(),
+            Value::from(serde_json::json!(9090))
+        );
+        assert_eq!(
+            doc.set_typed("port", Some("not-a-number"), ValueType::Number)
+                .unwrap_err()
+                .code(),
+            "document_parse_failed"
+        );
     }
 
     #[cfg(feature = "toml")]

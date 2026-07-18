@@ -1,7 +1,7 @@
 //! Format-independent document values: dot-path get/set/add/remove, type-directed
 //! CLI-string coercion, keyed-list (slug-addressed array) helpers, and typed
 //! serde adapters, backed by pluggable JSON/TOML/YAML/dotenv/INI format readers
-//! and writers. Ported from the standalone `agent-first-config` crate.
+//! and writers.
 //!
 //! # Features
 //!
@@ -31,7 +31,10 @@ pub mod format;
 #[cfg(feature = "schema")]
 pub mod schema;
 
-pub use coerce::{ScalarKind, ValueType, guard_bare_overwrite, scalar_kind, value_from_type};
+pub use coerce::{
+    ScalarKind, ValueType, coerce_toward, coerce_values_toward, guard_bare_overwrite, scalar_kind,
+    value_from_type, value_matches_type,
+};
 pub use error::{DocumentError, DocumentResult};
 pub use file::{Document, DocumentFile};
 pub use keyed::{KeyedList, add_keyed, remove_keyed};

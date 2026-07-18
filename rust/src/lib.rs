@@ -46,7 +46,7 @@ mod skill_admin;
 pub mod skill;
 
 /// Format-independent document values (dot-path access, typed coercion, and
-/// pluggable JSON/TOML/YAML/dotenv/INI backends), ported from `agent-first-config`.
+/// pluggable JSON/TOML/YAML/dotenv/INI backends).
 pub mod document;
 
 mod cli;
