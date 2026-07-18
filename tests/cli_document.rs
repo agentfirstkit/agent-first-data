@@ -37,12 +37,19 @@ fn run_with_stdin(args: &[&str], stdin: &[u8]) -> std::process::Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn afdata");
-    child
-        .stdin
-        .take()
-        .expect("stdin handle")
-        .write_all(stdin)
-        .expect("failed to write stdin");
+    {
+        let mut handle = child.stdin.take().expect("stdin handle");
+        // The child may reject its arguments and exit before reading stdin —
+        // e.g. a raw-scalar command rejecting a non-default `--output-to` — which
+        // closes the read end of the pipe first. A BrokenPipe on this write is
+        // that expected early exit, not a test failure; the assertions below run
+        // against the child's actual exit + output.
+        match handle.write_all(stdin) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Err(err) => panic!("failed to write stdin: {err}"),
+        }
+    }
     child.wait_with_output().expect("failed to wait for afdata")
 }
 
