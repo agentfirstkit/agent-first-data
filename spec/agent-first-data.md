@@ -51,6 +51,8 @@ Applies to all structured data: JSON, YAML, TOML, CLI arguments, environment var
 
 ## Suffixes
 
+`afdata lint` type-checks every suffix below, but only for a present, non-null value: a `null` value means the field is absent/unset, not present-with-the-wrong-type, so it is exempt from the suffix's type constraint. Absence may be written as an omitted key or as an explicit `null` — both are valid; a bare `law_repeal_at_epoch_s: null` is not a `suffix_type_mismatch`.
+
 ### Duration
 
 | Suffix | Unit | Example |
@@ -537,8 +539,9 @@ extension fields.
 
 ## CLI Event Framing
 
-Structured CLI programs emit complete AFDATA protocol v1 events to stdout.
-Framing depends on `--output`:
+Structured CLI programs emit complete AFDATA protocol v1 events. Where each
+event goes is set by the program's consumption mode (see Channel policy below);
+how each event is framed depends on `--output`:
 
 - JSON multi-event output is JSONL/NDJSON: one complete event per line.
 - Plain multi-event output is one display event per line.
@@ -546,26 +549,69 @@ Framing depends on `--output`:
 
 Agent-facing machine input remains JSON. YAML and plain are display formats.
 
-Channel policy:
-- `stdout` is the only protocol/log stream for machine-readable events
-- runtime protocol events MUST NOT be emitted on `stderr`
-- `stderr` may be used only for unrecoverable pre-protocol startup failures where structured output cannot be produced
+Channel policy — the stream an event lands on follows the **consumption mode**,
+not the event's shape. There are two modes:
+
+**Finite one-shot commands (the default).** A command that runs, emits at most
+one terminal event, and exits. Its events split by `kind`, following Unix
+stream conventions:
+- `kind:"result"` (and any data/findings payload the caller captures) → `stdout`
+- `kind:"error"` → `stderr`
+- `kind:"progress"` and `kind:"log"` → `stderr` (they are diagnostics)
+- routing follows `kind`, not the exit code: a `kind:"result"` payload always
+  goes to `stdout` even when the command exits non-zero (e.g. a search that
+  completed but matched nothing), and `kind:"error"` always goes to `stderr`
+- `stdout` therefore carries only successful payloads, so `x=$(tool …)` never
+  captures an error as data, `tool … >/dev/null` never swallows a diagnostic,
+  and `tool … | next` never pipes an error envelope in as input
+
+**Event streams.** A process whose consumer reads interleaved
+`log`/`progress`/`result`/`error` events **in order** (a long-running or agentic
+producer). Every event stays on ONE stream so ordering is preserved; splitting a
+stream across `stdout` and `stderr` would lose ordering and is prohibited. That
+stream's destination is chosen by the emitter (`stdout` by default).
+
+Destination selection:
+- CLI tools SHOULD expose `--output-to <split|stdout|stderr>`, default `split`.
+  `split` is finite mode above. `stdout`/`stderr` select event-stream mode and
+  collapse the whole envelope stream — every `kind`, including `error` — onto
+  that one stream. `--output` selects an event's **format**; `--output-to`
+  selects its **destination**; the two are orthogonal.
+- `--output-to stdout` restores the "read one stream, branch on `kind`"
+  contract for a consumer that wants it; `--output-to split` (the default) is
+  safe for shell capture and pipelines.
+- Raw-scalar reader commands (a command whose success output is an unwrapped
+  value, not an envelope) are intrinsically `split` and reject a non-default
+  `--output-to` as a usage error.
+
+In finite mode `stderr` carries both the formatted AFDATA `error`/`progress`/
+`log` envelopes and native diagnostics (Rust panics, Python tracebacks). A
+consumer reading the error stream parses AFDATA JSON lines and tolerates
+interleaved native, non-JSON bytes.
 
 Optional stream redirection:
 - CLI tools and services MAY expose `--stdout-file <PATH>` and `--stderr-file <PATH>`
 - unset file flags leave the corresponding stream unchanged
 - when enabled, stdout bytes are appended to the `--stdout-file` path instead of the original stdout destination
 - when enabled, stderr bytes are appended to the `--stderr-file` path instead of the original stderr destination
+- an event stream can be sent to a file by collapsing it (`--output-to stdout`)
+  and redirecting that stream (`--stdout-file <PATH>`); there is no separate
+  events-file flag
 - `--output` continues to select stdout format (`json`, `yaml`, `plain`, and help-specific `markdown`); it does not select stream destinations
 - implementations SHOULD install stream redirection before version/help handling, logging/tracing initialization, and other early output
-- startup failures to create/open the files SHOULD fail startup with a structured stdout error when stdout is still available
-- stderr MUST NOT be converted to AFDATA JSON; native diagnostics such as Rust panics, Python tracebacks, and runtime errors remain stderr bytes
+- startup failures to create/open the files SHOULD fail startup with a structured error when a stream is still available
+- redirection is a process-level file-descriptor concern applied beneath the
+  logical channel routing above; native panics/tracebacks stay raw `stderr` bytes
 - no application-level rotation is implied; rotate with external tooling
 - this is stream redirection, not a second AFDATA protocol channel and not stream copying
 
 Recommended enforcement:
-- Rust: clippy `print_stderr = "deny"` plus disallow `std::eprintln` / `std::io::stderr`
-- Go/Python/TypeScript: source-policy tests or lint rules that fail on stderr API usage in runtime code
+- every `stderr` write goes through the emitter's formatted diagnostic/error
+  path; no ad-hoc `stderr` writing that bypasses the formatter in runtime code
+- Rust: route through the emitter; keep native panic output as the only
+  unstructured `stderr` (no stray `eprintln!` / `std::io::stderr` in runtime code)
+- Go/Python/TypeScript: source-policy tests or lint rules that fail on ad-hoc
+  stderr APIs in runtime code, with the emitter's own sink as the sanctioned exception
 
 Finite structured CLI event streams follow:
 
@@ -755,8 +801,11 @@ All contexts can use the protocol structure from Part 3. `kind`, its matching
 payload field, and optional object-valued `trace` are standardized. CLI/logs
 apply output formatting and secret protection from Part 2. Raw-path serializers
 return JSON values unchanged unless the program explicitly calls
-`redacted_value`. For CLI/log protocol transport, use `stdout` only; do not
-split protocol events across `stdout` and `stderr`.
+`redacted_value`. For an **event stream** (interleaved events consumed in
+order), keep every event on one stream and do not split across `stdout` and
+`stderr` — splitting loses ordering. A **finite one-shot command** instead
+splits by `kind` (`result` → `stdout`, `error` → `stderr`); see CLI Event
+Framing for both modes and the `--output-to` selector.
 
 ---
 

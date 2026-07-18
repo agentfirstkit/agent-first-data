@@ -99,20 +99,23 @@ When enabled, stdout bytes are appended to the stdout file and stderr bytes are 
 
 Beyond emitting AFDATA, `afdata` reads and safely edits structured documents — JSON, TOML, YAML, dotenv, and INI — by dot-path. A spore embeds the library for generic config access without a per-field dispatch table; a shell or another-language CLI gets one tool for one-off reads and edits.
 
-Read with `show` (the whole document as one record), `get <KEY>` (one value as an AFDATA record, secrets still redacted), or `value <KEY>` (the raw scalar, for shell substitution). Edit in place with `set`/`unset` (any format) and, for JSON or YAML, `add`/`remove` on a keyed list:
+Read with `get <FILE> [KEY]` (the whole document with no KEY, or one value as an AFDATA record with KEY — secrets still redacted), `value <FILE> <KEY>` (the raw scalar, for shell substitution), or `paths`/`keys <FILE> [KEY]` (a container's children, one per line — `paths` emits full dot-paths that feed back into afdata, `keys` emits raw names for external tools). Edit in place with `set`/`unset` (any format) and, for JSON or YAML, `add`/`remove` on a keyed list:
 
 ```bash
-afdata get server.port config.toml
-host=$(afdata value server.host config.toml)      # KEY then FILE; scalars only
-afdata set server.port 8080 --input-file config.toml
+afdata get config.toml server.port
+host=$(afdata value config.toml server.host)      # FILE then KEY; scalars only
+afdata set config.toml server.port 8080 --value-type number
 ```
 
-- **Source-preserving and atomic.** Edits keep comments, key order, and unrelated formatting; a failed write leaves the original untouched, and the CLI refuses to write through a symlink or hardlink.
-- **One input model.** Reads take a positional FILE or piped stdin (defaulting to JSON, rejecting an interactive TTY rather than blocking); mutations require `--input-file`. Format is inferred from the file extension and overridable with `--input-format`.
+- **One input model.** Every command's first positional is FILE, or `-` for stdin (read commands only — mutations reject `-`). There is no implicit stdin fallback. Format is inferred from the file extension and overridable with `--input-format`.
+- **Source-preserving and atomic.** Edits keep comments, key order, and unrelated formatting; a failed write leaves the original untouched, and the CLI refuses to write through a symlink or hardlink. A mutation's result carries the `path` actually written.
 - **One dot-path grammar.** A literal dot in a key is `\.` and a literal backslash is `\\`; an unrecognized escape is an error, never a guess. `add`/`remove` operate on a keyed list and require an explicit `--slug-field`.
-- **Secrets stay closed.** A `_secret` leaf (or an exact `--secret-name`) is redacted even on a directly targeted `get`; `value --reveal-secret` is the explicit, auditable opt-in. `value` on an object or array errors (`path <KEY> is not a scalar`) — use `get` or `show` for a subtree.
+- **Bare values are strings; exact types are explicit.** `set`'s bare VALUE (and `add`'s `FIELD=VALUE`) is always a plain string — no shape-guessing, so `007` never becomes `7`. `--value-type string|number|bool|null|json` writes an exact type; `json` is the only entry point for an array or object. Overwriting an *existing* scalar of a different kind with a bare VALUE is an argument error naming both escape hatches, not a silent type rewrite.
+- **Number literals round-trip exactly.** `get`/`set` preserve a number's original digits — an integer beyond `u64` or a high-precision float is never routed through `f64` and reformatted; `value` is otherwise type-lossy (every scalar becomes plain text) but stays digit-faithful for numbers.
+- **Secrets stay closed.** A `_secret` leaf (or an exact `--secret-name`) is redacted even on a directly targeted `get`; `value --reveal-secret` is the explicit, auditable opt-in. `value` on a container errors (`document_not_scalar`) — use `get` for a subtree. `value`'s failure envelope goes to stderr, never stdout, so shell substitution never captures a JSON error as data; `--default VAL` covers the common "missing or null -> fall back" case in one call.
+- **Decidable errors.** Runtime document errors use stable `error.code`s (`document_path_not_found`, `document_type_mismatch`, `document_slug_not_found`, `document_slug_exists`, `document_parse_failed`, `document_io_failed`, and a few narrower ones) and exit 1; a malformed invocation is always `document_usage_error` at exit 2.
 
-The library lives at `agent_first_data::document` (Rust): `Document` / `DocumentFile` plus the format backends, gated by the `toml` / `yaml` / `dotenv` / `ini` features (JSON is core).
+The library lives at `agent_first_data::document` (Rust): `Document` / `DocumentFile` plus the format backends, gated by the `toml` / `yaml` / `dotenv` / `ini` features (JSON is core). Consumers can use `Format::name()`, `Value::kind_name()`, and `DocumentError::code()` instead of exhaustively matching public enums for display labels and stable error classification. For reading a config that may hold secrets, `DocumentFile::open_capped(path, format, max_bytes)` rejects an oversized or non-regular file before reading it and `value_at(dot_path)` fetches a single address in one call; on a parse failure `DocumentError::redacted_message()` (and the raw `location()`) yield a content-free message that never echoes the source.
 
 ## Logging Contract
 
@@ -128,7 +131,7 @@ Example plain line:
 level=info message="Processing" request_id=abc-123 timestamp_epoch_ms=1739026400000
 ```
 
-Name secret log fields explicitly (`api_key_secret`, `db_url`) so redaction can see the field name. URL fields should end in `_url`; any token-bearing query parameter must either be renamed to an `_secret` parameter such as `token_secret`, or listed in `secret_names` / `SecretNames` / `secretNames` when legacy names cannot change. Do not log a whole secret-bearing object as a pre-rendered debug string or free-form prose and expect AFDATA to find the inner secret. PII and domain-specific privacy policies (header names, API scopes) are owned by each spore; the library does not provide generic scanning or secret profiles.
+Name whole-value secret log fields explicitly (`api_key_secret`, `database_url_secret`) so redaction can see that the entire value is secret. Use `_url` only when the URL may remain visible after its userinfo and token-bearing query parameters are scrubbed. Any token-bearing query parameter must either be renamed to an `_secret` parameter such as `token_secret`, or listed in `secret_names` / `SecretNames` / `secretNames` when legacy names cannot change. Do not log a whole secret-bearing object as a pre-rendered debug string or free-form prose and expect AFDATA to find the inner secret. PII and domain-specific privacy policies (header names, API scopes) are owned by each spore; the library does not provide generic scanning or secret profiles.
 
 ## Supported Suffixes
 

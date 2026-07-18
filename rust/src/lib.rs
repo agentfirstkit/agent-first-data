@@ -58,7 +58,7 @@ mod redaction;
 mod validation;
 
 pub use cli::{
-    CliEmitter, CliEmitterError, LogFilters, OutputFormat, build_cli_version,
+    CliEmitter, CliEmitterError, LogFilters, OutputFormat, OutputTo, build_cli_version,
     cli_handle_version_or_continue, cli_parse_log_filters, cli_parse_output, cli_render_version,
 };
 pub use formatting::render;

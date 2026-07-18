@@ -110,8 +110,10 @@ pub fn get_path(root: &Value, path: &str, keyed_lists: &[KeyedList<'_>]) -> Docu
 
 /// Set a value at the given dot-path. `value` is inserted as-is at the leaf —
 /// no coercion happens here; callers that accept CLI strings (e.g. the
-/// `afdata` binary) coerce them toward the existing type via
-/// [`crate::document::coerce::coerce_values_typed`] before calling this.
+/// `afdata` binary) construct the typed `Value` first, via
+/// [`crate::document::coerce::value_from_type`] (an explicit `--value-type`)
+/// or a bare `Value::String` (zero coercion — see `cli-shell-config-todo.md`
+/// §3), before calling this.
 pub fn set_path(
     root: &mut Value,
     path: &str,

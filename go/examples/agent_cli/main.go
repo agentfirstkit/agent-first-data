@@ -222,11 +222,25 @@ func helpSchema(command, scope string) map[string]any {
 	}
 }
 
+// bootstrapEmitter builds a finite emitter for errors raised before the main
+// emitter exists (before --output is parsed): result → stdout, diagnostics and
+// errors → stderr, routed by kind.
+func bootstrapEmitter(format afdata.OutputFormat) *afdata.CliEmitter {
+	return afdata.NewCliEmitterFinite(os.Stdout, os.Stderr, format)
+}
+
+// finishCliError builds a standard cli_error envelope with the shared error
+// builder and finishes it on emitter, returning the process exit code. In finite
+// mode the error routes to stderr; Finish collapses a broken pipe to a clean
+// exit and any other write failure to code 4.
+func finishCliError(emitter *afdata.CliEmitter, message, hint string, exitCode int) int {
+	event, _ := afdata.BuildCLIError(message, hint)
+	return emitter.Finish(event, exitCode)
+}
+
 func printHelp(command, output string, outputExplicit bool, outputMissing bool, recursive bool) int {
 	if outputMissing {
-		event, _ := afdata.BuildCLIError("missing value for --output: expected plain, json, yaml, or markdown", "valid help output formats: plain, markdown, json, yaml")
-		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
-		return 2
+		return finishCliError(bootstrapEmitter(afdata.OutputFormatJson), "missing value for --output: expected plain, json, yaml, or markdown", "valid help output formats: plain, markdown, json, yaml", 2)
 	}
 	// Scope (one-level vs recursive) is set by --recursive; --output only picks
 	// the format. A specific subcommand is leaf-level here, so its scope is the
@@ -252,9 +266,7 @@ func printHelp(command, output string, outputExplicit bool, outputMissing bool, 
 	}
 	format, err := afdata.CliParseOutput(output)
 	if err != nil {
-		event, _ := afdata.BuildCLIError(err.Error(), "")
-		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
-		return 2
+		return finishCliError(bootstrapEmitter(afdata.OutputFormatJson), err.Error(), "", 2)
 	}
 	fmt.Println(afdata.Render(helpSchema(command, scope), format, afdata.OutputOptions{}))
 	return 0
@@ -282,7 +294,7 @@ func buildRequestLog(command string) map[string]any {
 		"message":  "event",
 		"category": "request",
 		"command":  command,
-	})
+	}).Trace(map[string]any{})
 	event := builder.Build()
 	return event.Value()
 }
@@ -308,7 +320,7 @@ func buildStartupLog(args []string, command string, output string, filters afdat
 			"log":    filters.Values(),
 		},
 		"env": startupEnvSnapshot(),
-	})
+	}).Trace(map[string]any{})
 	event := builder.Build()
 	return event.Value()
 }
@@ -438,6 +450,11 @@ func validateStrictArgs(args []string) (string, string) {
 }
 
 func main() {
+	// Make a write to a broken stdout/stderr pipe return an error the emitter
+	// surfaces (so Finish can map it to a clean exit), instead of the default
+	// SIGPIPE termination.
+	installSigpipeHandler()
+
 	output := "json"
 	outputExplicit := false
 	outputConflict := ""
@@ -456,16 +473,12 @@ func main() {
 	args := os.Args[1:]
 	outputMissing := outputFlagMissing(args)
 	if _, err := streamredirect.InstallStreamRedirectFromArgs(args); err != nil {
-		event, _ := afdata.BuildCLIError(err.Error(), "")
-		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
-		os.Exit(2)
+		os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), err.Error(), "", 2))
 	}
 
 	if out, handled, err := afdata.CliHandleVersionOrContinue(args, "agent-cli", agentCliVersion); handled {
 		if err != nil {
-			event, _ := afdata.BuildCLIError(err.Error(), "valid version output formats: json, yaml, plain")
-			fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
-			os.Exit(2)
+			os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), err.Error(), "valid version output formats: json, yaml, plain", 2))
 		}
 		fmt.Print(out)
 		return
@@ -557,34 +570,29 @@ func main() {
 	// the format. A bare --recursive (no --help) falls through to normal parsing.
 	if showHelp {
 		if outputConflict != "" {
-			event, _ := afdata.BuildCLIError(outputConflict, "valid output formats: json, yaml, plain")
-			fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
-			os.Exit(2)
+			os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), outputConflict, "valid output formats: json, yaml, plain", 2))
 		}
 		os.Exit(printHelp(command, output, outputExplicit, outputMissing, recursive))
 	}
 
 	// 1. Parse --output flag with structured error on failure.
 	if outputMissing {
-		event, _ := afdata.BuildCLIError("missing value for --output: expected json, yaml, or plain", "valid output formats: json, yaml, plain")
-		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
-		os.Exit(2)
+		os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), "missing value for --output: expected json, yaml, or plain", "valid output formats: json, yaml, plain", 2))
 	}
 	if outputConflict != "" {
-		event, _ := afdata.BuildCLIError(outputConflict, "valid output formats: json, yaml, plain")
-		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
-		os.Exit(2)
+		os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), outputConflict, "valid output formats: json, yaml, plain", 2))
 	}
 	format, err := afdata.CliParseOutput(output)
 	if err != nil {
-		event, _ := afdata.BuildCLIError(err.Error(), "")
-		fmt.Println(afdata.Render(event.Value(), afdata.OutputFormatJson, afdata.OutputOptions{}))
-		os.Exit(2)
+		os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), err.Error(), "", 2))
 	}
+
+	// One finite emitter for the command: result → stdout, error/log → stderr,
+	// per the AFDATA output-stream contract, routed by kind.
+	emitter := afdata.NewCliEmitterFinite(os.Stdout, os.Stderr, format)
+
 	if message, hint := validateStrictArgs(args); message != "" {
-		event, _ := afdata.BuildCLIError(message, hint)
-		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
-		os.Exit(2)
+		os.Exit(finishCliError(emitter, message, hint, 2))
 	}
 
 	// 2. Normalize --log filters: trim, lowercase, deduplicate.
@@ -594,47 +602,40 @@ func main() {
 	}
 	if verbose {
 		// --verbose is shorthand for --log all.
-		// Create new filters with "all" added
 		allValues := filters.Values()
 		allValues = append(allValues, "all")
 		filters = afdata.CliParseLogFilters(allValues)
 	}
 
 	// Each diagnostic line self-tags with its `category`, so `--log all` reveals
-	// the full set from real output rather than a static help list.
+	// the full set from real output. Diagnostics land on stderr.
 	if logEnabled(filters, "request") {
-		fmt.Println(afdata.Render(buildRequestLog(command), format, afdata.OutputOptions{}))
+		_ = emitter.EmitValidatedValue(buildRequestLog(command))
 	}
 	if logEnabled(filters, "startup") {
-		fmt.Println(afdata.Render(buildStartupLog(args, command, output, filters, verbose), format, afdata.OutputOptions{}))
+		_ = emitter.EmitValidatedValue(buildStartupLog(args, command, output, filters, verbose))
 	}
 
 	// 3. No subcommand → error with hint.
 	if command == "" {
-		event, _ := afdata.BuildCLIError("no subcommand provided", "try: agent-cli --help")
-		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
-		os.Exit(2)
+		os.Exit(finishCliError(emitter, "no subcommand provided", "try: agent-cli --help", 2))
 	}
 
 	switch command {
 	case "echo":
-		// 4. --dry-run → preview without executing.
+		// 4. --dry-run → preview without executing. The preview carries a trace,
+		// so build the event and Finish it (FinishResult builds a trace-less result).
 		if dryRun {
-			builder := afdata.NewJSONResult(map[string]any{
+			preview := afdata.NewJSONResult(map[string]any{
 				"action": "echo",
 				"log":    filters,
-			}).Trace(map[string]any{"duration_ms": 0})
-			preview := builder.Build()
-			fmt.Println(afdata.Render(preview.Value(), format, afdata.OutputOptions{}))
-			return
+			}).Trace(map[string]any{"duration_ms": 0}).Build()
+			os.Exit(emitter.Finish(preview, 0))
 		}
-
-		resultBuilder := afdata.NewJSONResult(map[string]any{
+		os.Exit(emitter.FinishResult(map[string]any{
 			"action": "echo",
 			"log":    filters,
-		})
-		result := resultBuilder.Build()
-		fmt.Println(afdata.Render(result.Value(), format, afdata.OutputOptions{}))
+		}))
 
 	case "ping":
 		// 5. Demonstrate a protocol v1 error with hint on failure.
@@ -642,36 +643,29 @@ func main() {
 			host = os.Getenv(pingHostEnv)
 		}
 		if host == "" {
-			errBuilder := afdata.NewJSONError("ping_target_not_configured", "ping target not configured").
+			errVal, _ := afdata.NewJSONError("ping_target_not_configured", "ping target not configured").
 				Hint("set PING_HOST or pass --host").
-				Trace(map[string]any{"duration_ms": 0})
-			errVal, _ := errBuilder.Build()
-			fmt.Println(afdata.Render(errVal.Value(), format, afdata.OutputOptions{}))
-			os.Exit(1)
+				Trace(map[string]any{"duration_ms": 0}).Build()
+			os.Exit(emitter.Finish(errVal, 1))
 		}
 
 	case "cancel":
-		errBuilder := afdata.NewJSONError("cancelled", "operation cancelled").
+		errVal, _ := afdata.NewJSONError("cancelled", "operation cancelled").
 			Hint("the operation was cancelled before completion").
-			Trace(map[string]any{"duration_ms": 0})
-		errVal, _ := errBuilder.Build()
-		fmt.Println(afdata.Render(errVal.Value(), format, afdata.OutputOptions{}))
-		os.Exit(1)
+			Trace(map[string]any{"duration_ms": 0}).Build()
+		os.Exit(emitter.Finish(errVal, 1))
 
 	case "skill":
-		os.Exit(runSkill(positionals, agent, scope, skillsDir, force, format))
+		os.Exit(runSkill(emitter, positionals, agent, scope, skillsDir, force))
 
 	default:
-		hint := "valid commands: echo, ping, cancel, skill"
-		event, _ := afdata.BuildCLIError("unknown command: "+command, hint)
-		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
-		os.Exit(2)
+		os.Exit(finishCliError(emitter, "unknown command: "+command, "valid commands: echo, ping, cancel, skill", 2))
 	}
 }
 
 // runSkill wires the parsed `skill` subcommand to the library and prints the result.
 // Returns the process exit code (0 ok, 1 action error, 2 bad flag value).
-func runSkill(positionals []string, agentStr, scopeStr, skillsDir string, force bool, format afdata.OutputFormat) int {
+func runSkill(emitter *afdata.CliEmitter, positionals []string, agentStr, scopeStr, skillsDir string, force bool) int {
 	verb := ""
 	if len(positionals) > 1 {
 		verb = positionals[1]
@@ -685,26 +679,19 @@ func runSkill(positionals []string, agentStr, scopeStr, skillsDir string, force 
 	case "uninstall":
 		action = skill.SkillActionUninstall
 	default:
-		event, _ := afdata.BuildCLIError("skill requires a subcommand: status, install, uninstall", "example: agent-cli skill status --agent opencode")
-		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
-		return 2
+		return finishCliError(emitter, "skill requires a subcommand: status, install, uninstall", "example: agent-cli skill status --agent opencode", 2)
 	}
 
 	opts, message, hint := buildSkillOptions(agentStr, scopeStr, skillsDir, force)
 	if message != "" {
-		event, _ := afdata.BuildCLIError(message, hint)
-		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
-		return 2
+		return finishCliError(emitter, message, hint, 2)
 	}
 
 	report, serr := skill.RunSkillAdmin(widgetSpec, action, opts)
 	if serr != nil {
-		event, _ := afdata.BuildCLIError(serr.Message, serr.Hint)
-		fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
-		return 1
+		return finishCliError(emitter, serr.Message, serr.Hint, 1)
 	}
-	fmt.Println(afdata.Render(report, format, afdata.OutputOptions{}))
-	return 0
+	return emitter.FinishResult(report)
 }
 
 // buildSkillOptions parses the --agent/--scope string flags into the library enums.

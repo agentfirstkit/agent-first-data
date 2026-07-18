@@ -33,6 +33,7 @@ pub fn set_scalar_preserving(content: &str, path: &str, value: &Value) -> Docume
             | Value::Integer(_)
             | Value::Unsigned(_)
             | Value::Float(_)
+            | Value::Number(_)
             | Value::String(_)
     ) {
         return Err(DocumentError::UnsupportedOperation {
@@ -225,6 +226,26 @@ fn to_noyalib_value(value: &Value) -> DocumentResult<YamlValue> {
             operation: "set".to_string(),
             detail: "non-finite YAML float is not representable".to_string(),
         }),
+        // See the identical fallback in `format::toml::toml_item`: a
+        // float-shaped `Value::Number` literal parses to `f64` cleanly (YAML
+        // floats are canonically `f64` at the format level too); an
+        // integer-shaped one only exists because it overflows `u64`, so it
+        // can never be written through noyalib's numeric `Value`.
+        Value::Number(text) if value.is_float() => text
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(YamlValue::from)
+            .ok_or_else(|| DocumentError::UnsupportedOperation {
+                format: "YAML".to_string(),
+                operation: "set".to_string(),
+                detail: format!("float literal `{text}` is not representable in YAML"),
+            }),
+        Value::Number(text) => Err(DocumentError::UnsupportedOperation {
+            format: "YAML".to_string(),
+            operation: "set".to_string(),
+            detail: format!("integer literal `{text}` exceeds YAML's 64-bit integer range"),
+        }),
         Value::String(value) => Ok(YamlValue::String(value.clone())),
         Value::Array(values) => Ok(YamlValue::Sequence(
             values
@@ -290,6 +311,21 @@ fn our_value_to_yaml_value(v: &Value) -> DocumentResult<YamlValue> {
             // Keep the existing config representation: floats serialize as scalars.
             Ok(YamlValue::Number((*f).into()))
         }
+        Value::Number(text) if v.is_float() => text
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(|value| YamlValue::Number(value.into()))
+            .ok_or_else(|| DocumentError::UnsupportedOperation {
+                format: "YAML".to_string(),
+                operation: "save".to_string(),
+                detail: format!("float literal `{text}` is not representable in YAML"),
+            }),
+        Value::Number(text) => Err(DocumentError::UnsupportedOperation {
+            format: "YAML".to_string(),
+            operation: "save".to_string(),
+            detail: format!("integer literal `{text}` exceeds YAML's 64-bit integer range"),
+        }),
         Value::String(s) => Ok(YamlValue::String(s.clone())),
         Value::Array(a) => {
             let seq = a

@@ -1,0 +1,50 @@
+[
+  {
+    "name": "integer_beyond_u64",
+    "description": "A ~30-digit integer far beyond u64::MAX must round-trip digit-for-digit through decode_protocol_event -> render(json/yaml), never parse->f64->reserialize.",
+    "input_line": "{\"kind\":\"result\",\"result\":123456789012345678901234567890,\"trace\":{}}",
+    "expected_json": "123456789012345678901234567890",
+    "expected_yaml": "---\n123456789012345678901234567890"
+  },
+  {
+    "name": "high_precision_float",
+    "description": "0.1 written to 34 significant digits must not collapse to the float64 shortest round-trip \"0.1\".",
+    "input_line": "{\"kind\":\"result\",\"result\":0.1000000000000000055511151231257827,\"trace\":{}}",
+    "expected_json": "0.1000000000000000055511151231257827",
+    "expected_yaml": "---\n0.1000000000000000055511151231257827"
+  },
+  {
+    "name": "negative_zero",
+    "description": "-0.0 must keep its sign, not normalize to 0 or 0.0, when parsed and re-emitted as JSON. (Deliberately the float spelling, not the bare-integer \"-0\": that narrower form is a documented Rust/serde_json limitation, see rust/src/tests.rs's negative_zero_bare_integer_is_a_known_serde_json_limitation.) No expected_yaml: Rust's YAML/plain renderer canonicalizes an integral-valued decoded float's trailing zero the same way it does for a hand-built one (\"-0.0\" -> \"-0\", value-preserving, spelling-lossy) since serde_json::Number carries no decoded-vs-hand-built distinction; see rust/src/tests.rs's number_fidelity_fixtures comment. JSON is unaffected and asserted exactly.",
+    "input_line": "{\"kind\":\"result\",\"result\":-0.0,\"trace\":{}}",
+    "expected_json": "-0.0"
+  },
+  {
+    "name": "u64_max_regression",
+    "description": "u64::MAX already round-tripped correctly before this phase (i64/u64-range integers were never the bug); guard against a regression introduced by the fidelity work itself.",
+    "input_line": "{\"kind\":\"result\",\"result\":18446744073709551615,\"trace\":{}}",
+    "expected_json": "18446744073709551615",
+    "expected_yaml": "---\n18446744073709551615"
+  },
+  {
+    "name": "exponent_notation",
+    "description": "Exponent form must survive verbatim, not be renormalized to a different (even numerically equal) exponent or decimal spelling. Deliberately written with an explicit '+' sign: a sign-less exponent (\"6.022e23\") is a documented Rust/serde_json limitation, see rust/src/tests.rs's signless_exponent_is_a_known_serde_json_limitation.",
+    "input_line": "{\"kind\":\"result\",\"result\":6.022e+23,\"trace\":{}}",
+    "expected_json": "6.022e+23",
+    "expected_yaml": "---\n6.022e+23"
+  },
+  {
+    "name": "leading_zero_numeric_string",
+    "description": "A numeric-looking JSON string (never valid as a bare JSON number literal) must stay a string end to end, never reinterpreted as a number.",
+    "input_line": "{\"kind\":\"result\",\"result\":\"007\",\"trace\":{}}",
+    "expected_json": "\"007\"",
+    "expected_yaml": "---\n\"007\""
+  },
+  {
+    "name": "bare_epoch_ns_number",
+    "description": "AFDATA naming convention requires _epoch_ns as a decimal string (values exceed the 2^53-1 safe-integer range); writing it as a bare JSON number is a naming-convention violation that `afdata lint` rejects, but it is not a license for the decode/render layer to corrupt the digits. The nanosecond value below is deliberately beyond f64's exact-integer range.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"created_epoch_ns\":1707868800000000000000},\"trace\":{}}",
+    "expected_json": "{\"created_epoch_ns\":1707868800000000000000}",
+    "expected_yaml": "---\ncreated_epoch_ns: 1707868800000000000000"
+  }
+]

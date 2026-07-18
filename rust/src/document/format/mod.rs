@@ -6,6 +6,9 @@ use std::path::Path;
 
 #[cfg(feature = "dotenv")]
 pub mod dotenv;
+// The frontmatter splitter has no format dependency, so it always compiles; the
+// inner TOML/YAML backends it delegates to are gated at the call sites below.
+pub mod frontmatter;
 #[cfg(feature = "ini")]
 pub mod ini;
 // JSON is a core (non-optional) dependency of agent-first-data, so this
@@ -23,9 +26,29 @@ pub enum Format {
     Yaml,
     Dotenv,
     Ini,
+    /// A `+++`-fenced TOML frontmatter block; the Markdown body is frozen. Never
+    /// auto-detected — selected only via `--input-format toml-frontmatter`.
+    TomlFrontmatter,
+    /// A `---`-fenced YAML frontmatter block; the Markdown body is frozen. Never
+    /// auto-detected — selected only via `--input-format yaml-frontmatter`.
+    YamlFrontmatter,
 }
 
 impl Format {
+    /// Stable human-readable label used in document results and diagnostics.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Json => "JSON",
+            Self::Toml => "TOML",
+            Self::Yaml => "YAML",
+            Self::Dotenv => "dotenv",
+            Self::Ini => "INI",
+            Self::TomlFrontmatter => "TOML frontmatter",
+            Self::YamlFrontmatter => "YAML frontmatter",
+        }
+    }
+
     /// Detect format from file extension.
     pub fn detect(path: &Path) -> Option<Self> {
         let file_name = path.file_name().and_then(|name| name.to_str())?;
@@ -91,6 +114,28 @@ impl Format {
                 operation: "load".to_string(),
                 detail: "requires Cargo feature `ini`".to_string(),
             }),
+
+            #[cfg(feature = "toml")]
+            Format::TomlFrontmatter => {
+                toml::load(frontmatter::split(content, frontmatter::Delimiter::Plus)?.frontmatter)
+            }
+            #[cfg(not(feature = "toml"))]
+            Format::TomlFrontmatter => Err(DocumentError::UnsupportedOperation {
+                format: "TOML frontmatter".to_string(),
+                operation: "load".to_string(),
+                detail: "requires Cargo feature `toml`".to_string(),
+            }),
+
+            #[cfg(feature = "yaml")]
+            Format::YamlFrontmatter => {
+                yaml::load(frontmatter::split(content, frontmatter::Delimiter::Dash)?.frontmatter)
+            }
+            #[cfg(not(feature = "yaml"))]
+            Format::YamlFrontmatter => Err(DocumentError::UnsupportedOperation {
+                format: "YAML frontmatter".to_string(),
+                operation: "load".to_string(),
+                detail: "requires Cargo feature `yaml`".to_string(),
+            }),
         }
     }
 
@@ -134,6 +179,21 @@ impl Format {
                 operation: "save".to_string(),
                 detail: "requires Cargo feature `ini`".to_string(),
             }),
+
+            // Frontmatter has no whole-document re-render: the Markdown body is
+            // frozen source, not part of the parsed value, so a fresh render
+            // cannot reconstruct the file. Edits go through the source-preserving
+            // set/unset seam (see `DocumentFile`), never here.
+            Format::TomlFrontmatter | Format::YamlFrontmatter => {
+                Err(DocumentError::UnsupportedOperation {
+                    format: "frontmatter".to_string(),
+                    operation: "save".to_string(),
+                    detail:
+                        "frontmatter mode has no whole-document re-render; the Markdown body is \
+                             not part of the parsed value — use source-preserving set/unset"
+                            .to_string(),
+                })
+            }
         }
     }
 
@@ -150,3 +210,25 @@ pub use json::{load as load_json, save as save_json};
 pub use toml::{load as load_toml, save as save_toml};
 #[cfg(feature = "yaml")]
 pub use yaml::{load as load_yaml, save as save_yaml};
+
+#[cfg(test)]
+mod tests {
+    use super::Format;
+
+    #[test]
+    fn format_names_are_stable() {
+        let cases = [
+            (Format::Json, "JSON"),
+            (Format::Toml, "TOML"),
+            (Format::Yaml, "YAML"),
+            (Format::Dotenv, "dotenv"),
+            (Format::Ini, "INI"),
+            (Format::TomlFrontmatter, "TOML frontmatter"),
+            (Format::YamlFrontmatter, "YAML frontmatter"),
+        ];
+
+        for (format, expected) in cases {
+            assert_eq!(format.name(), expected);
+        }
+    }
+}

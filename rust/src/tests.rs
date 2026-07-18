@@ -1922,6 +1922,52 @@ fn cli_emitter_returns_writer_errors() {
     assert!(std::error::Error::source(&err).is_some());
 }
 
+struct OtherFailWriter;
+
+impl std::io::Write for OtherFailWriter {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("boom"))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn cli_emitter_finish_maps_outcomes_to_exit_codes() {
+    // Success writes the terminal event and returns the caller's code.
+    let mut ok = CliEmitter::new(Vec::new(), OutputFormat::Json);
+    assert_eq!(ok.finish_result(json!({"ok": true})), 0);
+    assert!(
+        String::from_utf8(ok.into_inner())
+            .expect("utf8")
+            .contains("\"kind\":\"result\"")
+    );
+
+    // A rich error is built with the json_error builder (the error "type") and
+    // handed to finish — no separate error-emitting convenience method.
+    let mut err = CliEmitter::new(Vec::new(), OutputFormat::Json);
+    let event = crate::protocol::json_error("bad_thing", "nope")
+        .hint("try again")
+        .build()
+        .expect("valid error");
+    assert_eq!(err.finish(event, 2), 2);
+    let out = String::from_utf8(err.into_inner()).expect("utf8");
+    assert!(out.contains("\"code\":\"bad_thing\""), "{out}");
+    assert!(out.contains("\"hint\":\"try again\""), "{out}");
+
+    // A broken pipe (reader hung up) maps to 0, not a failure code.
+    let mut broken = CliEmitter::new(FailingWriter, OutputFormat::Json);
+    let event = crate::protocol::json_error("x", "y")
+        .build()
+        .expect("valid error");
+    assert_eq!(broken.finish(event, 2), 0);
+
+    // Any other write failure maps to 4.
+    let mut other = CliEmitter::new(OtherFailWriter, OutputFormat::Json);
+    assert_eq!(other.finish_result(json!({})), 4);
+}
+
 struct FailOnceWriter {
     failed: bool,
     bytes: Vec<u8>,
@@ -1993,6 +2039,26 @@ fn cli_handle_version_honors_explicit_output_formats() {
         .expect("version should render");
     assert!(out.contains("kind=result"), "{out}");
     assert!(out.contains("result.version=1.2.3"), "{out}");
+}
+
+#[test]
+fn cli_handle_version_skips_output_to_space_value() {
+    // A preceding `--output-to <value>` (space form) must not be mistaken for
+    // the subcommand boundary; the later `--version --output json` must still
+    // be detected. Regression for the pre-clap version scanner.
+    let raw = vec![
+        "agent-cli".to_string(),
+        "--output-to".to_string(),
+        "stdout".to_string(),
+        "--version".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+    ];
+    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
+        .expect("valid version request")
+        .expect("version should render");
+    assert!(out.contains("\"kind\":\"result\""), "{out}");
+    assert!(out.contains("\"version\":\"1.2.3\""), "{out}");
 }
 
 #[test]
@@ -2404,4 +2470,134 @@ fn decode_protocol_event_rejects_unsupported_kind() {
     let err = decode_protocol_event(r#"{"kind":"ping","ping":{},"trace":{}}"#)
         .expect_err("unsupported kind must fail");
     assert!(matches!(err, EventDecodeError::InvalidEvent(_)));
+}
+
+// ═══════════════════════════════════════════
+// Number literal fidelity (shared spec/fixtures/number_fidelity.json)
+// ═══════════════════════════════════════════
+//
+// Phase 1 (rust/src/document, cli/src/main.rs) already made the Rust CLI and
+// document layer digit-faithful via Value::Number(String) and crate-wide
+// serde_json arbitrary_precision. This suite verifies the *library* layer —
+// decode_protocol_event + formatting::render — inherits that fidelity for
+// free on the JSON path: arbitrary_precision makes serde_json::Value::Number
+// retain the exact source literal regardless of call site (parsed via
+// decode_protocol_event or hand-built via json!()), and serialize_json_output
+// serializes that stored text directly, so no library code change was needed
+// for JSON.
+//
+// YAML/plain are a narrower story: format_number() (this file's
+// yaml_scalar/plain_scalar helper) canonicalizes an *integral-valued* float
+// by reformatting through f64 and dropping a trailing ".0", to match
+// Go/TS/Python's own native-number formatting for hand-built values (see its
+// doc comment). Go/TS/Python can tell a *decoded* number apart from a
+// hand-built one (json.Number / LosslessNumber / _RawNumber wrapper types)
+// and skip that canonicalization for decoded values, preserving exact
+// spelling even in YAML. serde_json::Number carries no such decoded-vs-hand-
+// built distinction, so format_number cannot do the same. This is invisible
+// for every fixture case here except one: a decoded "-0.0" loses its trailing
+// zero in YAML/plain ("-0.0" -> "-0", value-preserving — IEEE-754 negative
+// zero survives — but spelling-lossy), which is why number_fidelity.json's
+// "negative_zero" case has no expected_yaml. Every other case's YAML is
+// asserted and exact, since only integral-valued floats hit this path.
+
+#[test]
+fn number_fidelity_fixtures() {
+    let cases = load_fixture("number_fidelity.json");
+    for case in cases
+        .as_array()
+        .expect("number_fidelity.json must be an array")
+    {
+        let name = case["name"].as_str().expect("missing name");
+        let input_line = case["input_line"]
+            .as_str()
+            .expect("input_line must be a string");
+        let expected_json = case["expected_json"]
+            .as_str()
+            .expect("expected_json must be a string");
+
+        let decoded = decode_protocol_event(input_line)
+            .unwrap_or_else(|e| panic!("[number_fidelity/{name}] decode failed: {e}"));
+        let result = match decoded {
+            DecodedEvent::Result(r) => r.result,
+            other => {
+                panic!("[number_fidelity/{name}] expected DecodedEvent::Result, got {other:?}")
+            }
+        };
+
+        let got_json = render(&result, OutputFormat::Json, &OutputOptions::default());
+        assert_eq!(
+            got_json, expected_json,
+            "[number_fidelity/{name}] json mismatch"
+        );
+
+        if let Some(expected_yaml) = case["expected_yaml"].as_str() {
+            let got_yaml = render(&result, OutputFormat::Yaml, &OutputOptions::default());
+            assert_eq!(
+                got_yaml, expected_yaml,
+                "[number_fidelity/{name}] yaml mismatch"
+            );
+        }
+    }
+}
+
+// Guards the pre-existing (not newly introduced) arbitrary_precision Number
+// handling in as_f64/as_i64/format_number: decode_protocol_event wraps every
+// decoded number in the same Value::Number regardless of magnitude, so
+// Plain's suffix arithmetic must keep working for a routine decoded event.
+#[test]
+fn number_fidelity_does_not_regress_ordinary_decoded_numbers_in_plain_output() {
+    let text = r#"{"kind":"result","result":{"duration_ms":42,"size_bytes":5242880,"cpu_percent":85.5},"trace":{}}"#;
+    let decoded = decode_protocol_event(text).expect("decode");
+    let result = match decoded {
+        DecodedEvent::Result(r) => r.result,
+        other => panic!("expected DecodedEvent::Result, got {other:?}"),
+    };
+    let got = render(&result, OutputFormat::Plain, &OutputOptions::default());
+    assert_eq!(got, "cpu=85.5% duration=42ms size=5.0MiB");
+}
+
+// Known, narrow infeasibility (see number_fidelity.json's "negative_zero"
+// case, which deliberately uses "-0.0" rather than bare "-0"): serde_json's
+// arbitrary_precision parser fast-paths a *bare integer* literal with no '.'
+// or 'e' through Rust's native `str::parse::<i64/u64>`, which treats "-0" and
+// "0" as equal and returns unsigned 0, discarding the sign before the
+// string-retention branch is ever reached (rust/src/tests.rs asserted this
+// directly against upstream serde_json 1.0.150's `parse_any_number`, not
+// afdata code). Any float-shaped spelling ("-0.0", "-0e0") is unaffected —
+// those always take the string-retention path. Working around the bare-
+// integer case would require a hand-rolled JSON tokenizer to rewrite "-0"
+// tokens outside of strings before handing text to serde_json, which is
+// exactly the fragile hand-scanning this project's own conventions reject
+// elsewhere; not attempted here.
+#[test]
+fn negative_zero_bare_integer_is_a_known_serde_json_limitation() {
+    let v: serde_json::Value = serde_json::from_str("-0").expect("parses");
+    assert_eq!(
+        serde_json::to_string(&v).expect("serializes"),
+        "0",
+        "if this starts passing, serde_json fixed the upstream limitation \
+         documented above -- promote \"-0\" (bare integer) back into \
+         number_fidelity.json's negative_zero case"
+    );
+}
+
+// Known, narrow infeasibility (see number_fidelity.json's "exponent_notation"
+// case, which deliberately writes "6.022e+23" with an explicit sign rather
+// than bare "6.022e23"): serde_json's arbitrary_precision scanner
+// (`scan_exponent`) inserts a synthetic '+' into its retained text whenever
+// the source exponent has no explicit sign, in every code path (not just a
+// fast-path shortcut like the bare-integer case above) -- so this one is
+// unconditional for any sign-less exponent, not just an edge case. Same
+// reasoning as above for not working around it with hand-rolled scanning.
+#[test]
+fn signless_exponent_is_a_known_serde_json_limitation() {
+    let v: serde_json::Value = serde_json::from_str("6.022e23").expect("parses");
+    assert_eq!(
+        serde_json::to_string(&v).expect("serializes"),
+        "6.022e+23",
+        "if this starts passing, serde_json fixed the upstream limitation \
+         documented above -- promote \"6.022e23\" (sign-less exponent) back \
+         into number_fidelity.json's exponent_notation case"
+    );
 }

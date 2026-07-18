@@ -45,6 +45,7 @@ import {
   cliHandleVersionOrContinue,
   cliParseLogFilters,
   cliParseOutput,
+  CliEmitter,
   LogFilters,
 } from "../src/index.js";
 import {
@@ -317,6 +318,7 @@ function buildRequestLog(command: string | undefined): JsonValue {
     category: "request",
     command: command ?? "none",
   })
+    .trace({})
     .build()
     .toJSON();
 }
@@ -340,6 +342,7 @@ function buildStartupLog(args: string[], command: string | undefined, output: st
     },
     env: startupEnvSnapshot(),
   })
+    .trace({})
     .build()
     .toJSON();
 }
@@ -411,26 +414,31 @@ function strictParseArgs(args: string[]) {
   return parsed;
 }
 
-function renderCliParseError(args: string[], message: string, hint = "try: agent-cli --help"): string {
-  const err = buildCliError(message, hint);
+/**
+ * Best-effort output format for error reporting: honor an explicit --output when
+ * it parses, otherwise fall back to json so even a malformed --output still
+ * yields a readable error envelope.
+ */
+function resolveFormatOrJson(args: string[]): OutputFormat {
   try {
-    const outputArg = resolveOutputArg(args);
-    const fmt = cliParseOutput(outputArg ?? "json");
-    return render(err, fmt);
+    return cliParseOutput(resolveOutputArg(args) ?? "json");
   } catch {
-    return render(err, "json");
+    return "json";
   }
 }
 
 function main(): void {
   const args = process.argv.slice(2);
+
+  // Bootstrap errors happen before the command emitter exists, so each spins up
+  // its own finite emitter and routes the error envelope to stderr via finish().
   try {
     installStreamRedirectFromRawArgs(args);
   } catch (e) {
-    console.log(render(buildCliError((e as Error).message), "json"));
-    process.exit(2);
+    process.exit(CliEmitter.finite("json").finish(buildCliError((e as Error).message), 2));
   }
 
+  // --version prints conventional TEXT to stdout, never an error envelope.
   try {
     const version = cliHandleVersionOrContinue(args, "agent-cli", AGENT_CLI_VERSION);
     if (version !== undefined) {
@@ -438,8 +446,12 @@ function main(): void {
       return;
     }
   } catch (e) {
-    console.log(render(buildCliError((e as Error).message, "valid version output formats: json, yaml, plain"), "json"));
-    process.exit(2);
+    process.exit(
+      CliEmitter.finite("json").finish(
+        buildCliError((e as Error).message, "valid version output formats: json, yaml, plain"),
+        2,
+      ),
+    );
   }
 
   const showHelp = args.includes("--help") || args.includes("-h");
@@ -450,20 +462,24 @@ function main(): void {
   try {
     parsedArgs = strictParseArgs(args);
   } catch (e) {
-    console.log(renderCliParseError(args, (e as Error).message));
-    process.exit(2);
+    process.exit(
+      CliEmitter.finite(resolveFormatOrJson(args)).finish(
+        buildCliError((e as Error).message, "try: agent-cli --help"),
+        2,
+      ),
+    );
   }
   const positionals = parsedArgs.positionals;
   const command = positionals[0];
 
   // --help is one-level plain; --recursive expands the tree and --output picks
-  // the format. A bare --recursive (no --help) falls through to normal parsing.
+  // the format. Help TEXT prints to stdout; a help error is an error envelope on
+  // stderr. A bare --recursive (no --help) falls through to normal parsing.
   if (showHelp) {
     try {
       process.stdout.write(renderHelpOutput(command, resolveOutputArg(args), hasExplicitOutput(args), recursive));
     } catch (e) {
-      console.log(render(buildCliError((e as Error).message), "json"));
-      process.exit(2);
+      process.exit(CliEmitter.finite("json").finish(buildCliError((e as Error).message), 2));
     }
     return;
   }
@@ -474,20 +490,30 @@ function main(): void {
   try {
     outputArg = resolveOutputArg(args);
   } catch (e) {
-    console.log(render(buildCliError((e as Error).message, "valid output formats: json, yaml, plain"), "json"));
-    process.exit(2);
+    process.exit(
+      CliEmitter.finite("json").finish(
+        buildCliError((e as Error).message, "valid output formats: json, yaml, plain"),
+        2,
+      ),
+    );
   }
-  const logArg = typeof values.log === "string" ? values.log : "";
-  const host = typeof values.host === "string" ? values.host : undefined;
 
   // Step 1: parse --output with shared helper
   let fmt: OutputFormat;
   try {
     fmt = cliParseOutput(outputArg ?? "json");
   } catch (e) {
-    console.log(render(buildCliError((e as Error).message), "json"));
-    process.exit(2);
+    process.exit(CliEmitter.finite("json").finish(buildCliError((e as Error).message), 2));
   }
+
+  // One finite emitter for the command: result → stdout, error/log → stderr, per
+  // the AFDATA output-stream contract. finish()/finishResult() resolve the emit
+  // to a process exit code (chosen code on success, 0 on a broken pipe, 4 on any
+  // other write failure) — a library never calls process.exit itself.
+  const emitter = CliEmitter.finite(fmt);
+
+  const logArg = typeof values.log === "string" ? values.log : "";
+  const host = typeof values.host === "string" ? values.host : undefined;
 
   // Step 2: parse --log with shared helper (trim + lowercase + dedup)
   let logArgsForVerbose = logArg ? logArg.split(",") : [];
@@ -497,59 +523,56 @@ function main(): void {
   }
   const log = cliParseLogFilters(logArgsForVerbose);
 
-  // Each diagnostic line self-tags with its `category`, so `--log all` reveals
-  // the full set from real output rather than a static help list.
+  // Each diagnostic line self-tags with its `category`; diagnostics land on stderr.
   if (logEnabled(log, "request")) {
-    console.log(render(buildRequestLog(command), fmt));
+    emitter.emitValidatedValue(buildRequestLog(command));
   }
   if (logEnabled(log, "startup")) {
-    console.log(render(buildStartupLog(args, command, outputArg ?? "json", log, values.verbose === true), fmt));
+    emitter.emitValidatedValue(buildStartupLog(args, command, outputArg ?? "json", log, values.verbose === true));
   }
 
   // Step 3: no subcommand → error with hint
   if (!command) {
-    console.log(render(buildCliError("no subcommand provided", "try: agent-cli --help"), fmt));
-    process.exit(2);
+    process.exit(emitter.finish(buildCliError("no subcommand provided", "try: agent-cli --help"), 2));
   }
 
   switch (command) {
     case "echo": {
-      // Step 4: --dry-run → preview without executing
+      // Step 4: --dry-run → preview without executing. A trace field makes this a
+      // "rich" result, so build the event and hand it to finish directly.
       if (dryRun) {
-        const preview = jsonResult({ action: "echo", log }).trace({ duration_ms: 0 }).build();
-        console.log(render(preview, fmt));
-        return;
+        process.exit(emitter.finish(jsonResult({ action: "echo", log }).trace({ duration_ms: 0 }).build(), 0));
       }
-      const result = jsonResult({ action: "echo", log }).build();
-      console.log(render(result, fmt));
-      break;
+      // Plain result → finishResult (which wraps finish(<result event>, 0)).
+      process.exit(emitter.finishResult({ action: "echo", log }));
     }
     case "ping": {
-      // Step 5: demonstrate a protocol v1 error with hint on failure
+      // Step 5: demonstrate a protocol v1 error with hint on failure. A rich error
+      // (hint + trace) goes through the builder, then finish(event, exitCode).
       const effectiveHost = host ?? process.env[PING_HOST_ENV];
       if (!effectiveHost) {
-        const err = jsonError(
-          "ping_target_not_configured",
-          "ping target not configured"
-        )
-          .hint("set PING_HOST or pass --host")
-          .trace({ duration_ms: 0 })
-          .build();
-        console.log(render(err, fmt));
-        process.exit(1);
+        process.exit(
+          emitter.finish(
+            jsonError("ping_target_not_configured", "ping target not configured")
+              .hint("set PING_HOST or pass --host")
+              .trace({ duration_ms: 0 })
+              .build(),
+            1,
+          ),
+        );
       }
       break;
     }
     case "cancel": {
-      const err = jsonError(
-        "cancelled",
-        "operation cancelled"
-      )
-        .hint("the operation was cancelled before completion")
-        .trace({ duration_ms: 0 })
-        .build();
-      console.log(render(err, fmt));
-      process.exit(1);
+      process.exit(
+        emitter.finish(
+          jsonError("cancelled", "operation cancelled")
+            .hint("the operation was cancelled before completion")
+            .trace({ duration_ms: 0 })
+            .build(),
+          1,
+        ),
+      );
     }
     case "skill": {
       // Step 6: wire the embedded Agent Skill installer to the library.
@@ -557,12 +580,12 @@ function main(): void {
       const scopeArg = typeof values.scope === "string" ? values.scope : "personal";
       const skillsDir = typeof values["skills-dir"] === "string" ? values["skills-dir"] : undefined;
       const force = values.force === true;
-      process.exit(runSkill(positionals[1], agentArg ?? "all", scopeArg ?? "personal", skillsDir, force, fmt));
-      break;
+      process.exit(runSkill(emitter, positionals[1], agentArg ?? "all", scopeArg ?? "personal", skillsDir, force));
     }
     default: {
-      console.log(render(buildCliError(`unknown command: ${command}`, "valid commands: echo, ping, skill"), fmt));
-      process.exit(2);
+      process.exit(
+        emitter.finish(buildCliError(`unknown command: ${command}`, "valid commands: echo, ping, skill"), 2),
+      );
     }
   }
 }
@@ -572,36 +595,34 @@ function main(): void {
  * Returns the process exit code (0 ok, 1 action error, 2 bad flag value).
  */
 function runSkill(
+  emitter: CliEmitter,
   verb: string | undefined,
   agentArg: string,
   scopeArg: string,
   skillsDir: string | undefined,
   force: boolean,
-  fmt: OutputFormat,
 ): number {
   const actions: Record<string, SkillAction> = { status: "status", install: "install", uninstall: "uninstall" };
   const action = verb !== undefined ? actions[verb] : undefined;
   if (action === undefined) {
-    const err = buildCliError("skill requires a subcommand: status, install, uninstall", "example: agent-cli skill status --agent opencode");
-    console.log(render(err, fmt));
-    return 2;
+    return emitter.finish(
+      buildCliError("skill requires a subcommand: status, install, uninstall", "example: agent-cli skill status --agent opencode"),
+      2,
+    );
   }
 
   const built = buildSkillOptions(agentArg, scopeArg, skillsDir, force);
   if ("error" in built) {
-    console.log(render(buildCliError(built.error, built.hint), fmt));
-    return 2;
+    return emitter.finish(buildCliError(built.error, built.hint), 2);
   }
 
   try {
     const report = runSkillAdmin(WIDGET_SPEC, action, built.options);
-    // The report is structured; serialize it for output (it is already JSON-shaped).
-    console.log(render(report as unknown as JsonValue, fmt));
-    return 0;
+    // The structured report becomes a result envelope (result → stdout).
+    return emitter.finishResult(report as unknown as JsonValue);
   } catch (e) {
     if (e instanceof SkillError) {
-      console.log(render(buildCliError(e.message, e.hint), fmt));
-      return 1;
+      return emitter.finish(buildCliError(e.message, e.hint), 1);
     }
     throw e;
   }

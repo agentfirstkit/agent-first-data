@@ -41,6 +41,8 @@ Integer vs string is not uniform across siblings: `_epoch_s` and `_epoch_ms` are
 
 `_rfc3339` needs a **mandatory** offset: `YYYY-MM-DDThh:mm:ss[.fff]` followed by `Z` or `±HH:MM`. A bare `2026-02-14T10:30:00` (no offset), a space instead of `T`, or a trailing IANA name (`...Asia/Shanghai`) is rejected by `afdata lint`. `afdata lint` also type-checks the numeric suffixes (durations `_s`/`_ms`/…, currency `_cents`/`_micro`/`_jpy`) and rejects a `_url` with internal whitespace or bare `user:pass@host` credentials.
 
+A `null` value is exempt from every suffix type constraint above: `null` means the field is absent/unset, not present-with-the-wrong-type, so `law_repeal_at_epoch_s: null` is not a `suffix_type_mismatch`. Absence may be written as an omitted key or as an explicit `null` — both are valid. The constraint applies only once a value is present and non-null.
+
 ### Strict string formats
 
 | Suffix | Format | Example |
@@ -225,22 +227,24 @@ Every protocol event uses `kind` plus one same-named payload:
 | `"result"` | Terminal success |
 | `"error"` | Terminal error with non-empty `error.code` and `error.message` |
 
-Channel policy:
-- `stdout` is the only protocol/log stream for machine-readable events
-- runtime protocol events MUST NOT be emitted on `stderr`
-- `stderr` is reserved for unrecoverable pre-protocol startup failures only
+Channel policy — the stream follows the consumption mode, not the event shape:
+- **Finite one-shot command (default):** `result` → `stdout`; `error`/`progress`/`log` → `stderr`. Routing follows `kind`, not the exit code, so `stdout` carries only successful payloads (`x=$(tool …)`, `tool | next`, and `tool >/dev/null` all stay safe).
+- **Event stream (interleaved events consumed in order):** every event, including `error`, stays on one stream so ordering survives; do not split it across `stdout`/`stderr`.
+- `--output-to <split|stdout|stderr>` (default `split`) selects the mode: `stdout`/`stderr` collapse the whole stream onto one destination. `--output` selects format, `--output-to` selects destination.
+- Raw-scalar readers (`value`/`paths`/`keys`) are intrinsically split and reject a non-default `--output-to`.
+- Choose the mode by how the output is consumed, not reflexively: a plain one-shot shell command uses **finite**; a tool whose output is itself an event stream (streaming rows, interleaved progress/log) or that is agent-facing and wants one structured channel uses **stream/unified** (all on `stdout`, errors included — a stream's terminal error must stay on the stream). When building a CLI on the library, emit terminal events with the emitter's `finish`/`finish_result` helpers (success → the given code, broken pipe → 0, other write failure → a nonzero output-failure code); build errors with the `json_error` builder (the error *type*, carrying hint/retryable/fields) and pass the event to `finish` — the helpers work in either mode.
 
 Optional stream redirection:
-- use `--stdout-file <PATH>` to redirect stdout bytes to a file
-- use `--stderr-file <PATH>` to redirect stderr bytes to a file
-- keep `--output` reserved for stdout format selection (`json`, `yaml`, `plain`, and help-specific `markdown`)
-- do not convert stderr diagnostics to JSON; Rust panics, Python tracebacks, and runtime errors stay native stderr bytes
+- use `--stdout-file <PATH>` / `--stderr-file <PATH>` to redirect a stream's bytes to a file (process-level, beneath the channel routing above)
+- send an event stream to a file by collapsing it (`--output-to stdout`) and redirecting (`--stdout-file <PATH>`); there is no separate events-file flag
+- native panics/tracebacks stay raw `stderr` bytes; in finite mode `stderr` also carries the formatted AFDATA `error`/`progress`/`log` envelopes, so a reader parses JSON lines and tolerates interleaved native bytes
 - treat this as stream destination control, not a second protocol stream and not stream copying
 - do not implement application-level rotation
 
 Recommended enforcement:
-- Rust: enable clippy `print_stderr = "deny"` and disallow `std::eprintln` / `std::io::stderr`
-- Go/Python/TypeScript: add source-policy tests that fail if runtime sources reference stderr APIs
+- route every `stderr` write through the emitter's diagnostic/error path; no ad-hoc stderr that bypasses the formatter in runtime code
+- Rust: keep native panic output as the only unstructured `stderr` (no stray `eprintln!` / `std::io::stderr`)
+- Go/Python/TypeScript: source-policy tests that fail on ad-hoc stderr APIs in runtime code, with the emitter's own sink as the sanctioned exception
 
 ### Templates
 
@@ -263,7 +267,7 @@ Startup payload fields are tool-defined; `config` is recommended, while `version
 | MCP tool | JSON |
 | SSE stream | JSONL |
 
-All use `kind` plus the same-named payload and optional `trace`. Do not split protocol events across `stdout` and `stderr`.
+All use `kind` plus the same-named payload and optional `trace`. An event stream keeps its events on one stream (never split); a finite one-shot command splits by `kind` (`result` → stdout, `error` → stderr) — see Channel policy.
 
 Base validators enforce mandatory envelope/error/lifecycle rules. Strict validators additionally require object-valued `trace` on every event and `retryable` on every error. Log and progress payloads remain tool-defined in both profiles. Use strict validation before claiming compliance with all recommendations.
 
@@ -351,4 +355,4 @@ Use this checklist when the skill is evaluating a change, not just documenting c
 7. Environment variables follow `UPPER_SNAKE_CASE` with the same suffixes
 8. One-time CLI output uses `json_log()`/`CliEmitter` + output helpers; long-running services use `afdata_tracing::try_init()` (Rust) to capture via tracing; other languages emit log events explicitly via builders
 9. Database columns use AFDATA suffixes on generic types (`duration_ms INTEGER`, not `duration INTEGER`); native types like `TIMESTAMPTZ` don't need suffixes
-10. CLI flag parsing uses `cli_parse_output()`/`cli_parse_log_filters()`/`build_cli_error()`/version helpers — not custom reimplementations; uses `try_parse()` not `parse()` in Rust so clap errors go to stdout as JSONL
+10. CLI flag parsing uses `cli_parse_output()`/`cli_parse_log_filters()`/`build_cli_error()`/version helpers — not custom reimplementations; uses `try_parse()` not `parse()` in Rust so a clap/usage error becomes a structured `kind:"error"` envelope (routed to stderr under the default split, exit 2), never raw clap text

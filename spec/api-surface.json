@@ -337,6 +337,59 @@
       "note": "Go-only free constructor (Go has no constructor methods); Rust/Python/TS use CliEmitter::with_options / CliEmitter(..., options=...) / new CliEmitter(..., options) instead."
     },
     {
+      "id": "output_to",
+      "kind": "type",
+      "rust": "OutputTo",
+      "python": "OutputTo",
+      "typescript": "OutputTo",
+      "go": "OutputTo"
+    },
+    {
+      "id": "parse_output_to",
+      "kind": "fn",
+      "rust": null,
+      "python": null,
+      "typescript": "parseOutputTo",
+      "go": "ParseOutputTo",
+      "note": "Rust/Python expose this as the OutputTo::parse associated function / OutputTo.parse classmethod, not a separate top-level export; Go/TS provide it as a free function."
+    },
+    {
+      "id": "cli_emitter_finite",
+      "kind": "fn",
+      "rust": null,
+      "python": null,
+      "typescript": null,
+      "go": "NewCliEmitterFinite",
+      "note": "Go-only free constructor for a finite one-shot emitter (result to stdout, error/progress/log to stderr); Rust/Python/TS construct via CliEmitter methods (finite / finite_with / finiteWith), not separate top-level exports."
+    },
+    {
+      "id": "cli_emitter_finite_with_options",
+      "kind": "fn",
+      "rust": null,
+      "python": null,
+      "typescript": null,
+      "go": "NewCliEmitterFiniteWithOptions",
+      "note": "Go-only free constructor: finite one-shot emitter with explicit output options; Rust/Python/TS use CliEmitter's finite constructor with an options argument instead."
+    },
+    {
+      "id": "cli_emitter_from_output_to",
+      "kind": "fn",
+      "rust": null,
+      "python": null,
+      "typescript": null,
+      "go": "NewCliEmitterFromOutputTo",
+      "note": "Go-only free constructor that builds a finite (split) or unified emitter from a parsed OutputTo selector, wired to the process streams; Rust/Python/TS use CliEmitter::from_output_to / from_output_to / fromOutputTo methods."
+    },
+    {
+      "id": "cli_emitter_from_output_to_with_options",
+      "kind": "fn",
+      "rust": null,
+      "python": null,
+      "typescript": null,
+      "go": "NewCliEmitterFromOutputToWithOptions",
+      "note": "Go-only free constructor: from-OutputTo with explicit output options; Rust/Python/TS use the from_output_to method with an options argument instead."
+    },
+    {
       "id": "output_options_for_policy",
       "kind": "fn",
       "rust": null,

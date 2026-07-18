@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import sys
 from typing import Any, Callable, Mapping, Iterator
 
 from agent_first_data.format import (
@@ -26,6 +27,46 @@ class OutputFormat(enum.Enum):
     JSON = "json"
     YAML = "yaml"
     PLAIN = "plain"
+
+
+class OutputTo(enum.Enum):
+    """Where a CliEmitter sends its events, selected by ``--output-to``.
+
+    The stream an event lands on follows the program's *consumption mode*, not
+    the event's shape (see the spec's CLI Event Framing):
+
+    - ``OutputTo.SPLIT`` (the default) is finite one-shot mode: ``result`` goes
+      to stdout, while ``error``/``progress``/``log`` go to stderr. stdout
+      therefore carries only successful payloads, so a shell capture or pipe
+      never mistakes a failure for data.
+    - ``OutputTo.STDOUT`` / ``OutputTo.STDERR`` are event-stream mode: every
+      event, including ``error``, is collapsed onto that one stream so a consumer
+      reading it in order (branching on ``kind``) sees preserved ordering.
+    """
+
+    SPLIT = "split"
+    STDOUT = "stdout"
+    STDERR = "stderr"
+
+    @classmethod
+    def parse(cls, value: str) -> OutputTo:
+        """Parse an ``--output-to`` value: ``split`` (default), ``stdout``, or ``stderr``.
+
+        Raises ValueError with a message suitable for build_cli_error on unknown values.
+
+        >>> OutputTo.parse("split")
+        <OutputTo.SPLIT: 'split'>
+        >>> OutputTo.parse("xml")
+        Traceback (most recent call last):
+            ...
+        ValueError: unsupported --output-to 'xml'; expected split, stdout, or stderr
+        """
+        try:
+            return cls(value)
+        except ValueError:
+            raise ValueError(
+                f"unsupported --output-to {value!r}; expected split, stdout, or stderr"
+            )
 
 
 class LogFilters:
@@ -125,7 +166,24 @@ def render(value: Any, format: OutputFormat, *, options: OutputOptions | None = 
 
 
 class CliEmitter:
-    """Stateful emitter for finite structured CLI executions."""
+    """Stateful emitter for structured CLI executions.
+
+    The output format, redaction policy, and stream routing are fixed when the
+    emitter is created. Emitting after a terminal event, emitting a repeated
+    terminal event, and writer failures all raise.
+
+    Routing follows the consumption mode (:class:`OutputTo`):
+
+    - :meth:`finite` / :meth:`finite_with` — finite one-shot: ``result`` → the
+      primary writer (stdout), ``error``/``progress``/``log`` → the diagnostic
+      writer (stderr). The recommended default for a one-shot CLI, so shell
+      capture and pipelines never treat a failure as data.
+    - :meth:`stream` (and the plain ``CliEmitter(writer, ...)`` constructor) —
+      event stream: every event, including ``error``, goes to the single writer,
+      preserving interleaved ordering.
+    - :meth:`from_output_to` builds either shape from a parsed :class:`OutputTo`
+      selector.
+    """
 
     def __init__(
         self,
@@ -133,12 +191,85 @@ class CliEmitter:
         format: OutputFormat,
         output_options: OutputOptions | None = None,
         log_fields: Callable[[], Mapping[str, Any]] | None = None,
+        *,
+        diagnostic: Any | None = None,
     ) -> None:
+        """Create an event-stream emitter: every event goes to ``writer``.
+
+        This is the unified/stream form (alias :meth:`stream`). Pass
+        ``diagnostic`` — or use :meth:`finite`/:meth:`finite_with` — for finite
+        one-shot mode, which routes ``result`` to ``writer`` and every diagnostic
+        (``error``/``progress``/``log``) to ``diagnostic``.
+        """
         self._writer = writer
+        self._diagnostic = diagnostic
         self._format = format
         self._output_options = output_options or OutputOptions()
         self._terminal_emitted = False
         self._log_fields_provider = log_fields
+
+    @classmethod
+    def stream(
+        cls,
+        writer: Any,
+        format: OutputFormat,
+        output_options: OutputOptions | None = None,
+        log_fields: Callable[[], Mapping[str, Any]] | None = None,
+    ) -> CliEmitter:
+        """Create an event-stream emitter: every event, including ``error``, goes
+        to the single ``writer``, preserving interleaved ordering. Pick this when
+        the consumer reads one ordered stream and branches on ``kind``.
+        """
+        return cls(writer, format, output_options, log_fields)
+
+    @classmethod
+    def finite_with(
+        cls,
+        result_writer: Any,
+        diagnostic: Any,
+        format: OutputFormat,
+        output_options: OutputOptions | None = None,
+        log_fields: Callable[[], Mapping[str, Any]] | None = None,
+    ) -> CliEmitter:
+        """Create a finite one-shot emitter with explicit sinks: ``result`` goes
+        to ``result_writer``, while ``error``/``progress``/``log`` go to
+        ``diagnostic``.
+        """
+        return cls(result_writer, format, output_options, log_fields, diagnostic=diagnostic)
+
+    @classmethod
+    def finite(
+        cls,
+        format: OutputFormat,
+        output_options: OutputOptions | None = None,
+        log_fields: Callable[[], Mapping[str, Any]] | None = None,
+    ) -> CliEmitter:
+        """Create a finite one-shot emitter wired to the process streams:
+        ``result`` → ``sys.stdout``, ``error``/``progress``/``log`` →
+        ``sys.stderr``. The recommended default for a one-shot CLI.
+        """
+        return cls.finite_with(sys.stdout, sys.stderr, format, output_options, log_fields)
+
+    @classmethod
+    def from_output_to(
+        cls,
+        selector: OutputTo,
+        format: OutputFormat,
+        output_options: OutputOptions | None = None,
+        log_fields: Callable[[], Mapping[str, Any]] | None = None,
+    ) -> CliEmitter:
+        """Build an emitter from a parsed :class:`OutputTo` selector, wired to the
+        process streams: ``SPLIT`` is finite mode (``result`` → stdout,
+        everything else → stderr); ``STDOUT``/``STDERR`` are event-stream mode
+        onto that one stream.
+        """
+        if selector is OutputTo.SPLIT:
+            return cls.finite_with(sys.stdout, sys.stderr, format, output_options, log_fields)
+        if selector is OutputTo.STDOUT:
+            return cls.stream(sys.stdout, format, output_options, log_fields)
+        if selector is OutputTo.STDERR:
+            return cls.stream(sys.stderr, format, output_options, log_fields)
+        raise ValueError(f"unsupported OutputTo selector: {selector!r}")
 
     def with_log_fields(self, provider: Callable[[], Mapping[str, Any]]) -> CliEmitter:
         """Set a provider callable for default log event fields.
@@ -177,8 +308,14 @@ class CliEmitter:
                 merged_log.update(log_payload)
                 envelope["log"] = merged_log
 
-        self._writer.write(render(envelope, self._format, options=self._output_options) + "\n")
-        flush = getattr(self._writer, "flush", None)
+        # Finite mode (a diagnostic sink is present) splits by kind: `result`
+        # stays on the primary writer (stdout), while `error`/`progress`/`log`
+        # are diagnostics routed to the diagnostic writer (stderr). Event-stream
+        # mode (no diagnostic sink) keeps every event on the single writer.
+        use_diagnostic = kind != "result" and self._diagnostic is not None
+        sink = self._diagnostic if use_diagnostic else self._writer
+        sink.write(render(envelope, self._format, options=self._output_options) + "\n")
+        flush = getattr(sink, "flush", None)
         if flush is not None:
             flush()
         if kind in ("result", "error"):
@@ -218,6 +355,34 @@ class CliEmitter:
             raise ValueError("message must be a non-empty string")
         event = json_log({"level": level.value, "message": message}).build()
         self.emit(event)
+
+    def finish(self, event: Event | dict, success_code: int) -> int:
+        """Emit ``event`` as the terminal event and resolve the outcome to a
+        process exit code, so a one-shot CLI need not hand-roll the
+        emit-then-exit dance.
+
+        Returns ``success_code`` on a successful write; ``0`` if the write failed
+        because the reader hung up (broken pipe); ``4`` on any other emit,
+        validation, or write failure. A library never calls :func:`sys.exit`
+        itself — return this code from the program's entry point.
+        """
+        try:
+            self.emit(event)
+        except BrokenPipeError:
+            return 0
+        except Exception:
+            return 4
+        return success_code
+
+    def finish_result(self, payload: Any) -> int:
+        """Convenience over :meth:`finish`: emit a ``result`` payload and return
+        ``0`` on success.
+
+        Errors have no matching convenience: build the event through the error
+        builder — ``json_error(code, message).hint_if_some(hint)...build()``, which
+        also carries ``retryable`` and extra fields — and pass it to
+        :meth:`finish` with the desired exit code."""
+        return self.finish(json_result(payload).build(), 0)
 
 
 def build_cli_version(version: str) -> dict:

@@ -91,7 +91,7 @@ impl serde::Serializer for ValueSerializer {
             Ok(Value::Float(value))
         } else {
             Err(SerializeError(
-                "non-finite float is not a configuration value".to_string(),
+                "non-finite float is not a document value".to_string(),
             ))
         }
     }
@@ -441,6 +441,26 @@ impl serde::Serializer for ValueKeySerializer {
     }
 }
 
+/// Best-effort numeric visit for a [`Value::Number`] literal: integer first
+/// (covers a magnitude-only-oversized integer literal), else lossy `f64`.
+fn visit_number_literal<'de, V: de::Visitor<'de>>(
+    text: &str,
+    visitor: V,
+) -> Result<V::Value, serde::de::value::Error> {
+    if let Ok(value) = text.parse::<i64>() {
+        return visitor.visit_i64(value);
+    }
+    if let Ok(value) = text.parse::<u64>() {
+        return visitor.visit_u64(value);
+    }
+    match text.parse::<f64>() {
+        Ok(value) => visitor.visit_f64(value),
+        Err(_) => Err(de::Error::custom(format!(
+            "invalid numeric literal `{text}`"
+        ))),
+    }
+}
+
 struct ValueDeserializer<'a>(&'a Value);
 
 macro_rules! string_number {
@@ -473,6 +493,15 @@ where
             Value::Integer(value) => visitor.visit_i64(*value),
             Value::Unsigned(value) => visitor.visit_u64(*value),
             Value::Float(value) => visitor.visit_f64(*value),
+            // A `Value::Number` literal only exists because it does not fit
+            // `i64`/`u64`/`f64` cleanly at the source-text level (e.g. an
+            // integer beyond `u64::MAX`), but a typed Rust struct field can
+            // only ever hold one of those three widths anyway — so a
+            // best-effort numeric visit (integer first, else lossy `f64`) is
+            // the most faithful a generic typed decode can be here. Callers
+            // that need the exact digits read the untyped `Value` via
+            // `Value::as_number_literal` instead of decoding through serde.
+            Value::Number(text) => visit_number_literal(text, visitor),
             Value::String(value) => visitor.visit_string(value.clone()),
             Value::Array(values) => visitor.visit_seq(BorrowedSeqAccess {
                 values: values.iter(),

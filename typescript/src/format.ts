@@ -6,7 +6,17 @@
  * isValidRfc3339Time, isValidRfc3339, isValidBcp47, RedactionPolicy,
  * PlainStyle, and OutputOptions. The single render entry point (`render`)
  * lives in cli.ts and calls this module's internal JSON/YAML/plain formatters.
+ *
+ * Number literal fidelity: decodeProtocolEvent parses with `lossless-json`
+ * instead of JSON.parse, so a number's exact source literal (arbitrary
+ * precision integers, high-precision floats, exponent forms, "-0") survives
+ * decode. Parsed numbers become LosslessNumber internally; every JSON/YAML
+ * rendering path here treats it as an opaque scalar leaf (never destructured
+ * as a plain object) and re-emits its exact literal text. This is internal —
+ * LosslessNumber is never part of the public JsonValue type or exports.
  */
+
+import { parse as losslessParse, stringify as losslessStringify, isLosslessNumber } from "lossless-json";
 
 export type JsonValue =
   | string
@@ -381,7 +391,11 @@ const ERROR_RESERVED_FIELDS = new Set(["code", "message", "hint", "retryable"]);
 export function decodeProtocolEvent(text: string): DecodedEvent {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    // lossless-json instead of JSON.parse: preserves each number's exact
+    // source literal (see module-level fidelity note) instead of collapsing
+    // it through float64. isSyntaxError-compatible: throws the same
+    // SyntaxError shape JSON.parse would.
+    parsed = losslessParse(text);
   } catch (e) {
     throw new EventDecodeError(`invalid JSON: ${(e as Error).message}`);
   }
@@ -466,7 +480,21 @@ export function outputOptionsForPolicy(policy: RedactionPolicy): OutputOptions {
  */
 export function formatJsonValue(value: JsonValue | Event, options: OutputOptions = {}): string {
   const unwrapped = value instanceof Event ? (value.toJSON() as JsonValue) : value;
-  return JSON.stringify(redactedValue(unwrapped, options.redaction ?? {}));
+  return canonicalJsonString(redactedValue(unwrapped, options.redaction ?? {}));
+}
+
+/**
+ * Compact JSON serialization, byte-identical to `JSON.stringify(value)` for
+ * every value that contains no LosslessNumber, and additionally correct for
+ * values that do: `JSON.stringify` cannot serialize a LosslessNumber (it has
+ * no `toJSON` and isn't a boxed Number, so it would fall back to serializing
+ * its internal `{value, isLosslessNumber}` fields as if they were user data).
+ * lossless-json's `stringify` recognizes LosslessNumber and re-emits its
+ * exact literal text unquoted, and matches native JSON.stringify's escaping
+ * and formatting for everything else.
+ */
+function canonicalJsonString(value: JsonValue): string {
+  return losslessStringify(value) ?? "null";
 }
 
 /**
@@ -945,6 +973,10 @@ function isInt(value: JsonValue): value is number {
 function decimalIntText(value: JsonValue): string | null {
   if (typeof value === "string" && /^-?\d+$/.test(value)) return value;
   if (isInt(value)) return String(value);
+  if (isLosslessNumber(value)) {
+    const text = value.toString();
+    return /^-?\d+$/.test(text) ? text : null;
+  }
   return null;
 }
 
@@ -971,15 +1003,29 @@ function isNum(value: JsonValue): value is number {
 function tryProcessField(key: string, value: JsonValue): [string, string] | null {
   let stripped: string | null;
 
+  // Plain-format suffix processing below does real arithmetic (division,
+  // modulo, Math.floor/abs) that only works on a native JS number. A decoded
+  // LosslessNumber is normalized to one here via Number() \u2014 which never
+  // throws, unlike LosslessNumber's own valueOf() (documented to throw for
+  // values it can't safely represent as number/bigint) \u2014 so an ordinary
+  // decoded value (e.g. duration_ms: 42) keeps formatting exactly as before,
+  // and an exotic decoded value degrades gracefully (loses precision here,
+  // same as it always would for a >2^53 native number) rather than crashing.
+  // This is Plain's documented lossy/human path; JSON/YAML stay exact via
+  // yamlScalar/plainScalar/canonicalJsonString, and decimalIntText below
+  // (msats/sats/epoch_ns) keeps exactness by reading `value` directly instead
+  // of `numeric`.
+  const numeric: JsonValue = isLosslessNumber(value) ? Number(value.toString()) : value;
+
   // Group 1: compound timestamp suffixes
   stripped = stripSuffixCI(key, "_epoch_ms");
   if (stripped !== null) {
-    if (isInt(value)) { const formatted = formatRfc3339Ms(value); if (formatted !== null) return [stripped, formatted]; }
+    if (isInt(numeric)) { const formatted = formatRfc3339Ms(numeric); if (formatted !== null) return [stripped, formatted]; }
     return null;
   }
   stripped = stripSuffixCI(key, "_epoch_s");
   if (stripped !== null) {
-    if (isInt(value)) { const formatted = formatRfc3339Ms(value * 1000); if (formatted !== null) return [stripped, formatted]; }
+    if (isInt(numeric)) { const formatted = formatRfc3339Ms(numeric * 1000); if (formatted !== null) return [stripped, formatted]; }
     return null;
   }
   stripped = stripSuffixCI(key, "_epoch_ns");
@@ -992,24 +1038,24 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   // Group 2: compound currency suffixes
   stripped = stripSuffixCI(key, "_usd_cents");
   if (stripped !== null) {
-    if (isInt(value) && value >= 0) return [stripped, `$${Math.floor(value / 100)}.${String(value % 100).padStart(2, "0")}`];
+    if (isInt(numeric) && numeric >= 0) return [stripped, `$${Math.floor(numeric / 100)}.${String(numeric % 100).padStart(2, "0")}`];
     return null;
   }
   stripped = stripSuffixCI(key, "_eur_cents");
   if (stripped !== null) {
-    if (isInt(value) && value >= 0) return [stripped, `\u20ac${Math.floor(value / 100)}.${String(value % 100).padStart(2, "0")}`];
+    if (isInt(numeric) && numeric >= 0) return [stripped, `\u20ac${Math.floor(numeric / 100)}.${String(numeric % 100).padStart(2, "0")}`];
     return null;
   }
   const gc = tryStripGenericCents(key);
   if (gc !== null) {
     const [gcStripped, code] = gc;
-    if (isInt(value) && value >= 0) return [gcStripped, `${Math.floor(value / 100)}.${String(value % 100).padStart(2, "0")} ${code.toUpperCase()}`];
+    if (isInt(numeric) && numeric >= 0) return [gcStripped, `${Math.floor(numeric / 100)}.${String(numeric % 100).padStart(2, "0")} ${code.toUpperCase()}`];
     return null;
   }
   const gm = tryStripGenericMicro(key);
   if (gm !== null) {
     const [gmStripped, code] = gm;
-    if (isInt(value) && value >= 0) return [gmStripped, `${Math.floor(value / 1_000_000)}.${String(value % 1_000_000).padStart(6, "0")} ${code.toUpperCase()}`];
+    if (isInt(numeric) && numeric >= 0) return [gmStripped, `${Math.floor(numeric / 1_000_000)}.${String(numeric % 1_000_000).padStart(6, "0")} ${code.toUpperCase()}`];
     return null;
   }
 
@@ -1021,17 +1067,17 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   }
   stripped = stripSuffixCI(key, "_minutes");
   if (stripped !== null) {
-    if (isNum(value)) return [stripped, `${plainScalar(value)} minutes`];
+    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)} minutes`];
     return null;
   }
   stripped = stripSuffixCI(key, "_hours");
   if (stripped !== null) {
-    if (isNum(value)) return [stripped, `${plainScalar(value)} hours`];
+    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)} hours`];
     return null;
   }
   stripped = stripSuffixCI(key, "_days");
   if (stripped !== null) {
-    if (isNum(value)) return [stripped, `${plainScalar(value)} days`];
+    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)} days`];
     return null;
   }
 
@@ -1050,39 +1096,39 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   }
   stripped = stripSuffixCI(key, "_bytes");
   if (stripped !== null) {
-    if (isInt(value) && value >= 0) return [stripped, formatBytesHuman(value)];
+    if (isInt(numeric) && numeric >= 0) return [stripped, formatBytesHuman(numeric)];
     return null;
   }
   stripped = stripSuffixCI(key, "_percent");
   if (stripped !== null) {
-    if (isNum(value)) return [stripped, `${plainScalar(value)}%`];
+    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)}%`];
     return null;
   }
   // Group 5: short suffixes (last to avoid false positives)
   stripped = stripSuffixCI(key, "_jpy");
   if (stripped !== null) {
-    if (isInt(value) && value >= 0) return [stripped, `\u00a5${formatWithCommas(value)}`];
+    if (isInt(numeric) && numeric >= 0) return [stripped, `\u00a5${formatWithCommas(numeric)}`];
     return null;
   }
   stripped = stripSuffixCI(key, "_ns");
   if (stripped !== null) {
-    if (isNum(value)) return [stripped, `${plainScalar(value)}ns`];
+    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)}ns`];
     return null;
   }
   stripped = stripSuffixCI(key, "_us");
   if (stripped !== null) {
-    if (isNum(value)) return [stripped, `${plainScalar(value)}\u03bcs`];
+    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)}\u03bcs`];
     return null;
   }
   stripped = stripSuffixCI(key, "_ms");
   if (stripped !== null) {
-    const fv = formatMsValue(value);
+    const fv = formatMsValue(numeric);
     if (fv !== null) return [stripped, fv];
     return null;
   }
   stripped = stripSuffixCI(key, "_s");
   if (stripped !== null) {
-    if (isNum(value)) return [stripped, `${plainScalar(value)}s`];
+    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)}s`];
     return null;
   }
 
@@ -1305,7 +1351,10 @@ function yamlScalar(value: JsonValue): string {
   if (value === null) return "null";
   if (typeof value === "boolean") return value.toString();
   if (typeof value === "number") return value.toString();
-  return `"${escapeYamlStr(JSON.stringify(sortJsonValue(value)))}"`;
+  // Decoded number: emit the exact source literal unquoted, matching JSON's
+  // structure-preserving fidelity contract for YAML too.
+  if (isLosslessNumber(value)) return value.toString();
+  return `"${escapeYamlStr(canonicalJsonString(sortJsonValue(value)))}"`;
 }
 
 
@@ -1353,12 +1402,16 @@ function plainScalar(value: JsonValue): string {
   if (value === null) return "null";
   if (typeof value === "boolean") return value.toString();
   if (typeof value === "number") return value.toString();
-  return JSON.stringify(sortJsonValue(value));
+  // Decoded number: emit the exact source literal (Plain is documented lossy
+  // for arithmetic-derived formatting, but a bare pass-through scalar still
+  // gets its exact digits, not a mangled float64 round-trip).
+  if (isLosslessNumber(value)) return value.toString();
+  return canonicalJsonString(sortJsonValue(value));
 }
 
 function plainScalarRaw(value: JsonValue): string {
   if (isObject(value) || Array.isArray(value)) {
-    return JSON.stringify(sortJsonValue(value));
+    return canonicalJsonString(sortJsonValue(value));
   }
   return plainScalar(value);
 }
@@ -1401,6 +1454,11 @@ function sanitizeForJson(value: unknown, stack = new WeakSet<object>(), depth = 
   if (t === "function") return "<unsupported:function>";
   if (t === "symbol") return "<unsupported:symbol>";
 
+  // A LosslessNumber (from decodeProtocolEvent) is typeof "object" but must
+  // stay opaque: the generic object branch below would otherwise flatten it
+  // into its internal {value, isLosslessNumber} fields via Object.entries.
+  if (isLosslessNumber(value)) return value as unknown as JsonValue;
+
   if (value instanceof Error) return value.message;
   if (value instanceof Date) return value.toISOString();
 
@@ -1428,7 +1486,13 @@ function sanitizeForJson(value: unknown, stack = new WeakSet<object>(), depth = 
 }
 
 function isObject(value: unknown): value is { [key: string]: JsonValue } {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  // isLosslessNumber excludes decoded numbers: a LosslessNumber is
+  // typeof "object" but is an opaque scalar leaf, never a plain JSON object —
+  // every object-walking function below (redaction, YAML/plain rendering,
+  // sortJsonValue, validation) funnels through this check, so excluding it
+  // here is the single choke point that keeps LosslessNumber from being
+  // destructured into its internal {value, isLosslessNumber} fields.
+  return typeof value === "object" && value !== null && !Array.isArray(value) && !isLosslessNumber(value);
 }
 
 function sortedObjectKeys(obj: { [key: string]: JsonValue }): string[] {

@@ -180,6 +180,7 @@ fn toml_fragment(value: &Value) -> Option<String> {
         Value::Unsigned(value) => i64::try_from(*value).ok().map(|value| value.to_string()),
         Value::Float(value) if value.is_finite() => Some(value.to_string()),
         Value::Float(_) => None,
+        Value::Number(text) => Some(text.clone()),
         Value::String(value) => Some(format!("\"{}\"", value.escape_default())),
         Value::Array(values) => {
             let fragments = values
@@ -243,6 +244,7 @@ fn render_yaml_with_comments(
                 Value::Integer(i) => out.push_str(&i.to_string()),
                 Value::Unsigned(i) => out.push_str(&i.to_string()),
                 Value::Float(f) => out.push_str(&f.to_string()),
+                Value::Number(text) => out.push_str(text),
                 Value::Bool(b) => out.push_str(&b.to_string()),
                 Value::Null => out.push_str("null"),
                 Value::Array(a) => {
@@ -292,6 +294,7 @@ fn render_yaml_sequence(
             Value::Integer(value) => out.push_str(&value.to_string()),
             Value::Unsigned(value) => out.push_str(&value.to_string()),
             Value::Float(value) => out.push_str(&value.to_string()),
+            Value::Number(text) => out.push_str(text),
             Value::Bool(value) => out.push_str(&value.to_string()),
             Value::Null => out.push_str("null"),
             Value::Object(_) | Value::Array(_) => {

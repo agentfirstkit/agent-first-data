@@ -39,7 +39,7 @@ There are no named redaction profiles. Use the default policy (`All`), an explic
 
 ## Where to use it: CLI flags, config files, logs, and API responses
 
-- **Building a CLI tool an agent will call** — your output is understood correctly the first time, with no extra schema to ship.
+- **Building a CLI tool an agent will call** — your output is understood correctly the first time, with no extra schema to ship. Results land on `stdout` and errors on `stderr` by default, so a shell capture or pipe never mistakes a failure for data; a single `--output-to stdout` collapses everything onto one stream when a consumer would rather branch on `kind`.
 - **Writing a config file** — keys like `timeout_s` or `db_password_secret` make settings self-explanatory to whoever edits them, and secrets stay hidden when the config is printed back.
 - **Adding logs to a service** — the same lines stay readable for a person and parseable for an agent.
 - **Designing an API response or event payload** — units and sensitivity travel *with* the data, across every boundary it crosses.

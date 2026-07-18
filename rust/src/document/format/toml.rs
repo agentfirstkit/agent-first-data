@@ -131,6 +131,29 @@ fn toml_item(value: &Value) -> DocumentResult<toml_edit::Item> {
             operation: "set".to_string(),
             detail: "non-finite TOML float is not representable".to_string(),
         }),
+        // A `Value::Number` literal is float-shaped (has a `.`/`e`) or
+        // integer-shaped (does not); an integer-shaped one only exists
+        // because it overflows `u64`, which also overflows TOML's 64-bit
+        // integer grammar, so it can never be written. A float-shaped one
+        // parses to `f64` cleanly (it already passed JSON-number syntax
+        // validation) and writes like any other TOML float — TOML floats
+        // are canonically `f64` at the format level, so this is not a
+        // fidelity regression versus `Value::Float` above.
+        Value::Number(text) if value.is_float() => text
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(toml_edit::value)
+            .ok_or_else(|| DocumentError::UnsupportedOperation {
+                format: "TOML".to_string(),
+                operation: "set".to_string(),
+                detail: format!("float literal `{text}` is not representable in TOML"),
+            }),
+        Value::Number(text) => Err(DocumentError::UnsupportedOperation {
+            format: "TOML".to_string(),
+            operation: "set".to_string(),
+            detail: format!("integer literal `{text}` exceeds TOML's 64-bit integer range"),
+        }),
         Value::String(value) => Ok(toml_edit::value(value.clone())),
         Value::Array(_) | Value::Object(_) => Err(DocumentError::UnsupportedOperation {
             format: "TOML".to_string(),
@@ -192,6 +215,21 @@ fn our_value_to_toml_value(v: &Value) -> DocumentResult<toml::Value> {
             }
         }),
         Value::Float(f) => Ok(toml::Value::Float(*f)),
+        Value::Number(text) if v.is_float() => text
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(toml::Value::Float)
+            .ok_or_else(|| DocumentError::UnsupportedOperation {
+                format: "TOML".to_string(),
+                operation: "save".to_string(),
+                detail: format!("float literal `{text}` is not representable in TOML"),
+            }),
+        Value::Number(text) => Err(DocumentError::UnsupportedOperation {
+            format: "TOML".to_string(),
+            operation: "save".to_string(),
+            detail: format!("integer literal `{text}` exceeds TOML's 64-bit integer range"),
+        }),
         Value::String(s) => Ok(toml::Value::String(s.clone())),
         Value::Array(a) => {
             let arr = a

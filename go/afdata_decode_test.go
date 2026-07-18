@@ -148,3 +148,60 @@ func asEventDecodeError(err error, target **EventDecodeError) bool {
 	}
 	return false
 }
+
+// TestNumberFidelityFixtures drives spec/fixtures/number_fidelity.json
+// (shared across all four SDKs). DecodeProtocolEvent already used
+// dec.UseNumber() before this phase; this suite is the regression guard for
+// that plus the marshalToObject fix in afdata.go (builder Trace/Extend/error
+// Build no longer round-trip a caller-supplied struct through
+// json.Unmarshal into map[string]any without UseNumber, which silently
+// collapsed >2^53 struct fields to float64).
+func TestNumberFidelityFixtures(t *testing.T) {
+	for _, tc := range loadFixture("number_fidelity.json") {
+		name := tc["name"].(string)
+		t.Run(name, func(t *testing.T) {
+			inputLine := tc["input_line"].(string)
+			expectedJSON := tc["expected_json"].(string)
+
+			decoded, err := DecodeProtocolEvent(inputLine)
+			if err != nil {
+				t.Fatalf("decode failed: %v", err)
+			}
+			result, ok := decoded.(*DecodedResult)
+			if !ok {
+				t.Fatalf("decoded type = %T, want *DecodedResult", decoded)
+			}
+
+			gotJSON := Render(result.Result, OutputFormatJson, OutputOptions{})
+			if gotJSON != expectedJSON {
+				t.Errorf("json got %q, want %q", gotJSON, expectedJSON)
+			}
+
+			if expectedYAML, ok := tc["expected_yaml"].(string); ok {
+				gotYAML := Render(result.Result, OutputFormatYaml, OutputOptions{})
+				if gotYAML != expectedYAML {
+					t.Errorf("yaml got %q, want %q", gotYAML, expectedYAML)
+				}
+			}
+		})
+	}
+}
+
+// TestNumberFidelityDoesNotRegressOrdinaryDecodedNumbersInPlainOutput guards
+// the pre-existing (not newly introduced) json.Number handling in
+// asInt64/asFloat64/yamlScalar/plainScalar: DecodeProtocolEvent wraps every
+// decoded number, including small ordinary ones, in json.Number, so Plain's
+// suffix arithmetic must keep working for a routine decoded event.
+func TestNumberFidelityDoesNotRegressOrdinaryDecodedNumbersInPlainOutput(t *testing.T) {
+	line := `{"kind":"result","result":{"duration_ms":42,"size_bytes":5242880,"cpu_percent":85.5},"trace":{}}`
+	decoded, err := DecodeProtocolEvent(line)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	result := decoded.(*DecodedResult).Result
+	got := Render(result, OutputFormatPlain, OutputOptions{})
+	want := "cpu=85.5% duration=42ms size=5.0MiB"
+	if got != want {
+		t.Errorf("plain got %q, want %q", got, want)
+	}
+}

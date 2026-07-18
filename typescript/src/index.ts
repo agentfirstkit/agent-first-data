@@ -38,10 +38,12 @@ export {
 } from "./format.js";
 export {
   type OutputFormat,
+  type OutputTo,
   type CliEventWriter,
   CliEmitter,
   LogFilters,
   cliParseOutput,
+  parseOutputTo,
   cliParseLogFilters,
   render,
   buildCliError,

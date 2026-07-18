@@ -34,6 +34,7 @@ from agent_first_data.format import (
 
 from agent_first_data.cli import (
     OutputFormat,
+    OutputTo,
     LogFilters,
     CliEmitter,
     cli_parse_output,
@@ -76,6 +77,7 @@ __all__ = [
     "is_valid_rfc3339_date",
     "is_valid_rfc3339_time",
     "OutputFormat",
+    "OutputTo",
     "LogFilters",
     "CliEmitter",
     "cli_parse_output",

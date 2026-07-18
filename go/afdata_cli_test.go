@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -367,6 +368,215 @@ func TestCliEmitterDoesNotCommitTerminalStateWhenWriteFails(t *testing.T) {
 	}
 	if lines := strings.Count(strings.TrimSpace(writer.buf.String()), "\n") + 1; lines != 1 {
 		t.Fatalf("expected one event line, got %d", lines)
+	}
+}
+
+// ═══════════════════════════════════════════
+// OutputTo parsing
+// ═══════════════════════════════════════════
+
+func TestParseOutputTo_AllVariants(t *testing.T) {
+	cases := []struct {
+		in   string
+		want OutputTo
+	}{
+		{"split", OutputToSplit},
+		{"stdout", OutputToStdout},
+		{"stderr", OutputToStderr},
+	}
+	for _, c := range cases {
+		got, err := ParseOutputTo(c.in)
+		if err != nil {
+			t.Errorf("ParseOutputTo(%q): unexpected error: %v", c.in, err)
+		}
+		if got != c.want {
+			t.Errorf("ParseOutputTo(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestParseOutputTo_RejectsUnknown(t *testing.T) {
+	for _, s := range []string{"both", "SPLIT", "", "file"} {
+		_, err := ParseOutputTo(s)
+		if err == nil {
+			t.Errorf("ParseOutputTo(%q): expected error, got nil", s)
+		}
+	}
+	_, err := ParseOutputTo("both")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !contains(err.Error(), "both") || !contains(err.Error(), "split") {
+		t.Errorf("error %q should name the bad value and the accepted set", err.Error())
+	}
+}
+
+// ═══════════════════════════════════════════
+// CliEmitter two-mode routing
+// ═══════════════════════════════════════════
+
+// Finite one-shot mode splits by kind: result → the primary (stdout) sink,
+// while error/progress/log → the diagnostic (stderr) sink.
+func TestCliEmitterFiniteSplitsResultToPrimary(t *testing.T) {
+	var out, diag bytes.Buffer
+	emitter := NewCliEmitterFinite(&out, &diag, OutputFormatJson)
+
+	if err := emitter.EmitProgress("working"); err != nil {
+		t.Fatalf("progress emit: %v", err)
+	}
+	if err := emitter.EmitLog(LogLevelInfo, "step"); err != nil {
+		t.Fatalf("log emit: %v", err)
+	}
+	if err := emitter.EmitResult(map[string]any{"rows": 2}); err != nil {
+		t.Fatalf("result emit: %v", err)
+	}
+
+	if !contains(out.String(), "\"kind\":\"result\"") {
+		t.Fatalf("result must go to the primary sink, got: %q", out.String())
+	}
+	if contains(out.String(), "\"kind\":\"progress\"") || contains(out.String(), "\"kind\":\"log\"") {
+		t.Fatalf("diagnostics must not reach the primary sink, got: %q", out.String())
+	}
+	if !contains(diag.String(), "\"kind\":\"progress\"") || !contains(diag.String(), "\"kind\":\"log\"") {
+		t.Fatalf("progress/log must go to the diagnostic sink, got: %q", diag.String())
+	}
+	if contains(diag.String(), "\"kind\":\"result\"") {
+		t.Fatalf("result must not reach the diagnostic sink, got: %q", diag.String())
+	}
+}
+
+// In finite mode an error is a diagnostic (routing follows kind, not exit code),
+// so it goes to the diagnostic sink, keeping the primary (stdout) sink free of
+// anything a pipe could mistake for a successful payload.
+func TestCliEmitterFiniteRoutesErrorToDiagnostic(t *testing.T) {
+	var out, diag bytes.Buffer
+	emitter := NewCliEmitterFinite(&out, &diag, OutputFormatJson)
+
+	if err := emitter.EmitError("boom", "it failed"); err != nil {
+		t.Fatalf("error emit: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("primary sink must stay empty on error, got: %q", out.String())
+	}
+	if !contains(diag.String(), "\"kind\":\"error\"") {
+		t.Fatalf("error must go to the diagnostic sink, got: %q", diag.String())
+	}
+}
+
+// Event-stream (unified) mode collapses every event, including error, onto the
+// single writer so a consumer reading one ordered stream sees them all.
+func TestCliEmitterStreamUnifiesAllEvents(t *testing.T) {
+	var buf bytes.Buffer
+	emitter := NewCliEmitter(&buf, OutputFormatJson)
+
+	if err := emitter.EmitProgress("working"); err != nil {
+		t.Fatalf("progress emit: %v", err)
+	}
+	if err := emitter.EmitLog(LogLevelInfo, "step"); err != nil {
+		t.Fatalf("log emit: %v", err)
+	}
+	if err := emitter.EmitError("boom", "it failed"); err != nil {
+		t.Fatalf("error emit: %v", err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{"\"kind\":\"progress\"", "\"kind\":\"log\"", "\"kind\":\"error\""} {
+		if !contains(out, want) {
+			t.Fatalf("stream mode must keep %s on the single writer, got: %q", want, out)
+		}
+	}
+	if lines := strings.Count(strings.TrimSpace(out), "\n") + 1; lines != 3 {
+		t.Fatalf("expected three framed events, got %d: %q", lines, out)
+	}
+}
+
+// The from-selector constructor picks the shape: split → finite (a diagnostic
+// sink is wired), stdout/stderr → stream (a single writer, no diagnostic sink).
+func TestNewCliEmitterFromOutputToShape(t *testing.T) {
+	if e := NewCliEmitterFromOutputTo(OutputToSplit, OutputFormatJson); e.diagnostic == nil {
+		t.Error("OutputToSplit must produce a finite emitter with a diagnostic sink")
+	}
+	if e := NewCliEmitterFromOutputTo(OutputToStdout, OutputFormatJson); e.diagnostic != nil {
+		t.Error("OutputToStdout must produce a stream emitter with no diagnostic sink")
+	}
+	if e := NewCliEmitterFromOutputTo(OutputToStderr, OutputFormatJson); e.diagnostic != nil {
+		t.Error("OutputToStderr must produce a stream emitter with no diagnostic sink")
+	}
+}
+
+// ═══════════════════════════════════════════
+// CliEmitter Finish / exit-code helpers
+// ═══════════════════════════════════════════
+
+func TestCliEmitterFinishSuccessReturnsSuccessCode(t *testing.T) {
+	var buf bytes.Buffer
+	emitter := NewCliEmitter(&buf, OutputFormatJson)
+	errEvent, _ := NewJSONError("cancelled", "operation cancelled").Build()
+	if code := emitter.Finish(errEvent, 1); code != 1 {
+		t.Fatalf("Finish success code = %d, want 1", code)
+	}
+	if !contains(buf.String(), "\"kind\":\"error\"") {
+		t.Fatalf("Finish must write the event: %q", buf.String())
+	}
+}
+
+func TestCliEmitterFinishResultWritesResultAndReturnsZero(t *testing.T) {
+	var out, diag bytes.Buffer
+	emitter := NewCliEmitterFinite(&out, &diag, OutputFormatJson)
+	if code := emitter.FinishResult(map[string]any{"rows": 3}); code != 0 {
+		t.Fatalf("FinishResult code = %d, want 0", code)
+	}
+	if !contains(out.String(), "\"kind\":\"result\"") || !contains(out.String(), "rows") {
+		t.Fatalf("FinishResult must write the result to the primary sink: %q", out.String())
+	}
+	if diag.Len() != 0 {
+		t.Fatalf("FinishResult must not write to the diagnostic sink: %q", diag.String())
+	}
+}
+
+// A rich error routed through the builder + Finish lands on the diagnostic sink
+// with its hint intact, and Finish returns the caller's exit code.
+func TestCliEmitterFinishRichErrorToDiagnostic(t *testing.T) {
+	var out, diag bytes.Buffer
+	emitter := NewCliEmitterFinite(&out, &diag, OutputFormatJson)
+	event, err := NewJSONError("cancelled", "operation cancelled").
+		Hint("retry later").
+		Trace(map[string]any{"duration_ms": 0}).
+		Build()
+	if err != nil {
+		t.Fatalf("build error event: %v", err)
+	}
+	if code := emitter.Finish(event, 1); code != 1 {
+		t.Fatalf("Finish code = %d, want 1", code)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("error must not reach the primary sink: %q", out.String())
+	}
+	got := diag.String()
+	if !contains(got, "\"kind\":\"error\"") || !contains(got, "cancelled") || !contains(got, "retry later") {
+		t.Fatalf("error (incl. hint) must reach the diagnostic sink: %q", got)
+	}
+}
+
+type epipeWriter struct{}
+
+func (epipeWriter) Write(_ []byte) (int, error) { return 0, syscall.EPIPE }
+
+func TestCliEmitterFinishBrokenPipeReturnsZero(t *testing.T) {
+	// A broken pipe (reader hung up) collapses any success code to 0.
+	if code := NewCliEmitter(epipeWriter{}, OutputFormatJson).FinishResult(map[string]any{"ok": true}); code != 0 {
+		t.Fatalf("broken pipe FinishResult code = %d, want 0", code)
+	}
+	errEvent, _ := NewJSONError("boom", "it failed").Build()
+	if code := NewCliEmitter(epipeWriter{}, OutputFormatJson).Finish(errEvent, 7); code != 0 {
+		t.Fatalf("broken pipe Finish code = %d, want 0", code)
+	}
+}
+
+func TestCliEmitterFinishOtherWriteFailureReturnsFour(t *testing.T) {
+	// failingWriter returns a non-EPIPE error, so Finish maps it to 4.
+	if code := NewCliEmitter(failingWriter{}, OutputFormatJson).FinishResult(map[string]any{"ok": true}); code != 4 {
+		t.Fatalf("other write failure code = %d, want 4", code)
 	}
 }
 

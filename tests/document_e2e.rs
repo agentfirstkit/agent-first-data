@@ -545,26 +545,42 @@ fn test_type_prefix_coercion() {
 
 #[test]
 fn test_numeric_boundaries_do_not_narrow_unsigned_or_float() {
-    let max = agent_first_data::document::coerce_scalar("18446744073709551615");
+    // §4: `coerce_scalar`'s shape-guessing is gone (superseded by §3's
+    // "bare value is always a string" rule); the literal-faithful numeric
+    // entry point is now `value_from_type(ValueType::Number, ...)`.
+    use agent_first_data::document::{ValueType, value_from_type};
+
+    let max = value_from_type(ValueType::Number, Some("18446744073709551615")).unwrap();
     assert_eq!(max.as_unsigned(), Some(u64::MAX));
-    let precise = agent_first_data::document::coerce_scalar("9007199254740993");
+    let precise = value_from_type(ValueType::Number, Some("9007199254740993")).unwrap();
     assert_eq!(precise.as_integer(), Some(9_007_199_254_740_993));
-    let float = agent_first_data::document::coerce_scalar("3.0");
-    assert!(matches!(float, Value::Float(value) if value == 3.0));
+    // A literal written with a decimal point stays literal-faithful
+    // (`Value::Number`), not silently narrowed to `Value::Float` — even
+    // when, as here, its magnitude would fit exactly.
+    let float = value_from_type(ValueType::Number, Some("3.0")).unwrap();
+    assert_eq!(float, Value::Number("3.0".to_string()));
     assert_eq!(
-        agent_first_data::document::coerce_scalar(&i64::MIN.to_string()).as_integer(),
+        value_from_type(ValueType::Number, Some(&i64::MIN.to_string()))
+            .unwrap()
+            .as_integer(),
         Some(i64::MIN)
     );
     assert_eq!(
-        agent_first_data::document::coerce_scalar(&i64::MAX.to_string()).as_integer(),
+        value_from_type(ValueType::Number, Some(&i64::MAX.to_string()))
+            .unwrap()
+            .as_integer(),
         Some(i64::MAX)
     );
     assert_eq!(
-        agent_first_data::document::coerce_scalar("9007199254740991").as_integer(),
+        value_from_type(ValueType::Number, Some("9007199254740991"))
+            .unwrap()
+            .as_integer(),
         Some(9_007_199_254_740_991)
     );
     assert_eq!(
-        agent_first_data::document::coerce_scalar("9007199254740993").as_integer(),
+        value_from_type(ValueType::Number, Some("9007199254740993"))
+            .unwrap()
+            .as_integer(),
         Some(9_007_199_254_740_993)
     );
 }
@@ -578,8 +594,90 @@ fn test_json_unsigned_boundary_round_trip() {
         get_path(&value, "n", &[]).unwrap().as_unsigned(),
         Some(u64::MAX)
     );
-    assert!(matches!(get_path(&value, "f", &[]).unwrap(), Value::Float(value) if value == 3.0));
-    assert!(Format::Json.load("1e400").is_err());
+    // §4: a float literal is preserved verbatim as `Value::Number`, not
+    // narrowed through `f64` — even a value whose magnitude, like `3.0`,
+    // would survive that narrowing exactly. The point is the literal
+    // *spelling* survives too.
+    assert_eq!(
+        get_path(&value, "f", &[]).unwrap(),
+        Value::Number("3.0".to_string())
+    );
+    // §4: an exponent so large it would overflow `f64` no longer fails to
+    // parse — arbitrary-precision JSON numbers never force an eager `f64`
+    // evaluation, so the literal is simply preserved (serde_json normalizes
+    // a positive exponent to an explicit `+`, `1e400` -> `1e+400`; every
+    // digit is still exactly as written).
+    let huge_exponent = Format::Json.load("1e400").unwrap();
+    assert_eq!(huge_exponent, Value::Number("1e+400".to_string()));
+}
+
+/// §4 fixture matrix: oversized integers, high-precision floats, exponent
+/// notation, and `-0` through the JSON backend's `get`/`set`-facing reader.
+/// `value` (CLI byte emission) is covered separately in
+/// `tests/cli_document.rs`; this is the structural (`document::Value`)
+/// layer both `get` and `value` build on.
+#[test]
+fn test_json_number_literal_fidelity_matrix() {
+    let huge_int = "123456789012345678901234567890";
+    let precise_float = "0.1000000000000000055511151231257827";
+    let source = format!(
+        "{{\"huge\":{huge_int},\"precise\":{precise_float},\"exp\":1e+140,\"neg_zero_int\":-0,\"neg_zero_float\":-0.0}}"
+    );
+    let value = Format::Json.load(&source).unwrap();
+
+    assert_eq!(
+        get_path(&value, "huge", &[]).unwrap(),
+        Value::Number(huge_int.to_string())
+    );
+    assert_eq!(
+        get_path(&value, "precise", &[]).unwrap(),
+        Value::Number(precise_float.to_string())
+    );
+    assert_eq!(
+        get_path(&value, "exp", &[]).unwrap(),
+        Value::Number("1e+140".to_string())
+    );
+    // An integer `-0` has no distinct representation from `0` in `i64` —
+    // there is no signed zero for integers, so this collapses to a plain
+    // `Integer(0)`, not a fidelity violation (no digits are lost; the sign
+    // was mathematically redundant).
+    assert_eq!(
+        get_path(&value, "neg_zero_int", &[]).unwrap(),
+        Value::Integer(0)
+    );
+    // A *float* `-0.0` is a distinct IEEE 754 value from `0.0`, and its
+    // literal is preserved exactly (not collapsed).
+    assert_eq!(
+        get_path(&value, "neg_zero_float", &[]).unwrap(),
+        Value::Number("-0.0".to_string())
+    );
+
+    // set_path/get_path round-trip the literal exactly (no f64 detour).
+    let mut root = value;
+    set_path(
+        &mut root,
+        "set_huge",
+        &Value::Number(huge_int.to_string()),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        get_path(&root, "set_huge", &[]).unwrap(),
+        Value::Number(huge_int.to_string())
+    );
+
+    // Regression: values that fit i64/u64 stay Integer/Unsigned, unaffected
+    // by the Number variant's introduction.
+    assert_eq!(
+        get_path(
+            &Format::Json.load("{\"u\":18446744073709551615}").unwrap(),
+            "u",
+            &[]
+        )
+        .unwrap()
+        .as_unsigned(),
+        Some(u64::MAX)
+    );
 }
 
 #[cfg(feature = "yaml")]
@@ -621,8 +719,16 @@ fn test_json_numeric_boundary_matrix() {
         get_path(&value, "u", &[]).unwrap().as_unsigned(),
         Some(u64::MAX)
     );
-    assert!(matches!(get_path(&value, "f", &[]).unwrap(), Value::Float(f) if f > 0.0));
-    assert!(Format::Json.load("{\"bad\":1e400}").is_err());
+    // §4: a decimal-exponent literal is preserved verbatim as `Value::Number`.
+    assert_eq!(
+        get_path(&value, "f", &[]).unwrap(),
+        Value::Number("1e-10".to_string())
+    );
+    // §4: no longer an error — see `test_json_unsigned_boundary_round_trip`.
+    assert_eq!(
+        Format::Json.load("{\"bad\":1e400}").unwrap().get("bad"),
+        Some(&Value::Number("1e+400".to_string()))
+    );
 }
 
 #[cfg(feature = "yaml")]

@@ -31,28 +31,19 @@
 //       cargo test --examples --features cli-help,cli-help-markdown,skill-admin
 
 use agent_first_data::{
-    OutputOptions, build_cli_error, cli_parse_log_filters, cli_parse_output, json_error,
-    json_result, render,
+    CliEmitter, CliEmitterError, Event, OutputFormat, OutputOptions, build_cli_error,
+    cli_parse_log_filters, cli_parse_output, json_error, json_result, render,
 };
 #[cfg(feature = "cli-help")]
 use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use std::io::Write;
 
-macro_rules! stdoutln {
-    ($($arg:tt)*) => {{
-        write_stdout_line_or_exit(&format!($($arg)*));
-    }};
-}
-
+// Human-facing help/version TEXT (not protocol envelopes) prints to stdout.
 macro_rules! stdout {
     ($($arg:tt)*) => {{
         write_stdout_or_exit(&format!($($arg)*));
     }};
-}
-
-fn write_stdout_line_or_exit(line: &str) {
-    write_stdout_or_exit(&format!("{line}\n"));
 }
 
 fn write_stdout_or_exit(text: &str) {
@@ -63,6 +54,31 @@ fn write_stdout_or_exit(text: &str) {
         }
         std::process::exit(1);
     }
+}
+
+// Emit one standalone error envelope through a finite emitter and exit, using
+// the library's `finish()` to map the outcome to a process exit code (broken
+// pipe → 0, other write failure → 4). Used for pre-command/usage errors that
+// occur before the main emitter is built.
+fn emit_error_exit(format: OutputFormat, event: Event, code: u8) -> ! {
+    std::process::exit(CliEmitter::finite(format).finish(event, code).into())
+}
+
+// As `emit_error_exit`, for a help error already shaped as a JSON value.
+// `finish()` takes a typed Event, so the value path maps the emit outcome here.
+fn emit_value_error_exit(format: OutputFormat, event: serde_json::Value, code: u8) -> ! {
+    let mut emitter = CliEmitter::finite(format);
+    let exit = match emitter.emit_validated_value(event) {
+        Ok(()) => code,
+        Err(err) if err.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe) => 0,
+        Err(_) => 4,
+    };
+    std::process::exit(exit.into())
+}
+
+// Turn a library `finish*` exit code into a process exit.
+fn exit_with(code: u8) -> ! {
+    std::process::exit(code.into())
 }
 
 const AGENT_CLI_HOST_ENV: &str = "AGENT_CLI_HOST";
@@ -239,17 +255,11 @@ fn main() {
     let _stream_redirect =
         match agent_first_data::stream_redirect::install_from_raw_args(raw.clone()) {
             Ok(installed) => installed,
-            Err(err) => {
-                stdoutln!(
-                    "{}",
-                    render(
-                        build_cli_error(&err.to_string(), None).as_value(),
-                        agent_first_data::OutputFormat::Json,
-                        &OutputOptions::default()
-                    )
-                );
-                std::process::exit(2);
-            }
+            Err(err) => emit_error_exit(
+                OutputFormat::Json,
+                build_cli_error(&err.to_string(), None),
+                2,
+            ),
         };
 
     match agent_first_data::cli_handle_version_or_continue(
@@ -262,20 +272,11 @@ fn main() {
             std::process::exit(0);
         }
         Ok(None) => {}
-        Err(err) => {
-            stdoutln!(
-                "{}",
-                render(
-                    err.as_value(),
-                    agent_first_data::OutputFormat::Json,
-                    &OutputOptions::default()
-                )
-            );
-            std::process::exit(2);
-        }
+        Err(err) => emit_error_exit(OutputFormat::Json, err, 2),
     }
 
-    // Handle help before clap so `--help --output markdown` can work.
+    // Handle help before clap so `--help --output markdown` can work. Help TEXT
+    // prints to stdout; a help *error* is an error envelope on stderr.
     #[cfg(feature = "cli-help")]
     {
         match agent_first_data::cli_handle_help_or_continue(
@@ -288,21 +289,12 @@ fn main() {
                 std::process::exit(0);
             }
             Ok(None) => {}
-            Err(err) => {
-                stdoutln!(
-                    "{}",
-                    render(
-                        &err,
-                        agent_first_data::OutputFormat::Json,
-                        &OutputOptions::default()
-                    )
-                );
-                std::process::exit(2);
-            }
+            Err(err) => emit_value_error_exit(OutputFormat::Json, err, 2),
         }
     }
 
-    // try_parse — clap errors become JSONL to stdout, not stderr text
+    // try_parse — a clap error becomes a structured error envelope (on stderr),
+    // never raw clap text.
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         if matches!(
             e.kind(),
@@ -310,41 +302,29 @@ fn main() {
         ) {
             e.exit();
         }
-        stdoutln!(
-            "{}",
-            render(
-                build_cli_error(&e.to_string(), Some("try: agent-cli --help"),).as_value(),
-                agent_first_data::OutputFormat::Json,
-                &OutputOptions::default()
-            )
-        );
-        std::process::exit(2);
+        emit_error_exit(
+            OutputFormat::Json,
+            build_cli_error(&e.to_string(), Some("try: agent-cli --help")),
+            2,
+        )
     });
     #[cfg(feature = "stream-redirect")]
     let _stream_redirect_args = (&cli.stdout_file, &cli.stderr_file);
 
     // Parse --output/--json and --log
     let output = resolve_output(&cli.output, cli.json).unwrap_or_else(|e| {
-        stdoutln!(
-            "{}",
-            render(
-                build_cli_error(&e, Some("valid values: json, yaml, plain"),).as_value(),
-                agent_first_data::OutputFormat::Json,
-                &OutputOptions::default()
-            )
-        );
-        std::process::exit(2);
+        emit_error_exit(
+            OutputFormat::Json,
+            build_cli_error(&e, Some("valid values: json, yaml, plain")),
+            2,
+        )
     });
     let format = cli_parse_output(&output).unwrap_or_else(|e| {
-        stdoutln!(
-            "{}",
-            render(
-                build_cli_error(&e, Some("valid values: json, yaml, plain"),).as_value(),
-                agent_first_data::OutputFormat::Json,
-                &OutputOptions::default()
-            )
-        );
-        std::process::exit(2);
+        emit_error_exit(
+            OutputFormat::Json,
+            build_cli_error(&e, Some("valid values: json, yaml, plain")),
+            2,
+        )
     });
     let log = if cli.verbose {
         // --verbose is shorthand for --log all.
@@ -355,112 +335,67 @@ fn main() {
         cli_parse_log_filters(&cli.log)
     };
 
+    // One finite emitter for the command: `result` → stdout, `error`/`log` →
+    // stderr, per the AFDATA output-stream contract.
+    let mut emitter = CliEmitter::finite(format);
+
     // Each diagnostic line self-tags with its `category`, so `--log all` reveals
-    // the full set from real output rather than a static help list.
+    // the full set from real output. Diagnostics land on stderr.
     if log.enabled("request") {
-        stdoutln!(
-            "{}",
-            render(
-                &build_request_log(cli.command.as_ref()),
-                format,
-                &OutputOptions::default()
-            )
-        );
+        let _ = emitter.emit(build_request_log(cli.command.as_ref()));
     }
     if log.enabled("startup") {
-        stdoutln!(
-            "{}",
-            render(
-                &build_startup_log(cli.command.as_ref(), &output, &log, cli.verbose),
-                format,
-                &OutputOptions::default()
-            )
-        );
+        let _ = emitter.emit(build_startup_log(
+            cli.command.as_ref(),
+            &output,
+            &log,
+            cli.verbose,
+        ));
     }
 
     match cli.command {
-        None => {
-            stdoutln!(
-                "{}",
-                render(
-                    build_cli_error("no subcommand provided", Some("try: agent-cli --help"),)
-                        .as_value(),
-                    format,
-                    &OutputOptions::default()
-                )
-            );
-            std::process::exit(2);
-        }
+        // Error → build via the error builder, hand the event to finish().
+        None => exit_with(emitter.finish(
+            build_cli_error("no subcommand provided", Some("try: agent-cli --help")),
+            2,
+        )),
+        // Result → finish_result (broken-pipe-safe, returns 0 on success).
         Some(Command::Config { action }) => match action {
             ConfigAction::Show => {
-                let result = json_result(serde_json::json!({"action": "config_show"})).build();
-                stdoutln!(
-                    "{}",
-                    render(result.as_value(), format, &OutputOptions::default())
-                );
+                exit_with(emitter.finish_result(serde_json::json!({"action": "config_show"})))
             }
-            ConfigAction::Set { key, value } => {
-                let result = json_result(
-                    serde_json::json!({"action": "config_set", "key": key, "value": value}),
-                )
-                .build();
-                stdoutln!(
-                    "{}",
-                    render(result.as_value(), format, &OutputOptions::default())
-                );
-            }
+            ConfigAction::Set { key, value } => exit_with(emitter.finish_result(
+                serde_json::json!({"action": "config_set", "key": key, "value": value}),
+            )),
         },
         Some(Command::Service { action }) => match action {
             ServiceAction::Start {
                 port,
                 api_key_secret,
-            } => {
-                let result = json_result(
-                    serde_json::json!({"action": "service_start", "port": port, "api_key_secret": api_key_secret}),
-                )
-                .build();
-                stdoutln!(
-                    "{}",
-                    render(result.as_value(), format, &OutputOptions::default())
-                );
-            }
+            } => exit_with(emitter.finish_result(
+                serde_json::json!({"action": "service_start", "port": port, "api_key_secret": api_key_secret}),
+            )),
             ServiceAction::Stop => {
-                let result = json_result(serde_json::json!({"action": "service_stop"})).build();
-                stdoutln!(
-                    "{}",
-                    render(result.as_value(), format, &OutputOptions::default())
-                );
+                exit_with(emitter.finish_result(serde_json::json!({"action": "service_stop"})))
             }
             ServiceAction::Status => {
-                let result = json_result(serde_json::json!({"action": "service_status"})).build();
-                stdoutln!(
-                    "{}",
-                    render(result.as_value(), format, &OutputOptions::default())
-                );
+                exit_with(emitter.finish_result(serde_json::json!({"action": "service_status"})))
             }
         },
         Some(Command::Ping { host, timeout_ms }) => {
             let host = host.or_else(|| std::env::var(AGENT_CLI_HOST_ENV).ok());
             if host.is_none() {
+                // Rich error (hint + extra field) → build the event, finish it.
                 let err = json_error("ping_target_not_configured", "ping target not configured")
                     .hint("pass --host or set AGENT_CLI_HOST")
                     .field("duration_ms", serde_json::json!(0))
                     .build()
                     .expect("error builder failed");
-                stdoutln!(
-                    "{}",
-                    render(err.as_value(), format, &OutputOptions::default())
-                );
-                std::process::exit(1);
+                exit_with(emitter.finish(err, 1));
             }
-            let result = json_result(
+            exit_with(emitter.finish_result(
                 serde_json::json!({"action": "ping", "host": host, "timeout_ms": timeout_ms}),
-            )
-            .build();
-            stdoutln!(
-                "{}",
-                render(result.as_value(), format, &OutputOptions::default())
-            );
+            ))
         }
         Some(Command::Cancel) => {
             let err = json_error("cancelled", "operation cancelled")
@@ -468,15 +403,11 @@ fn main() {
                 .field("duration_ms", serde_json::json!(0))
                 .build()
                 .expect("error builder failed");
-            stdoutln!(
-                "{}",
-                render(err.as_value(), format, &OutputOptions::default())
-            );
-            std::process::exit(1);
+            exit_with(emitter.finish(err, 1))
         }
         #[cfg(feature = "skill-admin")]
         Some(Command::Skill { action }) => {
-            std::process::exit(run_skill(action, format));
+            std::process::exit(run_skill(&mut emitter, action));
         }
     }
 }
@@ -506,7 +437,7 @@ fn resolve_output(output: &str, json: bool) -> Result<String, String> {
     }
 }
 
-fn build_request_log(command: Option<&Command>) -> serde_json::Value {
+fn build_request_log(command: Option<&Command>) -> Event {
     agent_first_data::json_log(serde_json::json!({
         "level": "info",
         "message": "request",
@@ -514,7 +445,6 @@ fn build_request_log(command: Option<&Command>) -> serde_json::Value {
         "command": command_label(command),
     }))
     .build()
-    .into_value()
 }
 
 fn build_startup_log(
@@ -522,7 +452,7 @@ fn build_startup_log(
     output: &str,
     log: &agent_first_data::LogFilters,
     verbose: bool,
-) -> serde_json::Value {
+) -> Event {
     agent_first_data::json_log(serde_json::json!({
         "level": "info",
         "message": "startup",
@@ -541,7 +471,6 @@ fn build_startup_log(
         "env": startup_env_snapshot(),
     }))
     .build()
-    .into_value()
 }
 
 fn startup_env_snapshot() -> serde_json::Value {
@@ -562,7 +491,7 @@ fn startup_env_snapshot() -> serde_json::Value {
 // Wire the parsed `skill` subcommand to the library and print the result. Returns
 // the process exit code (0 ok, 1 action error, 2 bad flag value).
 #[cfg(feature = "skill-admin")]
-fn run_skill(action: SkillCmd, format: agent_first_data::OutputFormat) -> i32 {
+fn run_skill(emitter: &mut CliEmitter<std::io::Stdout>, action: SkillCmd) -> i32 {
     use agent_first_data::skill::{self, SkillAction};
     let (verb, target, force) = match action {
         SkillCmd::Status(target) => (SkillAction::Status, target, false),
@@ -572,44 +501,23 @@ fn run_skill(action: SkillCmd, format: agent_first_data::OutputFormat) -> i32 {
     let options = match build_skill_options(target, force) {
         Ok(options) => options,
         Err((message, hint)) => {
-            stdoutln!(
-                "{}",
-                render(
-                    build_cli_error(&message, Some(&hint)).as_value(),
-                    format,
-                    &OutputOptions::default()
-                )
-            );
+            let _ = emitter.emit(build_cli_error(&message, Some(&hint)));
             return 2;
         }
     };
     match skill::run_skill_admin(&WIDGET_SPEC, verb, &options) {
         Ok(report) => match serde_json::to_value(&report) {
             Ok(value) => {
-                stdoutln!("{}", render(&value, format, &OutputOptions::default()));
+                let _ = emitter.emit_result(value);
                 0
             }
             Err(e) => {
-                stdoutln!(
-                    "{}",
-                    render(
-                        build_cli_error(&e.to_string(), None).as_value(),
-                        format,
-                        &OutputOptions::default()
-                    )
-                );
+                let _ = emitter.emit(build_cli_error(&e.to_string(), None));
                 1
             }
         },
         Err(err) => {
-            stdoutln!(
-                "{}",
-                render(
-                    build_cli_error(&err.message, err.hint.as_deref()).as_value(),
-                    format,
-                    &OutputOptions::default()
-                )
-            );
+            let _ = emitter.emit(build_cli_error(&err.message, err.hint.as_deref()));
             1
         }
     }
@@ -1680,7 +1588,7 @@ mod tests {
 
     #[test]
     fn request_log_is_category_tagged() {
-        let v = build_request_log(None);
+        let v = build_request_log(None).into_value();
         assert_eq!(v["kind"], "log");
         assert_eq!(v["log"]["category"], "request");
         assert_eq!(v["log"]["command"], "none");
@@ -1693,7 +1601,7 @@ mod tests {
             host: Some("example.com".to_string()),
             timeout_ms: 5000,
         };
-        let v = build_startup_log(Some(&command), "yaml", &log, false);
+        let v = build_startup_log(Some(&command), "yaml", &log, false).into_value();
         assert_eq!(v["kind"], "log");
         assert_eq!(v["log"]["category"], "startup");
         assert_eq!(v["log"]["event"], "startup");
@@ -1908,12 +1816,13 @@ mod tests {
                 scope: "personal".to_string(),
                 skills_dir: Some(dir.to_string_lossy().to_string()),
             };
+            let mut emitter = CliEmitter::finite(OutputFormat::Json);
             let code = run_skill(
+                &mut emitter,
                 SkillCmd::Install(SkillWriteArgs {
                     target: args,
                     force: false,
                 }),
-                OutputFormat::Json,
             );
             assert_eq!(code, 0);
             let _ = std::fs::remove_dir_all(dir);

@@ -346,6 +346,43 @@ class EventDecodeError(Exception):
     pass
 
 
+class _RawNumber:
+    """Internal: a decoded JSON number whose exact source literal must
+    survive re-emission (see decode_protocol_event's number-fidelity note).
+
+    Deliberately not an int/float subclass: Part 2's suffix-driven formatting
+    (`_is_number`, `_as_int`, ...) checks `isinstance(value, (int, float))`,
+    so a `_RawNumber` gracefully falls through to the existing "wrong type"
+    passthrough there rather than risking a lossy or crashing arithmetic
+    conversion. JSON/YAML/plain leaf rendering special-case it directly.
+    """
+
+    __slots__ = ("literal",)
+
+    def __init__(self, literal: str) -> None:
+        self.literal = literal
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return f"_RawNumber({self.literal!r})"
+
+
+def _parse_int_lossless(text: str) -> Any:
+    """json.loads parse_int hook: int() is exact for every JSON integer
+    literal except "-0" (int("-0") == 0, dropping the sign), so only that
+    one case needs wrapping; every other integer stays a plain arbitrary-
+    precision Python int, unchanged from the pre-fidelity behavior."""
+    if text == "-0":
+        return _RawNumber(text)
+    return int(text)
+
+
+def _parse_float_lossless(text: str) -> Any:
+    """json.loads parse_float hook: always wraps, since float64 can silently
+    drop significant digits for any literal (there is no simple "is this one
+    safe" test analogous to the integer case above)."""
+    return _RawNumber(text)
+
+
 @dataclass(frozen=True)
 class DecodedResult:
     """Decoded protocol v1 result event."""
@@ -390,9 +427,19 @@ def decode_protocol_event(
 
     Raises EventDecodeError if ``text`` is not valid JSON or fails strict
     validation.
+
+    Number literal fidelity: ``json.loads``'s default integer parsing is
+    already arbitrary-precision (exact for every integer except the single
+    "-0" edge case, where ``int("-0") == 0`` silently drops the sign), but its
+    default float parsing collapses any literal through float64 (30 significant
+    digits become 15-17, "0.1000...055511..." becomes "0.1"). ``parse_int``/
+    ``parse_float`` hooks below route both exceptions through ``_RawNumber``,
+    which stores the exact source literal; every JSON/YAML/plain renderer in
+    this module treats it as an opaque scalar and re-emits that literal
+    verbatim. This is internal — ``_RawNumber`` is never part of the public API.
     """
     try:
-        event = json.loads(text)
+        event = json.loads(text, parse_int=_parse_int_lossless, parse_float=_parse_float_lossless)
     except (ValueError, TypeError) as exc:
         raise EventDecodeError(f"invalid JSON: {exc}") from exc
 
@@ -472,9 +519,32 @@ def _format_json(value: Any, *, options: OutputOptions | None = None) -> str:
     Single-line JSON. Secrets redacted, original keys, raw values.
     """
     output_options = options or OutputOptions()
-    return json.dumps(
-        redacted_value(value, secret_names=output_options.secret_names, policy=output_options.policy), ensure_ascii=False, separators=(",", ":")
-    )
+    redacted = redacted_value(value, secret_names=output_options.secret_names, policy=output_options.policy)
+    return _encode_json_lossless(redacted)
+
+
+def _encode_json_lossless(value: Any) -> str:
+    """Compact JSON encoder, byte-identical to
+    ``json.dumps(value, ensure_ascii=False, separators=(",", ":"))`` for every
+    value that contains no ``_RawNumber``, and additionally correct for values
+    that do: ``json.dumps`` has no hook to emit a raw, unquoted number literal
+    (a ``_RawNumber`` is not int/float, so stdlib ``json`` would reject it, and
+    subclassing float doesn't work either — ``json``'s float encoder calls the
+    unbound ``float.__repr__`` directly, bypassing any subclass override).
+    Recurses only through dict/list to find nested ``_RawNumber`` leaves;
+    every other value (including plain int/float/str/bool/None) delegates to
+    ``json.dumps`` so string escaping and number formatting stay exactly as
+    they were before this function existed.
+    """
+    if isinstance(value, _RawNumber):
+        return value.literal
+    if isinstance(value, dict):
+        return "{" + ",".join(
+            f"{json.dumps(k, ensure_ascii=False)}:{_encode_json_lossless(v)}" for k, v in value.items()
+        ) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(_encode_json_lossless(v) for v in value) + "]"
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def _format_yaml(value: Any, *, options: OutputOptions | None = None) -> str:
@@ -740,6 +810,8 @@ def _sanitize_for_json(value: Any, stack: set[int] | None = None, depth: int = 0
         if math.isfinite(value):
             return value
         return "<unsupported:float>"
+    if isinstance(value, _RawNumber):
+        return value
     if isinstance(value, BaseException):
         return str(value)
 
@@ -1045,10 +1117,21 @@ def _decimal_int_text(value: Any) -> str | None:
 
 def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
     """Try suffix-driven processing. Returns (stripped_key, formatted_value) or None."""
+    # Plain-format suffix arithmetic below only works on a native int/float. A
+    # decoded _RawNumber (see decode_protocol_event's fidelity note) is
+    # normalized to a float here for that arithmetic, so an ordinary decoded
+    # value (e.g. cpu_percent: 85.5) keeps formatting exactly as before; this
+    # is Plain's documented lossy/human path. The _epoch_ns/_msats/_sats
+    # branches below keep exactness by reading `value` directly instead of
+    # `numeric` (their _as_decimal_int/_decimal_int_text helpers already
+    # handle plain arbitrary-precision int values, which is what every
+    # decoded integer literal already is -- only floats get wrapped).
+    numeric: Any = float(value.literal) if isinstance(value, _RawNumber) else value
+
     # Group 1: compound timestamp suffixes
     stripped = _strip_suffix_ci(key, "_epoch_ms")
     if stripped is not None:
-        n = _as_int(value)
+        n = _as_int(numeric)
         if n is not None:
             formatted = _format_rfc3339_ms(n)
             if formatted is not None:
@@ -1056,7 +1139,7 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
         return None
     stripped = _strip_suffix_ci(key, "_epoch_s")
     if stripped is not None:
-        n = _as_int(value)
+        n = _as_int(numeric)
         if n is not None:
             formatted = _format_rfc3339_ms(n * 1000)
             if formatted is not None:
@@ -1074,27 +1157,27 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
     # Group 2: compound currency suffixes
     stripped = _strip_suffix_ci(key, "_usd_cents")
     if stripped is not None:
-        n = _as_non_neg_int(value)
+        n = _as_non_neg_int(numeric)
         if n is not None:
             return stripped, f"${n // 100}.{n % 100:02d}"
         return None
     stripped = _strip_suffix_ci(key, "_eur_cents")
     if stripped is not None:
-        n = _as_non_neg_int(value)
+        n = _as_non_neg_int(numeric)
         if n is not None:
             return stripped, f"\u20ac{n // 100}.{n % 100:02d}"
         return None
     gc = _try_strip_generic_cents(key)
     if gc is not None:
         stripped, code = gc
-        n = _as_non_neg_int(value)
+        n = _as_non_neg_int(numeric)
         if n is not None:
             return stripped, f"{n // 100}.{n % 100:02d} {code.upper()}"
         return None
     gm = _try_strip_generic_micro(key)
     if gm is not None:
         stripped, code = gm
-        n = _as_non_neg_int(value)
+        n = _as_non_neg_int(numeric)
         if n is not None:
             return stripped, f"{n // 1_000_000}.{n % 1_000_000:06d} {code.upper()}"
         return None
@@ -1107,18 +1190,18 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
         return None
     stripped = _strip_suffix_ci(key, "_minutes")
     if stripped is not None:
-        if _is_number(value):
-            return stripped, f"{_plain_scalar(value)} minutes"
+        if _is_number(numeric):
+            return stripped, f"{_plain_scalar(numeric)} minutes"
         return None
     stripped = _strip_suffix_ci(key, "_hours")
     if stripped is not None:
-        if _is_number(value):
-            return stripped, f"{_plain_scalar(value)} hours"
+        if _is_number(numeric):
+            return stripped, f"{_plain_scalar(numeric)} hours"
         return None
     stripped = _strip_suffix_ci(key, "_days")
     if stripped is not None:
-        if _is_number(value):
-            return stripped, f"{_plain_scalar(value)} days"
+        if _is_number(numeric):
+            return stripped, f"{_plain_scalar(numeric)} days"
         return None
 
     # Group 4: single-unit suffixes
@@ -1136,42 +1219,42 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
         return None
     stripped = _strip_suffix_ci(key, "_bytes")
     if stripped is not None:
-        n = _as_non_neg_int(value)
+        n = _as_non_neg_int(numeric)
         if n is not None:
             return stripped, _format_bytes_human(n)
         return None
     stripped = _strip_suffix_ci(key, "_percent")
     if stripped is not None:
-        if _is_number(value):
-            return stripped, f"{_plain_scalar(value)}%"
+        if _is_number(numeric):
+            return stripped, f"{_plain_scalar(numeric)}%"
         return None
     # Group 5: short suffixes (last to avoid false positives)
     stripped = _strip_suffix_ci(key, "_jpy")
     if stripped is not None:
-        n = _as_non_neg_int(value)
+        n = _as_non_neg_int(numeric)
         if n is not None:
             return stripped, f"\u00a5{_format_with_commas(n)}"
         return None
     stripped = _strip_suffix_ci(key, "_ns")
     if stripped is not None:
-        if _is_number(value):
-            return stripped, f"{_plain_scalar(value)}ns"
+        if _is_number(numeric):
+            return stripped, f"{_plain_scalar(numeric)}ns"
         return None
     stripped = _strip_suffix_ci(key, "_us")
     if stripped is not None:
-        if _is_number(value):
-            return stripped, f"{_plain_scalar(value)}\u03bcs"
+        if _is_number(numeric):
+            return stripped, f"{_plain_scalar(numeric)}\u03bcs"
         return None
     stripped = _strip_suffix_ci(key, "_ms")
     if stripped is not None:
-        fv = _format_ms_value(value)
+        fv = _format_ms_value(numeric)
         if fv is not None:
             return stripped, fv
         return None
     stripped = _strip_suffix_ci(key, "_s")
     if stripped is not None:
-        if _is_number(value):
-            return stripped, f"{_plain_scalar(value)}s"
+        if _is_number(numeric):
+            return stripped, f"{_plain_scalar(numeric)}s"
         return None
 
     return None
@@ -1382,6 +1465,10 @@ def _yaml_scalar(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return _number_str(value)
+    if isinstance(value, _RawNumber):
+        # Decoded number: emit the exact source literal unquoted, matching
+        # JSON's structure-preserving fidelity contract for YAML too.
+        return value.literal
     if isinstance(value, (dict, list)):
         return f'"{_escape_yaml_str(_canonical_json(value))}"'
     return f'"{_escape_yaml_str(str(value))}"'
@@ -1436,6 +1523,11 @@ def _plain_scalar(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return _number_str(value)
+    if isinstance(value, _RawNumber):
+        # Decoded number: emit the exact source literal (Plain is documented
+        # lossy for arithmetic-derived formatting, but a bare pass-through
+        # scalar still gets its exact digits, not a float64 round-trip).
+        return value.literal
     if isinstance(value, (dict, list)):
         return _canonical_json(value)
     return str(value)
@@ -1480,7 +1572,7 @@ def _utf16_sort_key(s: str) -> bytes:
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(_sort_json_value(value), ensure_ascii=False, separators=(",", ":"))
+    return _encode_json_lossless(_sort_json_value(value))
 
 
 def _sort_json_value(value: Any) -> Any:

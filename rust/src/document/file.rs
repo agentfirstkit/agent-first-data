@@ -139,6 +139,38 @@ impl DocumentFile {
         })
     }
 
+    /// Open and parse `path` like [`DocumentFile::open`], but first reject any
+    /// non-regular file, or any file larger than `max_bytes`, without reading
+    /// its contents.
+    ///
+    /// Use this over [`open`](DocumentFile::open) when reading untrusted or
+    /// secret-bearing config, where an unbounded read of an arbitrary path is
+    /// a denial-of-service risk.
+    pub fn open_capped(
+        path: impl AsRef<Path>,
+        format_override: Option<Format>,
+        max_bytes: u64,
+    ) -> DocumentResult<DocumentFile> {
+        let path = path.as_ref();
+        let metadata = fs::metadata(path).map_err(|error| DocumentError::IoError {
+            detail: format!("read `{}`: {error}", path.display()),
+        })?;
+        if !metadata.is_file() {
+            return Err(DocumentError::IoError {
+                detail: format!("`{}` is not a regular file", path.display()),
+            });
+        }
+        if metadata.len() > max_bytes {
+            return Err(DocumentError::IoError {
+                detail: format!(
+                    "`{}` exceeds the {max_bytes}-byte read limit",
+                    path.display()
+                ),
+            });
+        }
+        DocumentFile::open(path, format_override)
+    }
+
     /// The file path this document was opened from.
     pub fn path(&self) -> &Path {
         &self.path
@@ -148,6 +180,17 @@ impl DocumentFile {
     /// edit, if any).
     pub fn value(&self) -> &Value {
         &self.value
+    }
+
+    /// Resolve a dotted `path` against the parsed document and return the value
+    /// at that address.
+    ///
+    /// One-call read counterpart to [`set`](DocumentFile::set): equivalent to
+    /// [`value`](DocumentFile::value) followed by
+    /// [`crate::document::get_path`], for callers that only need to read one
+    /// address out of a file.
+    pub fn value_at(&self, path: &str) -> DocumentResult<Value> {
+        crate::document::get_path(&self.value, path, &[])
     }
 
     /// The format this file was opened as.
@@ -203,6 +246,32 @@ impl DocumentFile {
             #[cfg(feature = "ini")]
             Format::Ini => {
                 crate::document::format::ini::set_scalar_preserving(&self.source, key, &target)?
+            }
+            #[cfg(feature = "toml")]
+            Format::TomlFrontmatter => {
+                let parts = crate::document::format::frontmatter::split(
+                    &self.source,
+                    crate::document::format::frontmatter::Delimiter::Plus,
+                )?;
+                let new_fm = crate::document::format::toml::set_scalar_preserving(
+                    parts.frontmatter,
+                    key,
+                    &target,
+                )?;
+                format!("{}{}{}", parts.pre, new_fm, parts.post)
+            }
+            #[cfg(feature = "yaml")]
+            Format::YamlFrontmatter => {
+                let parts = crate::document::format::frontmatter::split(
+                    &self.source,
+                    crate::document::format::frontmatter::Delimiter::Dash,
+                )?;
+                let new_fm = crate::document::format::yaml::set_scalar_preserving(
+                    parts.frontmatter,
+                    key,
+                    &target,
+                )?;
+                format!("{}{}{}", parts.pre, new_fm, parts.post)
             }
             _ => self.format.save(&new_doc)?,
         };
@@ -270,7 +339,7 @@ impl DocumentFile {
             }
             _ => {
                 return Err(DocumentError::UnsupportedOperation {
-                    format: format_name(self.format).to_string(),
+                    format: self.format.name().to_string(),
                     operation: "add".to_string(),
                     detail: "keyed collection source editor is not implemented for this backend"
                         .to_string(),
@@ -327,7 +396,7 @@ impl DocumentFile {
             )?,
             _ => {
                 return Err(DocumentError::UnsupportedOperation {
-                    format: format_name(self.format).to_string(),
+                    format: self.format.name().to_string(),
                     operation: "remove".to_string(),
                     detail: "keyed collection source editor is not implemented for this backend"
                         .to_string(),
@@ -358,6 +427,26 @@ impl DocumentFile {
             Format::Dotenv => crate::document::format::dotenv::unset_preserving(&self.source, key)?,
             #[cfg(feature = "ini")]
             Format::Ini => crate::document::format::ini::unset_preserving(&self.source, key)?,
+            #[cfg(feature = "toml")]
+            Format::TomlFrontmatter => {
+                let parts = crate::document::format::frontmatter::split(
+                    &self.source,
+                    crate::document::format::frontmatter::Delimiter::Plus,
+                )?;
+                let new_fm =
+                    crate::document::format::toml::unset_preserving(parts.frontmatter, key)?;
+                format!("{}{}{}", parts.pre, new_fm, parts.post)
+            }
+            #[cfg(feature = "yaml")]
+            Format::YamlFrontmatter => {
+                let parts = crate::document::format::frontmatter::split(
+                    &self.source,
+                    crate::document::format::frontmatter::Delimiter::Dash,
+                )?;
+                let new_fm =
+                    crate::document::format::yaml::unset_preserving(parts.frontmatter, key)?;
+                format!("{}{}{}", parts.pre, new_fm, parts.post)
+            }
             _ => self.format.save(&value)?,
         };
         self.save_atomic(&output)?;
@@ -497,16 +586,6 @@ fn write_atomic(path: &Path, bytes: &[u8], operation: &str) -> DocumentResult<()
     result
 }
 
-fn format_name(format: Format) -> &'static str {
-    match format {
-        Format::Json => "JSON",
-        Format::Toml => "TOML",
-        Format::Yaml => "YAML",
-        Format::Dotenv => "dotenv",
-        Format::Ini => "INI",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
@@ -533,6 +612,44 @@ mod tests {
             Some("example.com")
         );
         assert_eq!(doc.source(), contents);
+    }
+
+    #[test]
+    fn value_at_reads_a_nested_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(
+            dir.path(),
+            "config.json",
+            r#"{"database": {"url": "postgres://x"}}"#,
+        );
+        let doc = DocumentFile::open(&path, None).unwrap();
+
+        assert_eq!(
+            doc.value_at("database.url").unwrap(),
+            Value::String("postgres://x".to_string())
+        );
+        assert_eq!(
+            doc.value_at("database.missing").unwrap_err().code(),
+            "document_path_not_found"
+        );
+    }
+
+    #[test]
+    fn open_capped_enforces_size_and_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(dir.path(), "config.json", r#"{"k": "v"}"#);
+
+        // Within the cap: opens normally.
+        assert!(DocumentFile::open_capped(&path, None, 1024).is_ok());
+
+        // Over the cap: rejected without parsing, as an io failure.
+        let err = DocumentFile::open_capped(&path, None, 4).unwrap_err();
+        assert_eq!(err.code(), "document_io_failed");
+        assert!(err.to_string().contains("read limit"));
+
+        // A directory is not a regular file.
+        let dir_err = DocumentFile::open_capped(dir.path(), Some(Format::Json), 1024).unwrap_err();
+        assert_eq!(dir_err.code(), "document_io_failed");
     }
 
     #[cfg(feature = "toml")]

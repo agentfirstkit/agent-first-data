@@ -113,20 +113,139 @@ export function render(value: JsonValue | Event, format: OutputFormat, options: 
 
 export type CliEventWriter = (line: string) => void;
 
-/** Stateful emitter for finite structured CLI executions. */
+/**
+ * Where a CliEmitter sends its events, selected by `--output-to`.
+ *
+ * The stream an event lands on follows the program's consumption mode, not the
+ * event's shape (see the spec's CLI Event Framing):
+ *
+ * - "split" (the default) is finite one-shot mode: `result` → stdout, while
+ *   `error`/`progress`/`log` → stderr. stdout therefore carries only successful
+ *   payloads, so a shell capture or pipe never mistakes a failure for data.
+ * - "stdout" / "stderr" are event-stream mode: every event, including `error`,
+ *   is collapsed onto that one stream so a consumer reading it in order
+ *   (branching on `kind`) sees preserved ordering.
+ */
+export type OutputTo = "split" | "stdout" | "stderr";
+
+/**
+ * Parse an `--output-to` value into an OutputTo: "split" (default), "stdout", or
+ * "stderr". Throws on unknown values; catch and pass the message to
+ * buildCliError.
+ *
+ * @example
+ * parseOutputTo("split") // → "split"
+ * parseOutputTo("both")  // throws Error
+ */
+export function parseOutputTo(value: string): OutputTo {
+  if (value === "split" || value === "stdout" || value === "stderr") {
+    return value;
+  }
+  throw new Error(`invalid --output-to '${value}': expected split, stdout, or stderr`);
+}
+
+/** Event writer bound to the process stdout stream. */
+const processStdoutWriter: CliEventWriter = (line) => {
+  process.stdout.write(line);
+};
+
+/**
+ * Event writer bound to the process stderr stream. This is the CliEmitter's
+ * blessed diagnostic sink: stderr is sanctioned here, and only here, precisely
+ * because output flows through the emitter rather than an ad-hoc write. The
+ * `stderr-sink` marker is what no_stderr_policy.test.ts allows through.
+ */
+const processStderrWriter: CliEventWriter = (line) => {
+  process.stderr.write(line); // stderr-sink: CliEmitter diagnostic channel
+};
+
+/**
+ * Stateful emitter for structured CLI executions.
+ *
+ * Routing follows the consumption mode (OutputTo):
+ *
+ * - Finite one-shot (`CliEmitter.finite` / `finiteWith` /
+ *   `fromOutputTo("split")`): `result` → the primary writer (stdout);
+ *   `error`/`progress`/`log` → the diagnostic writer (stderr). The recommended
+ *   default for a one-shot CLI, so shell capture and pipelines never treat a
+ *   failure as data.
+ * - Event stream (`new CliEmitter(...)` / `CliEmitter.stream` /
+ *   `fromOutputTo("stdout"|"stderr")`): every event, including `error`, goes to
+ *   the single writer, preserving interleaved ordering.
+ */
 export class CliEmitter {
   private terminalEmitted = false;
   private logFieldsProvider?: () => Record<string, JsonValue>;
+  private diagnostic?: CliEventWriter;
 
+  /**
+   * Create an event-stream emitter: every event, including `error`, goes to the
+   * single `writer`. Use CliEmitter.finite for a one-shot command that should
+   * split `result`/`error` across stdout/stderr.
+   */
   constructor(
     private readonly writer: CliEventWriter,
     private readonly format: OutputFormat,
     private readonly outputOptions: OutputOptions = {},
   ) {}
 
+  /**
+   * Create an event-stream emitter: every event goes to `writer`, preserving
+   * interleaved ordering. Pick this when the consumer reads one ordered stream
+   * and branches on `kind`. Alias for the constructor's unified form.
+   */
+  static stream(writer: CliEventWriter, format: OutputFormat, outputOptions: OutputOptions = {}): CliEmitter {
+    return new CliEmitter(writer, format, outputOptions);
+  }
+
+  /**
+   * Create a finite one-shot emitter with explicit sinks: `result` goes to
+   * `resultWriter`, while `error`/`progress`/`log` go to `diagnostic`.
+   */
+  static finiteWith(
+    resultWriter: CliEventWriter,
+    diagnostic: CliEventWriter,
+    format: OutputFormat,
+    outputOptions: OutputOptions = {},
+  ): CliEmitter {
+    const emitter = new CliEmitter(resultWriter, format, outputOptions);
+    emitter.diagnostic = diagnostic;
+    return emitter;
+  }
+
+  /**
+   * Create a finite one-shot emitter wired to the process streams: `result` →
+   * stdout, `error`/`progress`/`log` → stderr. The recommended default for a
+   * one-shot CLI.
+   */
+  static finite(format: OutputFormat, outputOptions: OutputOptions = {}): CliEmitter {
+    return CliEmitter.finiteWith(processStdoutWriter, processStderrWriter, format, outputOptions);
+  }
+
+  /**
+   * Build an emitter from a parsed OutputTo selector, wired to the process
+   * streams: "split" is finite mode (`result` → stdout, everything else →
+   * stderr); "stdout"/"stderr" are event-stream mode onto that one stream.
+   */
+  static fromOutputTo(selector: OutputTo, format: OutputFormat, outputOptions: OutputOptions = {}): CliEmitter {
+    if (selector === "split") return CliEmitter.finite(format, outputOptions);
+    const writer = selector === "stdout" ? processStdoutWriter : processStderrWriter;
+    return CliEmitter.stream(writer, format, outputOptions);
+  }
+
   withLogFields(provider: () => Record<string, JsonValue>): this {
     this.logFieldsProvider = provider;
     return this;
+  }
+
+  /**
+   * Select the sink for an event by `kind`. Finite mode (a diagnostic sink is
+   * present) keeps `result` on the primary writer (stdout) and routes
+   * `error`/`progress`/`log` to the diagnostic writer (stderr). Event-stream
+   * mode (no diagnostic sink) keeps every event on the single writer.
+   */
+  private sinkFor(kind: string): CliEventWriter {
+    return kind !== "result" && this.diagnostic ? this.diagnostic : this.writer;
   }
 
   emit(event: Event): void {
@@ -144,7 +263,7 @@ export class CliEmitter {
     } else {
       throw new Error(`unsupported event kind ${JSON.stringify(kind)}`);
     }
-    this.writer(`${render(jsonValue, this.format, this.outputOptions)}\n`);
+    this.sinkFor(kind)(`${render(jsonValue, this.format, this.outputOptions)}\n`);
     if (kind === "result" || kind === "error") this.terminalEmitted = true;
   }
 
@@ -162,8 +281,42 @@ export class CliEmitter {
     } else {
       throw new Error(`unsupported event kind ${JSON.stringify(kind)}`);
     }
-    this.writer(`${render(value, this.format, this.outputOptions)}\n`);
+    this.sinkFor(kind as string)(`${render(value, this.format, this.outputOptions)}\n`);
     if (kind === "result" || kind === "error") this.terminalEmitted = true;
+  }
+
+  private static isBrokenPipe(err: unknown): boolean {
+    return (
+      typeof err === "object" && err !== null && (err as NodeJS.ErrnoException).code === "EPIPE"
+    );
+  }
+
+  /**
+   * Emit `event` as the terminal event and resolve the outcome to a process
+   * exit code, so a one-shot CLI need not hand-roll the emit-then-exit dance.
+   *
+   * A successful write returns `successCode`; a broken pipe (the reader hung up)
+   * returns `0`; any other write or validation failure returns `4`. A library
+   * never calls process.exit itself — return this code and let the caller exit.
+   */
+  finish(event: Event, successCode: number): number {
+    try {
+      this.emit(event);
+      return successCode;
+    } catch (err) {
+      return CliEmitter.isBrokenPipe(err) ? 0 : 4;
+    }
+  }
+
+  /**
+   * Convenience over finish: emit a `result` payload and return `0` on success.
+   *
+   * Errors — simple or rich — go through the builder instead: construct the event
+   * with jsonError(code, message).hint(...)…build() (the builder is the error
+   * "type", so it scales to `retryable`/extra fields) and call finish(event, code).
+   */
+  finishResult(payload: JsonValue): number {
+    return this.finish(jsonResult(payload).build(), 0);
   }
 }
 

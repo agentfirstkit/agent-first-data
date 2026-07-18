@@ -162,16 +162,61 @@ impl From<std::io::Error> for CliEmitterError {
     }
 }
 
-/// Stateful emitter for finite structured CLI executions.
+/// Where a [`CliEmitter`] sends its events, selected by `--output-to`.
 ///
-/// The output format and redaction policy are fixed when the emitter is
-/// created. Emitting after a terminal event, emitting a repeated terminal
-/// event, and writer failures all return explicit errors.
+/// The stream an event lands on follows the program's *consumption mode*, not
+/// the event's shape (see the spec's CLI Event Framing):
 ///
-/// 0.16 API: Accepts typed Event, provides semantic convenience methods,
-/// and supports per-log default field provider.
+/// - [`OutputTo::Split`] (the default) is finite one-shot mode: `result` goes
+///   to `stdout`, while `error`/`progress`/`log` go to `stderr`. `stdout`
+///   therefore carries only successful payloads, so a shell capture or pipe
+///   never mistakes a failure for data.
+/// - [`OutputTo::Stdout`] / [`OutputTo::Stderr`] are event-stream mode: every
+///   event, including `error`, is collapsed onto that one stream so a consumer
+///   reading it in order (`kind`-branching) sees preserved ordering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputTo {
+    /// Finite one-shot: `result` → stdout, `error`/`progress`/`log` → stderr.
+    Split,
+    /// Event stream: every event onto stdout.
+    Stdout,
+    /// Event stream: every event onto stderr.
+    Stderr,
+}
+
+impl OutputTo {
+    /// Parse an `--output-to` value: `split` (default), `stdout`, or `stderr`.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "split" => Ok(Self::Split),
+            "stdout" => Ok(Self::Stdout),
+            "stderr" => Ok(Self::Stderr),
+            other => Err(format!(
+                "unsupported --output-to `{other}`; expected split, stdout, or stderr"
+            )),
+        }
+    }
+}
+
+/// Stateful emitter for structured CLI executions.
+///
+/// The output format, redaction policy, and stream routing are fixed when the
+/// emitter is created. Emitting after a terminal event, emitting a repeated
+/// terminal event, and writer failures all return explicit errors.
+///
+/// Routing follows the consumption mode ([`OutputTo`]):
+///
+/// - [`CliEmitter::finite`] / [`CliEmitter::finite_with`] — finite one-shot:
+///   `result` → the primary writer (stdout), `error`/`progress`/`log` → the
+///   diagnostic writer (stderr). This is the recommended default for a
+///   one-shot CLI, so shell capture and pipelines never treat a failure as data.
+/// - [`CliEmitter::stream`] — event stream: every event, including `error`,
+///   goes to the single writer, preserving interleaved ordering.
+/// - [`CliEmitter::from_output_to`] builds either shape from a parsed
+///   [`OutputTo`] selector.
 pub struct CliEmitter<W: std::io::Write> {
     writer: W,
+    diagnostic: Option<Box<dyn std::io::Write>>,
     format: OutputFormat,
     output_options: OutputOptions,
     strict_protocol: bool,
@@ -180,15 +225,54 @@ pub struct CliEmitter<W: std::io::Write> {
 }
 
 impl<W: std::io::Write> CliEmitter<W> {
-    /// Create a new CLI emitter with default output options.
+    /// Create an event-stream emitter: every event goes to `writer`.
+    ///
+    /// Alias for [`CliEmitter::stream`]. Use [`CliEmitter::finite`] for a
+    /// one-shot command that should split `result`/`error` across stdout/stderr.
     pub fn new(writer: W, format: OutputFormat) -> Self {
-        Self::with_options(writer, format, OutputOptions::default())
+        Self::stream(writer, format)
     }
 
-    /// Create a new CLI emitter with custom output options.
+    /// Create an event-stream emitter with custom output options.
     pub fn with_options(writer: W, format: OutputFormat, output_options: OutputOptions) -> Self {
         Self {
             writer,
+            diagnostic: None,
+            format,
+            output_options,
+            strict_protocol: false,
+            terminal_emitted: false,
+            log_fields_provider: None,
+        }
+    }
+
+    /// Create an event-stream emitter: every event, including `error`, goes to
+    /// the single `writer`, preserving interleaved ordering. Pick this when the
+    /// consumer reads one ordered stream and branches on `kind`.
+    pub fn stream(writer: W, format: OutputFormat) -> Self {
+        Self::with_options(writer, format, OutputOptions::default())
+    }
+
+    /// Create a finite one-shot emitter with explicit sinks: `result` goes to
+    /// `result_writer`, while `error`/`progress`/`log` go to `diagnostic`.
+    pub fn finite_with(
+        result_writer: W,
+        diagnostic: impl std::io::Write + 'static,
+        format: OutputFormat,
+    ) -> Self {
+        Self::finite_with_options(result_writer, diagnostic, format, OutputOptions::default())
+    }
+
+    /// Create a finite one-shot emitter with explicit sinks and output options.
+    pub fn finite_with_options(
+        result_writer: W,
+        diagnostic: impl std::io::Write + 'static,
+        format: OutputFormat,
+        output_options: OutputOptions,
+    ) -> Self {
+        Self {
+            writer: result_writer,
+            diagnostic: Some(Box::new(diagnostic)),
             format,
             output_options,
             strict_protocol: false,
@@ -272,6 +356,32 @@ impl<W: std::io::Write> CliEmitter<W> {
         self.write_event(event)
     }
 
+    /// Emit `event` as the terminal event and resolve the outcome to a process
+    /// exit code, so a one-shot CLI need not hand-roll the emit-then-exit dance.
+    ///
+    /// A successful write returns `success_code`; a broken pipe (the reader hung
+    /// up) returns `0`; any other write or validation failure returns `4`. A
+    /// library never calls `process::exit` itself — return this code from `main`
+    /// (`std::process::ExitCode::from(code)`).
+    pub fn finish(&mut self, event: Event, success_code: u8) -> u8 {
+        match self.emit(event) {
+            Ok(()) => success_code,
+            Err(err) if err.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe) => 0,
+            Err(_) => 4,
+        }
+    }
+
+    /// Convenience over [`CliEmitter::finish`]: emit a `result` payload and
+    /// return `0` on success.
+    ///
+    /// For an error, build it with [`json_error`] (`.hint(…)`, `.retryable(…)`,
+    /// `.field(…)` as needed) and pass the event to [`CliEmitter::finish`] with
+    /// the desired exit code — the builder is the error type, so no separate
+    /// error-emitting convenience is needed.
+    pub fn finish_result(&mut self, payload: Value) -> u8 {
+        self.finish(json_result(payload).build(), 0)
+    }
+
     /// Access the underlying writer.
     pub fn into_inner(self) -> W {
         self.writer
@@ -311,13 +421,81 @@ impl<W: std::io::Write> CliEmitter<W> {
             }
         }
         let rendered = crate::formatting::render(&event, self.format, &self.output_options);
-        self.writer.write_all(rendered.as_bytes())?;
-        self.writer.write_all(b"\n")?;
-        self.writer.flush()?;
+        // Finite mode (a diagnostic sink is present) splits by kind: `result`
+        // stays on the primary writer (stdout), while `error`/`progress`/`log`
+        // are diagnostics routed to the diagnostic writer (stderr). Event-stream
+        // mode (no diagnostic sink) keeps every event on the single writer.
+        match &mut self.diagnostic {
+            Some(diagnostic) if kind != "result" => {
+                write_event_line(diagnostic.as_mut(), &rendered)
+            }
+            _ => write_event_line(&mut self.writer, &rendered),
+        }?;
         if matches!(kind, "result" | "error") {
             self.terminal_emitted = true;
         }
         Ok(())
+    }
+}
+
+/// Write one rendered event line (payload plus trailing newline) and flush.
+fn write_event_line(writer: &mut dyn std::io::Write, rendered: &str) -> std::io::Result<()> {
+    writer.write_all(rendered.as_bytes())?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
+// The emitter's own diagnostic sink is the spec's sanctioned exception to the
+// "no ad-hoc stderr" rule (Channel policy): a finite one-shot emitter routes
+// `error`/`progress`/`log` to `std::io::stderr` on purpose, so these wired
+// constructors are allowed to name it directly.
+#[allow(clippy::disallowed_methods)]
+impl CliEmitter<std::io::Stdout> {
+    /// Create a finite one-shot emitter wired to the process streams: `result`
+    /// → `stdout`, `error`/`progress`/`log` → `stderr`. The recommended default
+    /// for a one-shot CLI.
+    pub fn finite(format: OutputFormat) -> Self {
+        Self::finite_with(std::io::stdout(), std::io::stderr(), format)
+    }
+
+    /// Create a finite one-shot emitter wired to the process streams, with
+    /// custom output options.
+    pub fn finite_options(format: OutputFormat, output_options: OutputOptions) -> Self {
+        Self::finite_with_options(std::io::stdout(), std::io::stderr(), format, output_options)
+    }
+}
+
+// Same sanctioned exception as above: `from_output_to` wires the process
+// streams (`std::io::stderr` included) as the emitter's own sinks.
+#[allow(clippy::disallowed_methods)]
+impl CliEmitter<Box<dyn std::io::Write>> {
+    /// Build an emitter from a parsed [`OutputTo`] selector, wired to the
+    /// process streams: `Split` is finite mode (`result` → stdout, everything
+    /// else → stderr); `Stdout`/`Stderr` are event-stream mode onto that stream.
+    pub fn from_output_to(selector: OutputTo, format: OutputFormat) -> Self {
+        Self::from_output_to_with(selector, format, OutputOptions::default())
+    }
+
+    /// As [`CliEmitter::from_output_to`], with custom output options.
+    pub fn from_output_to_with(
+        selector: OutputTo,
+        format: OutputFormat,
+        output_options: OutputOptions,
+    ) -> Self {
+        match selector {
+            OutputTo::Split => Self::finite_with_options(
+                Box::new(std::io::stdout()),
+                std::io::stderr(),
+                format,
+                output_options,
+            ),
+            OutputTo::Stdout => {
+                Self::with_options(Box::new(std::io::stdout()), format, output_options)
+            }
+            OutputTo::Stderr => {
+                Self::with_options(Box::new(std::io::stderr()), format, output_options)
+            }
+        }
     }
 }
 
@@ -427,6 +605,19 @@ fn parse_version_request(raw_args: &[String]) -> ParsedVersionRequest {
                 &mut output_error,
             );
             i += 1;
+            continue;
+        }
+
+        // `--output-to` takes a value but does not affect version text output.
+        // Consume its space-separated value so it is not mistaken for the
+        // subcommand boundary (which would hide a later `--version`/`--output`).
+        if flag_name == Some("output-to") {
+            let has_space_value = inline_value.is_none()
+                && args
+                    .get(i + 1)
+                    .map(|next| !next.starts_with('-'))
+                    .unwrap_or(false);
+            i += if has_space_value { 2 } else { 1 };
             continue;
         }
 

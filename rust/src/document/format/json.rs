@@ -296,10 +296,17 @@ pub fn remove_array_item_preserving(
     let (mut remove_start, mut remove_end, remove_following_line) =
         if content.as_bytes().get(after) == Some(&b',') {
             (start, after + 1, true)
-        } else if let Some(comma) = content.as_bytes()[..start]
+        } else if let Some(comma) = content.as_bytes()[target.start..start]
             .iter()
             .rposition(|byte| *byte == b',')
+            .map(|offset| target.start + offset)
         {
+            // Scoped to the array's own span (`target.start..start`), not
+            // the whole document: an unscoped backward search can walk past
+            // the array's opening `[` and land on an unrelated preceding
+            // sibling's comma (e.g. `{"a":1,"items":[{"id":"x"}]}` removing
+            // the sole item), corrupting the document instead of just
+            // collapsing the array to `[]`.
             (comma, item.end, false)
         } else {
             (start, item.end, false)

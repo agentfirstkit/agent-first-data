@@ -5,6 +5,7 @@ import pytest
 from io import StringIO
 from agent_first_data import (
     OutputFormat,
+    OutputTo,
     PlainStyle,
     OutputOptions,
     LogLevel,
@@ -275,6 +276,210 @@ def test_cli_emitter_with_log_fields_provider():
     assert parsed["log"]["code"] == "cache_miss"
     assert parsed["log"]["message"] == "test message"
     assert parsed["log"]["level"] == "info"
+
+
+# ── OutputTo parsing ──────────────────────────────────────────────────────────
+
+def test_output_to_parse_all_variants():
+    assert OutputTo.parse("split") is OutputTo.SPLIT
+    assert OutputTo.parse("stdout") is OutputTo.STDOUT
+    assert OutputTo.parse("stderr") is OutputTo.STDERR
+
+
+def test_output_to_parse_rejects_unknown():
+    with pytest.raises(ValueError, match="unsupported --output-to"):
+        OutputTo.parse("xml")
+    # The offending value and the accepted set are named in the message.
+    with pytest.raises(ValueError, match="xml"):
+        OutputTo.parse("xml")
+    with pytest.raises(ValueError, match="split, stdout, or stderr"):
+        OutputTo.parse("both")
+
+
+def test_output_to_parse_is_case_sensitive():
+    with pytest.raises(ValueError):
+        OutputTo.parse("SPLIT")
+    with pytest.raises(ValueError):
+        OutputTo.parse("")
+
+
+# ── CliEmitter two-mode routing ───────────────────────────────────────────────
+
+def test_finite_split_routes_result_and_diagnostics_separately():
+    out = StringIO()
+    err = StringIO()
+    emitter = CliEmitter.finite_with(out, err, OutputFormat.JSON)
+    emitter.emit_log(LogLevel.INFO, "startup")
+    emitter.emit_progress("halfway")
+    emitter.emit_result({"rows": 2})
+
+    # result → primary (stdout) sink only
+    result_lines = out.getvalue().splitlines()
+    assert len(result_lines) == 1
+    assert json.loads(result_lines[0])["kind"] == "result"
+
+    # log + progress → diagnostic (stderr) sink only
+    diag_kinds = [json.loads(line)["kind"] for line in err.getvalue().splitlines()]
+    assert diag_kinds == ["log", "progress"]
+
+
+def test_finite_split_routes_error_to_diagnostic():
+    out = StringIO()
+    err = StringIO()
+    emitter = CliEmitter.finite_with(out, err, OutputFormat.JSON)
+    emitter.emit_error("boom", "it broke")
+    # error is a diagnostic: it must land on stderr, never on the result stream,
+    # so a shell capture of stdout never mistakes a failure for data.
+    assert out.getvalue() == ""
+    err_lines = err.getvalue().splitlines()
+    assert len(err_lines) == 1
+    assert json.loads(err_lines[0])["kind"] == "error"
+
+
+def test_stream_mode_collapses_every_event_onto_one_writer():
+    buf = StringIO()
+    emitter = CliEmitter.stream(buf, OutputFormat.JSON)
+    emitter.emit_log(LogLevel.INFO, "startup")
+    emitter.emit_progress("halfway")
+    emitter.emit_error("boom", "it broke")
+    kinds = [json.loads(line)["kind"] for line in buf.getvalue().splitlines()]
+    # every event, including error, preserves interleaved order on one stream
+    assert kinds == ["log", "progress", "error"]
+
+
+def test_default_constructor_is_stream_form():
+    # The plain CliEmitter(writer, ...) constructor is the unified/stream form:
+    # no diagnostic sink, so every event stays on the single writer.
+    buf = StringIO()
+    emitter = CliEmitter(buf, OutputFormat.JSON)
+    emitter.emit_progress("halfway")
+    emitter.emit_error("boom", "it broke")
+    kinds = [json.loads(line)["kind"] for line in buf.getvalue().splitlines()]
+    assert kinds == ["progress", "error"]
+
+
+def test_from_output_to_split_is_finite(monkeypatch):
+    out = StringIO()
+    err = StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr("sys.stderr", err)
+    emitter = CliEmitter.from_output_to(OutputTo.SPLIT, OutputFormat.JSON)
+    emitter.emit_error("boom", "it broke")
+    assert out.getvalue() == ""
+    assert json.loads(err.getvalue().splitlines()[0])["kind"] == "error"
+
+
+def test_from_output_to_stdout_streams_everything_to_stdout(monkeypatch):
+    out = StringIO()
+    err = StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr("sys.stderr", err)
+    emitter = CliEmitter.from_output_to(OutputTo.STDOUT, OutputFormat.JSON)
+    emitter.emit_progress("halfway")
+    emitter.emit_error("boom", "it broke")
+    assert err.getvalue() == ""
+    kinds = [json.loads(line)["kind"] for line in out.getvalue().splitlines()]
+    assert kinds == ["progress", "error"]
+
+
+def test_from_output_to_stderr_streams_everything_to_stderr(monkeypatch):
+    out = StringIO()
+    err = StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr("sys.stderr", err)
+    emitter = CliEmitter.from_output_to(OutputTo.STDERR, OutputFormat.JSON)
+    emitter.emit_result({"rows": 1})
+    assert out.getvalue() == ""
+    assert json.loads(err.getvalue().splitlines()[0])["kind"] == "result"
+
+
+def test_finite_split_still_enforces_terminal_lifecycle():
+    out = StringIO()
+    err = StringIO()
+    emitter = CliEmitter.finite_with(out, err, OutputFormat.JSON)
+    emitter.emit_result({"rows": 2})
+    with pytest.raises(RuntimeError, match="duplicate terminal"):
+        emitter.emit_error("late", "too late")
+
+
+# ── CliEmitter.finish / finish_result ─────────────────────────────────────────
+
+def test_finish_returns_success_code_on_success():
+    buf = StringIO()
+    emitter = CliEmitter.stream(buf, OutputFormat.JSON)
+    code = emitter.finish(json_result({"rows": 1}).build(), 0)
+    assert code == 0
+    assert json.loads(buf.getvalue().splitlines()[0])["kind"] == "result"
+
+
+def test_finish_honors_a_nonzero_success_code():
+    buf = StringIO()
+    emitter = CliEmitter.stream(buf, OutputFormat.JSON)
+    # finish returns the caller's success_code verbatim on a good write.
+    code = emitter.finish(json_error("cancelled", "cancelled").build(), 1)
+    assert code == 1
+    assert json.loads(buf.getvalue().splitlines()[0])["error"]["code"] == "cancelled"
+
+
+def test_finish_result_writes_result_and_returns_zero():
+    out = StringIO()
+    err = StringIO()
+    emitter = CliEmitter.finite_with(out, err, OutputFormat.JSON)
+    code = emitter.finish_result({"ok": True})
+    assert code == 0
+    assert err.getvalue() == ""
+    parsed = json.loads(out.getvalue().splitlines()[0])
+    assert parsed["kind"] == "result"
+    assert parsed["result"] == {"ok": True}
+
+
+def test_finish_routes_a_built_error_to_the_diagnostic_sink():
+    # The error "type" is the builder: build via json_error(...).hint_if_some(...)
+    # and hand the event to finish with the desired exit code. In finite mode the
+    # error is a diagnostic → stderr, and finish returns the caller's exit code.
+    out = StringIO()
+    err = StringIO()
+    emitter = CliEmitter.finite_with(out, err, OutputFormat.JSON)
+    event = json_error("bad_flag", "bad flag").hint_if_some("try --help").build()
+    code = emitter.finish(event, 2)
+    assert code == 2
+    assert out.getvalue() == ""
+    parsed = json.loads(err.getvalue().splitlines()[0])
+    assert parsed["error"]["code"] == "bad_flag"
+    assert parsed["error"]["hint"] == "try --help"
+
+
+class _BrokenPipeWriter:
+    def write(self, _value: str) -> None:
+        raise BrokenPipeError("reader hung up")
+
+
+class _FailingWriter:
+    def write(self, _value: str) -> None:
+        raise OSError("disk full")
+
+
+def test_finish_returns_0_on_broken_pipe():
+    emitter = CliEmitter.stream(_BrokenPipeWriter(), OutputFormat.JSON)
+    assert emitter.finish(json_result({"rows": 1}).build(), 0) == 0
+
+
+def test_finish_returns_4_on_other_write_failure():
+    emitter = CliEmitter.stream(_FailingWriter(), OutputFormat.JSON)
+    assert emitter.finish(json_result({"rows": 1}).build(), 0) == 4
+
+
+def test_finish_result_returns_0_on_broken_pipe():
+    emitter = CliEmitter.stream(_BrokenPipeWriter(), OutputFormat.JSON)
+    assert emitter.finish_result({"ok": True}) == 0
+
+
+def test_finish_returns_4_on_lifecycle_violation():
+    # A non-BrokenPipe failure (here a duplicate terminal) resolves to 4.
+    buf = StringIO()
+    emitter = CliEmitter.stream(buf, OutputFormat.JSON)
+    assert emitter.finish(json_result({"rows": 1}).build(), 0) == 0
+    assert emitter.finish(json_error("late", "too late").build(), 1) == 4
 
 
 # ── version helpers ───────────────────────────────────────────────────────────

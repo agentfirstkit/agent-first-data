@@ -118,15 +118,29 @@ func normalizeTrace(trace any) any {
 	if obj, ok := trace.(map[string]any); ok {
 		return obj
 	}
-	data, err := json.Marshal(trace)
-	if err != nil {
-		return trace
-	}
-	var obj map[string]any
-	if json.Unmarshal(data, &obj) == nil {
+	if obj, err := marshalToObject(trace); err == nil {
 		return obj
 	}
 	return trace
+}
+
+// marshalToObject serializes value via json.Marshal and decodes the result
+// back into a map[string]any using UseNumber, so large integers (>2^53)
+// inside a caller-supplied struct's numeric fields survive as json.Number
+// instead of collapsing to a lossy float64 the way plain json.Unmarshal into
+// map[string]any would.
+func marshalToObject(value any) (map[string]any, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var obj map[string]any
+	if err := dec.Decode(&obj); err != nil {
+		return nil, err
+	}
+	return obj, nil
 }
 
 // ═════════════════════════════════════════════
@@ -211,13 +225,8 @@ func (b *JSONErrorBuilder) Extend(value any) *JSONErrorBuilder {
 	if value == nil {
 		return b
 	}
-	data, err := json.Marshal(value)
+	obj, err := marshalToObject(value)
 	if err != nil {
-		b.errs = append(b.errs, &BuilderError{msg: "extend: failed to marshal value: " + err.Error()})
-		return b
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(data, &obj); err != nil {
 		b.errs = append(b.errs, &BuilderError{msg: "extend: value must serialize to a JSON object"})
 		return b
 	}
@@ -256,13 +265,11 @@ func (b *JSONErrorBuilder) Build() (Event, error) {
 		if obj, ok := b.trace.(map[string]any); ok {
 			traceObj = obj
 		} else {
-			data, err := json.Marshal(b.trace)
+			obj, err := marshalToObject(b.trace)
 			if err != nil {
-				return Event{}, &BuilderError{msg: "trace must be serializable: " + err.Error()}
-			}
-			if err := json.Unmarshal(data, &traceObj); err != nil {
 				return Event{}, &BuilderError{msg: "trace must be a JSON object"}
 			}
+			traceObj = obj
 		}
 	}
 

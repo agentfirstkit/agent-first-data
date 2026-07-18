@@ -203,6 +203,99 @@ describe("protocol strict fixtures", () => {
   }
 });
 
+// --- decodeProtocolEvent ---
+
+describe("decodeProtocolEvent", () => {
+  // Payloads here are deliberately string-only, not numeric: a decoded number
+  // is a LosslessNumber (see the module-level fidelity note in format.ts),
+  // not a plain JS `number`, so it does not deepEqual a plain-number fixture
+  // literal. Numeric decode fidelity has its own dedicated coverage below
+  // ("number fidelity fixtures").
+  it("decodes a result event", () => {
+    const event = jsonResult({ hash: "abc" }).build();
+    const decoded = decodeProtocolEvent(render(event, "json"));
+    assert.equal(decoded.kind, "result");
+    assert.deepEqual((decoded as { result: unknown }).result, { hash: "abc" });
+    assert.deepEqual(decoded.trace, {});
+  });
+
+  it("decodes an error event with extension fields", () => {
+    const event = jsonError("not_found", "missing").hint("check the id").field("id", "abc").retryable().build();
+    const decoded = decodeProtocolEvent(render(event, "json"));
+    assert.equal(decoded.kind, "error");
+    if (decoded.kind !== "error") throw new Error("expected error");
+    assert.equal(decoded.code, "not_found");
+    assert.equal(decoded.message, "missing");
+    assert.equal(decoded.retryable, true);
+    assert.equal(decoded.hint, "check the id");
+    assert.deepEqual(decoded.fields, { id: "abc" });
+  });
+
+  it("decodes a progress event", () => {
+    const event = jsonProgress({ message: "halfway", status: "uploading" }).build();
+    const decoded = decodeProtocolEvent(render(event, "json"));
+    assert.equal(decoded.kind, "progress");
+    assert.deepEqual((decoded as { progress: unknown }).progress, { message: "halfway", status: "uploading" });
+  });
+
+  it("decodes a log event", () => {
+    const event = jsonLog({ level: "warn", message: "slow query" }).build();
+    const decoded = decodeProtocolEvent(render(event, "json"));
+    assert.equal(decoded.kind, "log");
+    assert.deepEqual((decoded as { log: unknown }).log, { level: "warn", message: "slow query" });
+  });
+
+  it("throws EventDecodeError on invalid JSON", () => {
+    assert.throws(() => decodeProtocolEvent("not json"), EventDecodeError);
+  });
+
+  it("throws EventDecodeError on an invalid envelope", () => {
+    assert.throws(() => decodeProtocolEvent(JSON.stringify({ kind: "result" })), EventDecodeError);
+  });
+
+  it("throws EventDecodeError when strict validation fails", () => {
+    // Missing trace fails the strict profile even though the shape is otherwise valid.
+    assert.throws(() => decodeProtocolEvent(JSON.stringify({ kind: "result", result: {} })), EventDecodeError);
+  });
+});
+
+// --- Number literal fidelity (shared spec/fixtures/number_fidelity.json) ---
+//
+// Regression guard for decodeProtocolEvent's lossless-json parse path and
+// canonicalJsonString/yamlScalar/plainScalar's LosslessNumber handling in
+// format.ts (the main cross-language gap this phase closes: plain
+// JSON.parse forces every number through float64, corrupting digits).
+
+describe("number fidelity fixtures", () => {
+  for (const tc of load("number_fidelity.json")) {
+    it(tc.name, () => {
+      const decoded = decodeProtocolEvent(tc.input_line);
+      assert.equal(decoded.kind, "result", `[number_fidelity/${tc.name}] expected a result event`);
+      const result = (decoded as { result: JsonValue }).result;
+
+      const gotJson = render(result, "json");
+      assert.equal(gotJson, tc.expected_json, `[number_fidelity/${tc.name}] json mismatch`);
+
+      if (tc.expected_yaml !== undefined) {
+        const gotYaml = render(result, "yaml");
+        assert.equal(gotYaml, tc.expected_yaml, `[number_fidelity/${tc.name}] yaml mismatch`);
+      }
+    });
+  }
+
+  it("does not regress ordinary (non-exotic) decoded numbers in plain output", () => {
+    // decodeProtocolEvent wraps every number, including small ordinary ones;
+    // tryProcessField must normalize back to a native number for Plain's
+    // suffix arithmetic or this would silently stop formatting duration_ms
+    // etc. for any decoded event (see format.ts's tryProcessField comment).
+    const decoded = decodeProtocolEvent(
+      JSON.stringify({ kind: "result", result: { duration_ms: 42, size_bytes: 5242880, cpu_percent: 85.5 }, trace: {} }),
+    );
+    const plain = render((decoded as { result: JsonValue }).result, "plain");
+    assert.equal(plain, "cpu=85.5% duration=42ms size=5.0MiB");
+  });
+});
+
 it("error builder ignores reserved extension fields", () => {
   const event = jsonError("explicit", "message")
     .field("code", "wrong")

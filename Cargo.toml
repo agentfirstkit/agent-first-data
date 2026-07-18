@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-data"
-version = "0.18.0"
+version = "0.19.0"
 edition = "2024"
 description = "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents."
 license = "MIT"
@@ -55,7 +55,13 @@ ini = []
 schema = []
 
 [dependencies]
-serde_json = "1"
+# `arbitrary_precision` is load-bearing for the document layer's number
+# literal fidelity (§4): it makes `serde_json::Number` retain the exact
+# source text of a parsed number instead of collapsing it through f64,
+# which is what `document::Value::Number` relies on to avoid corrupting
+# integers beyond u64 range or high-precision float literals. See
+# `rust/src/document/value.rs`.
+serde_json = { version = "1", features = ["arbitrary_precision"] }
 serde = { version = "1", features = ["derive"] }
 chrono = "0.4"
 url = "2"

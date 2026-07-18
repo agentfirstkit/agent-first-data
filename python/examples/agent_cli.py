@@ -26,6 +26,7 @@ import signal
 import sys
 
 from agent_first_data import (
+    CliEmitter,
     OutputFormat,
     LogLevel,
     build_cli_error,
@@ -254,6 +255,20 @@ def cli_error_format_from_raw(raw: list[str]) -> OutputFormat:
         return OutputFormat.JSON
 
 
+def bootstrap_error(fmt: OutputFormat, message: str, hint: str | None = None, exit_code: int = 2) -> int:
+    """Resolve a pre-emitter/bootstrap CLI error to a process exit code.
+
+    Bootstrap failures (bad flags, format conflicts) happen before main()'s
+    finite emitter exists, so each builds a standard ``cli_error`` event through
+    the error builder (:func:`build_cli_error`) and hands it to a fresh
+    ``CliEmitter.finite(fmt).finish``: the ``error`` envelope goes to stderr
+    (never stdout, so shell capture and pipelines never treat a usage failure as
+    data), and finish folds in broken-pipe (``0``) and write-failure (``4``)
+    handling. Callers ``sys.exit`` the returned code.
+    """
+    return CliEmitter.finite(fmt).finish(build_cli_error(message, hint=hint), exit_code)
+
+
 def help_requested(raw: list[str]) -> bool:
     return "--help" in raw or "-h" in raw
 
@@ -408,11 +423,9 @@ def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
     scope = "recursive" if recursive else "one_level"
 
     if output_missing(raw) or (explicit and value is None):
-        print(render(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml"), OutputFormat.JSON))
-        sys.exit(2)
+        sys.exit(bootstrap_error(OutputFormat.JSON, "missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml"))
     if conflict is not None:
-        print(render(build_cli_error(conflict, hint="valid help output formats: plain, markdown, json, yaml"), OutputFormat.JSON))
-        sys.exit(2)
+        sys.exit(bootstrap_error(OutputFormat.JSON, conflict, hint="valid help output formats: plain, markdown, json, yaml"))
 
     if not explicit or value == "plain":
         if sub is not None:
@@ -432,8 +445,9 @@ def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
     try:
         fmt = cli_parse_output(value)
     except ValueError as e:
-        print(render(build_cli_error(str(e)), OutputFormat.JSON))
-        sys.exit(2)
+        sys.exit(bootstrap_error(OutputFormat.JSON, str(e)))
+    # Successful help output (structured) is stdout: it is the help "payload",
+    # not a diagnostic. --help/--version text never routes through the emitter.
     print(render(help_schema(parser, args.command, scope), fmt))
 
 
@@ -443,34 +457,30 @@ def main() -> None:
     try:
         _stream_redirect = install_stream_redirect_from_raw_args(raw)
     except (OSError, ValueError) as e:
-        print(render(build_cli_error(str(e)), OutputFormat.JSON))
-        sys.exit(2)
+        sys.exit(bootstrap_error(OutputFormat.JSON, str(e)))
 
+    # --version/--help TEXT is not an AFDATA envelope: it is handled here, before
+    # the finite emitter is involved, and stays on stdout unchanged.
     try:
         version = cli_handle_version_or_continue(raw, "agent-cli", AGENT_CLI_VERSION)
     except ValueError as e:
-        print(render(build_cli_error(str(e), hint="valid version output formats: json, yaml, plain"), OutputFormat.JSON))
-        sys.exit(2)
+        sys.exit(bootstrap_error(OutputFormat.JSON, str(e), hint="valid version output formats: json, yaml, plain"))
     if version is not None:
         print(version, end="")
         return
 
     if output_missing(raw):
         if help_requested(raw):
-            print(render(build_cli_error("missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml"), OutputFormat.JSON))
+            sys.exit(bootstrap_error(OutputFormat.JSON, "missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml"))
         else:
-            print(render(build_cli_error("missing value for --output: expected json, yaml, or plain", hint="valid output formats: json, yaml, plain"), OutputFormat.JSON))
-        sys.exit(2)
+            sys.exit(bootstrap_error(OutputFormat.JSON, "missing value for --output: expected json, yaml, or plain", hint="valid output formats: json, yaml, plain"))
     try:
         args = parse_cli_args(parser, raw)
     except ArgumentParserError as e:
-        fmt = cli_error_format_from_raw(raw)
-        print(render(build_cli_error(str(e), hint="try: agent-cli --help"), fmt))
-        sys.exit(2)
+        sys.exit(bootstrap_error(cli_error_format_from_raw(raw), str(e), hint="try: agent-cli --help"))
     conflict = output_conflict(raw)
     if conflict is not None:
-        print(render(build_cli_error(conflict, hint="valid output formats: json, yaml, plain"), OutputFormat.JSON))
-        sys.exit(2)
+        sys.exit(bootstrap_error(OutputFormat.JSON, conflict, hint="valid output formats: json, yaml, plain"))
     if args.json:
         args.output = "json"
 
@@ -484,8 +494,15 @@ def main() -> None:
     try:
         fmt = cli_parse_output(args.output)
     except ValueError as e:
-        print(render(build_cli_error(str(e)), OutputFormat.JSON))
-        sys.exit(2)
+        sys.exit(bootstrap_error(OutputFormat.JSON, str(e)))
+
+    # A finite one-shot emitter is this example's single output path from here on:
+    # `result` → stdout, `error`/`progress`/`log` → stderr (see the spec's CLI
+    # Event Framing). stdout therefore carries only successful payloads, so shell
+    # capture and pipelines never treat a diagnostic or failure as data. (An
+    # agentic, long-running producer would instead pick CliEmitter.from_output_to
+    # with --output-to stdout to keep every event on one ordered stream.)
+    emitter = CliEmitter.finite(fmt)
 
     # Step 2: parse --log with shared helper (trim + lowercase + dedup)
     log = cli_parse_log_filters(args.log.split(",") if args.log else [])
@@ -494,49 +511,48 @@ def main() -> None:
         log.append("all")
 
     # Each diagnostic line self-tags with its `category`, so `--log all` reveals
-    # the full set from real output rather than a static help list.
+    # the full set from real output rather than a static help list. Logs are
+    # diagnostics: the finite emitter routes them to stderr.
     if log_enabled(log, "request"):
-        print(render(build_request_log(args.command), fmt))
+        emitter.emit(build_request_log(args.command))
     if log_enabled(log, "startup"):
-        print(render(build_startup_log(raw, args, log), fmt))
+        emitter.emit(build_startup_log(raw, args, log))
 
-    # Step 3: no subcommand → error with hint
+    # Step 3: no subcommand → a cli_error with a hint. Build it through the error
+    # builder and hand it to finish (routed to stderr in finite mode).
     if not args.command:
-        print(render(build_cli_error("no subcommand provided", hint="try: agent-cli --help"), fmt))
-        sys.exit(2)
+        sys.exit(emitter.finish(build_cli_error("no subcommand provided", hint="try: agent-cli --help"), 2))
 
     if args.command == "echo":
-        # Step 4: --dry-run → preview without executing
+        # Step 4: --dry-run → preview without executing. The preview carries an
+        # explicit trace, so build the event and hand it to finish (finish_result
+        # would build a default-trace result instead).
         if args.dry_run:
             preview = json_result({"action": "echo", "log": log}).trace({"duration_ms": 0}).build()
-            print(render(preview.to_dict(), fmt))
-            return
+            sys.exit(emitter.finish(preview, 0))
 
-        result = json_result({"action": "echo", "log": log}).build()
-        print(render(result.to_dict(), fmt))
+        sys.exit(emitter.finish_result({"action": "echo", "log": log}))
 
     elif args.command == "ping":
-        # Step 5: demonstrate a protocol v1 error with hint on failure
+        # Step 5: a rich protocol v1 error (hint + trace) → build event + finish.
         host = args.host or os.environ.get(PING_HOST_ENV)
         if not host:
             err = json_error(
                 "ping_target_not_configured",
                 "ping target not configured",
             ).hint("set PING_HOST or pass --host").trace({"duration_ms": 0}).build()
-            print(render(err.to_dict(), fmt))
-            sys.exit(1)
+            sys.exit(emitter.finish(err, 1))
 
     elif args.command == "cancel":
         err = json_error(
             "cancelled",
             "operation cancelled",
         ).hint("the operation was cancelled before completion").trace({"duration_ms": 0}).build()
-        print(render(err.to_dict(), fmt))
-        sys.exit(1)
+        sys.exit(emitter.finish(err, 1))
 
     elif args.command == "skill":
         # Step 6: wire the embedded Agent Skill installer to the library.
-        sys.exit(run_skill(args, fmt))
+        sys.exit(run_skill(emitter, args))
 
 
 def build_skill_options(args):
@@ -564,10 +580,12 @@ def build_skill_options(args):
     return SkillOptions(agent=agent, scope=scope, skills_dir=args.skills_dir, force=args.force), None
 
 
-def run_skill(args, fmt) -> int:
-    """Wire the parsed `skill` subcommand to the library and print the result.
+def run_skill(emitter: CliEmitter, args) -> int:
+    """Wire the parsed `skill` subcommand to the library and emit the outcome.
 
-    Returns the process exit code (0 ok, 1 action error, 2 bad flag value).
+    Routes through the finite emitter: the success report is a `result` (stdout)
+    and every failure is an `error` (stderr). Returns the process exit code
+    (0 ok, 1 action error, 2 bad flag value).
     """
     actions = {
         "status": SkillAction.STATUS,
@@ -576,27 +594,22 @@ def run_skill(args, fmt) -> int:
     }
     action = actions.get(args.verb)
     if action is None:
-        err = build_cli_error(
+        return emitter.finish(build_cli_error(
             "skill requires a subcommand: status, install, uninstall",
             hint="example: agent-cli skill status --agent opencode",
-        )
-        print(render(err, fmt))
-        return 2
+        ), 2)
 
     options, parse_error = build_skill_options(args)
     if parse_error is not None:
         message, hint = parse_error
-        print(render(build_cli_error(message, hint=hint), fmt))
-        return 2
+        return emitter.finish(build_cli_error(message, hint=hint), 2)
 
     try:
         report = run_skill_admin(WIDGET_SPEC, action, options)
     except SkillError as e:
-        print(render(build_cli_error(e.message, hint=e.hint), fmt))
-        return 1
-    # The report is structured; serialize it for output.
-    print(render(report.to_dict(), fmt))
-    return 0
+        return emitter.finish(build_cli_error(e.message, hint=e.hint), 1)
+    # The report is a structured payload; wrap it in a result envelope (stdout).
+    return emitter.finish_result(report.to_dict())
 
 
 # ── Tests (run via: pytest examples/agent_cli.py) ─────────────────────────────

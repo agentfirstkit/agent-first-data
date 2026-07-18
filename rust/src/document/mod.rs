@@ -31,7 +31,7 @@ pub mod format;
 #[cfg(feature = "schema")]
 pub mod schema;
 
-pub use coerce::{coerce_scalar, coerce_scalar_typed, coerce_values, coerce_values_typed};
+pub use coerce::{ScalarKind, ValueType, guard_bare_overwrite, scalar_kind, value_from_type};
 pub use error::{DocumentError, DocumentResult};
 pub use file::{Document, DocumentFile};
 pub use keyed::{KeyedList, add_keyed, remove_keyed};

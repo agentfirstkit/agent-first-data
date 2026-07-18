@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   cliParseOutput,
+  parseOutputTo,
   cliParseLogFilters,
   render,
   PlainStyle,
@@ -39,6 +40,35 @@ describe("cliParseOutput", () => {
       assert.ok(e instanceof Error);
       assert.ok(e.message.includes("toml"));
       assert.ok(e.message.includes("json"));
+    }
+  });
+});
+
+// ── parseOutputTo ─────────────────────────────────────────────────────────────
+
+describe("parseOutputTo", () => {
+  it("accepts all selectors", () => {
+    assert.equal(parseOutputTo("split"), "split");
+    assert.equal(parseOutputTo("stdout"), "stdout");
+    assert.equal(parseOutputTo("stderr"), "stderr");
+  });
+
+  it("rejects unknown values", () => {
+    assert.throws(() => parseOutputTo("both"));
+    assert.throws(() => parseOutputTo("SPLIT"));
+    assert.throws(() => parseOutputTo(""));
+  });
+
+  it("error message contains the invalid value and the valid choices", () => {
+    try {
+      parseOutputTo("file");
+      assert.fail("expected throw");
+    } catch (e) {
+      assert.ok(e instanceof Error);
+      assert.ok(e.message.includes("file"));
+      assert.ok(e.message.includes("split"));
+      assert.ok(e.message.includes("stdout"));
+      assert.ok(e.message.includes("stderr"));
     }
   });
 });
@@ -250,6 +280,120 @@ describe("CliEmitter", () => {
     assert.throws(() => emitter.emit(event), /retry/);
     emitter.emit(event);
     assert.equal(lines.length, 1);
+  });
+
+  it("finite mode splits result to the primary sink and diagnostics to the diagnostic sink", () => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const emitter = CliEmitter.finiteWith(
+      (line) => out.push(line),
+      (line) => err.push(line),
+      "json",
+    );
+    emitter.emit(jsonProgress({ message: "working", percent: 50 }).build());
+    emitter.emit(jsonLog({ level: "info", message: "startup", event: "startup" }).build());
+    emitter.emit(jsonResult({ rows: 2 }).build());
+    // result → primary (stdout) sink only
+    assert.equal(out.length, 1);
+    assert.ok(out[0]!.includes('"kind":"result"'));
+    // progress + log → diagnostic (stderr) sink
+    assert.equal(err.length, 2);
+    assert.deepEqual(err.map((line) => JSON.parse(line).kind), ["progress", "log"]);
+  });
+
+  it("finite mode routes error (not result) to the diagnostic sink", () => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const emitter = CliEmitter.finiteWith(
+      (line) => out.push(line),
+      (line) => err.push(line),
+      "json",
+    );
+    emitter.emit(jsonError("boom", "it broke").build());
+    assert.equal(out.length, 0);
+    assert.equal(err.length, 1);
+    assert.ok(err[0]!.includes('"kind":"error"'));
+  });
+
+  it("stream mode collapses every event onto the single writer", () => {
+    const lines: string[] = [];
+    const emitter = CliEmitter.stream((line) => lines.push(line), "json");
+    emitter.emit(jsonProgress({ message: "working", percent: 50 }).build());
+    emitter.emit(jsonLog({ level: "info", message: "startup", event: "startup" }).build());
+    emitter.emit(jsonError("boom", "it broke").build());
+    assert.equal(lines.length, 3);
+    assert.deepEqual(lines.map((line) => JSON.parse(line).kind), ["progress", "log", "error"]);
+  });
+
+  it("the unified constructor is stream mode (no split)", () => {
+    const lines: string[] = [];
+    const emitter = new CliEmitter((line) => lines.push(line), "json");
+    emitter.emit(jsonError("boom", "it broke").build());
+    // error stays on the single writer — no diagnostic sink to divert it.
+    assert.equal(lines.length, 1);
+    assert.ok(lines[0]!.includes('"kind":"error"'));
+  });
+});
+
+// ── CliEmitter finish helpers ─────────────────────────────────────────────────
+
+describe("CliEmitter finish helpers", () => {
+  it("finish returns the success code on a successful write", () => {
+    const lines: string[] = [];
+    const emitter = new CliEmitter((line) => lines.push(line), "json");
+    assert.equal(emitter.finish(jsonResult({ ok: true }).build(), 0), 0);
+    assert.equal(lines.length, 1);
+    assert.ok(lines[0]!.includes('"kind":"result"'));
+  });
+
+  it("finish returns the caller's success code even for an error event (exit code is the caller's)", () => {
+    const lines: string[] = [];
+    const emitter = new CliEmitter((line) => lines.push(line), "json");
+    assert.equal(emitter.finish(jsonError("boom", "it broke").build(), 1), 1);
+    assert.ok(lines[0]!.includes('"kind":"error"'));
+  });
+
+  it("finishResult writes a result to the primary sink and returns 0", () => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const emitter = CliEmitter.finiteWith((l) => out.push(l), (l) => err.push(l), "json");
+    assert.equal(emitter.finishResult({ rows: 3 }), 0);
+    assert.equal(out.length, 1);
+    assert.equal(err.length, 0);
+    assert.equal(JSON.parse(out[0]!).result.rows, 3);
+  });
+
+  it("finish routes a builder-built error (with hint) to the diagnostic sink and returns the exit code", () => {
+    // Errors go through the builder — the builder is the error "type" — then
+    // finish(event, exitCode). No finishError shortcut.
+    const out: string[] = [];
+    const err: string[] = [];
+    const emitter = CliEmitter.finiteWith((l) => out.push(l), (l) => err.push(l), "json");
+    const event = jsonError("ping_failed", "no route").hint("check --host").build();
+    assert.equal(emitter.finish(event, 1), 1);
+    assert.equal(out.length, 0);
+    assert.equal(err.length, 1);
+    const parsed = JSON.parse(err[0]!);
+    assert.equal(parsed.kind, "error");
+    assert.equal(parsed.error.code, "ping_failed");
+    assert.equal(parsed.error.message, "no route");
+    assert.equal(parsed.error.hint, "check --host");
+  });
+
+  it("finish maps a broken pipe (EPIPE) to exit code 0", () => {
+    const emitter = new CliEmitter(() => {
+      const e = new Error("write EPIPE") as NodeJS.ErrnoException;
+      e.code = "EPIPE";
+      throw e;
+    }, "json");
+    assert.equal(emitter.finish(jsonResult({ ok: true }).build(), 0), 0);
+  });
+
+  it("finish maps any other write failure to exit code 4", () => {
+    const emitter = new CliEmitter(() => {
+      throw new Error("disk full");
+    }, "json");
+    assert.equal(emitter.finish(jsonResult({ ok: true }).build(), 0), 4);
   });
 });
 

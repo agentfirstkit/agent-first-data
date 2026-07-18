@@ -476,3 +476,38 @@ def test_decode_protocol_event_fails_strict_validation():
     # Missing trace fails the strict profile even though the shape is otherwise valid.
     with pytest.raises(EventDecodeError):
         decode_protocol_event(json.dumps({"kind": "result", "result": {}}))
+
+
+# --- Number literal fidelity (shared spec/fixtures/number_fidelity.json) ---
+#
+# Regression guard for decode_protocol_event's parse_int/parse_float hooks
+# (_RawNumber, only needed for floats and the "-0" integer edge case --
+# every other integer is already arbitrary-precision via plain Python int)
+# and for _encode_json_lossless/_yaml_scalar/_plain_scalar's _RawNumber
+# handling in format.py.
+
+
+def test_number_fidelity_fixtures():
+    for case in _load("number_fidelity.json"):
+        name = case["name"]
+        decoded = decode_protocol_event(case["input_line"])
+        assert isinstance(decoded, DecodedResult), f"[number_fidelity/{name}] expected DecodedResult"
+
+        got_json = render(decoded.result, OutputFormat.JSON)
+        assert got_json == case["expected_json"], f"[number_fidelity/{name}] json mismatch: {got_json!r}"
+
+        if "expected_yaml" in case:
+            got_yaml = render(decoded.result, OutputFormat.YAML)
+            assert got_yaml == case["expected_yaml"], f"[number_fidelity/{name}] yaml mismatch: {got_yaml!r}"
+
+
+def test_number_fidelity_does_not_regress_ordinary_decoded_numbers_in_plain_output():
+    # decode_protocol_event wraps every decoded float (not ints -- those are
+    # already arbitrary-precision Python int) in _RawNumber, including small
+    # ordinary ones; _try_process_field must normalize back to a float for
+    # Plain's suffix arithmetic or this would silently stop formatting a
+    # decoded cpu_percent for any event with a float suffix field.
+    line = json.dumps({"kind": "result", "result": {"duration_ms": 42, "size_bytes": 5242880, "cpu_percent": 85.5}, "trace": {}})
+    decoded = decode_protocol_event(line)
+    plain = render(decoded.result, OutputFormat.PLAIN)
+    assert plain == "cpu=85.5% duration=42ms size=5.0MiB"
