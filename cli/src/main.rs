@@ -1820,6 +1820,7 @@ fn compute_set(
     };
 
     doc.set(key, new_value)?;
+    doc.save()?;
     Ok(json!({
         "code": "document_set",
         "format": doc.format().name(),
@@ -1870,6 +1871,7 @@ fn compute_add(
     }
     let mut doc = DocumentFile::open(file, input_format)?;
     doc.add(key, slug, slug_field, &field_pairs)?;
+    doc.save()?;
     Ok(json!({
         "code": "document_added",
         "format": doc.format().name(),
@@ -1904,6 +1906,7 @@ fn compute_remove(
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
     let mut doc = DocumentFile::open(file, input_format)?;
     doc.remove(key, slug, slug_field)?;
+    doc.save()?;
     Ok(json!({
         "code": "document_removed",
         "format": doc.format().name(),
@@ -1924,7 +1927,16 @@ fn compute_unset(file: &Path, key: &str, ctx: &DocumentContext<'_>) -> Result<Va
     reject_mutation_dash(file)?;
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
     let mut doc = DocumentFile::open(file, input_format)?;
-    doc.unset(key)?;
+    // `Document::unset` is idempotent, but the `afdata unset` CLI keeps its
+    // strict contract: unsetting an absent key is a caught error, so scripts
+    // can tell an actual removal from a no-op.
+    if !doc.unset(key)? {
+        return Err(DocumentError::PathNotFound {
+            path: key.to_string(),
+        }
+        .into());
+    }
+    doc.save()?;
     Ok(json!({
         "code": "document_unset",
         "format": doc.format().name(),

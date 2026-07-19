@@ -5,7 +5,7 @@ use crate::document::{DocumentError, DocumentResult, Value};
 /// Edit an existing scalar item in a TOML document without reserializing the
 /// surrounding document. Comments, ordering, whitespace, and datetime syntax
 /// outside the target remain owned by `toml_edit::DocumentMut`.
-pub fn set_scalar_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
+pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
     let segments = crate::document::parse_path(path)?;
     if segments.iter().any(|segment| segment.contains(['.', '\\'])) {
         return Err(DocumentError::UnsupportedOperation {
@@ -26,8 +26,25 @@ pub fn set_scalar_preserving(content: &str, path: &str, value: &Value) -> Docume
     let (last, parents) = segments.split_last().ok_or(DocumentError::EmptyPath)?;
     let mut current = document.as_item_mut();
     for parent in parents {
+        // Auto-create a missing intermediate table so a sparse config can grow
+        // (`set imap.host` when `[imap]` is absent), matching `set_path`.
         // toml_edit returns `Some(Item::None)` for absent keys, so treat that as
         // a genuinely missing parent rather than a navigable node.
+        {
+            let table =
+                current
+                    .as_table_like_mut()
+                    .ok_or_else(|| DocumentError::UnsupportedOperation {
+                        format: "TOML".to_string(),
+                        operation: "set".to_string(),
+                        detail: "cannot address a key inside a non-table TOML value".to_string(),
+                    })?;
+            if table.get(parent).filter(|item| !item.is_none()).is_none() {
+                let mut created = toml_edit::Table::new();
+                created.set_implicit(true);
+                table.insert(parent, toml_edit::Item::Table(created));
+            }
+        }
         current = current
             .get_mut(parent)
             .filter(|item| !item.is_none())

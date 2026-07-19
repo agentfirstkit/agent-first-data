@@ -23,7 +23,7 @@ pub fn load(content: &str) -> DocumentResult<Value> {
 /// Replace one scalar in a YAML source document while retaining all unrelated
 /// source bytes. Escaped keys, keyed-list routes, and collection replacement
 /// are deliberately rejected until they have a lossless CST path adapter.
-pub fn set_scalar_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
+pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
     let segments = crate::document::parse_path(path)?;
     let yaml_path = cst_path(&segments, "set")?;
     if !matches!(

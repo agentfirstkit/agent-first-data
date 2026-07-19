@@ -1,30 +1,24 @@
-//! Format-neutral in-memory document value, plus a file-backed document
-//! facade with safe, source-preserving edits.
+//! Format-neutral document editing: an in-memory [`Document`] with
+//! source-preserving edits, and a [`DocumentFile`] that adds the file boundary.
 //!
-//! [`DocumentFile`] lifts the file-safety and source-preserving edit
-//! orchestration that previously lived only in a CLI binary: mutation
-//! methods refuse to write through a symlink or (on unix) a hardlinked
-//! file, and every write goes to a same-directory temp file that is
-//! fsynced, has the original file's permissions re-applied, and is
-//! atomically renamed over the target — so a crash or error mid-write never
-//! leaves a partial file.
+//! [`Document`] holds the source text, its parsed [`Value`], and the
+//! [`Format`]. Its verbs — [`set`](Document::set) / [`unset`](Document::unset)
+//! / [`add`](Document::add) / [`remove`](Document::remove) — edit the source in
+//! place (comments, ordering, and untouched formatting survive) and update the
+//! parsed value alongside; [`source`](Document::source) reads the result and
+//! [`encode`](Document::encode) re-renders a fresh, non-preserving copy from the
+//! value. No file, no I/O, no guards — just editing.
 //!
-//! This module never redacts values on decode/encode/save/edit — it reads
-//! and writes raw values as-is; redaction is the caller's responsibility.
+//! [`DocumentFile`] is a [`Document`] plus a path, reachable through
+//! [`Deref`](std::ops::Deref): read and edit exactly as above, then commit with
+//! [`save`](DocumentFile::save) or the [`edit`](DocumentFile::edit) closure.
+//! Every write refuses a symlink/hardlinked target and goes to a
+//! same-directory temp file that is fsynced, has the original permissions
+//! re-applied, and is atomically renamed over the target — so a crash mid-write
+//! never leaves a partial file.
 //!
-//! # Capability matrix
-//!
-//! - [`Document`] (in-memory): [`Document::value_mut`] allows arbitrary
-//!   in-memory edits; [`Document::encode`] re-renders the value fresh from
-//!   scratch — formatting and comments are NOT preserved. No file, no atomic
-//!   write.
-//! - [`DocumentFile`] (file-backed): reads via [`DocumentFile::value`] (paired
-//!   with the free function [`crate::document::get_path`]), and
-//!   source-preserving typed write verbs [`DocumentFile::set`]/
-//!   [`DocumentFile::unset`]/[`DocumentFile::add`]/[`DocumentFile::remove`];
-//!   every write is atomic (symlink/hardlink-guarded temp file + fsync +
-//!   permission-preserving rename). There is no `value_mut` — edits go
-//!   through the verbs above so the original source's formatting survives.
+//! This module never redacts values — it reads and writes raw values as-is;
+//! redaction is the caller's responsibility.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -32,11 +26,16 @@ use std::path::{Path, PathBuf};
 
 use crate::document::{DocumentError, DocumentResult, Format, KeyedList, Value};
 
-/// A format-neutral in-memory document: a parsed [`Value`] plus the
-/// [`Format`] it was parsed from. Has no file or stdin coupling — construct
-/// it from a string or any [`std::io::Read`] the caller supplies.
+/// A format-neutral in-memory document: the original source text, its parsed
+/// [`Value`], and the [`Format`] both came from. Has no file coupling —
+/// construct it from a string or any [`std::io::Read`] the caller supplies,
+/// edit it source-preservingly with [`set`](Document::set) /
+/// [`unset`](Document::unset) / [`add`](Document::add) /
+/// [`remove`](Document::remove), and read the result back with
+/// [`source`](Document::source). [`DocumentFile`] is just this plus a path.
 #[derive(Debug, Clone)]
 pub struct Document {
+    source: String,
     value: Value,
     format: Format,
 }
@@ -49,7 +48,11 @@ impl Document {
     /// contract that `from_str` would imply.
     pub fn parse(source: &str, format: Format) -> DocumentResult<Document> {
         let value = format.load(source)?;
-        Ok(Document { value, format })
+        Ok(Document {
+            source: source.to_string(),
+            value,
+            format,
+        })
     }
 
     /// Read `reader` fully to a `String`, then parse it in the given
@@ -66,14 +69,16 @@ impl Document {
         Document::parse(&source, format)
     }
 
-    /// Borrow the parsed value.
+    /// Borrow the parsed value (reflects the last successful edit).
     pub fn value(&self) -> &Value {
         &self.value
     }
 
-    /// Mutably borrow the parsed value.
-    pub fn value_mut(&mut self) -> &mut Value {
-        &mut self.value
+    /// Borrow the current source text — the original bytes with every
+    /// source-preserving edit applied. This is what [`DocumentFile::save`]
+    /// writes.
+    pub fn source(&self) -> &str {
+        &self.source
     }
 
     /// The format this document was parsed from.
@@ -81,29 +86,66 @@ impl Document {
         self.format
     }
 
+    /// Resolve a dotted `path` against the parsed document and return the value
+    /// at that address.
+    pub fn value_at(&self, path: &str) -> DocumentResult<Value> {
+        crate::document::get_path(&self.value, path, &[])
+    }
+
+    /// [`value_at`](Document::value_at) that also asserts the value at `path`
+    /// satisfies `expected`, returning a [`DocumentError::TypeMismatch`]
+    /// otherwise.
+    pub fn value_at_typed(
+        &self,
+        path: &str,
+        expected: crate::document::ValueType,
+    ) -> DocumentResult<Value> {
+        let value = self.value_at(path)?;
+        if crate::document::value_matches_type(&value, expected) {
+            Ok(value)
+        } else {
+            Err(DocumentError::TypeMismatch {
+                path: path.to_string(),
+                expected: expected.name().to_string(),
+                got: value.kind_name().to_string(),
+                hint: None,
+            })
+        }
+    }
+
+    /// Build a value from the CLI string `raw` per an explicit
+    /// [`ValueType`](crate::document::ValueType) and [`set`](Document::set) it.
+    pub fn set_typed(
+        &mut self,
+        key: &str,
+        raw: Option<&str>,
+        value_type: crate::document::ValueType,
+    ) -> DocumentResult<()> {
+        let value = crate::document::value_from_type(value_type, raw)?;
+        self.set(key, value)
+    }
+
     /// Re-render the current value in its format via [`Format::save`].
     ///
     /// This is a fresh, non-source-preserving render: comments and original
-    /// formatting are not retained. Use [`DocumentFile`] when the original
-    /// source's formatting must survive an edit.
+    /// formatting are not retained. Use [`source`](Document::source) after
+    /// source-preserving edits to keep the original formatting.
     pub fn encode(&self) -> DocumentResult<String> {
         self.format.save(&self.value)
     }
 }
 
-/// A file-backed document: owns the path, format, original source text, and
-/// parsed value.
+/// A file-backed [`Document`]: the in-memory document plus the path it was
+/// read from.
 ///
-/// Reading (`open`) is always allowed. Mutation methods guard against unsafe
-/// targets (symlinks, hardlinked files) and write through a same-directory
-/// temp file that is atomically renamed over the original — see
-/// [`DocumentFile::save_atomic`].
-#[derive(Debug)]
+/// All reads and source-preserving edits come from [`Document`] through
+/// [`Deref`]/[`DerefMut`]; `DocumentFile` adds only the file boundary — reading
+/// on [`open`](DocumentFile::open) and an atomic, symlink-guarded commit on
+/// [`save`](DocumentFile::save) / [`edit`](DocumentFile::edit).
+#[derive(Debug, Clone)]
 pub struct DocumentFile {
+    doc: Document,
     path: PathBuf,
-    format: Format,
-    source: String,
-    value: Value,
 }
 
 impl DocumentFile {
@@ -130,12 +172,9 @@ impl DocumentFile {
         let source = fs::read_to_string(&path).map_err(|error| DocumentError::IoError {
             detail: format!("read `{}`: {error}", path.display()),
         })?;
-        let value = format.load(&source)?;
         Ok(DocumentFile {
+            doc: Document::parse(&source, format)?,
             path,
-            format,
-            source,
-            value,
         })
     }
 
@@ -176,91 +215,31 @@ impl DocumentFile {
         &self.path
     }
 
-    /// Borrow the currently parsed value (reflects the last successful
-    /// edit, if any).
-    pub fn value(&self) -> &Value {
-        &self.value
-    }
-
-    /// Resolve a dotted `path` against the parsed document and return the value
-    /// at that address.
-    ///
-    /// One-call read counterpart to [`set`](DocumentFile::set): equivalent to
-    /// [`value`](DocumentFile::value) followed by
-    /// [`crate::document::get_path`], for callers that only need to read one
-    /// address out of a file.
-    pub fn value_at(&self, path: &str) -> DocumentResult<Value> {
-        crate::document::get_path(&self.value, path, &[])
-    }
-
-    /// [`value_at`](DocumentFile::value_at) that also asserts the value at `path`
-    /// satisfies `expected`, returning a [`DocumentError::TypeMismatch`]
-    /// otherwise. The read counterpart to [`set_typed`](DocumentFile::set_typed):
-    /// a caller that knows the type it wants gets a wrong-typed leaf as a caught
-    /// error, not a silent surprise.
-    pub fn value_at_typed(
-        &self,
-        path: &str,
-        expected: crate::document::ValueType,
-    ) -> DocumentResult<Value> {
-        let value = self.value_at(path)?;
-        if crate::document::value_matches_type(&value, expected) {
-            Ok(value)
-        } else {
-            Err(DocumentError::TypeMismatch {
-                path: path.to_string(),
-                expected: expected.name().to_string(),
-                got: value.kind_name().to_string(),
-                hint: None,
-            })
-        }
-    }
-
-    /// Build a value from the CLI string `raw` per an explicit
-    /// [`ValueType`](crate::document::ValueType) — via
-    /// [`value_from_type`](crate::document::value_from_type), which validates the
-    /// literal parses as that type — and [`set`](DocumentFile::set) it. The
-    /// typed-set counterpart to [`value_at_typed`]: the caller states the type
-    /// once and both the parse and the store enforce it.
-    pub fn set_typed(
-        &mut self,
-        key: &str,
-        raw: Option<&str>,
-        value_type: crate::document::ValueType,
-    ) -> DocumentResult<()> {
-        let value = crate::document::value_from_type(value_type, raw)?;
-        self.set(key, value)
-    }
-
-    /// The format this file was opened as.
-    pub fn format(&self) -> Format {
-        self.format
-    }
-
-    /// Borrow the current source text (reflects the last successful edit,
-    /// if any).
-    pub fn source(&self) -> &str {
-        &self.source
-    }
-
     /// Preflight-check that this file is safe to mutate — not a symlink, and
     /// on unix not hardlinked — without performing any write.
     ///
-    /// Every mutation method ([`DocumentFile::set`] and friends) already
-    /// runs this same guard itself before writing, so calling it directly is
-    /// only useful when a caller must front-run a *separate* side effect with
-    /// the same guarantee — for example, a CLI that reads a secret from stdin
-    /// for `set` should refuse an unsafe target before consuming that input,
-    /// not after.
+    /// [`save`](DocumentFile::save) runs this same guard before it writes, so
+    /// calling it directly is only useful to front-run a *separate* side effect
+    /// with the same guarantee — e.g. a CLI reading a secret from stdin for a
+    /// `set` should refuse an unsafe target before consuming that input.
     pub fn ensure_mutable(&self, operation: &str) -> DocumentResult<()> {
         guard_mutation(&self.path, operation)?;
         Ok(())
     }
+}
 
+impl Document {
     /// Set `key` to the typed `value`, preserving the rest of the source
-    /// document.
+    /// document. The edit is staged in memory — call
+    /// [`save`](DocumentFile::save) to persist it.
+    ///
+    /// Backend capability mirrors [`crate::document::set_path`] where the
+    /// source editor allows it: the JSON backend replaces an existing value
+    /// (scalar or collection) and creates missing intermediate parent objects;
+    /// the TOML backend creates missing parent tables. Backends that cannot
+    /// express an edit source-preserving (e.g. YAML collection mutation) return
+    /// [`DocumentError::UnsupportedOperation`].
     pub fn set(&mut self, key: &str, value: Value) -> DocumentResult<()> {
-        guard_mutation(&self.path, "set")?;
         let mut new_doc = self.value.clone();
         self.format.ensure_writable("set")?;
         crate::document::set_path(&mut new_doc, key, &value, &[])?;
@@ -269,22 +248,22 @@ impl DocumentFile {
         let output = match self.format {
             #[cfg(feature = "toml")]
             Format::Toml => {
-                crate::document::format::toml::set_scalar_preserving(&self.source, key, &target)?
+                crate::document::format::toml::set_preserving(&self.source, key, &target)?
             }
             #[cfg(feature = "yaml")]
             Format::Yaml => {
-                crate::document::format::yaml::set_scalar_preserving(&self.source, key, &target)?
+                crate::document::format::yaml::set_preserving(&self.source, key, &target)?
             }
             Format::Json => {
-                crate::document::format::json::set_scalar_preserving(&self.source, key, &target)?
+                crate::document::format::json::set_preserving(&self.source, key, &target)?
             }
             #[cfg(feature = "dotenv")]
             Format::Dotenv => {
-                crate::document::format::dotenv::set_scalar_preserving(&self.source, key, &target)?
+                crate::document::format::dotenv::set_preserving(&self.source, key, &target)?
             }
             #[cfg(feature = "ini")]
             Format::Ini => {
-                crate::document::format::ini::set_scalar_preserving(&self.source, key, &target)?
+                crate::document::format::ini::set_preserving(&self.source, key, &target)?
             }
             #[cfg(feature = "toml")]
             Format::TomlFrontmatter => {
@@ -292,11 +271,8 @@ impl DocumentFile {
                     &self.source,
                     crate::document::format::frontmatter::Delimiter::Plus,
                 )?;
-                let new_fm = crate::document::format::toml::set_scalar_preserving(
-                    parts.frontmatter,
-                    key,
-                    &target,
-                )?;
+                let new_fm =
+                    crate::document::format::toml::set_preserving(parts.frontmatter, key, &target)?;
                 format!("{}{}{}", parts.pre, new_fm, parts.post)
             }
             #[cfg(feature = "yaml")]
@@ -305,16 +281,12 @@ impl DocumentFile {
                     &self.source,
                     crate::document::format::frontmatter::Delimiter::Dash,
                 )?;
-                let new_fm = crate::document::format::yaml::set_scalar_preserving(
-                    parts.frontmatter,
-                    key,
-                    &target,
-                )?;
+                let new_fm =
+                    crate::document::format::yaml::set_preserving(parts.frontmatter, key, &target)?;
                 format!("{}{}{}", parts.pre, new_fm, parts.post)
             }
             _ => self.format.save(&new_doc)?,
         };
-        self.save_atomic(&output)?;
         self.source = output;
         self.value = new_doc;
         Ok(())
@@ -334,7 +306,6 @@ impl DocumentFile {
         slug_field: &str,
         fields: &[(String, Value)],
     ) -> DocumentResult<()> {
-        guard_mutation(&self.path, "add")?;
         let mut value = self.value.clone();
         self.format.ensure_writable("add")?;
         let keyed_lists = [KeyedList {
@@ -385,7 +356,6 @@ impl DocumentFile {
                 });
             }
         };
-        self.save_atomic(&output)?;
         self.source = output;
         self.value = value;
         Ok(())
@@ -398,7 +368,6 @@ impl DocumentFile {
     /// keyed-collection editor today; other formats return
     /// [`DocumentError::UnsupportedOperation`].
     pub fn remove(&mut self, key: &str, slug: &str, slug_field: &str) -> DocumentResult<()> {
-        guard_mutation(&self.path, "remove")?;
         let mut value = self.value.clone();
         self.format.ensure_writable("remove")?;
         let keyed_lists = [KeyedList {
@@ -442,16 +411,22 @@ impl DocumentFile {
                 });
             }
         };
-        self.save_atomic(&output)?;
         self.source = output;
         self.value = value;
         Ok(())
     }
 
-    /// Remove the entry at `key` entirely. Preserves the rest of the source
-    /// document.
-    pub fn unset(&mut self, key: &str) -> DocumentResult<()> {
-        guard_mutation(&self.path, "unset")?;
+    /// Remove the entry at `key` entirely, preserving the rest of the source
+    /// document. The edit is staged in memory — call
+    /// [`DocumentFile::save`] to persist it.
+    ///
+    /// Idempotent, like [`HashSet::remove`](std::collections::HashSet::remove):
+    /// returns `Ok(false)` when `key` is already absent (nothing is staged) and
+    /// `Ok(true)` when it was removed.
+    pub fn unset(&mut self, key: &str) -> DocumentResult<bool> {
+        if self.value_at(key).is_err() {
+            return Ok(false);
+        }
         let mut value = self.value.clone();
         self.format.ensure_writable("unset")?;
         crate::document::unset_path(&mut value, key)?;
@@ -488,10 +463,36 @@ impl DocumentFile {
             }
             _ => self.format.save(&value)?,
         };
-        self.save_atomic(&output)?;
         self.source = output;
         self.value = value;
-        Ok(())
+        Ok(true)
+    }
+}
+
+impl DocumentFile {
+    /// Run `edit` against the in-memory [`Document`], then commit once with
+    /// [`save`](DocumentFile::save). The single-call form of stage-then-save:
+    /// the edits either all land (on `Ok`) or none reach disk (on `Err`,
+    /// nothing is written), and the commit can't be forgotten.
+    pub fn edit<F>(&mut self, edit: F) -> DocumentResult<()>
+    where
+        F: FnOnce(&mut Document) -> DocumentResult<()>,
+    {
+        edit(&mut self.doc)?;
+        self.save()
+    }
+
+    /// Persist the document — every edit staged since [`open`](DocumentFile::open)
+    /// — to its path in a single atomic write.
+    ///
+    /// The mutation verbs (`set`/`unset`/`add`/`remove`) stage their
+    /// source-preserving edit in memory and do **not** touch disk; this is the
+    /// one commit point. That lets a caller apply several edits and inspect the
+    /// result via [`value`](Document::value) (e.g. deserialize-and-validate)
+    /// before any bytes are written, and makes a multi-edit change atomic —
+    /// all edits land together or none do.
+    pub fn save(&self) -> DocumentResult<()> {
+        self.save_atomic(self.doc.source())
     }
 
     /// Atomically replace the file's contents with `new_source`: guard
@@ -501,16 +502,25 @@ impl DocumentFile {
     /// on any failure the temp file is removed and the original file is
     /// untouched.
     ///
-    /// This does not update the in-memory [`DocumentFile::source`] /
-    /// [`DocumentFile::value`] — the mutation methods do that themselves
-    /// after a successful write.
-    ///
-    /// Crate-internal: this is the raw-string write seam the typed verbs
-    /// (`set`/`unset`/`add`/`remove`) route through after computing a
-    /// source-preserving rendering; it is not part of the public API, so
-    /// callers cannot bypass the typed verbs to write arbitrary raw text.
+    /// Crate-internal write seam behind the public [`save`](DocumentFile::save);
+    /// it is not exported, so callers cannot write arbitrary raw text that
+    /// bypasses the parse/edit path.
     pub(crate) fn save_atomic(&self, new_source: &str) -> DocumentResult<()> {
         write_atomic(&self.path, new_source.as_bytes(), "write")
+    }
+}
+
+impl std::ops::Deref for DocumentFile {
+    type Target = Document;
+
+    fn deref(&self) -> &Document {
+        &self.doc
+    }
+}
+
+impl std::ops::DerefMut for DocumentFile {
+    fn deref_mut(&mut self) -> &mut Document {
+        &mut self.doc
     }
 }
 
@@ -750,6 +760,7 @@ mod tests {
         let mut doc = DocumentFile::open(&path, None).unwrap();
 
         doc.set("port", Value::Integer(1024)).unwrap();
+        doc.save().unwrap();
 
         let saved = fs::read_to_string(&path).unwrap();
         assert!(saved.contains("# leading comment"));
@@ -772,6 +783,7 @@ mod tests {
         let mut doc = DocumentFile::open(&path, None).unwrap();
 
         doc.set("port", Value::Integer(1024)).unwrap();
+        doc.save().unwrap();
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o640);
@@ -788,8 +800,9 @@ mod tests {
         // Reading through the symlink is fine.
         let mut doc = DocumentFile::open(&link, None).unwrap();
 
-        // Mutating through it is not.
-        let err = doc.set("port", Value::Integer(1024)).unwrap_err();
+        // Editing in memory is fine; committing through the symlink is not.
+        doc.set("port", Value::Integer(1024)).unwrap();
+        let err = doc.save().unwrap_err();
         assert!(matches!(err, DocumentError::UnsupportedOperation { .. }));
 
         // The target file was never touched.
@@ -817,6 +830,24 @@ mod tests {
         assert_eq!(
             reparsed.value().get("a").and_then(Value::as_integer),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn document_edits_source_in_memory_without_a_file() {
+        // The point of the Document/DocumentFile split: source-preserving
+        // editing with no file, no I/O, no guards.
+        let mut doc = Document::parse("{\n  \"host\": \"old\"\n}\n", Format::Json).unwrap();
+        doc.set("host", Value::String("new".to_string())).unwrap();
+        doc.set("imap.port", Value::Integer(993)).unwrap(); // creates the parent
+
+        assert_eq!(
+            doc.source(),
+            "{\n  \"host\": \"new\",\n  \"imap\": {\n    \"port\": 993\n  }\n}\n"
+        );
+        assert_eq!(
+            doc.value_at("imap.port").unwrap(),
+            Value::from(serde_json::json!(993))
         );
     }
 }

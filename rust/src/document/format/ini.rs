@@ -154,7 +154,7 @@ pub fn save(value: &Value) -> DocumentResult<String> {
 }
 
 /// Replace an existing INI scalar without reordering sections or entries.
-pub fn set_scalar_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
+pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
     let Value::String(value) = value else {
         return Err(unsupported("set", "INI values are strings"));
     };

@@ -132,7 +132,7 @@ pub fn save(_value: &Value) -> DocumentResult<String> {
 }
 
 /// Replace one existing assignment while preserving every other source byte.
-pub fn set_scalar_preserving(content: &str, key: &str, value: &Value) -> DocumentResult<String> {
+pub fn set_preserving(content: &str, key: &str, value: &Value) -> DocumentResult<String> {
     let Value::String(value) = value else {
         return Err(unsupported("set", "dotenv values are strings"));
     };

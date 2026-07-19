@@ -41,7 +41,7 @@ fn test_json_round_trip() {
 #[test]
 fn test_json_scalar_edit_preserves_unrelated_source() {
     let source = "{\n  \"z\": 1e+3,\n  \"nested\": { \"keep\": \"\\u0061\", \"target\": 2 }\n}\n";
-    let edited = agent_first_data::document::format::json::set_scalar_preserving(
+    let edited = agent_first_data::document::format::json::set_preserving(
         source,
         "nested.target",
         &Value::Integer(7),
@@ -62,9 +62,19 @@ fn test_json_unset_preserves_unrelated_source() {
 }
 
 #[test]
+fn test_json_unset_last_member_stays_inside_parent() {
+    // Regression: removing the sole/last member of a nested object must not
+    // grab a comma from an enclosing container. Here the comma after `arr`
+    // belongs to the root, not to `b`.
+    let source = r#"{"arr": [{"n": 1}], "b": {"x": 2}}"#;
+    let edited = agent_first_data::document::format::json::unset_preserving(source, "b.x").unwrap();
+    assert_eq!(edited, r#"{"arr": [{"n": 1}], "b": {}}"#);
+}
+
+#[test]
 fn test_json_golden_variants_preserve_untouched_source() {
     let compact = "{\"keep\":\"\\u0061\",\"target\":1e+3,\"tail\":[1,2]}";
-    let edited = agent_first_data::document::format::json::set_scalar_preserving(
+    let edited = agent_first_data::document::format::json::set_preserving(
         compact,
         "target",
         &Value::Integer(7),
@@ -78,6 +88,72 @@ fn test_json_golden_variants_preserve_untouched_source() {
     let edited =
         agent_first_data::document::format::json::unset_preserving(crlf, "target").unwrap();
     assert_eq!(edited, "{\r\n  \"keep\": 1e+3\r\n}\r\n");
+}
+
+#[test]
+fn test_json_set_creates_missing_parent_objects() {
+    // Sparse config: `imap` does not exist yet, so setting `imap.host` must
+    // create the intermediate object, indented to match the sibling member.
+    let source = "{\n  \"a\": 1\n}\n";
+    let edited = agent_first_data::document::format::json::set_preserving(
+        source,
+        "imap.host",
+        &Value::String("mail.example.com".to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        edited,
+        "{\n  \"a\": 1,\n  \"imap\": {\n    \"host\": \"mail.example.com\"\n  }\n}\n"
+    );
+}
+
+#[test]
+fn test_json_set_creates_deep_missing_parents_in_empty_object() {
+    let source = "{\n  \"a\": {}\n}\n";
+    let edited = agent_first_data::document::format::json::set_preserving(
+        source,
+        "a.b.c",
+        &Value::Integer(1),
+    )
+    .unwrap();
+    // The whole nested chain is created; unrelated source is untouched.
+    let parsed: serde_json::Value = serde_json::from_str(&edited).unwrap();
+    assert_eq!(parsed["a"]["b"]["c"], serde_json::json!(1));
+}
+
+#[test]
+fn test_json_set_replaces_existing_array_value() {
+    let source = "{\n  \"steps\": [1, 2]\n}\n";
+    let edited = agent_first_data::document::format::json::set_preserving(
+        source,
+        "steps",
+        &Value::Array(vec![Value::Integer(3), Value::Integer(4)]),
+    )
+    .unwrap();
+    assert_eq!(edited, "{\n  \"steps\": [3,4]\n}\n");
+}
+
+#[test]
+fn test_json_set_replaces_scalar_with_empty_array() {
+    let source = "{\n  \"steps\": \"none\"\n}\n";
+    let edited = agent_first_data::document::format::json::set_preserving(
+        source,
+        "steps",
+        &Value::Array(vec![]),
+    )
+    .unwrap();
+    assert_eq!(edited, "{\n  \"steps\": []\n}\n");
+}
+
+#[test]
+fn test_json_set_rejects_child_under_scalar() {
+    let source = "{\n  \"a\": 1\n}\n";
+    let error =
+        agent_first_data::document::format::json::set_preserving(source, "a.b", &Value::Integer(2));
+    assert!(matches!(
+        error,
+        Err(DocumentError::UnsupportedOperation { .. })
+    ));
 }
 
 #[cfg(feature = "toml")]
@@ -107,7 +183,7 @@ port = 5432
 #[test]
 fn test_toml_scalar_edit_preserves_comments_and_datetime() {
     let source = "# keep\n[database]\nport = 5432 # note\nwhen = 2024-01-01T00:00:00Z\n";
-    let edited = agent_first_data::document::format::toml::set_scalar_preserving(
+    let edited = agent_first_data::document::format::toml::set_preserving(
         source,
         "database.port",
         &Value::Integer(3306),
@@ -133,7 +209,7 @@ fn test_toml_unset_preserves_comments() {
 #[test]
 fn test_toml_golden_array_and_datetime_bytes() {
     let source = "# keep\nwhen = 2024-01-01T00:00:00Z\nvalues = [1, 2, 3]\ntarget = 1\n";
-    let edited = agent_first_data::document::format::toml::set_scalar_preserving(
+    let edited = agent_first_data::document::format::toml::set_preserving(
         source,
         "target",
         &Value::Integer(2),
@@ -145,7 +221,7 @@ fn test_toml_golden_array_and_datetime_bytes() {
 
     let arrays =
         "global_target = 1\n\n[[servers]]\nname = \"one\"\n\n[[servers]]\nname = \"two\"\n";
-    let edited = agent_first_data::document::format::toml::set_scalar_preserving(
+    let edited = agent_first_data::document::format::toml::set_preserving(
         arrays,
         "global_target",
         &Value::Integer(2),
@@ -159,14 +235,14 @@ fn test_toml_golden_array_and_datetime_bytes() {
 #[cfg(feature = "toml")]
 #[test]
 fn test_toml_rejects_unrepresentable_null_and_u64() {
-    let null_error = agent_first_data::document::format::toml::set_scalar_preserving(
+    let null_error = agent_first_data::document::format::toml::set_preserving(
         "value = 1\n",
         "value",
         &Value::Null,
     )
     .unwrap_err();
     assert!(null_error.to_string().contains("no null"));
-    let unsigned_error = agent_first_data::document::format::toml::set_scalar_preserving(
+    let unsigned_error = agent_first_data::document::format::toml::set_preserving(
         "value = 1\n",
         "value",
         &Value::Unsigned(u64::MAX),
@@ -202,7 +278,7 @@ server:
 #[test]
 fn test_yaml_scalar_edit_preserves_comments_and_float() {
     let source = "# keep\nserver:\n  host: localhost # host\n  ratio: 1.0\n";
-    let edited = agent_first_data::document::format::yaml::set_scalar_preserving(
+    let edited = agent_first_data::document::format::yaml::set_preserving(
         source,
         "server.host",
         &Value::String("example.com".to_string()),
@@ -229,7 +305,7 @@ fn test_yaml_unset_preserves_comments() {
 fn test_yaml_golden_styles_and_crlf() {
     let source =
         "# keep\r\nroot:\r\n  quoted: 'old'\r\n  literal: |\r\n    unchanged\r\n  target: 1.0\r\n";
-    let edited = agent_first_data::document::format::yaml::set_scalar_preserving(
+    let edited = agent_first_data::document::format::yaml::set_preserving(
         source,
         "root.target",
         &Value::Float(2.0),
@@ -244,7 +320,7 @@ fn test_yaml_golden_styles_and_crlf() {
 #[test]
 fn test_yaml_golden_flow_tag_anchor_and_alias_untouched() {
     let source = "defaults: &defaults {name: old}\ncopy: *defaults\ntarget: 1\nflow: [1, 2]\n";
-    let edited = agent_first_data::document::format::yaml::set_scalar_preserving(
+    let edited = agent_first_data::document::format::yaml::set_preserving(
         source,
         "target",
         &Value::Integer(2),
@@ -300,7 +376,7 @@ fn test_yaml_keyed_collection_edit_preserves_unrelated_source() {
 #[test]
 fn test_yaml_cst_numeric_path_adapter_and_unsupported_escaped_keys() {
     let source = "items:\n  - name: first\n  - name: second\nkeep: 1.0\n";
-    let edited = agent_first_data::document::format::yaml::set_scalar_preserving(
+    let edited = agent_first_data::document::format::yaml::set_preserving(
         source,
         "items.1.name",
         &Value::String("changed".to_string()),
@@ -308,7 +384,7 @@ fn test_yaml_cst_numeric_path_adapter_and_unsupported_escaped_keys() {
     .unwrap();
     assert!(edited.contains("name: changed"));
     assert!(edited.contains("keep: 1.0"));
-    let error = agent_first_data::document::format::yaml::set_scalar_preserving(
+    let error = agent_first_data::document::format::yaml::set_preserving(
         source,
         r"items.key\.with.dot",
         &Value::String("x".to_string()),
@@ -782,7 +858,7 @@ fn test_toml_numeric_boundary_matrix() {
     );
     assert!(Format::Toml.load("bad = 1e9999\n").is_err());
     assert!(
-        agent_first_data::document::format::toml::set_scalar_preserving(
+        agent_first_data::document::format::toml::set_preserving(
             "value = 1\n",
             "value",
             &Value::Float(f64::NAN)
@@ -895,7 +971,7 @@ fn test_ini_fixtures_and_source_editor() {
     );
     assert!(Format::Ini.load("root=value\n").is_err());
     assert!(Format::Ini.load("[s]\na: b\n").is_err());
-    let edited = agent_first_data::document::format::ini::set_scalar_preserving(
+    let edited = agent_first_data::document::format::ini::set_preserving(
         source,
         r"Database.key\.with\.dot",
         &Value::String("changed".to_string()),
@@ -909,7 +985,7 @@ fn test_ini_fixtures_and_source_editor() {
     assert!(removed.contains("[empty]\r\n"));
 
     let no_final_newline = "[section]\r\nkey = old";
-    let edited = agent_first_data::document::format::ini::set_scalar_preserving(
+    let edited = agent_first_data::document::format::ini::set_preserving(
         no_final_newline,
         "section.key",
         &Value::String("new".to_string()),
@@ -974,7 +1050,7 @@ fn test_dotenv_multiline_and_missing_set_preserve_source() {
         get_path(&value, "MULTI", &[]).unwrap().as_str(),
         Some("first\nsecond")
     );
-    let edited = agent_first_data::document::format::dotenv::set_scalar_preserving(
+    let edited = agent_first_data::document::format::dotenv::set_preserving(
         source,
         "NEW",
         &Value::String("value".to_string()),
@@ -983,7 +1059,7 @@ fn test_dotenv_multiline_and_missing_set_preserve_source() {
     assert!(edited.starts_with(source));
 
     let no_final_newline = "export KEY='old'";
-    let edited = agent_first_data::document::format::dotenv::set_scalar_preserving(
+    let edited = agent_first_data::document::format::dotenv::set_preserving(
         no_final_newline,
         "KEY",
         &Value::String("new value".to_string()),
@@ -1020,7 +1096,7 @@ fn test_json_set_missing_key_inserts_preserving_layout() {
     // A new leaf under an existing object is spliced with sibling indentation;
     // every untouched byte (including number spelling) is preserved.
     let source = "{\n  \"keep\": 1e+3,\n  \"obj\": {\n    \"a\": 1\n  }\n}\n";
-    let edited = agent_first_data::document::format::json::set_scalar_preserving(
+    let edited = agent_first_data::document::format::json::set_preserving(
         source,
         "obj.b",
         &Value::Integer(2),
@@ -1030,14 +1106,17 @@ fn test_json_set_missing_key_inserts_preserving_layout() {
         edited,
         "{\n  \"keep\": 1e+3,\n  \"obj\": {\n    \"a\": 1,\n    \"b\": 2\n  }\n}\n"
     );
-    // Missing intermediate parent fails before producing output.
-    assert!(
-        agent_first_data::document::format::json::set_scalar_preserving(
-            source,
-            "nope.deep",
-            &Value::Integer(1)
-        )
-        .is_err()
+    // A missing intermediate parent is now created under the deepest existing
+    // object, leaving every untouched byte (including number spelling) intact.
+    let created = agent_first_data::document::format::json::set_preserving(
+        source,
+        "nope.deep",
+        &Value::Integer(1),
+    )
+    .unwrap();
+    assert_eq!(
+        created,
+        "{\n  \"keep\": 1e+3,\n  \"obj\": {\n    \"a\": 1\n  },\n  \"nope\": {\n    \"deep\": 1\n  }\n}\n"
     );
 }
 
@@ -1071,4 +1150,88 @@ fn test_file_operations() {
         .expect("failed to load updated JSON");
     let version = get_path(&reloaded, "app.version", &[]).expect("failed to get version");
     assert_eq!(version.as_str().expect("version should be string"), "2.0");
+}
+
+#[test]
+fn test_document_file_stages_edits_until_save() {
+    use agent_first_data::document::DocumentFile;
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().join("config.json");
+    let initial =
+        "{\n  \"imap\": {\n    \"host\": \"old\",\n    \"password_secret_env\": \"OLD\"\n  }\n}\n";
+    fs::write(&path, initial).unwrap();
+
+    let mut doc = DocumentFile::open(&path, Some(Format::Json)).unwrap();
+    // Two staged edits in afmail's config-set shape: replace a scalar and clear
+    // a mutually-exclusive sibling.
+    doc.set("imap.host", Value::String("new".to_string()))
+        .unwrap();
+    doc.unset("imap.password_secret_env").unwrap();
+
+    // Nothing has touched disk yet — both edits are staged in memory.
+    assert_eq!(fs::read_to_string(&path).unwrap(), initial);
+
+    // The in-memory value already reflects both edits, so a caller can
+    // deserialize-and-validate the result before committing.
+    assert_eq!(
+        get_path(doc.value(), "imap.host", &[])
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "new"
+    );
+    assert!(get_path(doc.value(), "imap.password_secret_env", &[]).is_err());
+
+    // A single atomic commit lands both edits.
+    doc.save().unwrap();
+    let reloaded = Format::Json
+        .load(&fs::read_to_string(&path).unwrap())
+        .unwrap();
+    assert_eq!(
+        get_path(&reloaded, "imap.host", &[])
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "new"
+    );
+    assert!(get_path(&reloaded, "imap.password_secret_env", &[]).is_err());
+}
+
+#[test]
+fn test_document_unset_is_idempotent() {
+    use agent_first_data::document::Document;
+
+    let mut doc = Document::parse("{\n  \"a\": 1,\n  \"b\": 2\n}\n", Format::Json).unwrap();
+    assert!(doc.unset("a").unwrap()); // removed → true
+    assert!(!doc.unset("a").unwrap()); // already gone → false, no error
+    assert!(!doc.unset("missing").unwrap()); // never existed → false
+    assert_eq!(doc.source(), "{\n  \"b\": 2\n}\n");
+}
+
+#[cfg(feature = "toml")]
+#[test]
+fn test_toml_set_creates_missing_parent_table() {
+    let source = "title = \"cfg\"\n";
+    let edited = agent_first_data::document::format::toml::set_preserving(
+        source,
+        "imap.host",
+        &Value::String("mail.example.com".to_string()),
+    )
+    .unwrap();
+    // Parent table created; existing content preserved; parses back correctly.
+    let parsed = Format::Toml.load(&edited).unwrap();
+    assert_eq!(
+        get_path(&parsed, "imap.host", &[])
+            .unwrap()
+            .as_str()
+            .unwrap(),
+        "mail.example.com"
+    );
+    assert_eq!(
+        get_path(&parsed, "title", &[]).unwrap().as_str().unwrap(),
+        "cfg"
+    );
 }

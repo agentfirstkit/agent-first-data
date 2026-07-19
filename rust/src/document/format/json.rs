@@ -35,51 +35,45 @@ impl<'a> JsonDocument<'a> {
     }
 }
 
-/// Replace one existing JSON scalar while retaining every byte outside its
-/// value span. JSON has no comments, but this still preserves key order,
+/// Set a JSON value at `path` while retaining every byte outside the edited
+/// region. JSON has no comments, but this still preserves key order,
 /// whitespace, line endings, escapes, and untouched number spellings.
-pub fn set_scalar_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
+///
+/// Matches the in-memory [`crate::document::set_path`] capability:
+/// - an existing value (scalar *or* collection) is replaced in place;
+/// - a missing leaf, and any missing intermediate parent objects, are created
+///   under the deepest existing ancestor object.
+pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
     let segments = crate::document::parse_path(path)?;
     let document = JsonDocument::parse(content)?;
     let root = document.root();
-    let replacement =
-        serde_json::to_string(&serde_json::Value::from(value.clone())).map_err(|error| {
-            DocumentError::UnsupportedOperation {
-                format: "JSON".to_string(),
-                operation: "set".to_string(),
-                detail: error.to_string(),
-            }
-        })?;
     let mut output = content.to_string();
     match resolve(root, &segments, 0) {
         Some(target) => {
-            if !matches!(target.kind, NodeKind::Scalar) {
-                return Err(DocumentError::UnsupportedOperation {
-                    format: "JSON".to_string(),
-                    operation: "set".to_string(),
-                    detail: "only existing scalar JSON values are supported by the source editor"
-                        .to_string(),
-                });
-            }
+            // Replace the whole existing node span — scalar or collection. A
+            // replaced collection is re-rendered compactly; everything outside
+            // its span (and key order) is untouched.
+            let replacement = compact_json(value)?;
             output.replace_range(target.start..target.end, &replacement);
         }
         None => {
-            // Missing leaf: splice a new member into the (existing) parent
-            // object, mirroring the neighbouring member's indentation. A
-            // missing intermediate parent fails before any write.
-            let (last, parents) = segments.split_last().ok_or(DocumentError::EmptyPath)?;
-            let parent = resolve(root, parents, 0).ok_or_else(|| DocumentError::PathNotFound {
-                path: path.to_string(),
-            })?;
-            let NodeKind::Object(entries) = &parent.kind else {
-                return Err(DocumentError::UnsupportedOperation {
+            // The full path is absent. Find the deepest existing ancestor
+            // object, then splice one new member holding the remaining path
+            // chain wrapped around the leaf value — creating every missing
+            // intermediate object along the way.
+            let (insert_at, tail) = deepest_existing_object(root, &segments).ok_or_else(|| {
+                DocumentError::UnsupportedOperation {
                     format: "JSON".to_string(),
                     operation: "set".to_string(),
                     detail: "cannot insert a new key into a non-object JSON value".to_string(),
-                });
+                }
+            })?;
+            let NodeKind::Object(entries) = &insert_at.kind else {
+                unreachable!("deepest_existing_object only returns object nodes");
             };
+            let (member_key, rest) = tail.split_first().ok_or(DocumentError::EmptyPath)?;
             let new_key =
-                serde_json::to_string(last).map_err(|error| DocumentError::ParseError {
+                serde_json::to_string(member_key).map_err(|error| DocumentError::ParseError {
                     format: "JSON".to_string(),
                     detail: error.to_string(),
                 })?;
@@ -87,14 +81,19 @@ pub fn set_scalar_preserving(content: &str, path: &str, value: &Value) -> Docume
                 Some((_, last_node)) => {
                     let anchor = last_node.member_start.unwrap_or(last_node.start);
                     let (indent, multiline) = member_indent(content.as_bytes(), anchor);
+                    let member_value = nested_member_value(rest, value, multiline, &indent)?;
                     let fragment = if multiline {
-                        format!(",\n{indent}{new_key}: {replacement}")
+                        format!(",\n{indent}{new_key}: {member_value}")
                     } else {
-                        format!(", {new_key}: {replacement}")
+                        format!(", {new_key}: {member_value}")
                     };
                     (last_node.end, fragment)
                 }
-                None => (parent.start + 1, format!("{new_key}: {replacement}")),
+                None => {
+                    // Empty object: no sibling to mirror, so stay inline compact.
+                    let member_value = nested_member_value(rest, value, false, "")?;
+                    (insert_at.start + 1, format!("{new_key}: {member_value}"))
+                }
             };
             output.insert_str(position, &fragment);
         }
@@ -106,6 +105,67 @@ pub fn set_scalar_preserving(content: &str, path: &str, value: &Value) -> Docume
         }
     })?;
     Ok(output)
+}
+
+/// Compact one-line JSON rendering of a document value.
+fn compact_json(value: &Value) -> DocumentResult<String> {
+    serde_json::to_string(&serde_json::Value::from(value.clone())).map_err(|error| {
+        DocumentError::UnsupportedOperation {
+            format: "JSON".to_string(),
+            operation: "set".to_string(),
+            detail: error.to_string(),
+        }
+    })
+}
+
+/// The deepest node reachable along `segments` that is an object, paired with
+/// the still-missing tail below it. Returns `None` if that deepest existing
+/// node is not an object (so a child key cannot be created under it).
+fn deepest_existing_object<'a>(
+    root: &'a Node,
+    segments: &'a [String],
+) -> Option<(&'a Node, &'a [String])> {
+    // `segments` itself does not resolve (checked by the caller), so start one
+    // level up and walk toward the root; the root (empty prefix) always exists.
+    for split in (0..segments.len()).rev() {
+        if let Some(node) = resolve(root, &segments[..split], 0) {
+            return match node.kind {
+                NodeKind::Object(_) => Some((node, &segments[split..])),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// Render the value for a spliced member: the leaf `value` wrapped in an object
+/// for each remaining `tail` segment (`["a","b"] , v` → `{"a":{"b":v}}`).
+/// Multiline output is re-indented to sit at `base_indent`.
+fn nested_member_value(
+    tail: &[String],
+    value: &Value,
+    multiline: bool,
+    base_indent: &str,
+) -> DocumentResult<String> {
+    let mut nested = serde_json::Value::from(value.clone());
+    for segment in tail.iter().rev() {
+        let mut object = serde_json::Map::new();
+        object.insert(segment.clone(), nested);
+        nested = serde_json::Value::Object(object);
+    }
+    if multiline {
+        let pretty =
+            serde_json::to_string_pretty(&nested).map_err(|error| DocumentError::ParseError {
+                format: "JSON".to_string(),
+                detail: error.to_string(),
+            })?;
+        Ok(pretty.replace('\n', &format!("\n{base_indent}")))
+    } else {
+        serde_json::to_string(&nested).map_err(|error| DocumentError::ParseError {
+            format: "JSON".to_string(),
+            detail: error.to_string(),
+        })
+    }
 }
 
 /// Indentation of the member whose key begins at `anchor`, and whether that
@@ -159,14 +219,20 @@ pub fn unset_preserving(content: &str, path: &str) -> DocumentResult<String> {
     }
     let end = target.end;
     let after = skip_ws_bytes(content.as_bytes(), end);
+    // Removing a last/only member also removes the comma *before* it — but that
+    // search must stay inside the target's own parent container. A comma
+    // belonging to an enclosing object/array (e.g. a sibling earlier in the
+    // document) is not ours to take, or we splice across a container boundary.
+    let parent_body_start =
+        resolve(root, &segments[..segments.len() - 1], 0).map_or(0, |parent| parent.start + 1);
     let (remove_start, mut remove_end, remove_following_line) =
         if content.as_bytes().get(after) == Some(&b',') {
             (start, after + 1, true)
-        } else if let Some(comma) = content.as_bytes()[..start]
+        } else if let Some(offset) = content.as_bytes()[parent_body_start..start]
             .iter()
             .rposition(|byte| *byte == b',')
         {
-            (comma, end, false)
+            (parent_body_start + offset, end, false)
         } else {
             (start, end, false)
         };

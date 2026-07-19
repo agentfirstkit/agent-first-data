@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.19.1",
+  "version": "0.20.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,8 +13,11 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Add coerce_toward/coerce_values_toward: type-directed coercion of CLI strings toward an existing or known type (no scalar shape-guessing) for consumers building config setters",
-    "Add DocumentFile::value_at_typed/set_typed and value_matches_type: typed read/write that validates a value against an explicit ValueType"
+    "Move source-preserving editing onto the in-memory Document — set/unset/add/remove edit a string in place with no file — and reduce DocumentFile to a thin file adapter adding open, an atomic guarded save, and an edit() commit closure.",
+    "Stop auto-persisting document edits: the verbs stage in memory and a new public save() is the single atomic commit point, so callers can batch edits and validate the result before anything is written.",
+    "Grow sparse and nested documents in place — the source editor creates missing intermediate parents (JSON deep object chains, TOML tables) and the JSON backend sets or replaces collection values — matching the in-memory set_path.",
+    "Make Document::unset idempotent, returning whether it removed anything, so clearing an optional key needs no existence pre-check; the afdata unset CLI keeps its strict error-on-missing behavior.",
+    "Fix a JSON unset that took a comma belonging to an enclosing container when deleting the sole or last member of a nested object, which produced invalid JSON."
   ],
   "bonds": [],
   "tree": {
