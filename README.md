@@ -26,6 +26,48 @@ It is a convention, not a framework — a small set of name endings, plus a tiny
 - **Logging agents can read.** Structured logs that follow the same rules, with request-scoped fields.
 - **The same in four languages.** One identical API across Rust, Go, Python, and TypeScript.
 
+## A quick look
+
+One record — a log event with a timeout, an API key, and a database URL — rendered three ways. Nothing is configured; the field names carry everything.
+
+```json
+{"kind":"log","log":{"event":"startup","args":{"timeout_s":30,"api_key_secret":"sk-123"},"db_url":"postgres://user:p@ss@db/app?token_secret=abc"},"trace":{"duration_ms":1280}}
+```
+
+**JSON and YAML** keep original keys and types (structure-preserving) and only redact secrets:
+
+```yaml
+---
+kind: "log"
+log:
+  args:
+    api_key_secret: "***"
+    timeout_s: 30
+  db_url: "postgres://user:***@db/app?token_secret=***"
+  event: "startup"
+trace:
+  duration_ms: 1280
+```
+
+**Plain** is the one human renderer — it strips unit suffixes and formats values for scanning:
+
+```text
+kind=log log.args.api_key=*** log.args.timeout=30s log.db_url=postgres://user:***@db/app?token_secret=*** log.event=startup trace.duration=1.28s
+```
+
+## Supported suffixes
+
+| Category | Suffixes |
+|:--|:--|
+| Duration | `_ns`, `_us`, `_ms`, `_s`, `_minutes`, `_hours`, `_days` |
+| Timestamps | `_epoch_ns`, `_epoch_ms`, `_epoch_s`, `_rfc3339` |
+| Size | `_bytes` (integer everywhere — config and output alike) |
+| Currency | `_msats`, `_sats`, `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents`, `_{code}_micro` (`code` is 3–4 ASCII letters) |
+| Strict strings | `_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time` |
+| Other | `_percent`, `_secret`, `_url` |
+
+JSON and YAML keep suffixes and raw values; Plain strips duration/size/currency/timestamp suffixes after formatting the value, and never strips `_url`/`_bcp47`/`_utc_offset`/`_rfc3339_date`/`_rfc3339_time`.
+
 ## Redaction boundary
 
 AFDATA redaction is intentionally field-name based:
@@ -37,6 +79,18 @@ AFDATA redaction is intentionally field-name based:
 
 There are no named redaction profiles. Use the default policy (`All`), an explicit `secret_names` list, or the documented scoped policies (`TraceOnly`, `Off`) for deliberate exceptions.
 
+## Reading and editing config documents
+
+Beyond emitting AFDATA, the library and `afdata` CLI read and safely edit structured documents — JSON, TOML, YAML, dotenv, and INI — by dot-path:
+
+```bash
+afdata get config.toml server.port                    # one value as an AFDATA record (secrets redacted)
+host=$(afdata value config.toml server.host)          # raw scalar, for shell substitution
+afdata set config.toml server.port 8080 --value-type number
+```
+
+Edits are **source-preserving and atomic** — comments, key order, and formatting survive; a failed write leaves the original untouched, and the CLI refuses to write through a symlink. A bare value is always a string (`007` never becomes `7`); `--value-type string|number|bool|null|json` writes an exact type. `_secret` fields stay redacted even on a directly targeted `get` — `value --reveal-secret` is the auditable opt-in. Every command's first positional is the FILE (`-` reads stdin for reads only); errors carry stable `error.code`s (`document_path_not_found`, `document_type_mismatch`, …). The Rust library is `agent_first_data::document` (`Document` / `DocumentFile`); TOML/YAML/dotenv/INI are feature-gated, JSON is core.
+
 ## Where to use it: CLI flags, config files, logs, and API responses
 
 - **Building a CLI tool an agent will call** — your output is understood correctly the first time, with no extra schema to ship. Results land on `stdout` and errors on `stderr` by default, so a shell capture or pipe never mistakes a failure for data; a single `--output-to stdout` collapses everything onto one stream when a consumer would rather branch on `kind`.
@@ -45,11 +99,22 @@ There are no named redaction profiles. Use the default policy (`All`), an explic
 - **Designing an API response or event payload** — units and sensitivity travel *with* the data, across every boundary it crosses.
 - **Auditing for leaked secrets** — one naming rule (`_secret`) makes redaction automatic instead of case-by-case.
 
+## One contract, four languages
+
+The same surface ships identically in Rust, Go, Python, and TypeScript (each in its own casing):
+
+- **Protocol builders** `json_result` / `json_error` / `json_progress` / `json_log` → `.build()` → an event; **reader** `decode_protocol_event(text)` → a typed decoded event.
+- **Output** `render(value, format, options)` — the single value × format × options → string entry point.
+- **Redaction** `redacted_value` / `redact_url_secrets` for paths that bypass `render`.
+- **CLI helpers** `cli_parse_output`, `cli_parse_log_filters`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue`, and the `CliEmitter`.
+
+Three tools are **Rust-only** and deliberately outside the cross-language contract: skill admin (`SKILL.md` validation plus install/uninstall/status), stream redirection (`--stdout-file` / `--stderr-file`), and tracing/logging init (`afdata_tracing::try_init`). The exact shared surface is enumerated in [`spec/api-surface.json`](spec/api-surface.json).
+
 ## Adopt it: hand the convention to your coding agent
 
 Agent-First Data is a convention, not a dependency you wire in by hand — and adopting a convention is exactly the kind of work you now hand to an agent. There's even an [Agent Skill](skills/agent-first-data/SKILL.md) for exactly that — the convention in a form an agent reads and applies directly. Paste this to your coding agent:
 
-> Learn the Agent-First Data convention: read https://agentfirstkit.com/agent-first-data/docs/overview and https://agentfirstkit.com/agent-first-data/docs/agent-skill. Then look at the codebase we're working in and tell me whether adopting the convention would help it — and if so, how: which fields and config keys to rename, and where the output and logging helpers fit.
+> Learn the Agent-First Data convention: read https://agentfirstkit.com/agent-first-data/docs/specification and https://agentfirstkit.com/agent-first-data/docs/agent-skill. Then look at the codebase we're working in and tell me whether adopting the convention would help it — and if so, how: which fields and config keys to rename, and where the output and logging helpers fit.
 
 ## Install the Libraries
 
@@ -90,8 +155,7 @@ afdata skill validate skills/agent-first-data
 
 ## Docs
 
-- [Overview](docs/overview.md) — the full guide: examples, the complete API, every supported suffix, and logging
-- [Specification](spec/agent-first-data.md) — the formal convention
+- [Specification](spec/agent-first-data.md) — the full convention: every suffix, output formats, protocol, and logging
 - [Agent Skill](skills/agent-first-data/SKILL.md) — for AI-assisted development
 - Per-language API reference: [Rust](rust) · [Go](go) · [Python](python) · [TypeScript](typescript)
 

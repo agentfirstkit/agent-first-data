@@ -48,7 +48,7 @@ Options:
   -V, --version
           Print version
 
-AFDATA: 0.21.0
+AFDATA: 0.22.0
 ```
 
 ## afdata lint - Lint a JSON/JSONL stream, a JSON Schema, or a document for deterministic AFDATA issues

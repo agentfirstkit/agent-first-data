@@ -1011,7 +1011,7 @@ fn run_skill_admin_action(
     force: bool,
     format: OutputFormat,
 ) -> ExitCode {
-    use agent_first_data::skill::{SkillOptions, SkillSpec, run_skill_admin};
+    use agent_first_data::skill::{SkillAsset, SkillOptions, SkillSpec, run_skill_admin};
 
     let agent = match parse_skill_agent(agent) {
         Ok(agent) => agent,
@@ -1032,11 +1032,31 @@ fn run_skill_admin_action(
     };
 
     const SKILL_SOURCE: &str = include_str!("../../skills/agent-first-data/SKILL.md");
+    // SKILL.md points agents at these bundled references, so they must install
+    // alongside it. Keep this list in step with skills/agent-first-data/references/
+    // — the package smoke installs to a temp dir and asserts the whole tree lands.
+    const SKILL_ASSETS: &[SkillAsset] = &[
+        SkillAsset {
+            path: "references/rules.md",
+            contents: include_str!("../../skills/agent-first-data/references/rules.md"),
+        },
+        SkillAsset {
+            path: "references/registry.json",
+            contents: include_str!("../../skills/agent-first-data/references/registry.json"),
+        },
+        SkillAsset {
+            path: "references/protocol-v1.schema.json",
+            contents: include_str!(
+                "../../skills/agent-first-data/references/protocol-v1.schema.json"
+            ),
+        },
+    ];
     let spec = SkillSpec {
         name: "agent-first-data",
         source: SKILL_SOURCE,
         title: "Agent-First Data",
         marker_slug: "afdata",
+        assets: SKILL_ASSETS,
     };
     let options = SkillOptions {
         agent,

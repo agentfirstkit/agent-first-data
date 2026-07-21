@@ -16,7 +16,6 @@
  *       npx tsx examples/agent_cli.ts ping --output json
  *       npx tsx examples/agent_cli.ts echo --output yaml --log startup,request
  *       npx tsx examples/agent_cli.ts --log all ping   # or --verbose
- *       npx tsx examples/agent_cli.ts --stdout-file /tmp/agent-cli.out --stderr-file /tmp/agent-cli.err ping
  * Test: npx tsx --test examples/agent_cli.ts
  */
 
@@ -48,27 +47,7 @@ import {
   CliEmitter,
   LogFilters,
 } from "../src/index.js";
-import {
-  type SkillAction,
-  type SkillAgentSelection,
-  type SkillOptions,
-  type SkillScope,
-  type SkillSpec,
-  SkillError,
-  runSkillAdmin,
-} from "../src/skill.js";
-import { installStreamRedirectFromRawArgs } from "../src/stream_redirect.js";
 
-// A fictional spore's embedded Agent Skill, used by the `skill` subcommand to
-// demonstrate runSkillAdmin.
-const WIDGET_SKILL =
-  "---\nname: agent-first-widget\ndescription: Example skill bundled by the agent-cli demo.\n---\n\n# Agent-First Widget\n\nExample behavior rules go here.\n";
-const WIDGET_SPEC: SkillSpec = {
-  name: "agent-first-widget",
-  source: WIDGET_SKILL,
-  title: "Agent-First Widget",
-  markerSlug: "afwidget",
-};
 const AGENT_CLI_VERSION = "0.13.0";
 const AGENT_CLI_DISPLAY_NAME = "Agent CLI Example";
 const AFDATA_VERSION = "0.15.0";
@@ -79,7 +58,7 @@ const PING_HOST_ENV = "PING_HOST";
 // consults them so a global flag's space-separated value (e.g. `--log a,b`) is
 // never mistaken for the subcommand boundary. `--output`/`--json` are handled
 // by the pre-parser directly, so they need not be listed here.
-const GLOBAL_VALUE_FLAGS = ["--log", "--api-key-secret", "--stdout-file", "--stderr-file"];
+const GLOBAL_VALUE_FLAGS = ["--log", "--api-key-secret"];
 
 interface Subcommand {
   name: string;
@@ -91,12 +70,6 @@ const SUBCOMMANDS: Subcommand[] = [
   { name: "echo", about: "Echo back the input as structured output", flags: "  --dry-run    Preview without executing" },
   { name: "ping", about: "Ping a remote target", flags: "  --host       Target host to ping" },
   { name: "cancel", about: "Return a tool-defined cancellation error", flags: "  (no flags)" },
-  {
-    name: "skill",
-    about: "Manage this tool's embedded Agent Skill",
-    flags:
-      "  status|install|uninstall  Skill action\n  --agent      all, codex, claude-code, opencode, hermes (default: all)\n  --scope      personal, workspace (default: personal)\n  --skills-dir Skills directory (requires a single concrete --agent)\n  --force      Overwrite or remove a skill this tool did not manage",
-  },
 ];
 
 /**
@@ -118,8 +91,6 @@ function formatRootHelp(withTitle = true): string {
     "  --log <FILTERS>    Log categories (comma-separated); --log all (or --verbose) enables every category",
     "  --verbose          Enable all log categories (shorthand for --log all)",
     `  --api-key-secret <VALUE> API key used by examples (default: ${redactHelpDefault("--api-key-secret", HELP_DEFAULT_API_KEY_SECRET)})`,
-    "  --stdout-file <PATH> Redirect stdout to a file",
-    "  --stderr-file <PATH> Redirect stderr to a file",
     "  --help             Show this help (one-level); add --recursive to expand all subcommands",
     "  --recursive        With --help, expand the full command tree; --output picks the format",
     "",
@@ -203,8 +174,6 @@ function globalHelpOptions(includeRecursive: boolean): JsonValue[] {
       help: "API key used by examples",
       default_values: [redactHelpDefault("--api-key-secret", HELP_DEFAULT_API_KEY_SECRET)],
     },
-    { name: "--stdout-file", help: "Redirect stdout to a file" },
-    { name: "--stderr-file", help: "Redirect stderr to a file" },
   ];
   if (includeRecursive) {
     opts.push({ name: "--recursive", help: "With --help, expand the full command tree (a bare --recursive is ignored)" });
@@ -374,45 +343,31 @@ function strictParseArgs(args: string[]) {
       log: { type: "string" },
       verbose: { type: "boolean" },
       "api-key-secret": { type: "string" },
-      "stdout-file": { type: "string" },
-      "stderr-file": { type: "string" },
       "dry-run": { type: "boolean" },
       host: { type: "string" },
-      agent: { type: "string" },
-      scope: { type: "string" },
-      "skills-dir": { type: "string" },
-      force: { type: "boolean" },
     },
   });
   const command = parsed.positionals[0];
   const values = parsed.values;
   const has = (name: string) => Object.prototype.hasOwnProperty.call(values, name);
-  const helpRequested = values.help === true;
   if (command === undefined) return parsed;
   switch (command) {
     case "echo":
       if (parsed.positionals.length > 1) throw new Error(`unexpected positional argument: ${parsed.positionals[1]}`);
-      if (has("host") || has("agent") || has("scope") || has("skills-dir") || has("force")) {
+      if (has("host")) {
         throw new Error("option is not valid for echo");
       }
       break;
     case "ping":
       if (parsed.positionals.length > 1) throw new Error(`unexpected positional argument: ${parsed.positionals[1]}`);
-      if (has("dry-run") || has("agent") || has("scope") || has("skills-dir") || has("force")) {
+      if (has("dry-run")) {
         throw new Error("option is not valid for ping");
       }
       break;
     case "cancel":
       if (parsed.positionals.length > 1) throw new Error(`unexpected positional argument: ${parsed.positionals[1]}`);
-      if (has("dry-run") || has("host") || has("agent") || has("scope") || has("skills-dir") || has("force")) {
-        throw new Error("option is not valid for cancel");
-      }
-      break;
-    case "skill":
-      if (parsed.positionals.length < 2 && !helpRequested) throw new Error("skill requires a subcommand: status, install, uninstall");
-      if (parsed.positionals.length > 2) throw new Error(`unexpected positional argument: ${parsed.positionals[2]}`);
       if (has("dry-run") || has("host")) {
-        throw new Error("option is not valid for skill");
+        throw new Error("option is not valid for cancel");
       }
       break;
     default:
@@ -436,14 +391,6 @@ function resolveFormatOrJson(args: string[]): OutputFormat {
 
 function main(): void {
   const args = process.argv.slice(2);
-
-  // Bootstrap errors happen before the command emitter exists, so each spins up
-  // its own finite emitter and routes the error envelope to stderr via finish().
-  try {
-    installStreamRedirectFromRawArgs(args);
-  } catch (e) {
-    process.exit(CliEmitter.finite("json").finish(buildCliError((e as Error).message), 2));
-  }
 
   // --version always prints a structured protocol-v1 version event to stdout,
   // never an error envelope (a malformed request below is the only exception).
@@ -589,84 +536,12 @@ function main(): void {
         ),
       );
     }
-    case "skill": {
-      // Step 6: wire the embedded Agent Skill installer to the library.
-      const agentArg = typeof values.agent === "string" ? values.agent : "all";
-      const scopeArg = typeof values.scope === "string" ? values.scope : "personal";
-      const skillsDir = typeof values["skills-dir"] === "string" ? values["skills-dir"] : undefined;
-      const force = values.force === true;
-      process.exit(runSkill(emitter, positionals[1], agentArg ?? "all", scopeArg ?? "personal", skillsDir, force));
-    }
     default: {
       process.exit(
-        emitter.finish(buildCliError(`unknown command: ${command}`, "valid commands: echo, ping, skill"), 2),
+        emitter.finish(buildCliError(`unknown command: ${command}`, "valid commands: echo, ping, cancel"), 2),
       );
     }
   }
-}
-
-/**
- * Wire the parsed `skill` subcommand to the library and print the result.
- * Returns the process exit code (0 ok, 1 action error, 2 bad flag value).
- */
-function runSkill(
-  emitter: CliEmitter,
-  verb: string | undefined,
-  agentArg: string,
-  scopeArg: string,
-  skillsDir: string | undefined,
-  force: boolean,
-): number {
-  const actions: Record<string, SkillAction> = { status: "status", install: "install", uninstall: "uninstall" };
-  const action = verb !== undefined ? actions[verb] : undefined;
-  if (action === undefined) {
-    return emitter.finish(
-      buildCliError("skill requires a subcommand: status, install, uninstall", "example: agent-cli skill status --agent opencode"),
-      2,
-    );
-  }
-
-  const built = buildSkillOptions(agentArg, scopeArg, skillsDir, force);
-  if ("error" in built) {
-    return emitter.finish(buildCliError(built.error, built.hint), 2);
-  }
-
-  try {
-    const report = runSkillAdmin(WIDGET_SPEC, action, built.options);
-    // The structured report becomes a result envelope (result → stdout).
-    return emitter.finishResult(report as unknown as JsonValue);
-  } catch (e) {
-    if (e instanceof SkillError) {
-      return emitter.finish(buildCliError(e.message, e.hint), 1);
-    }
-    throw e;
-  }
-}
-
-/** Parse the --agent/--scope string flags into the library types. */
-function buildSkillOptions(
-  agentArg: string,
-  scopeArg: string,
-  skillsDir: string | undefined,
-  force: boolean,
-): { options: SkillOptions } | { error: string; hint: string } {
-  const agents: Record<string, SkillAgentSelection> = {
-    all: "all",
-    codex: "codex",
-    "claude-code": "claude-code",
-    opencode: "opencode",
-    hermes: "hermes",
-  };
-  const agent = agents[agentArg];
-  if (agent === undefined) {
-    return { error: `invalid --agent '${agentArg}'`, hint: "valid values: all, codex, claude-code, opencode, hermes" };
-  }
-  const scopes: Record<string, SkillScope> = { personal: "personal", workspace: "workspace" };
-  const scope = scopes[scopeArg];
-  if (scope === undefined) {
-    return { error: `invalid --scope '${scopeArg}'`, hint: "valid values: personal, workspace" };
-  }
-  return { options: { agent, scope, skillsDir, force } };
 }
 
 // ── Tests (run via: npx tsx --test examples/agent_cli.ts) ────────────────────
@@ -841,7 +716,7 @@ if (process.env["NODE_TEST_CONTEXT"]) {
         ["echo"],
         ["echo", "--dry-run"],
         ["ping", "--host", "example.com"],
-        ["skill", "status", "--agent", "opencode"],
+        ["cancel"],
       ]) {
         assert.doesNotThrow(() => strictParseArgs(args));
       }
@@ -851,8 +726,7 @@ if (process.env["NODE_TEST_CONTEXT"]) {
         ["echo", "--host", "example.com"],
         ["echo", "extra"],
         ["ping", "extra"],
-        ["skill"],
-        ["skill", "status", "extra"],
+        ["cancel", "extra"],
       ]) {
         assert.throws(() => strictParseArgs(args), Error, `${args.join(" ")} should fail strict parsing`);
       }

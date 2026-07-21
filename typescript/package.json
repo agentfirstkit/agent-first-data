@@ -1,6 +1,6 @@
 {
   "name": "agent-first-data",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
   "license": "MIT",
   "repository": {
@@ -14,14 +14,6 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
-    },
-    "./skill": {
-      "import": "./dist/skill.js",
-      "types": "./dist/skill.d.ts"
-    },
-    "./stream-redirect": {
-      "import": "./dist/stream_redirect.js",
-      "types": "./dist/stream_redirect.d.ts"
     }
   },
   "files": [

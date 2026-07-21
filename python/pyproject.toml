@@ -1,6 +1,6 @@
 [project]
 name = "agent-first-data"
-version = "0.21.0"
+version = "0.22.0"
 description = "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents."
 license = "MIT"
 readme = "README.md"
@@ -17,7 +17,4 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.package-data]
 agent_first_data = [
   "assets/*.json",
-  "assets/skills/agent-first-data/*.md",
-  "assets/skills/agent-first-data/references/*.md",
-  "assets/skills/agent-first-data/references/*.json",
 ]

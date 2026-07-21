@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Canonical cross-SDK API surface for the shared AFDATA contract (protocol builders/reader, output, redaction, CLI helpers, core types). Feature-gated Rust modules (cli-help, skill-admin, tracing, stream-redirect) are out of scope: they are implementation utilities, not part of the four-language shared contract, and are allowed to differ in shape per language. A `null` entry for a language means the symbol is intentionally absent there; add a `note` explaining why. Validated by scripts/validate_api_surface.py, wired into scripts/test.sh's static phase.",
+  "description": "Canonical cross-SDK API surface for the shared AFDATA contract (protocol builders/reader, output, redaction, CLI helpers, core types). The four SDKs synchronize on exactly two things: this core contract and the CLI helpers (the `cli` surface). Everything else is Rust-only: cli-help, skill-admin, tracing, and stream-redirect are implementation utilities that live only in the Rust crate; the Go/Python/TypeScript SDKs do not ship them. A `null` entry for a language means the symbol is intentionally absent there; add a `note` explaining why. Validated by scripts/validate_api_surface.py, wired into scripts/test.sh's static phase.",
   "groups": [
     {
       "id": "json_result",

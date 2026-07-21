@@ -124,14 +124,28 @@ run_package() {
     fi
   done
   rust_smoke="$(mktemp -d)"
-  (cd "$ROOTPATH" && cargo install --path . --root "$rust_smoke/cargo-root" --locked --features skill >/dev/null)
+  (cd "$ROOTPATH" && cargo install --path . --root "$rust_smoke/cargo-root" --locked --features skill-admin >/dev/null)
   if [ -x "$rust_smoke/cargo-root/bin/afdata.exe" ]; then
-    "$rust_smoke/cargo-root/bin/afdata.exe" --version >/dev/null
-    "$rust_smoke/cargo-root/bin/afdata.exe" skill validate "$ROOTPATH/skills/agent-first-data"
+    afdata_bin="$rust_smoke/cargo-root/bin/afdata.exe"
   else
-    "$rust_smoke/cargo-root/bin/afdata" --version >/dev/null
-    "$rust_smoke/cargo-root/bin/afdata" skill validate "$ROOTPATH/skills/agent-first-data"
+    afdata_bin="$rust_smoke/cargo-root/bin/afdata"
   fi
+  "$afdata_bin" --version >/dev/null
+  "$afdata_bin" skill validate "$ROOTPATH/skills/agent-first-data"
+  # `skill install` must bundle every file in the skill directory (SKILL.md and
+  # the whole references/ tree), not just SKILL.md. Install to a scratch dir and
+  # assert the installed tree covers the source skill tree — this guards against
+  # the installer silently dropping bundled assets, and against a new reference
+  # file drifting out of the CLI's declared asset list.
+  "$afdata_bin" skill install --agent claude-code --scope personal \
+    --skills-dir "$rust_smoke/skills" --force >/dev/null
+  while IFS= read -r src_file; do
+    rel="${src_file#"$ROOTPATH/skills/agent-first-data/"}"
+    if [ ! -f "$rust_smoke/skills/agent-first-data/$rel" ]; then
+      echo "skill install did not bundle: $rel" >&2
+      exit 1
+    fi
+  done < <(find "$ROOTPATH/skills/agent-first-data" -type f)
   mkdir -p "$rust_smoke/lib/src"
   # Cargo reads this path natively; on Windows it must be a real drive path, not
   # the MSYS /d/a/... form (which Cargo resolves against C:\ and fails to find).
@@ -173,9 +187,6 @@ wheel = next(Path(sys.argv[1]).glob("*.whl"))
 required = {
     "agent_first_data/assets/registry.json",
     "agent_first_data/assets/protocol-v1.schema.json",
-    "agent_first_data/assets/skills/agent-first-data/SKILL.md",
-    "agent_first_data/assets/skills/agent-first-data/references/registry.json",
-    "agent_first_data/assets/skills/agent-first-data/references/protocol-v1.schema.json",
 }
 with zipfile.ZipFile(wheel) as archive:
     names = set(archive.namelist())
@@ -198,7 +209,6 @@ assert event["kind"] == "error"
 assets = files("agent_first_data") / "assets"
 assert (assets / "registry.json").is_file()
 assert (assets / "protocol-v1.schema.json").is_file()
-assert (assets / "skills" / "agent-first-data" / "SKILL.md").is_file()
 PY
   rm -rf "$py_out"
   [ "$had_py_build" -eq 0 ] && rm -rf "$ROOTPATH/python/build"
@@ -218,9 +228,6 @@ const files = new Set(pack.files.map((file) => file.path));
 const required = [
   "assets/registry.json",
   "assets/protocol-v1.schema.json",
-  "assets/skills/agent-first-data/SKILL.md",
-  "assets/skills/agent-first-data/references/registry.json",
-  "assets/skills/agent-first-data/references/protocol-v1.schema.json",
 ];
 const missing = required.filter((file) => !files.has(file));
 if (missing.length) {
@@ -246,7 +253,6 @@ const root = dirname(dirname(distIndex));
 for (const file of [
   "assets/registry.json",
   "assets/protocol-v1.schema.json",
-  "assets/skills/agent-first-data/SKILL.md",
 ]) {
   if (!existsSync(join(root, file))) throw new Error(`missing ${file}`);
 }
@@ -284,7 +290,6 @@ GO
   (cd "$go_smoke" && go test ./...)
   test -f "$ROOTPATH/go/assets/registry.json"
   test -f "$ROOTPATH/go/assets/protocol-v1.schema.json"
-  test -f "$ROOTPATH/go/assets/skills/agent-first-data/SKILL.md"
   rm -rf "$go_smoke"
   return 0
 }

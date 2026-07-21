@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,10 +13,9 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Make --version/-V always emit a structured protocol-v1 version event (JSON by default, or --output yaml|plain/--json), dropping the conventional plain-text form so version output follows the same protocol as every other CLI result",
-    "Extend the version payload to carry name alongside version, plus an optional human-facing display_name and an opaque caller-supplied build identifier such as a git commit SHA, each omitted when absent",
-    "Teach the version pre-parser to recognize the caller's own value-taking global flags — from the clap command in Rust, an explicit value-flags list in Go/Python/TypeScript — so a flag's value like --stdout-file <path> is never mistaken for the subcommand boundary that would hide a following --version",
-    "Land the redesign identically across Rust, Go, Python, and TypeScript at API parity, and update the normative spec's version-output section to match"
+    "Fix afdata skill install to bundle the skill's whole directory — SKILL.md plus its references/ files — instead of writing SKILL.md alone; a new SkillAsset concept on the reusable installer makes status report a references-missing install as out-of-date so a plain reinstall repairs it, and uninstall cleans the assets up",
+    "Remove the skill-admin and stream-redirect capabilities from the Go, Python, and TypeScript SDKs, leaving them Rust-only, so the four-language SDKs now synchronize on exactly the core AFDATA contract plus the CLI helpers",
+    "Consolidate the documentation: fold docs/overview.md into the README as the single agent-facing guide and delete it, and state the shared-vs-Rust-only language boundary explicitly in the README, the spec, and spec/api-surface.json"
   ],
   "bonds": [],
   "tree": {

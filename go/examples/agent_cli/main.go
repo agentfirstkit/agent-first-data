@@ -3,8 +3,7 @@
 // Demonstrates: human --help (one-level) plus orthogonal --recursive scope and
 // --output json|yaml|markdown format for full surface export,
 // CliParseOutput, CliParseLogFilters, Render, BuildCliError,
-// --dry-run, error hints, and a `skill` subcommand that installs/uninstalls/
-// reports status of an embedded Agent Skill across Codex, Claude Code, opencode, and Hermes.
+// --dry-run, and error hints.
 //
 // Run: go run ./examples/agent_cli --help
 //
@@ -16,10 +15,7 @@
 //	go run ./examples/agent_cli echo
 //	go run ./examples/agent_cli echo --dry-run
 //	go run ./examples/agent_cli --log all ping   # or --verbose
-//	go run ./examples/agent_cli --stdout-file /tmp/agent-cli.out --stderr-file /tmp/agent-cli.err ping
 //	go run ./examples/agent_cli ping
-//	go run ./examples/agent_cli skill status --agent opencode --skills-dir /tmp/ex
-//	go run ./examples/agent_cli skill install --agent opencode --skills-dir /tmp/ex
 package main
 
 import (
@@ -30,20 +26,7 @@ import (
 	"strings"
 
 	afdata "github.com/agentfirstkit/agent-first-data/go"
-	"github.com/agentfirstkit/agent-first-data/go/skill"
-	"github.com/agentfirstkit/agent-first-data/go/streamredirect"
 )
-
-// A fictional spore's embedded Agent Skill, used by the `skill` subcommand to
-// demonstrate skill.RunSkillAdmin.
-const widgetSkill = "---\nname: agent-first-widget\ndescription: Example skill bundled by the agent-cli demo.\n---\n\n# Agent-First Widget\n\nExample behavior rules go here.\n"
-
-var widgetSpec = skill.SkillSpec{
-	Name:       "agent-first-widget",
-	Source:     widgetSkill,
-	Title:      "Agent-First Widget",
-	MarkerSlug: "afwidget",
-}
 
 const agentCliVersion = "0.13.0"
 const helpDefaultAPIKeySecret = "sk-help-default"
@@ -59,7 +42,6 @@ var subcommands = []subcommand{
 	{name: "echo", about: "Echo back the input as structured output", flags: "  --dry-run    Preview without executing"},
 	{name: "ping", about: "Ping a remote target", flags: "  --host       Target host to ping"},
 	{name: "cancel", about: "Return a tool-defined cancellation error", flags: "  (no flags)"},
-	{name: "skill", about: "Manage this tool's embedded Agent Skill", flags: "  status|install|uninstall  Skill action\n  --agent      all, codex, claude-code, opencode, hermes (default: all)\n  --scope      personal, workspace (default: personal)\n  --skills-dir Skills directory (requires a single concrete --agent)\n  --force      Overwrite or remove a skill this tool did not manage"},
 }
 
 // formatRootHelp returns one-level help for the root command. Markdown
@@ -78,8 +60,6 @@ func formatRootHelp(withTitle bool) string {
 	b.WriteString("  --log <FILTERS>    Log categories (comma-separated); --log all (or --verbose) enables every category\n")
 	b.WriteString("  --verbose          Enable all log categories (shorthand for --log all)\n")
 	fmt.Fprintf(&b, "  --api-key-secret <VALUE> API key used by examples (default: %s)\n", redactHelpDefault("--api-key-secret", helpDefaultAPIKeySecret))
-	b.WriteString("  --stdout-file <PATH> Redirect stdout to a file\n")
-	b.WriteString("  --stderr-file <PATH> Redirect stderr to a file\n")
 	b.WriteString("  --help             Show this help (one-level); add --recursive to expand all subcommands\n")
 	b.WriteString("  --recursive        With --help, expand the full command tree; --output picks the format\n\n")
 	b.WriteString("Commands:\n")
@@ -172,8 +152,6 @@ func globalHelpOptions(includeRecursive bool) []map[string]any {
 		{"name": "--log", "help": "Log categories (comma-separated); --log all (or --verbose) enables every category"},
 		{"name": "--verbose", "help": "Enable all log categories (shorthand for --log all)"},
 		{"name": "--api-key-secret", "help": "API key used by examples", "default_values": []string{redactHelpDefault("--api-key-secret", helpDefaultAPIKeySecret)}},
-		{"name": "--stdout-file", "help": "Redirect stdout to a file"},
-		{"name": "--stderr-file", "help": "Redirect stderr to a file"},
 	}
 	if includeRecursive {
 		opts = append(opts, map[string]any{"name": "--recursive", "help": "With --help, expand the full command tree (a bare --recursive is ignored)"})
@@ -367,8 +345,6 @@ func validateStrictArgs(args []string) (string, string) {
 	root.String("log", "", "")
 	root.Bool("verbose", false, "")
 	root.String("api-key-secret", helpDefaultAPIKeySecret, "")
-	root.String("stdout-file", "", "")
-	root.String("stderr-file", "", "")
 	if err := root.Parse(args); err != nil {
 		return err.Error(), "try: agent-cli --help"
 	}
@@ -414,37 +390,10 @@ func validateStrictArgs(args []string) (string, string) {
 		if fs.NArg() > 0 {
 			return "unexpected positional argument: " + fs.Arg(0), "usage: agent-cli cancel"
 		}
-	case "skill":
-		fs := flag.NewFlagSet("agent-cli skill", flag.ContinueOnError)
-		fs.SetOutput(io.Discard)
-		fs.Bool("help", false, "")
-		fs.Bool("h", false, "")
-		fs.String("agent", "all", "")
-		fs.String("scope", "personal", "")
-		fs.String("skills-dir", "", "")
-		fs.Bool("force", false, "")
-		verb := ""
-		flagArgs := make([]string, 0, len(rest))
-		for _, arg := range rest {
-			if verb == "" && !strings.HasPrefix(arg, "-") {
-				verb = arg
-				continue
-			}
-			flagArgs = append(flagArgs, arg)
-		}
-		if err := fs.Parse(flagArgs); err != nil {
-			return err.Error(), "try: agent-cli skill --help"
-		}
-		if verb == "" {
-			return "skill requires a subcommand: status, install, uninstall", "example: agent-cli skill status --agent opencode"
-		}
-		if fs.NArg() > 0 {
-			return "unexpected positional argument: " + fs.Arg(0), "usage: agent-cli skill status|install|uninstall [OPTIONS]"
-		}
 	case "config", "service":
-		return "command not implemented in Go example: " + command, "valid commands: echo, ping, cancel, skill"
+		return "command not implemented in Go example: " + command, "valid commands: echo, ping, cancel"
 	default:
-		return "unknown command: " + command, "valid commands: echo, ping, cancel, skill"
+		return "unknown command: " + command, "valid commands: echo, ping, cancel"
 	}
 	return "", ""
 }
@@ -461,10 +410,6 @@ func main() {
 	dryRun := false
 	logArg := ""
 	host := ""
-	agent := "all"
-	scope := "personal"
-	skillsDir := ""
-	force := false
 	showHelp := false
 	recursive := false
 	verbose := false
@@ -472,14 +417,11 @@ func main() {
 
 	args := os.Args[1:]
 	outputMissing := outputFlagMissing(args)
-	if _, err := streamredirect.InstallStreamRedirectFromArgs(args); err != nil {
-		os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), err.Error(), "", 2))
-	}
 
 	// The example's own value-taking global long flags: the pre-parser consumes
 	// each one's space value so it is never mistaken for the subcommand boundary
 	// (afdata's own --output/--output-to are recognized without being listed).
-	versionValueFlags := []string{"--log", "--host", "--agent", "--scope", "--skills-dir", "--api-key-secret", "--stdout-file", "--stderr-file"}
+	versionValueFlags := []string{"--log", "--host", "--api-key-secret"}
 	if out, handled, err := afdata.CliHandleVersionOrContinue(args, versionValueFlags, "agent-cli", "Agent CLI Example", agentCliVersion, ""); handled {
 		if err != nil {
 			os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), err.Error(), "valid version output formats: json, yaml, plain", 2))
@@ -537,26 +479,9 @@ func main() {
 			if i < len(args) {
 				host = args[i]
 			}
-		case "--agent":
-			i++
-			if i < len(args) {
-				agent = args[i]
-			}
-		case "--scope":
-			i++
-			if i < len(args) {
-				scope = args[i]
-			}
-		case "--skills-dir":
-			i++
-			if i < len(args) {
-				skillsDir = args[i]
-			}
-		case "--force":
-			force = true
 		case "--verbose":
 			verbose = true
-		case "--api-key-secret", "--stdout-file", "--stderr-file":
+		case "--api-key-secret":
 			i++
 		default:
 			if !strings.HasPrefix(args[i], "--") {
@@ -659,71 +584,7 @@ func main() {
 			Trace(map[string]any{"duration_ms": 0}).Build()
 		os.Exit(emitter.Finish(errVal, 1))
 
-	case "skill":
-		os.Exit(runSkill(emitter, positionals, agent, scope, skillsDir, force))
-
 	default:
-		os.Exit(finishCliError(emitter, "unknown command: "+command, "valid commands: echo, ping, cancel, skill", 2))
+		os.Exit(finishCliError(emitter, "unknown command: "+command, "valid commands: echo, ping, cancel", 2))
 	}
-}
-
-// runSkill wires the parsed `skill` subcommand to the library and prints the result.
-// Returns the process exit code (0 ok, 1 action error, 2 bad flag value).
-func runSkill(emitter *afdata.CliEmitter, positionals []string, agentStr, scopeStr, skillsDir string, force bool) int {
-	verb := ""
-	if len(positionals) > 1 {
-		verb = positionals[1]
-	}
-	var action skill.SkillAction
-	switch verb {
-	case "status":
-		action = skill.SkillActionStatus
-	case "install":
-		action = skill.SkillActionInstall
-	case "uninstall":
-		action = skill.SkillActionUninstall
-	default:
-		return finishCliError(emitter, "skill requires a subcommand: status, install, uninstall", "example: agent-cli skill status --agent opencode", 2)
-	}
-
-	opts, message, hint := buildSkillOptions(agentStr, scopeStr, skillsDir, force)
-	if message != "" {
-		return finishCliError(emitter, message, hint, 2)
-	}
-
-	report, serr := skill.RunSkillAdmin(widgetSpec, action, opts)
-	if serr != nil {
-		return finishCliError(emitter, serr.Message, serr.Hint, 1)
-	}
-	return emitter.FinishResult(report)
-}
-
-// buildSkillOptions parses the --agent/--scope string flags into the library enums.
-// Returns a non-empty message (and optional hint) on an unknown value.
-func buildSkillOptions(agentStr, scopeStr, skillsDir string, force bool) (skill.SkillOptions, string, string) {
-	var agent skill.SkillAgentSelection
-	switch agentStr {
-	case "all":
-		agent = skill.SkillAgentAll
-	case "codex":
-		agent = skill.SkillAgentCodex
-	case "claude-code":
-		agent = skill.SkillAgentClaudeCode
-	case "opencode":
-		agent = skill.SkillAgentOpencode
-	case "hermes":
-		agent = skill.SkillAgentHermes
-	default:
-		return skill.SkillOptions{}, fmt.Sprintf("invalid --agent '%s'", agentStr), "valid values: all, codex, claude-code, opencode, hermes"
-	}
-	var sc skill.SkillScope
-	switch scopeStr {
-	case "personal":
-		sc = skill.SkillScopePersonal
-	case "workspace":
-		sc = skill.SkillScopeWorkspace
-	default:
-		return skill.SkillOptions{}, fmt.Sprintf("invalid --scope '%s'", scopeStr), "valid values: personal, workspace"
-	}
-	return skill.SkillOptions{Agent: agent, Scope: sc, SkillsDir: skillsDir, Force: force}, "", ""
 }

@@ -15,7 +15,6 @@ Run:  PYTHONPATH=. python3 examples/agent_cli.py --help
       PYTHONPATH=. python3 examples/agent_cli.py ping --output json
       PYTHONPATH=. python3 examples/agent_cli.py echo --output yaml --log startup,request
       PYTHONPATH=. python3 examples/agent_cli.py --log all ping   # or --verbose
-      PYTHONPATH=. python3 examples/agent_cli.py --stdout-file /tmp/agent-cli.out --stderr-file /tmp/agent-cli.err ping
 Test: PYTHONPATH=. python3 -m pytest examples/agent_cli.py -v
 """
 
@@ -38,35 +37,11 @@ from agent_first_data import (
     cli_parse_log_filters,
     cli_parse_output,
 )
-from agent_first_data.skill import (
-    SkillAction,
-    SkillAgentSelection,
-    SkillError,
-    SkillOptions,
-    SkillScope,
-    SkillSpec,
-    run_skill_admin,
-)
-from agent_first_data.stream_redirect import install_from_raw_args as install_stream_redirect_from_raw_args
 
 AGENT_CLI_VERSION = "0.13.0"
 AFDATA_VERSION = "0.15.0"
 HELP_DEFAULT_API_KEY_SECRET = "sk-help-default"
 PING_HOST_ENV = "PING_HOST"
-
-# A fictional spore's embedded Agent Skill, used by the `skill` subcommand to
-# demonstrate run_skill_admin.
-WIDGET_SKILL = (
-    "---\nname: agent-first-widget\n"
-    "description: Example skill bundled by the agent-cli demo.\n"
-    "---\n\n# Agent-First Widget\n\nExample behavior rules go here.\n"
-)
-WIDGET_SPEC = SkillSpec(
-    name="agent-first-widget",
-    source=WIDGET_SKILL,
-    title="Agent-First Widget",
-    marker_slug="afwidget",
-)
 
 
 class ArgumentParserError(ValueError):
@@ -96,8 +71,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log", default="", help="Log categories (comma-separated); --log all (or --verbose) enables every category")
     parser.add_argument("--verbose", action="store_true", help="Enable all log categories (shorthand for --log all)")
     parser.add_argument("--api-key-secret", default=HELP_DEFAULT_API_KEY_SECRET, help=f"API key used by examples (default: {redact_help_default('--api-key-secret', HELP_DEFAULT_API_KEY_SECRET)})")
-    parser.add_argument("--stdout-file", dest="stdout_file", help="Redirect stdout to a file")
-    parser.add_argument("--stderr-file", dest="stderr_file", help="Redirect stderr to a file")
 
     subs = parser.add_subparsers(dest="command", parser_class=StrictArgumentParser)
 
@@ -111,14 +84,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     cancel_p = subs.add_parser("cancel", add_help=False, help="Return a tool-defined cancellation error")
     cancel_p.add_argument("--help", "-h", action="store_true", help="Show help for cancel")
-
-    skill_p = subs.add_parser("skill", add_help=False, help="Manage this tool's embedded Agent Skill")
-    skill_p.add_argument("--help", "-h", action="store_true", help="Show help for skill")
-    skill_p.add_argument("verb", nargs="?", help="status, install, or uninstall")
-    skill_p.add_argument("--agent", default="all", help="all, codex, claude-code, opencode, hermes")
-    skill_p.add_argument("--scope", default="personal", help="personal, workspace")
-    skill_p.add_argument("--skills-dir", dest="skills_dir", default=None, help="Skills directory (requires a single concrete --agent)")
-    skill_p.add_argument("--force", action="store_true", help="Overwrite or remove a skill this tool did not manage")
 
     return parser
 
@@ -370,8 +335,6 @@ def global_help_options(include_recursive: bool) -> list[dict]:
             "help": "API key used by examples",
             "default_values": [redact_help_default("--api-key-secret", HELP_DEFAULT_API_KEY_SECRET)],
         },
-        {"name": "--stdout-file", "help": "Redirect stdout to a file"},
-        {"name": "--stderr-file", "help": "Redirect stderr to a file"},
     ]
     if include_recursive:
         opts.append({"name": "--recursive", "help": "With --help, expand the full command tree (a bare --recursive is ignored)"})
@@ -454,10 +417,6 @@ def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
 def main() -> None:
     parser = build_parser()
     raw = sys.argv[1:]
-    try:
-        _stream_redirect = install_stream_redirect_from_raw_args(raw)
-    except (OSError, ValueError) as e:
-        sys.exit(bootstrap_error(OutputFormat.JSON, str(e)))
 
     # --version is now a protocol-v1 version envelope (JSON by default), and
     # --help TEXT stays conventional text; both are handled here, before the
@@ -469,7 +428,7 @@ def main() -> None:
         # recognized by the pre-parser itself.)
         version = cli_handle_version_or_continue(
             raw,
-            ["--log", "--api-key-secret", "--stdout-file", "--stderr-file"],
+            ["--log", "--api-key-secret"],
             "agent-cli",
             "Agent CLI Example",
             AGENT_CLI_VERSION,
@@ -561,67 +520,6 @@ def main() -> None:
             "operation cancelled",
         ).hint("the operation was cancelled before completion").trace({"duration_ms": 0}).build()
         sys.exit(emitter.finish(err, 1))
-
-    elif args.command == "skill":
-        # Step 6: wire the embedded Agent Skill installer to the library.
-        sys.exit(run_skill(emitter, args))
-
-
-def build_skill_options(args):
-    """Parse the --agent/--scope flags into library enums.
-
-    Returns ``(options, None)`` or ``(None, (message, hint))`` on an unknown value.
-    """
-    agents = {
-        "all": SkillAgentSelection.ALL,
-        "codex": SkillAgentSelection.CODEX,
-        "claude-code": SkillAgentSelection.CLAUDE_CODE,
-        "opencode": SkillAgentSelection.OPENCODE,
-        "hermes": SkillAgentSelection.HERMES,
-    }
-    agent = agents.get(args.agent)
-    if agent is None:
-        return None, (f"invalid --agent '{args.agent}'", "valid values: all, codex, claude-code, opencode, hermes")
-    scopes = {
-        "personal": SkillScope.PERSONAL,
-        "workspace": SkillScope.WORKSPACE,
-    }
-    scope = scopes.get(args.scope)
-    if scope is None:
-        return None, (f"invalid --scope '{args.scope}'", "valid values: personal, workspace")
-    return SkillOptions(agent=agent, scope=scope, skills_dir=args.skills_dir, force=args.force), None
-
-
-def run_skill(emitter: CliEmitter, args) -> int:
-    """Wire the parsed `skill` subcommand to the library and emit the outcome.
-
-    Routes through the finite emitter: the success report is a `result` (stdout)
-    and every failure is an `error` (stderr). Returns the process exit code
-    (0 ok, 1 action error, 2 bad flag value).
-    """
-    actions = {
-        "status": SkillAction.STATUS,
-        "install": SkillAction.INSTALL,
-        "uninstall": SkillAction.UNINSTALL,
-    }
-    action = actions.get(args.verb)
-    if action is None:
-        return emitter.finish(build_cli_error(
-            "skill requires a subcommand: status, install, uninstall",
-            hint="example: agent-cli skill status --agent opencode",
-        ), 2)
-
-    options, parse_error = build_skill_options(args)
-    if parse_error is not None:
-        message, hint = parse_error
-        return emitter.finish(build_cli_error(message, hint=hint), 2)
-
-    try:
-        report = run_skill_admin(WIDGET_SPEC, action, options)
-    except SkillError as e:
-        return emitter.finish(build_cli_error(e.message, hint=e.hint), 1)
-    # The report is a structured payload; wrap it in a result envelope (stdout).
-    return emitter.finish_result(report.to_dict())
 
 
 # ── Tests (run via: pytest examples/agent_cli.py) ─────────────────────────────

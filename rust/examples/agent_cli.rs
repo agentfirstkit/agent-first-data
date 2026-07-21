@@ -95,6 +95,7 @@ const WIDGET_SPEC: agent_first_data::skill::SkillSpec = agent_first_data::skill:
     source: WIDGET_SKILL,
     title: "Agent-First Widget",
     marker_slug: "afwidget",
+    assets: &[],
 };
 
 #[derive(Parser)]

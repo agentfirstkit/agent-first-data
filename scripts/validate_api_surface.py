@@ -13,11 +13,11 @@ and diffs it against each SDK's real exports:
   that shouldn't be exported).
 
 Scope: only the "shared contract" surface (protocol builders/reader, output,
-redaction, CLI helpers, core types) — the same groups listed in
-docs/overview.md's API table. Feature-gated Rust modules (cli-help,
-skill-admin, tracing, stream-redirect) and their Go/Python/TS counterparts
-are intentionally out of scope; they're implementation utilities allowed to
-differ in shape per language.
+redaction, CLI helpers, core types) — the same groups listed in the README's
+"One contract, four languages" section. cli-help, skill-admin, tracing, and
+stream-redirect are intentionally out of scope: they are Rust-only tools, not
+part of the cross-language contract, so the Go/Python/TypeScript SDKs do not
+ship them.
 
 A Rust `pub use` block directly preceded by `#[cfg(feature = "...")]` is
 "feature-gated": it's never required to have a manifest entry (the reverse

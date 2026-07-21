@@ -19,13 +19,6 @@ console.log(render(event.toJSON(), "plain"));
 
 Useful names use TypeScript casing: `render`, `outputOptionsForPolicy`, `redactedValue`, `redactUrlSecrets`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `isValidRfc3339`, `isValidBcp47`, `decodeProtocolEvent`, `cliParseOutput`, `cliParseLogFilters`, `buildCliError`, `buildCliVersion`, and `cliHandleVersionOrContinue`.
 
-Skill admin and stream redirection are not re-exported from the package root; import them from their own subpaths:
-
-```typescript
-import { runSkillAdmin } from "agent-first-data/skill";
-import { installStreamRedirectFromRawArgs } from "agent-first-data/stream-redirect";
-```
-
 ## Behavior Notes
 
 - Default redaction replaces every `_secret` or configured secret-name subtree with `***`, including objects and arrays.
@@ -34,11 +27,9 @@ import { installStreamRedirectFromRawArgs } from "agent-first-data/stream-redire
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - `buildCliError(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
 - Use `cliHandleVersionOrContinue()` before argument parsing so `--version`/`-V` always answers with a structured protocol-v1 `kind:"result"` version event — JSON by default, or `--output yaml|plain`/`--json` for another format; there is no conventional bare-text form. Pass your own value-taking global flag names so their value is not mistaken for the subcommand boundary.
-- Use `installStreamRedirectFromRawArgs()` (from `agent-first-data/stream-redirect`) before version/help handling if a CLI exposes `--stdout-file` or `--stderr-file`; stderr is redirected as native diagnostics, not JSON. Node fd-level redirection is process-lifetime because the standard library does not expose `dup2` restoration.
 
 ## Reference
 
-- Full convention and API groups: [docs/overview.md](https://github.com/agentfirstkit/agent-first-data/blob/main/docs/overview.md)
 - Formal cross-language contract: [spec/agent-first-data.md](https://github.com/agentfirstkit/agent-first-data/blob/main/spec/agent-first-data.md)
 - Conformance fixtures: [spec/fixtures](https://github.com/agentfirstkit/agent-first-data/tree/main/spec/fixtures)
 - Agent skill: [skills/agent-first-data/SKILL.md](https://github.com/agentfirstkit/agent-first-data/blob/main/skills/agent-first-data/SKILL.md)

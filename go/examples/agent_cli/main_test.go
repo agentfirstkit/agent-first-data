@@ -239,7 +239,6 @@ func TestValidateStrictArgs(t *testing.T) {
 		{"echo"},
 		{"echo", "--dry-run"},
 		{"ping", "--host", "example.com"},
-		{"skill", "status", "--agent", "opencode"},
 	}
 	for _, args := range valid {
 		if message, _ := validateStrictArgs(args); message != "" {
@@ -252,7 +251,6 @@ func TestValidateStrictArgs(t *testing.T) {
 		{"echo", "--host", "example.com"},
 		{"echo", "extra"},
 		{"ping", "extra"},
-		{"skill", "status", "extra"},
 	}
 	for _, args := range invalid {
 		if message, _ := validateStrictArgs(args); message == "" {

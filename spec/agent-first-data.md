@@ -14,6 +14,8 @@ Agent-First Data has three parts:
 
 **Parts 1 and 2 are the core.** Part 3 is optional — a recommended structure that works well with Parts 1 and 2, but you can use AFDATA naming with any JSON structure (REST APIs, GraphQL, databases, etc.).
 
+**Four SDKs, one contract.** This convention — naming, output processing, the protocol template, and the CLI helpers that emit it — is implemented identically in Rust, Go, Python, and TypeScript. The Rust crate additionally bundles `skill`/`skill-admin` (SKILL.md validation plus install/uninstall/status), `stream-redirect` (fd-level output redirection), and `tracing` (logging init); those are Rust-only tools, not part of the cross-language contract. The exact shared surface is enumerated in `spec/api-surface.json`.
+
 **Jump to:**
 - [Quick Reference: All Suffixes](#quick-reference-all-suffixes)
 - [Complete Example](#complete-example-cli-tool)
