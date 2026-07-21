@@ -70,9 +70,16 @@ const WIDGET_SPEC: SkillSpec = {
   markerSlug: "afwidget",
 };
 const AGENT_CLI_VERSION = "0.13.0";
+const AGENT_CLI_DISPLAY_NAME = "Agent CLI Example";
 const AFDATA_VERSION = "0.15.0";
 const HELP_DEFAULT_API_KEY_SECRET = "sk-help-default";
 const PING_HOST_ENV = "PING_HOST";
+
+// This tool's own value-taking global long flags. The version pre-parser
+// consults them so a global flag's space-separated value (e.g. `--log a,b`) is
+// never mistaken for the subcommand boundary. `--output`/`--json` are handled
+// by the pre-parser directly, so they need not be listed here.
+const GLOBAL_VALUE_FLAGS = ["--log", "--api-key-secret", "--stdout-file", "--stderr-file"];
 
 interface Subcommand {
   name: string;
@@ -438,9 +445,17 @@ function main(): void {
     process.exit(CliEmitter.finite("json").finish(buildCliError((e as Error).message), 2));
   }
 
-  // --version prints conventional TEXT to stdout, never an error envelope.
+  // --version always prints a structured protocol-v1 version event to stdout,
+  // never an error envelope (a malformed request below is the only exception).
   try {
-    const version = cliHandleVersionOrContinue(args, "agent-cli", AGENT_CLI_VERSION);
+    const version = cliHandleVersionOrContinue(
+      args,
+      GLOBAL_VALUE_FLAGS,
+      "agent-cli",
+      AGENT_CLI_DISPLAY_NAME,
+      AGENT_CLI_VERSION,
+      undefined,
+    );
     if (version !== undefined) {
       process.stdout.write(version);
       return;

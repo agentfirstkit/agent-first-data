@@ -10,7 +10,7 @@ use agent_first_data::{
     is_valid_rfc3339_time, json_error, json_result, normalize_utc_offset, render,
     validate_protocol_event, validate_protocol_stream,
 };
-#[cfg(feature = "cli-help")]
+#[cfg(any(feature = "cli", feature = "cli-help"))]
 use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
@@ -428,10 +428,17 @@ fn main() -> ExitCode {
         };
 
     // Handle --version through AFDATA so `--version --output json` works too.
+    let build = match env!("GIT_SHA") {
+        "unknown" => None,
+        sha => Some(sha),
+    };
     match agent_first_data::cli_handle_version_or_continue(
         &raw,
+        &Cli::command(),
         "afdata",
+        Some(env!("DISPLAY_NAME")),
         env!("CARGO_PKG_VERSION"),
+        build,
     ) {
         Ok(Some(version)) => return write_text_exit(&version, 0),
         Ok(None) => {}

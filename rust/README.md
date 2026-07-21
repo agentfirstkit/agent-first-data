@@ -60,7 +60,7 @@ Canonical flags are `--stdout-file` and `--stderr-file`. They redirect the corre
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - Prefer `try_init_*` for Rust tracing startup so failures, such as another global subscriber already being installed, are visible to the caller.
 - `build_cli_error(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
-- Use `cli_handle_version_or_continue()` before clap parsing so `--version --output json|yaml|plain` stays structured; use `VersionConfig::conventional_default()` so bare `--version` stays human text while explicit `--output` remains structured.
+- Use `cli_handle_version_or_continue()` before clap parsing so it can intercept `--version`/`-V` before clap's own built-in handling: it always answers with a protocol-v1 `kind:"result"` version event, JSON by default, or `--output yaml|plain`/`--json` for another format.
 - `stream-redirect` is Unix fd-level redirection where supported. It is stream destination control, not a second AFDATA protocol stream, and it does not implement rotation.
 
 ## Reference

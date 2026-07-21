@@ -284,7 +284,7 @@ Required cross-language behavior to rely on:
 - Use `redact_url_secrets()` for URLs embedded in log messages or prose before interpolating them into output.
 - Use `cli_parse_output()`, `cli_parse_log_filters()`, `render()`, `build_cli_error()`, and the version helper for CLI tools instead of custom parsing/error envelopes.
 - `build_cli_error(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
-- Rust CLIs should call `cli_handle_version_or_continue(raw_args, name, version)` before clap parsing so `--version --output json|yaml|plain` emits a structured `kind:"result"` event with `result.code == "version"` and `result.version` instead of clap's plain text. Bare `--version` always stays human `<name> <version>` text; explicit `--output` is always structured — there is no configuration.
+- Rust CLIs (feature `cli`/`cli-help`) should call `cli_handle_version_or_continue(raw_args, cmd, name, display_name, version, build)` before clap parsing so `--version`/`-V` always emits a structured `kind:"result"` event with `result.code == "version"`, `result.name`, and `result.version` (plus optional `result.display_name`/`result.build`) instead of clap's plain text — JSON by default, `--output yaml|plain` or `--json` for another format; there is no conventional bare-text form. Pass the caller's own `clap::Command` (e.g. `Cli::command()`) so any value-taking global flag it defines (e.g. `--stdout-file`) is recognized and its value is never mistaken for the subcommand boundary.
 - Use the protocol reader `decode_protocol_event(text)` to parse and strict-validate a single JSON text line, receiving a typed decoded event.
 
 ## AFDATA Logging

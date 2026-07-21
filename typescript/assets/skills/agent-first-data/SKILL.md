@@ -61,7 +61,8 @@ assert!(rendered.contains("\"api_key_secret\":\"***\""));
 For a finite CLI execution implemented in Rust, create one `CliEmitter`, select
 `OutputFormat` through `cli_parse_output`, enable strict protocol, and emit one
 terminal result or error. Handle version before clap with
-`cli_handle_version_or_continue(raw_args, name, version)`.
+`cli_handle_version_or_continue(raw_args, cmd, name, display_name, version, build)`,
+which always answers `--version`/`-V` with a structured version event.
 For non-CLI HTTP/MCP/SSE serialization, call `redacted_value()` or
 `redact_url_secrets()` explicitly at the boundary.
 

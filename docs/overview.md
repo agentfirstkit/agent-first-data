@@ -77,7 +77,7 @@ AFDATA does not provide named redaction profiles and does not scan arbitrary pro
 
 `build_cli_error(message, hint?)` returns a strict-ready protocol v1 error event: `{kind:"error", error:{code:"cli_error", message, hint?, retryable:false}, trace:{}}`.
 
-Version helpers should run before the app parser so bare `--version` stays conventional and `--version --output json|yaml|plain` emits a structured `kind:"result"` event with `result.version` instead of being intercepted by parser built-ins.
+Version helpers should run before the app parser so `--version`/`-V` always emits a structured `kind:"result"` version event — JSON by default, or `--output yaml|plain` — instead of being intercepted by the parser's built-in plain-text exit. The payload carries `result.name` and `result.version`, plus optional `result.display_name` and `result.build`; there is no conventional bare-text form.
 
 Canonical CLIs default to one terminal protocol event. They do not add
 `--stream` or `--result-only`; extra `log`/`progress` events appear only when

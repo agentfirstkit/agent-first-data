@@ -2007,40 +2007,97 @@ fn cli_emitter_does_not_commit_terminal_state_when_write_fails() {
 
 #[test]
 fn build_cli_version_has_standard_shape() {
-    let v = build_cli_version("1.2.3");
+    let v = build_cli_version(
+        "agent-cli",
+        Some("Agent CLI Example"),
+        "1.2.3",
+        Some("abc1234"),
+    );
     assert_eq!(v.as_value()["kind"], "result");
     assert_eq!(v.as_value()["result"]["code"], "version");
+    assert_eq!(v.as_value()["result"]["name"], "agent-cli");
+    assert_eq!(v.as_value()["result"]["display_name"], "Agent CLI Example");
     assert_eq!(v.as_value()["result"]["version"], "1.2.3");
-    // 0.16 API: trace is always present
+    assert_eq!(v.as_value()["result"]["build"], "abc1234");
     assert!(v.as_value().get("trace").is_some());
 }
 
 #[test]
-fn cli_handle_version_bare_is_conventional_text() {
-    // The one blessed behavior: a bare `--version` is conventional text, never
-    // a structured event.
-    let raw = vec!["agent-cli".to_string(), "--version".to_string()];
-    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
-        .expect("valid version request")
-        .expect("version should render");
-    assert_eq!(out, "agent-cli 1.2.3\n");
+fn build_cli_version_omits_absent_display_name_and_build() {
+    let v = build_cli_version("agent-cli", None, "1.2.3", None);
+    let result = &v.as_value()["result"];
+    assert_eq!(result["name"], "agent-cli");
+    assert_eq!(result["version"], "1.2.3");
+    assert!(result.get("display_name").is_none());
+    assert!(result.get("build").is_none());
 }
 
+#[cfg(any(feature = "cli", feature = "cli-help"))]
+fn version_test_command() -> clap::Command {
+    clap::Command::new("agent-cli")
+        .arg(
+            clap::Arg::new("stdout-file")
+                .long("stdout-file")
+                .action(clap::ArgAction::Set),
+        )
+        .arg(
+            clap::Arg::new("stderr-file")
+                .long("stderr-file")
+                .action(clap::ArgAction::Set),
+        )
+        .subcommand(clap::Command::new("hatch"))
+}
+
+#[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
-fn cli_handle_version_honors_explicit_output_formats() {
+fn cli_handle_version_bare_defaults_to_json() {
+    // The one blessed behavior: `--version` always answers with a protocol-v1
+    // event, JSON by default — no more conventional bare-text special case.
+    let raw = vec!["agent-cli".to_string(), "--version".to_string()];
+    let out = cli_handle_version_or_continue(
+        &raw,
+        &version_test_command(),
+        "agent-cli",
+        Some("Agent CLI Example"),
+        "1.2.3",
+        None,
+    )
+    .expect("valid version request")
+    .expect("version should render");
+    let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
+    assert_eq!(parsed["kind"], "result");
+    assert_eq!(parsed["result"]["code"], "version");
+    assert_eq!(parsed["result"]["name"], "agent-cli");
+    assert_eq!(parsed["result"]["display_name"], "Agent CLI Example");
+    assert_eq!(parsed["result"]["version"], "1.2.3");
+    assert_eq!(parsed["trace"], serde_json::json!({}));
+    validate_protocol_event(&parsed, true).expect("strict protocol event");
+}
+
+#[cfg(any(feature = "cli", feature = "cli-help"))]
+#[test]
+fn cli_handle_version_honors_explicit_plain_output() {
     let raw = vec![
         "agent-cli".to_string(),
         "--version".to_string(),
         "--output".to_string(),
         "plain".to_string(),
     ];
-    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
-        .expect("valid version request")
-        .expect("version should render");
+    let out = cli_handle_version_or_continue(
+        &raw,
+        &version_test_command(),
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    .expect("valid version request")
+    .expect("version should render");
     assert!(out.contains("kind=result"), "{out}");
     assert!(out.contains("result.version=1.2.3"), "{out}");
 }
 
+#[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
 fn cli_handle_version_skips_output_to_space_value() {
     // A preceding `--output-to <value>` (space form) must not be mistaken for
@@ -2054,13 +2111,133 @@ fn cli_handle_version_skips_output_to_space_value() {
         "--output".to_string(),
         "json".to_string(),
     ];
-    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
-        .expect("valid version request")
-        .expect("version should render");
+    let out = cli_handle_version_or_continue(
+        &raw,
+        &version_test_command(),
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    .expect("valid version request")
+    .expect("version should render");
     assert!(out.contains("\"kind\":\"result\""), "{out}");
     assert!(out.contains("\"version\":\"1.2.3\""), "{out}");
 }
 
+#[cfg(any(feature = "cli", feature = "cli-help"))]
+#[test]
+fn cli_handle_version_skips_stdout_file_space_value() {
+    // Same regression as --output-to, for stream_redirect's own global flags:
+    // the path value of a preceding `--stdout-file`/`--stderr-file` must not be
+    // mistaken for the subcommand boundary either.
+    let raw = vec![
+        "agent-cli".to_string(),
+        "--stdout-file".to_string(),
+        "/tmp/out.log".to_string(),
+        "--stderr-file".to_string(),
+        "/tmp/err.log".to_string(),
+        "--version".to_string(),
+    ];
+    let out = cli_handle_version_or_continue(
+        &raw,
+        &version_test_command(),
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    .expect("valid version request")
+    .expect("version should render");
+    let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
+    assert_eq!(parsed["result"]["name"], "agent-cli");
+    assert_eq!(parsed["result"]["version"], "1.2.3");
+}
+
+#[cfg(any(feature = "cli", feature = "cli-help"))]
+#[test]
+fn cli_handle_version_skips_stdout_file_inline_value() {
+    let raw = vec![
+        "agent-cli".to_string(),
+        "--stdout-file=/tmp/out.log".to_string(),
+        "--version".to_string(),
+    ];
+    assert!(
+        cli_handle_version_or_continue(
+            &raw,
+            &version_test_command(),
+            "agent-cli",
+            None,
+            "1.2.3",
+            None
+        )
+        .expect("valid version request")
+        .is_some()
+    );
+}
+
+#[cfg(any(feature = "cli", feature = "cli-help"))]
+#[test]
+fn cli_handle_version_skips_caller_defined_value_flag() {
+    // A consumer's *own* value-taking global flag that afdata's pre-parser has
+    // no special knowledge of — here a hypha-style comma-list `--log` — must
+    // have its space-separated value recognized through the passed
+    // `clap::Command`, not a hardcoded flag list. If `flag_takes_value` ever
+    // regressed to a fixed stdout-file/stderr-file allowlist, `request,startup`
+    // below would be mistaken for the subcommand boundary and `--version` would
+    // be dropped. This locks the hypha usage shape against that drift.
+    let cmd = clap::Command::new("hypha")
+        .arg(
+            clap::Arg::new("log")
+                .long("log")
+                .value_delimiter(',')
+                .action(clap::ArgAction::Append),
+        )
+        .subcommand(clap::Command::new("sense"));
+    let raw = vec![
+        "hypha".to_string(),
+        "--log".to_string(),
+        "request,startup".to_string(),
+        "--version".to_string(),
+    ];
+    let out = cli_handle_version_or_continue(&raw, &cmd, "hypha", None, "1.2.3", None)
+        .expect("valid version request")
+        .expect("version should render");
+    let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
+    assert_eq!(parsed["result"]["name"], "hypha");
+    assert_eq!(parsed["result"]["version"], "1.2.3");
+}
+
+#[cfg(any(feature = "cli", feature = "cli-help"))]
+#[test]
+fn cli_handle_version_boolean_global_flag_does_not_over_consume() {
+    // The mirror of the case above: a caller's boolean global flag takes no
+    // value, so the following positional is the subcommand boundary. A
+    // `--version` after that boundary belongs to the subcommand and must not be
+    // hijacked. If `flag_takes_value` wrongly reported the boolean flag as
+    // value-taking, it would swallow `sense` and misread this as a top-level
+    // version request.
+    let cmd = clap::Command::new("hypha")
+        .arg(
+            clap::Arg::new("verbose")
+                .long("verbose")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .subcommand(clap::Command::new("sense"));
+    let raw = vec![
+        "hypha".to_string(),
+        "--verbose".to_string(),
+        "sense".to_string(),
+        "--version".to_string(),
+    ];
+    assert!(
+        cli_handle_version_or_continue(&raw, &cmd, "hypha", None, "1.2.3", None)
+            .expect("subcommand --version must not be a top-level version request")
+            .is_none()
+    );
+}
+
+#[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
 fn cli_handle_version_supports_inline_output_format() {
     let raw = vec![
@@ -2068,14 +2245,22 @@ fn cli_handle_version_supports_inline_output_format() {
         "--output=yaml".to_string(),
         "--version".to_string(),
     ];
-    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
-        .expect("valid version request")
-        .expect("version should render");
+    let out = cli_handle_version_or_continue(
+        &raw,
+        &version_test_command(),
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    .expect("valid version request")
+    .expect("version should render");
     assert!(out.starts_with("---\n"), "{out}");
     assert!(out.contains("kind: \"result\""), "{out}");
     assert!(out.contains("version: \"1.2.3\""), "{out}");
 }
 
+#[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
 fn cli_handle_version_supports_json_alias() {
     let raw = vec![
@@ -2083,14 +2268,22 @@ fn cli_handle_version_supports_json_alias() {
         "--version".to_string(),
         "--json".to_string(),
     ];
-    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
-        .expect("valid version request")
-        .expect("version should render");
+    let out = cli_handle_version_or_continue(
+        &raw,
+        &version_test_command(),
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    .expect("valid version request")
+    .expect("version should render");
     let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
     assert_eq!(parsed["kind"], "result");
     assert_eq!(parsed["result"]["version"], "1.2.3");
 }
 
+#[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
 fn cli_handle_version_rejects_json_alias_conflict() {
     let raw = vec![
@@ -2100,9 +2293,16 @@ fn cli_handle_version_rejects_json_alias_conflict() {
         "--output".to_string(),
         "yaml".to_string(),
     ];
-    let err = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
-        .expect_err("conflicting formats must return error")
-        .into_value();
+    let err = cli_handle_version_or_continue(
+        &raw,
+        &version_test_command(),
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    .expect_err("conflicting formats must return error")
+    .into_value();
     assert_eq!(err["kind"], "error");
     assert!(
         err["error"]["message"]
@@ -2113,6 +2313,7 @@ fn cli_handle_version_rejects_json_alias_conflict() {
     );
 }
 
+#[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
 fn cli_handle_version_reports_invalid_output_as_cli_error() {
     let raw = vec![
@@ -2121,9 +2322,16 @@ fn cli_handle_version_reports_invalid_output_as_cli_error() {
         "--output".to_string(),
         "xml".to_string(),
     ];
-    let err = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
-        .expect_err("invalid version output must return error")
-        .into_value();
+    let err = cli_handle_version_or_continue(
+        &raw,
+        &version_test_command(),
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    .expect_err("invalid version output must return error")
+    .into_value();
     assert_eq!(err["kind"], "error");
     assert_eq!(err["error"]["code"], "cli_error");
     assert!(
@@ -2134,60 +2342,25 @@ fn cli_handle_version_reports_invalid_output_as_cli_error() {
     );
 }
 
-#[test]
-fn cli_handle_version_can_preserve_conventional_bare_text() {
-    let raw = vec!["agent-cli".to_string(), "--version".to_string()];
-    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
-        .expect("valid version request")
-        .expect("version should render");
-    assert_eq!(out, "agent-cli 1.2.3\n");
-}
-
-#[test]
-fn cli_handle_version_conventional_mode_still_honors_json_output() {
-    let raw = vec![
-        "agent-cli".to_string(),
-        "--version".to_string(),
-        "--output".to_string(),
-        "json".to_string(),
-    ];
-    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
-        .expect("valid version request")
-        .expect("version should render");
-    let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
-    assert_eq!(parsed["kind"], "result");
-    assert_eq!(parsed["result"]["version"], "1.2.3");
-}
-
-#[test]
-fn cli_handle_version_protocol_v1_adds_code_and_trace() {
-    let raw = vec![
-        "agent-cli".to_string(),
-        "--version".to_string(),
-        "--output".to_string(),
-        "json".to_string(),
-    ];
-    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
-        .expect("valid version request")
-        .expect("version should render");
-    let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
-    assert_eq!(parsed["kind"], "result");
-    assert_eq!(parsed["result"]["code"], "version");
-    assert_eq!(parsed["result"]["version"], "1.2.3");
-    assert_eq!(parsed["trace"], serde_json::json!({}));
-    validate_protocol_event(&parsed, true).expect("strict protocol event");
-}
-
+#[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
 fn cli_handle_version_without_version_returns_none() {
     let raw = vec!["agent-cli".to_string(), "ping".to_string()];
     assert!(
-        cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3",)
-            .expect("valid non-version request")
-            .is_none()
+        cli_handle_version_or_continue(
+            &raw,
+            &version_test_command(),
+            "agent-cli",
+            None,
+            "1.2.3",
+            None
+        )
+        .expect("valid non-version request")
+        .is_none()
     );
 }
 
+#[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
 fn cli_handle_version_ignores_version_flag_after_subcommand() {
     // A subcommand that takes its own `--version <value>` must not be hijacked
@@ -2199,12 +2372,20 @@ fn cli_handle_version_ignores_version_flag_after_subcommand() {
         "1.3.0".to_string(),
     ];
     assert!(
-        cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3",)
-            .expect("subcommand --version must not be a version request")
-            .is_none()
+        cli_handle_version_or_continue(
+            &raw,
+            &version_test_command(),
+            "agent-cli",
+            None,
+            "1.2.3",
+            None
+        )
+        .expect("subcommand --version must not be a version request")
+        .is_none()
     );
 }
 
+#[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
 fn cli_handle_version_ignores_short_version_flag_after_subcommand() {
     let raw = vec![
@@ -2214,12 +2395,20 @@ fn cli_handle_version_ignores_short_version_flag_after_subcommand() {
         "1.3.0".to_string(),
     ];
     assert!(
-        cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3",)
-            .expect("subcommand -V must not be a version request")
-            .is_none()
+        cli_handle_version_or_continue(
+            &raw,
+            &version_test_command(),
+            "agent-cli",
+            None,
+            "1.2.3",
+            None
+        )
+        .expect("subcommand -V must not be a version request")
+        .is_none()
     );
 }
 
+#[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
 fn cli_handle_version_honors_output_flag_before_top_level_version() {
     // Known output flags consume their value, so a trailing top-level
@@ -2230,9 +2419,16 @@ fn cli_handle_version_honors_output_flag_before_top_level_version() {
         "json".to_string(),
         "--version".to_string(),
     ];
-    let out = cli_handle_version_or_continue(&raw, "agent-cli", "1.2.3")
-        .expect("valid version request")
-        .expect("version should render");
+    let out = cli_handle_version_or_continue(
+        &raw,
+        &version_test_command(),
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    .expect("valid version request")
+    .expect("version should render");
     let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
     assert_eq!(parsed["result"]["version"], "1.2.3");
 }

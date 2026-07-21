@@ -476,7 +476,11 @@ func main() {
 		os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), err.Error(), "", 2))
 	}
 
-	if out, handled, err := afdata.CliHandleVersionOrContinue(args, "agent-cli", agentCliVersion); handled {
+	// The example's own value-taking global long flags: the pre-parser consumes
+	// each one's space value so it is never mistaken for the subcommand boundary
+	// (afdata's own --output/--output-to are recognized without being listed).
+	versionValueFlags := []string{"--log", "--host", "--agent", "--scope", "--skills-dir", "--api-key-secret", "--stdout-file", "--stderr-file"}
+	if out, handled, err := afdata.CliHandleVersionOrContinue(args, versionValueFlags, "agent-cli", "Agent CLI Example", agentCliVersion, ""); handled {
 		if err != nil {
 			os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), err.Error(), "valid version output formats: json, yaml, plain", 2))
 		}

@@ -584,8 +584,12 @@ func TestCliEmitterFinishOtherWriteFailureReturnsFour(t *testing.T) {
 // Version helpers
 // ═══════════════════════════════════════════
 
+// versionValueFlags mirrors the example's own value-taking global flags, so the
+// pre-parser recognizes their space-separated values.
+var versionValueFlags = []string{"--log", "--stdout-file", "--stderr-file"}
+
 func TestBuildCliVersion_StandardShape(t *testing.T) {
-	v := BuildCliVersion("1.2.3")
+	v := BuildCliVersion("agent-cli", "Agent CLI Example", "1.2.3", "abc1234")
 	if v["kind"] != "result" {
 		t.Errorf("kind = %v", v["kind"])
 	}
@@ -593,36 +597,63 @@ func TestBuildCliVersion_StandardShape(t *testing.T) {
 	if result["code"] != "version" {
 		t.Errorf("code = %v", result["code"])
 	}
+	if result["name"] != "agent-cli" {
+		t.Errorf("name = %v", result["name"])
+	}
+	if result["display_name"] != "Agent CLI Example" {
+		t.Errorf("display_name = %v", result["display_name"])
+	}
 	if result["version"] != "1.2.3" {
 		t.Errorf("version = %v", result["version"])
+	}
+	if result["build"] != "abc1234" {
+		t.Errorf("build = %v", result["build"])
 	}
 	if trace, ok := v["trace"].(map[string]any); !ok || len(trace) != 0 {
 		t.Errorf("trace = %v, want empty object", v["trace"])
 	}
 }
 
-func TestCliRenderVersion_DefaultJson(t *testing.T) {
-	out := CliRenderVersion("agent-cli", "1.2.3", OutputFormatJson)
-	if !contains(out, "\"kind\":\"result\"") {
-		t.Errorf("json version missing kind: %s", out)
+func TestBuildCliVersion_OmitsAbsentDisplayNameAndBuild(t *testing.T) {
+	v := BuildCliVersion("agent-cli", "", "1.2.3", "")
+	result := v["result"].(map[string]any)
+	if result["name"] != "agent-cli" {
+		t.Errorf("name = %v", result["name"])
 	}
-	if !contains(out, "\"version\":\"1.2.3\"") {
-		t.Errorf("json version missing version: %s", out)
+	if result["version"] != "1.2.3" {
+		t.Errorf("version = %v", result["version"])
+	}
+	if _, ok := result["display_name"]; ok {
+		t.Errorf("expected no display_name key, got %v", result["display_name"])
+	}
+	if _, ok := result["build"]; ok {
+		t.Errorf("expected no build key, got %v", result["build"])
 	}
 }
 
-func TestCliRenderVersion_ConventionalText(t *testing.T) {
-	got := CliRenderVersion("agent-cli", "1.2.3", "")
-	if got != "agent-cli 1.2.3\n" {
-		t.Errorf("got %q", got)
+func TestCliRenderVersion_Json(t *testing.T) {
+	out := CliRenderVersion("agent-cli", "Agent CLI Example", "1.2.3", "abc1234", OutputFormatJson)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &parsed); err != nil {
+		t.Fatalf("version json must parse: %v (%q)", err, out)
+	}
+	result := parsed["result"].(map[string]any)
+	if parsed["kind"] != "result" || result["code"] != "version" {
+		t.Errorf("json version wrong shape: %s", out)
+	}
+	if result["name"] != "agent-cli" || result["version"] != "1.2.3" {
+		t.Errorf("json version missing name/version: %s", out)
+	}
+	if result["display_name"] != "Agent CLI Example" || result["build"] != "abc1234" {
+		t.Errorf("json version missing display_name/build: %s", out)
 	}
 }
 
 func TestCliHandleVersionOrContinue_HonorsOutputFlag(t *testing.T) {
 	out, handled, err := CliHandleVersionOrContinue(
 		[]string{"--version", "--output", "plain"},
-		"agent-cli",
-		"1.2.3",
+		versionValueFlags,
+		"agent-cli", "Agent CLI Example", "1.2.3", "",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -638,8 +669,8 @@ func TestCliHandleVersionOrContinue_HonorsOutputFlag(t *testing.T) {
 func TestCliHandleVersionOrContinue_JsonAlias(t *testing.T) {
 	out, handled, err := CliHandleVersionOrContinue(
 		[]string{"--version", "--json"},
-		"agent-cli",
-		"1.2.3",
+		versionValueFlags,
+		"agent-cli", "", "1.2.3", "",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -655,8 +686,8 @@ func TestCliHandleVersionOrContinue_JsonAlias(t *testing.T) {
 func TestCliHandleVersionOrContinue_JsonAliasConflict(t *testing.T) {
 	_, handled, err := CliHandleVersionOrContinue(
 		[]string{"--version", "--json", "--output", "yaml"},
-		"agent-cli",
-		"1.2.3",
+		versionValueFlags,
+		"agent-cli", "", "1.2.3", "",
 	)
 	if !handled {
 		t.Fatal("expected handled")
@@ -666,11 +697,13 @@ func TestCliHandleVersionOrContinue_JsonAliasConflict(t *testing.T) {
 	}
 }
 
-func TestCliHandleVersionOrContinue_ConventionalDefault(t *testing.T) {
+func TestCliHandleVersionOrContinue_BareDefaultsToJson(t *testing.T) {
+	// The one blessed behavior: bare --version always answers with a protocol-v1
+	// event, JSON by default — no conventional bare-text special case.
 	out, handled, err := CliHandleVersionOrContinue(
 		[]string{"--version"},
-		"agent-cli",
-		"1.2.3",
+		versionValueFlags,
+		"agent-cli", "Agent CLI Example", "1.2.3", "",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -678,16 +711,27 @@ func TestCliHandleVersionOrContinue_ConventionalDefault(t *testing.T) {
 	if !handled {
 		t.Fatal("expected handled")
 	}
-	if out != "agent-cli 1.2.3\n" {
-		t.Errorf("out = %q", out)
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &parsed); err != nil {
+		t.Fatalf("bare --version must render json: %v (%q)", err, out)
+	}
+	result := parsed["result"].(map[string]any)
+	if parsed["kind"] != "result" || result["code"] != "version" {
+		t.Errorf("bare version wrong shape: %s", out)
+	}
+	if result["name"] != "agent-cli" || result["version"] != "1.2.3" {
+		t.Errorf("bare version missing name/version: %s", out)
+	}
+	if result["display_name"] != "Agent CLI Example" {
+		t.Errorf("bare version missing display_name: %s", out)
 	}
 }
 
 func TestCliHandleVersionOrContinue_ReturnsNoneWithoutVersion(t *testing.T) {
 	_, handled, err := CliHandleVersionOrContinue(
 		[]string{"ping"},
-		"agent-cli",
-		"1.2.3",
+		versionValueFlags,
+		"agent-cli", "", "1.2.3", "",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -700,8 +744,8 @@ func TestCliHandleVersionOrContinue_ReturnsNoneWithoutVersion(t *testing.T) {
 func TestCliHandleVersionOrContinue_RejectsInvalidOutput(t *testing.T) {
 	_, handled, err := CliHandleVersionOrContinue(
 		[]string{"--version", "--output", "xml"},
-		"agent-cli",
-		"1.2.3",
+		versionValueFlags,
+		"agent-cli", "", "1.2.3", "",
 	)
 	if !handled {
 		t.Fatal("expected handled")
@@ -718,7 +762,7 @@ func TestCliHandleVersionOrContinue_IgnoresVersionFlagAfterSubcommand(t *testing
 		{"hatch", "--version", "1.3.0"},
 		{"hatch", "-V", "1.3.0"},
 	} {
-		_, handled, err := CliHandleVersionOrContinue(args, "agent-cli", "1.2.3")
+		_, handled, err := CliHandleVersionOrContinue(args, versionValueFlags, "agent-cli", "", "1.2.3", "")
 		if err != nil {
 			t.Fatalf("unexpected error for %v: %v", args, err)
 		}
@@ -733,8 +777,53 @@ func TestCliHandleVersionOrContinue_HonorsOutputFlagBeforeTopLevelVersion(t *tes
 	// --version is still recognized.
 	out, handled, err := CliHandleVersionOrContinue(
 		[]string{"--output", "json", "--version"},
-		"agent-cli",
-		"1.2.3",
+		versionValueFlags,
+		"agent-cli", "", "1.2.3", "",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	if !contains(out, `"version":"1.2.3"`) {
+		t.Fatalf("expected version json, got %q", out)
+	}
+}
+
+func TestCliHandleVersionOrContinue_SkipsCallerDefinedValueFlag(t *testing.T) {
+	// A caller's own value-taking global flag (here a comma-list --log) must have
+	// its space-separated value recognized through valueFlags, not a hardcoded
+	// list. Without that, "request,startup" would be mistaken for the subcommand
+	// boundary and the trailing --version would be dropped.
+	out, handled, err := CliHandleVersionOrContinue(
+		[]string{"--log", "request,startup", "--version"},
+		[]string{"--log"},
+		"hypha", "", "1.2.3", "",
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &parsed); err != nil {
+		t.Fatalf("version json must parse: %v (%q)", err, out)
+	}
+	result := parsed["result"].(map[string]any)
+	if result["name"] != "hypha" || result["version"] != "1.2.3" {
+		t.Errorf("version missing name/version: %s", out)
+	}
+}
+
+func TestCliHandleVersionOrContinue_SkipsOutputToSpaceValue(t *testing.T) {
+	// A preceding --output-to <value> (space form) must not be mistaken for the
+	// subcommand boundary; the trailing --version must still be recognized.
+	out, handled, err := CliHandleVersionOrContinue(
+		[]string{"--output-to", "stdout", "--version"},
+		versionValueFlags,
+		"agent-cli", "", "1.2.3", "",
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

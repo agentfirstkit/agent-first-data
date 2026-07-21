@@ -14,8 +14,9 @@
 //! - Parse utilities: [`normalize_utc_offset`], [`is_valid_rfc3339_date`],
 //!   [`is_valid_rfc3339_time`], [`is_valid_rfc3339`], [`is_valid_bcp47`]
 //! - CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`] (returns [`LogFilters`]),
-//!   [`build_cli_error`], [`build_cli_version`], [`cli_render_version`],
-//!   [`cli_handle_version_or_continue`]
+//!   [`build_cli_error`], [`build_cli_version`], [`cli_render_version`]
+//! - (feature `cli` or `cli-help`): [`cli_handle_version_or_continue`] (needs a `&clap::Command`
+//!   to recognize the caller's own value-taking global flags)
 //! - (feature `cli-help`): configurable clap help rendering via [`cli_render_help_with_options`]
 //!   and [`cli_handle_help_or_continue`]
 //! - (feature `cli-help-markdown`): [`cli_render_help_markdown`] — recursive Markdown help
@@ -57,9 +58,11 @@ mod protocol;
 mod redaction;
 mod validation;
 
+#[cfg(any(feature = "cli", feature = "cli-help"))]
+pub use cli::cli_handle_version_or_continue;
 pub use cli::{
     CliEmitter, CliEmitterError, LogFilters, OutputFormat, OutputTo, build_cli_version,
-    cli_handle_version_or_continue, cli_parse_log_filters, cli_parse_output, cli_render_version,
+    cli_parse_log_filters, cli_parse_output, cli_render_version,
 };
 pub use formatting::render;
 #[cfg(feature = "cli-help")]

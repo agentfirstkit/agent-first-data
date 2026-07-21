@@ -320,36 +320,89 @@ export class CliEmitter {
   }
 }
 
-/** Build a standard CLI version value. */
-export function buildCliVersion(version: string): Event {
-  return jsonResult({ code: "version", version }).build();
+/**
+ * Build a standard CLI version event: a `kind:"result"` event whose payload is
+ * `{ code: "version", name, version }`, plus `display_name`/`build` when given.
+ * `name` is the short/bin identity (e.g. `"afdata"`); `displayName` is an
+ * optional human-facing product name (e.g. `"Agent-First Data"`); `build` is an
+ * opaque caller-supplied identifier (a git commit SHA, for example) — its
+ * meaning is entirely up to the caller. Both are `undefined` when unavailable,
+ * and simply absent from the payload. Note the JSON field is `display_name`
+ * (snake_case) even though the parameter is `displayName`.
+ */
+export function buildCliVersion(
+  name: string,
+  displayName: string | undefined,
+  version: string,
+  build: string | undefined,
+): Event {
+  return jsonResult({
+    code: "version",
+    name,
+    version,
+    ...(displayName !== undefined ? { display_name: displayName } : {}),
+    ...(build !== undefined ? { build } : {}),
+  }).build();
 }
 
 /**
- * Render CLI version output.
- * Pass an OutputFormat for AFDATA JSON/YAML/plain. Pass null to preserve
- * conventional "<name> <version>" text.
+ * Render a CLI version response as a protocol-v1 event in `format`. There is no
+ * conventional-text path — `format` is required.
  */
-export function cliRenderVersion(name: string, version: string, format: OutputFormat | null = null): string {
-  const rendered = format === null ? `${name} ${version}` : render(buildCliVersion(version), format);
+export function cliRenderVersion(
+  name: string,
+  displayName: string | undefined,
+  version: string,
+  build: string | undefined,
+  format: OutputFormat,
+): string {
+  const rendered = render(buildCliVersion(name, displayName, version, build), format);
   return `${rendered.replace(/\n+$/u, "")}\n`;
+}
+
+/**
+ * Split a flag argument into its long name (leading dashes stripped, any
+ * `=value` suffix dropped) and inline value. Returns `undefined` name for a
+ * non-flag or the bare `-`. `--output=` yields an empty-string inline value.
+ */
+function splitFlag(arg: string): { name: string | undefined; inlineValue: string | undefined } {
+  if (!arg.startsWith("-") || arg === "-") return { name: undefined, inlineValue: undefined };
+  const eq = arg.indexOf("=");
+  const flag = eq === -1 ? arg : arg.slice(0, eq);
+  const inlineValue = eq === -1 ? undefined : arg.slice(eq + 1);
+  const name = flag.replace(/^-+/u, "");
+  if (name === "") return { name: undefined, inlineValue: undefined };
+  return { name, inlineValue };
 }
 
 /**
  * Render version output if --version/-V is present; otherwise return undefined.
  * Throws for malformed version requests, for example `--version --output xml`.
  *
- * One blessed behavior, not configurable: a bare version request renders
- * conventional "<name> <version>" text; `--json` or `--output <fmt>` /
- * `--output=<fmt>` alongside it selects the structured AFDATA payload
- * instead.
+ * The one blessed behavior: `--version` always answers with a protocol-v1
+ * `kind:"result"` version event — JSON by default, or `--output yaml|plain` (or
+ * `--json`) for another format. There is no conventional bare-text path.
+ *
+ * `valueFlags` is the caller's own value-taking global long flags (with or
+ * without leading dashes; the leading dashes are stripped internally). It is the
+ * TS analog of Rust's `&clap::Command`: the pre-parser consults it so a global
+ * flag's space-separated value (e.g. `--log request,startup`) is never mistaken
+ * for the subcommand boundary, which would hide a later `--version`/`--output`.
  *
  * Only a top-level version request is recognized: scanning stops at the first
  * positional argument (the subcommand) or `--`, so `tool sub --version <value>`
  * leaves `--version` for the subcommand's parser rather than printing the
  * tool version.
  */
-export function cliHandleVersionOrContinue(rawArgs: string[], name: string, version: string): string | undefined {
+export function cliHandleVersionOrContinue(
+  rawArgs: string[],
+  valueFlags: string[],
+  name: string,
+  displayName: string | undefined,
+  version: string,
+  build: string | undefined,
+): string | undefined {
+  const valueFlagSet = new Set(valueFlags.map((flag) => flag.replace(/^-+/u, "")));
   let versionRequested = false;
   let outputFormat: OutputFormat | undefined;
   let outputError: Error | undefined;
@@ -361,6 +414,9 @@ export function cliHandleVersionOrContinue(rawArgs: string[], name: string, vers
     // --version and -V belong to the subcommand's own parser, matching
     // git/cargo/clap: this pre-parser only owns a top-level version request.
     if (!arg.startsWith("-")) break;
+
+    const { name: flagName, inlineValue } = splitFlag(arg);
+
     if (arg === "--version" || arg === "-V") {
       versionRequested = true;
       i += 1;
@@ -375,14 +431,21 @@ export function cliHandleVersionOrContinue(rawArgs: string[], name: string, vers
       i += 1;
       continue;
     }
-    if (arg === "--output" || arg.startsWith("--output=")) {
+    // `--output-to` takes a value but does not affect version text output.
+    // Consume its space-separated value so it is not mistaken for the
+    // subcommand boundary (which would hide a later `--version`/`--output`).
+    if (flagName === "output-to") {
+      const hasSpaceValue =
+        inlineValue === undefined && rawArgs[i + 1] !== undefined && !rawArgs[i + 1]!.startsWith("-");
+      i += hasSpaceValue ? 2 : 1;
+      continue;
+    }
+    if (flagName === "output") {
       let value: string | undefined;
-      let step = 1;
-      if (arg.startsWith("--output=")) {
-        value = arg.slice("--output=".length);
+      if (inlineValue !== undefined) {
+        value = inlineValue;
       } else if (rawArgs[i + 1] !== undefined && !rawArgs[i + 1]!.startsWith("-")) {
         value = rawArgs[i + 1];
-        step = 2;
       }
       if (value === undefined) {
         outputError = new Error("missing value for --output: expected json, yaml, or plain");
@@ -398,15 +461,21 @@ export function cliHandleVersionOrContinue(rawArgs: string[], name: string, vers
           outputError = e as Error;
         }
       }
-      i += step;
+      i += inlineValue !== undefined || value === undefined ? 1 : 2;
       continue;
     }
-    i += 1;
+
+    // Any other flag: consult the caller's own value-taking global flags so a
+    // flag's space-separated value is never mistaken for the subcommand
+    // boundary above.
+    const hasSpaceValue =
+      inlineValue === undefined && rawArgs[i + 1] !== undefined && !rawArgs[i + 1]!.startsWith("-");
+    i += hasSpaceValue && flagName !== undefined && valueFlagSet.has(flagName) ? 2 : 1;
   }
 
   if (!versionRequested) return undefined;
   if (outputError !== undefined) throw outputError;
-  return cliRenderVersion(name, version, outputFormat ?? null);
+  return cliRenderVersion(name, displayName, version, build, outputFormat ?? "json");
 }
 
 /**

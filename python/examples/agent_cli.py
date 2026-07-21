@@ -459,10 +459,22 @@ def main() -> None:
     except (OSError, ValueError) as e:
         sys.exit(bootstrap_error(OutputFormat.JSON, str(e)))
 
-    # --version/--help TEXT is not an AFDATA envelope: it is handled here, before
-    # the finite emitter is involved, and stays on stdout unchanged.
+    # --version is now a protocol-v1 version envelope (JSON by default), and
+    # --help TEXT stays conventional text; both are handled here, before the
+    # finite emitter is involved, and go to stdout unchanged.
     try:
-        version = cli_handle_version_or_continue(raw, "agent-cli", AGENT_CLI_VERSION)
+        # This example's own value-taking global flags: their space-separated
+        # value must not be mistaken for the subcommand boundary that stops the
+        # top-level version scan. (--output/--output-to/--json/--version are
+        # recognized by the pre-parser itself.)
+        version = cli_handle_version_or_continue(
+            raw,
+            ["--log", "--api-key-secret", "--stdout-file", "--stderr-file"],
+            "agent-cli",
+            "Agent CLI Example",
+            AGENT_CLI_VERSION,
+            None,
+        )
     except ValueError as e:
         sys.exit(bootstrap_error(OutputFormat.JSON, str(e), hint="valid version output formats: json, yaml, plain"))
     if version is not None:

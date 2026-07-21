@@ -484,36 +484,72 @@ def test_finish_returns_4_on_lifecycle_violation():
 
 # ── version helpers ───────────────────────────────────────────────────────────
 
+# The value-taking global flags a caller passes through so their space-separated
+# value is not mistaken for the subcommand boundary (the Python stand-in for the
+# Rust tests' `version_test_command()` with its `--stdout-file`/`--stderr-file`).
+VERSION_VALUE_FLAGS = ["--stdout-file", "--stderr-file"]
+
+
 def test_build_cli_version_standard_shape():
-    v = build_cli_version("1.2.3")
+    v = build_cli_version("agent-cli", "Agent CLI Example", "1.2.3", "abc1234")
     assert v["kind"] == "result"
     assert v["result"]["code"] == "version"
+    assert v["result"]["name"] == "agent-cli"
+    assert v["result"]["display_name"] == "Agent CLI Example"
     assert v["result"]["version"] == "1.2.3"
+    assert v["result"]["build"] == "abc1234"
     # 0.16 spec: all events have trace by default
     assert v["trace"] == {}
 
 
-def test_cli_render_version_is_conventional_by_default():
-    assert cli_render_version("agent-cli", "1.2.3") == "agent-cli 1.2.3\n"
+def test_build_cli_version_omits_absent_display_name_and_build():
+    v = build_cli_version("agent-cli", None, "1.2.3", None)
+    result = v["result"]
+    assert result["name"] == "agent-cli"
+    assert result["version"] == "1.2.3"
+    assert "display_name" not in result
+    assert "build" not in result
 
 
-def test_cli_render_version_can_render_json():
-    out = cli_render_version("agent-cli", "1.2.3", OutputFormat.JSON)
+def test_cli_render_version_renders_json():
+    out = cli_render_version("agent-cli", None, "1.2.3", None, OutputFormat.JSON)
     assert out.endswith("\n")
     assert '"kind":"result"' in out
     assert '"code":"version"' in out
+    assert '"name":"agent-cli"' in out
     assert '"version":"1.2.3"' in out
 
 
-def test_cli_handle_version_is_conventional_by_default():
-    assert cli_handle_version_or_continue(["--version"], "agent-cli", "1.2.3") == "agent-cli 1.2.3\n"
+def test_cli_handle_version_bare_defaults_to_json():
+    # The one blessed behavior: `--version` always answers with a protocol-v1
+    # event, JSON by default — no more conventional bare-text special case.
+    out = cli_handle_version_or_continue(
+        ["--version"],
+        VERSION_VALUE_FLAGS,
+        "agent-cli",
+        "Agent CLI Example",
+        "1.2.3",
+        None,
+    )
+    assert out is not None
+    parsed = json.loads(out.strip())
+    assert parsed["kind"] == "result"
+    assert parsed["result"]["code"] == "version"
+    assert parsed["result"]["name"] == "agent-cli"
+    assert parsed["result"]["display_name"] == "Agent CLI Example"
+    assert parsed["result"]["version"] == "1.2.3"
+    assert "build" not in parsed["result"]
+    assert parsed["trace"] == {}
 
 
-def test_cli_handle_version_honors_output_flag():
+def test_cli_handle_version_honors_explicit_plain_output():
     out = cli_handle_version_or_continue(
         ["--version", "--output", "plain"],
+        VERSION_VALUE_FLAGS,
         "agent-cli",
+        None,
         "1.2.3",
+        None,
     )
     assert out is not None
     assert "kind=result" in out
@@ -521,37 +557,155 @@ def test_cli_handle_version_honors_output_flag():
     assert "result.version=1.2.3" in out
 
 
+def test_cli_handle_version_skips_output_to_space_value():
+    # A preceding `--output-to <value>` (space form) must not be mistaken for
+    # the subcommand boundary; the later `--version --output json` must still be
+    # detected.
+    out = cli_handle_version_or_continue(
+        ["--output-to", "stdout", "--version", "--output", "json"],
+        VERSION_VALUE_FLAGS,
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    assert out is not None
+    parsed = json.loads(out.strip())
+    assert parsed["kind"] == "result"
+    assert parsed["result"]["version"] == "1.2.3"
+
+
+def test_cli_handle_version_skips_caller_value_flag_space_value():
+    # A caller's own value-taking global flag (here `--stdout-file`/
+    # `--stderr-file`): the path value must not be mistaken for the subcommand
+    # boundary either.
+    out = cli_handle_version_or_continue(
+        ["--stdout-file", "/tmp/out.log", "--stderr-file", "/tmp/err.log", "--version"],
+        VERSION_VALUE_FLAGS,
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    assert out is not None
+    parsed = json.loads(out.strip())
+    assert parsed["result"]["name"] == "agent-cli"
+    assert parsed["result"]["version"] == "1.2.3"
+
+
+def test_cli_handle_version_skips_caller_value_flag_inline_value():
+    out = cli_handle_version_or_continue(
+        ["--stdout-file=/tmp/out.log", "--version"],
+        VERSION_VALUE_FLAGS,
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    assert out is not None
+
+
+def test_cli_handle_version_skips_caller_defined_value_flag():
+    # A consumer's *own* value-taking global flag the pre-parser has no special
+    # knowledge of — here a hypha-style comma-list `--log` — must have its
+    # space-separated value recognized through `value_flags`, not a hardcoded
+    # allowlist. Otherwise `request,startup` would be read as the subcommand
+    # boundary and `--version` dropped.
+    out = cli_handle_version_or_continue(
+        ["--log", "request,startup", "--version"],
+        ["--log"],
+        "hypha",
+        None,
+        "1.2.3",
+        None,
+    )
+    assert out is not None
+    parsed = json.loads(out.strip())
+    assert parsed["result"]["name"] == "hypha"
+    assert parsed["result"]["version"] == "1.2.3"
+
+
+def test_cli_handle_version_boolean_global_flag_does_not_over_consume():
+    # The mirror of the case above: a caller's boolean global flag (absent from
+    # value_flags) takes no value, so the following positional is the subcommand
+    # boundary and a `--version` after it belongs to the subcommand.
+    assert (
+        cli_handle_version_or_continue(
+            ["--verbose", "sense", "--version"],
+            ["--log"],
+            "hypha",
+            None,
+            "1.2.3",
+            None,
+        )
+        is None
+    )
+
+
+def test_cli_handle_version_supports_inline_output_format():
+    out = cli_handle_version_or_continue(
+        ["--output=yaml", "--version"],
+        VERSION_VALUE_FLAGS,
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+    )
+    assert out is not None
+    assert out.startswith("---\n")
+    assert 'version: "1.2.3"' in out
+
+
 def test_cli_handle_version_json_alias():
     out = cli_handle_version_or_continue(
         ["--version", "--json"],
+        VERSION_VALUE_FLAGS,
         "agent-cli",
+        None,
         "1.2.3",
+        None,
     )
     assert out is not None
-    assert '"kind":"result"' in out
-    assert '"code":"version"' in out
-    assert '"version":"1.2.3"' in out
+    parsed = json.loads(out.strip())
+    assert parsed["kind"] == "result"
+    assert parsed["result"]["version"] == "1.2.3"
 
 
 def test_cli_handle_version_json_alias_conflict():
     with pytest.raises(ValueError, match="conflicting output formats"):
         cli_handle_version_or_continue(
             ["--version", "--json", "--output", "yaml"],
+            VERSION_VALUE_FLAGS,
             "agent-cli",
+            None,
             "1.2.3",
+            None,
         )
 
 
 def test_cli_handle_version_returns_none_without_version():
-    assert cli_handle_version_or_continue(["ping"], "agent-cli", "1.2.3") is None
+    assert (
+        cli_handle_version_or_continue(
+            ["ping"],
+            VERSION_VALUE_FLAGS,
+            "agent-cli",
+            None,
+            "1.2.3",
+            None,
+        )
+        is None
+    )
 
 
 def test_cli_handle_version_rejects_invalid_output():
     with pytest.raises(ValueError, match="xml"):
         cli_handle_version_or_continue(
             ["--version", "--output", "xml"],
+            VERSION_VALUE_FLAGS,
             "agent-cli",
+            None,
             "1.2.3",
+            None,
         )
 
 
@@ -561,16 +715,22 @@ def test_cli_handle_version_ignores_version_flag_after_subcommand():
     assert (
         cli_handle_version_or_continue(
             ["hatch", "--version", "1.3.0"],
+            VERSION_VALUE_FLAGS,
             "agent-cli",
+            None,
             "1.2.3",
+            None,
         )
         is None
     )
     assert (
         cli_handle_version_or_continue(
             ["hatch", "-V", "1.3.0"],
+            VERSION_VALUE_FLAGS,
             "agent-cli",
+            None,
             "1.2.3",
+            None,
         )
         is None
     )
@@ -581,8 +741,12 @@ def test_cli_handle_version_honors_output_flag_before_top_level_version():
     # --version is still recognized.
     out = cli_handle_version_or_continue(
         ["--output", "json", "--version"],
+        VERSION_VALUE_FLAGS,
         "agent-cli",
+        None,
         "1.2.3",
+        None,
     )
     assert out is not None
-    assert '"version":"1.2.3"' in out
+    parsed = json.loads(out.strip())
+    assert parsed["result"]["version"] == "1.2.3"

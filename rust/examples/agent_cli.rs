@@ -262,10 +262,17 @@ fn main() {
             ),
         };
 
+    let build = match env!("GIT_SHA") {
+        "unknown" => None,
+        sha => Some(sha),
+    };
     match agent_first_data::cli_handle_version_or_continue(
         &raw,
+        &Cli::command(),
         "agent-cli",
+        Some(env!("DISPLAY_NAME")),
         env!("CARGO_PKG_VERSION"),
+        build,
     ) {
         Ok(Some(version)) => {
             stdout!("{version}");

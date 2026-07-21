@@ -238,6 +238,28 @@ def assert_broken_pipe_no_traceback(case: CliCase) -> None:
     )
 
 
+def assert_version(case: CliCase) -> None:
+    # Parity check: across all four SDKs `--version` is always a structured
+    # protocol-v1 version event (JSON by default, no conventional bare text),
+    # carrying result.code/name/version, and an explicit `--output` still
+    # applies. Locks the four-language contract against drift.
+    proc = run_cli(case, ("--version",))
+    assert proc.returncode == 0, f"{case.name}: --version returned {proc.returncode}, stderr={proc.stderr!r}"
+    events = terminal_events(proc)
+    assert len(events) == 1, f"{case.name}: expected one version event, got {events!r}"
+    event = events[0]
+    assert event["kind"] == "result", f"{case.name}: --version did not emit a result: {event!r}"
+    result = event["result"]
+    assert result["code"] == "version", f"{case.name}: --version result code is not 'version': {event!r}"
+    assert result["name"], f"{case.name}: --version missing result.name: {event!r}"
+    assert result["version"], f"{case.name}: --version missing result.version: {event!r}"
+    plain = run_cli(case, ("--version", "--output", "plain"))
+    assert plain.returncode == 0, f"{case.name}: --version --output plain failed: {plain.stderr!r}"
+    assert "result.code=version" in plain.stdout, (
+        f"{case.name}: --version --output plain is not the structured event: {plain.stdout!r}"
+    )
+
+
 def assert_afdata_validate() -> None:
     proc = run_afdata(("validate", "-"), '{"kind":"result","result":{"ok":true}}\n')
     assert proc.returncode == 0, f"afdata validate failed: stderr={proc.stderr!r}, stdout={proc.stdout!r}"
@@ -500,6 +522,7 @@ def main() -> None:
         assert_format_conflict_fallback,
         assert_cancelled,
         assert_broken_pipe_no_traceback,
+        assert_version,
     )
     for case in cli_cases():
         for check in checks:

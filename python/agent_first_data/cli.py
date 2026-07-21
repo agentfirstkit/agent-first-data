@@ -385,39 +385,84 @@ class CliEmitter:
         return self.finish(json_result(payload).build(), 0)
 
 
-def build_cli_version(version: str) -> dict:
+def _split_flag(arg: str) -> tuple[str | None, str | None]:
+    """Split a flag token into its long name and optional inline ``=value``.
+
+    Mirrors the Rust pre-parser: leading dashes are stripped from the name and a
+    bare ``-`` (or an empty name) yields ``(None, None)``. ``--flag`` →
+    ``("flag", None)``; ``--flag=x`` → ``("flag", "x")`` (``x`` may be ``""``).
+    """
+    if not arg.startswith("-") or arg == "-":
+        return (None, None)
+    flag, sep, value = arg.partition("=")
+    name = flag.lstrip("-")
+    if not name:
+        return (None, None)
+    if sep:
+        return (name, value)
+    return (name, None)
+
+
+def build_cli_version(
+    name: str,
+    display_name: str | None,
+    version: str,
+    build: str | None,
+) -> dict:
     """Build a standard CLI version result event.
 
-    The result payload always carries ``code: "version"`` alongside
-    ``version``, so structured consumers can dispatch on ``code`` the same
-    way they would for any other result shape.
+    The result payload always carries ``code: "version"`` alongside ``name`` and
+    ``version``, so structured consumers can dispatch on ``code`` the same way
+    they would for any other result shape. ``name`` is the short/bin identity
+    (e.g. ``"afdata"``); ``display_name`` is an optional human-facing product
+    name (e.g. ``"Agent-First Data"``); ``build`` is an opaque caller-supplied
+    identifier (a git commit SHA, for example) — its meaning is entirely up to
+    the caller. Both ``display_name`` and ``build`` are ``None`` when
+    unavailable, and simply absent from the payload.
     """
-    return json_result({"code": "version", "version": version}).build().to_dict()
+    payload: dict[str, Any] = {"code": "version", "name": name, "version": version}
+    if display_name is not None:
+        payload["display_name"] = display_name
+    if build is not None:
+        payload["build"] = build
+    return json_result(payload).build().to_dict()
 
 
 def cli_render_version(
     name: str,
+    display_name: str | None,
     version: str,
-    format: OutputFormat | None = None,
+    build: str | None,
+    format: OutputFormat,
 ) -> str:
-    """Render CLI version output.
+    """Render a CLI version response as a protocol-v1 event in ``format``.
 
-    Pass an OutputFormat for AFDATA JSON/YAML/plain. Pass None to preserve
-    conventional "<name> <version>" text.
+    There is no conventional ``"<name> <version>"`` path: ``--version`` always
+    answers with the structured event (see :func:`build_cli_version`).
     """
-    rendered = (
-        f"{name} {version}" if format is None else render(build_cli_version(version), format)
-    )
+    rendered = render(build_cli_version(name, display_name, version, build), format)
     return rendered.rstrip("\n") + "\n"
 
 
-def cli_handle_version_or_continue(raw_args: list[str], name: str, version: str) -> str | None:
+def cli_handle_version_or_continue(
+    raw_args: list[str],
+    value_flags: list[str],
+    name: str,
+    display_name: str | None,
+    version: str,
+    build: str | None,
+) -> str | None:
     """Render version output if --version/-V is present; otherwise return None.
 
-    One blessed behavior, no configurable knobs: a bare version request
-    (``--version``/``-V`` with no output flag) always renders conventional
-    ``"<name> <version>\\n"`` text; adding ``--json`` or ``--output
-    <json|yaml|plain>`` selects the structured AFDATA rendering instead.
+    ``raw_args`` is ``sys.argv[1:]`` (no program name); scanning starts at index
+    0. ``value_flags`` names the caller's own value-taking global flags (with or
+    without leading dashes) so their value is never mistaken for the subcommand
+    boundary — the Python stand-in for Rust's ``&clap::Command`` lookup.
+
+    The one blessed behavior: ``--version``/``-V`` always answers with a
+    protocol-v1 ``kind:"result"`` version event (see :func:`build_cli_version`) —
+    JSON by default, or ``--json`` / ``--output <json|yaml|plain>`` to select
+    another format.
 
     Only a top-level version request is recognized: scanning stops at the first
     positional argument (the subcommand), so ``tool sub --version <value>``
@@ -428,6 +473,7 @@ def cli_handle_version_or_continue(raw_args: list[str], name: str, version: str)
     ``--version --output xml``. The caller should convert that to a CLI error
     with ``build_cli_error``.
     """
+    value_flag_names = {vf.lstrip("-") for vf in value_flags}
     version_requested = False
     output_format: OutputFormat | None = None
     output_error: ValueError | None = None
@@ -442,6 +488,8 @@ def cli_handle_version_or_continue(raw_args: list[str], name: str, version: str)
         # git/cargo/clap: this pre-parser only owns a top-level version request.
         if not arg.startswith("-"):
             break
+
+        flag_name, inline_value = _split_flag(arg)
         if arg in ("--version", "-V"):
             version_requested = True
             i += 1
@@ -455,17 +503,25 @@ def cli_handle_version_or_continue(raw_args: list[str], name: str, version: str)
                 output_format = OutputFormat.JSON
             i += 1
             continue
-        if arg == "--output" or arg.startswith("--output="):
+        # `--output-to` takes a value but does not affect version output. Consume
+        # its space-separated value so it is not mistaken for the subcommand
+        # boundary (which would hide a later `--version`/`--output`).
+        if flag_name == "output-to":
+            has_space_value = (
+                inline_value is None
+                and i + 1 < len(raw_args)
+                and not raw_args[i + 1].startswith("-")
+            )
+            i += 2 if has_space_value else 1
+            continue
+        if flag_name == "output":
             value: str | None
-            if arg.startswith("--output="):
-                value = arg.split("=", 1)[1]
-                step = 1
+            if inline_value is not None:
+                value = inline_value
             elif i + 1 < len(raw_args) and not raw_args[i + 1].startswith("-"):
                 value = raw_args[i + 1]
-                step = 2
             else:
                 value = None
-                step = 1
             if value is None:
                 output_error = ValueError(
                     "missing value for --output: expected json, yaml, or plain"
@@ -481,15 +537,31 @@ def cli_handle_version_or_continue(raw_args: list[str], name: str, version: str)
                         output_format = parsed_output
                 except ValueError as e:
                     output_error = e
-            i += step
+            i += 1 if (inline_value is not None or value is None) else 2
             continue
-        i += 1
+
+        # Any other flag: consume a space-separated value only if the caller
+        # listed this flag as value-taking, there is no inline `=value`, and the
+        # next arg exists and doesn't start with `-`. Otherwise it is a boolean
+        # flag and consumes only itself.
+        has_space_value = (
+            inline_value is None
+            and i + 1 < len(raw_args)
+            and not raw_args[i + 1].startswith("-")
+        )
+        i += 2 if (has_space_value and flag_name in value_flag_names) else 1
 
     if not version_requested:
         return None
     if output_error is not None:
         raise output_error
-    return cli_render_version(name, version, output_format)
+    return cli_render_version(
+        name,
+        display_name,
+        version,
+        build,
+        output_format if output_format is not None else OutputFormat.JSON,
+    )
 
 
 def build_cli_error(message: str, hint: str | None = None) -> dict | Event:

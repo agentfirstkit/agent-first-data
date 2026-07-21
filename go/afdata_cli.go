@@ -357,43 +357,79 @@ func (e *CliEmitter) FinishResult(payload any) int {
 	return e.Finish(NewJSONResult(payload).Build(), 0)
 }
 
-// BuildCliVersion builds a standard CLI version value as a map (for compatibility).
-// The structured version event follows the protocol-v1 shape shared by the other
-// SDKs: a "version"-coded result plus an empty trace.
-func BuildCliVersion(version string) map[string]any {
+// BuildCliVersion builds a standard CLI version value as a map: a protocol-v1
+// "version"-coded result plus an empty trace, following the shape shared by the
+// other SDKs. The result payload is {code:"version", name, version}, plus
+// display_name and build only when non-empty. name is the short/bin identity
+// (e.g. "afdata"); displayName is an optional human-facing product name (e.g.
+// "Agent-First Data"); build is an opaque caller-supplied identifier (a git
+// commit SHA, for example) whose meaning is entirely up to the caller. Passing
+// "" for displayName or build means absent — the field is omitted from the
+// payload.
+func BuildCliVersion(name, displayName, version, build string) map[string]any {
+	result := map[string]any{
+		"code":    "version",
+		"name":    name,
+		"version": version,
+	}
+	if displayName != "" {
+		result["display_name"] = displayName
+	}
+	if build != "" {
+		result["build"] = build
+	}
 	return map[string]any{
-		"kind": "result",
-		"result": map[string]any{
-			"code":    "version",
-			"version": version,
-		},
-		"trace": map[string]any{},
+		"kind":   "result",
+		"result": result,
+		"trace":  map[string]any{},
 	}
 }
 
-// CliRenderVersion renders CLI version output.
-// Pass an OutputFormat for AFDATA JSON/YAML/plain. Pass the empty string to
-// preserve conventional "<name> <version>" text.
-func CliRenderVersion(name string, version string, format OutputFormat) string {
-	var rendered string
-	if format == "" {
-		rendered = fmt.Sprintf("%s %s", name, version)
-	} else {
-		rendered = Render(BuildCliVersion(version), format, OutputOptions{})
-	}
+// CliRenderVersion renders a CLI version response as a protocol-v1 event in the
+// given format. There is no conventional "<name> <version>" text path: --version
+// always answers with a structured event.
+func CliRenderVersion(name, displayName, version, build string, format OutputFormat) string {
+	rendered := Render(BuildCliVersion(name, displayName, version, build), format, OutputOptions{})
 	return strings.TrimRight(rendered, "\n") + "\n"
 }
 
+// splitVersionFlag splits a flag arg into its long name (leading dashes and any
+// "=inline" suffix stripped) and the inline value. hasInline reports whether an
+// "=" was present. A non-flag arg (or a bare "-") yields an empty name.
+func splitVersionFlag(arg string) (name string, value string, hasInline bool) {
+	if !strings.HasPrefix(arg, "-") || arg == "-" {
+		return "", "", false
+	}
+	body := arg
+	if idx := strings.IndexByte(arg, '='); idx >= 0 {
+		body = arg[:idx]
+		value = arg[idx+1:]
+		hasInline = true
+	}
+	return strings.TrimLeft(body, "-"), value, hasInline
+}
+
 // CliHandleVersionOrContinue renders version output if --version/-V is present.
-// It returns handled=false when no version flag was present. A bare --version/-V
-// always prints conventional "<name> <version>" text; a structured event is
-// emitted only when the output format is requested explicitly via --output or
-// --json.
+// It returns handled=false when no version flag was present. --version always
+// answers with a structured protocol-v1 version event — JSON by default, or the
+// format requested via --output json|yaml|plain (or the --json alias). There is
+// no conventional bare-text path.
+//
+// valueFlags is the caller's own value-taking global long flags (with or without
+// leading dashes; each is normalized by stripping leading '-'). The pre-parser
+// consumes a recognized value flag's space-separated value so it is never
+// mistaken for the subcommand boundary — afdata's own --output/--output-to are
+// handled here without needing to be listed.
 //
 // Only a top-level version request is recognized: scanning stops at the first
 // positional argument (the subcommand), so "tool sub --version <value>" leaves
 // --version for the subcommand's parser rather than printing the tool version.
-func CliHandleVersionOrContinue(args []string, name string, version string) (out string, handled bool, err error) {
+func CliHandleVersionOrContinue(args []string, valueFlags []string, name, displayName, version, build string) (out string, handled bool, err error) {
+	valueFlagSet := make(map[string]struct{}, len(valueFlags))
+	for _, flag := range valueFlags {
+		valueFlagSet[strings.TrimLeft(flag, "-")] = struct{}{}
+	}
+
 	versionRequested := false
 	outputFormat := OutputFormat("")
 	outputExplicit := false
@@ -424,17 +460,38 @@ func CliHandleVersionOrContinue(args []string, name string, version string) (out
 			i++
 			continue
 		}
-		if arg == "--output" || strings.HasPrefix(arg, "--output=") {
-			var value string
-			if strings.HasPrefix(arg, "--output=") {
-				value = strings.TrimPrefix(arg, "--output=")
-				i++
-			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				value = args[i+1]
+
+		flagName, inlineValue, hasInline := splitVersionFlag(arg)
+
+		// --output-to takes a value but does not affect version output. Consume
+		// its space-separated value so it is not mistaken for the subcommand
+		// boundary (which would hide a later --version/--output).
+		if flagName == "output-to" {
+			if !hasInline && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				i += 2
 			} else {
-				err = fmt.Errorf("missing value for --output: expected json, yaml, or plain")
 				i++
+			}
+			continue
+		}
+
+		if flagName == "output" {
+			var value string
+			haveValue := false
+			switch {
+			case hasInline:
+				value = inlineValue
+				haveValue = true
+				i++
+			case i+1 < len(args) && !strings.HasPrefix(args[i+1], "-"):
+				value = args[i+1]
+				haveValue = true
+				i += 2
+			default:
+				i++
+			}
+			if !haveValue {
+				err = fmt.Errorf("missing value for --output: expected json, yaml, or plain")
 				continue
 			}
 			parsed, parseErr := CliParseOutput(value)
@@ -448,7 +505,16 @@ func CliHandleVersionOrContinue(args []string, name string, version string) (out
 			}
 			continue
 		}
-		i++
+
+		// Any other flag: consume a space-separated value only when the caller
+		// declared this long flag as value-taking, so its value is never mistaken
+		// for the subcommand boundary above.
+		_, isValueFlag := valueFlagSet[flagName]
+		if isValueFlag && !hasInline && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i += 2
+		} else {
+			i++
+		}
 	}
 
 	if !versionRequested {
@@ -457,8 +523,9 @@ func CliHandleVersionOrContinue(args []string, name string, version string) (out
 	if err != nil {
 		return "", true, err
 	}
-	if outputExplicit {
-		return CliRenderVersion(name, version, outputFormat), true, nil
+	format := outputFormat
+	if !outputExplicit {
+		format = OutputFormatJson
 	}
-	return CliRenderVersion(name, version, ""), true, nil
+	return CliRenderVersion(name, displayName, version, build, format), true, nil
 }

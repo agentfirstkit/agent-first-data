@@ -45,7 +45,7 @@ fmt.Println(r.URL("https://api.example.com/?authorization=abc"))
 - YAML keeps original keys and values (structure-preserving, like JSON), sorting keys by UTF-16 code unit order and quoting/escaping unsafe keys and string scalars. Plain strips formatting suffixes, formats values, sorts the same way, and renders nested objects/arrays as canonical JSON.
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - `build_cli_error(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
-- Use `CliHandleVersionOrContinue()` before argument parsing so bare `--version` stays conventional and `--version --output json|yaml|plain` stays structured.
+- Use `CliHandleVersionOrContinue()` before argument parsing so `--version`/`-V` always answers with a structured protocol-v1 `kind:"result"` version event — JSON by default, or `--output yaml|plain`/`--json` for another format; there is no conventional bare-text form. Pass your own value-taking global flag names so their value is not mistaken for the subcommand boundary.
 - Use `streamredirect.InstallStreamRedirectFromArgs()` before version/help handling if a CLI exposes `--stdout-file` or `--stderr-file`; stderr is redirected as native diagnostics, not JSON.
 
 ## Reference
