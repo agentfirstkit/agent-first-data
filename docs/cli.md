@@ -4,7 +4,7 @@
 
 # afdata - A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.
 
-Commands are grouped into two families: protocol tools that operate on AFDATA protocol-v1 JSON (lint, validate, render), and document tools that read and edit JSON/TOML/YAML/dotenv/INI documents by dot-path (get, value, paths, keys, set, unset, add, remove). Every command's first positional is its input; `-` reads stdin. Mutation commands (set/unset/add/remove) never read stdin.
+Commands are grouped into two families: protocol tools that operate on AFDATA protocol-v1 JSON (lint, validate, render, emit), and document tools that read and edit JSON/TOML/YAML/dotenv/INI documents by dot-path (get, value, paths, keys, set, unset, add, remove). `shell bash` exports the sourceable Bash authoring kit. Every data command's first positional is its input; `-` reads stdin. Mutation commands (set/unset/add/remove) never read stdin.
 
 ```text
 Usage: afdata [OPTIONS] <COMMAND>
@@ -13,6 +13,8 @@ Commands:
   lint      Lint a JSON/JSONL stream, a JSON Schema, or a document for deterministic AFDATA issues
   validate  Validate one protocol event or a finite protocol event stream (JSON only)
   render    Render JSON or JSONL through AFDATA output formatting and redaction (JSON only)
+  emit      Emit one AFDATA event from shell-safe scalar arguments
+  shell     Export a sourceable shell authoring kit
   skill     Validate an Agent Skill, or manage the bundled Agent Skill
   get       Read a document as a whole, or the value at a dot-path
   value     Read the scalar at a dot-path as raw bytes on stdout — no AFDATA envelope
@@ -103,6 +105,98 @@ Options:
       --secret-name <FIELD>
           Extra field name to redact (beyond the `_secret` suffix convention). Repeatable
 
+  -h, --help
+          Print help
+```
+
+## afdata emit - Emit one AFDATA event from shell-safe scalar arguments
+
+```text
+Usage: emit <COMMAND>
+
+Commands:
+  log     Emit a diagnostic log event (stderr under the default split)
+  result  Emit a terminal result event (stdout under the default split)
+  error   Emit a terminal error event and exit with status 1
+
+Options:
+  -h, --help
+          Print help
+```
+
+### afdata emit log - Emit a diagnostic log event (stderr under the default split)
+
+```text
+Usage: log <LEVEL> <MESSAGE>
+
+Arguments:
+  <LEVEL>
+          Log level: debug, info, warn, or error
+
+  <MESSAGE>
+          Human-readable message; do not place secrets in free text
+
+Options:
+  -h, --help
+          Print help
+```
+
+### afdata emit result - Emit a terminal result event (stdout under the default split)
+
+```text
+Usage: result <MESSAGE>
+
+Arguments:
+  <MESSAGE>
+          Human-readable result message
+
+Options:
+  -h, --help
+          Print help
+```
+
+### afdata emit error - Emit a terminal error event and exit with status 1
+
+```text
+Usage: error [OPTIONS] <CODE> <MESSAGE>
+
+Arguments:
+  <CODE>
+          Stable machine-readable error code
+
+  <MESSAGE>
+          Human-readable error message
+
+Options:
+      --hint <HINT>
+          Suggested corrective action
+
+      --retryable
+          Mark the failure as safe to retry
+
+  -h, --help
+          Print help
+```
+
+## afdata shell - Export a sourceable shell authoring kit
+
+```text
+Usage: shell <COMMAND>
+
+Commands:
+  bash  Print the sourceable Bash authoring kit as raw Bash on stdout
+
+Options:
+  -h, --help
+          Print help
+```
+
+### afdata shell bash - Print the sourceable Bash authoring kit as raw Bash on stdout
+
+```text
+Usage: bash
+
+Options:
   -h, --help
           Print help
 ```

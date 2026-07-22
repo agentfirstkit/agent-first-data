@@ -7,7 +7,7 @@ use agent_first_data::document::{
 use agent_first_data::{
     ErrorBuilder, Event, OutputFormat, OutputOptions, OutputTo, PlainStyle, Redactor,
     build_cli_error, cli_parse_output, is_valid_bcp47, is_valid_rfc3339, is_valid_rfc3339_date,
-    is_valid_rfc3339_time, json_error, json_result, normalize_utc_offset, render,
+    is_valid_rfc3339_time, json_error, json_log, json_result, normalize_utc_offset, render,
     validate_protocol_event, validate_protocol_stream,
 };
 #[cfg(any(feature = "cli", feature = "cli-help"))]
@@ -35,11 +35,12 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
     // feature-gated (`#[cfg(feature = "skill")]`) and a minimal build's
     // help must not mention it at all (verified by `tests/cli_e2e.py`).
     long_about = "Commands are grouped into two families: protocol tools \
-        that operate on AFDATA protocol-v1 JSON (lint, validate, render), \
+        that operate on AFDATA protocol-v1 JSON (lint, validate, render, emit), \
         and document tools that read and edit JSON/TOML/YAML/dotenv/INI \
         documents by dot-path (get, value, paths, keys, set, unset, add, \
-        remove). Every command's first positional is its input; `-` reads \
-        stdin. Mutation commands (set/unset/add/remove) never read stdin.",
+        remove). `shell bash` exports the sourceable Bash authoring kit. Every \
+        data command's first positional is its input; `-` reads stdin. Mutation \
+        commands (set/unset/add/remove) never read stdin.",
     after_help = concat!("AFDATA: ", env!("CARGO_PKG_VERSION")),
     disable_help_subcommand = true
 )]
@@ -116,9 +117,17 @@ enum Command {
         #[arg(long = "secret-name", value_name = "FIELD")]
         secret_names: Vec<String>,
     },
+    /// Emit one AFDATA event from shell-safe scalar arguments
+    #[command(display_order = 4, subcommand)]
+    Emit(EmitCommand),
+
+    /// Export a sourceable shell authoring kit
+    #[command(display_order = 5, subcommand)]
+    Shell(ShellCommand),
+
     /// Validate an Agent Skill, or manage the bundled Agent Skill
     #[cfg(feature = "skill")]
-    #[command(display_order = 4, subcommand)]
+    #[command(display_order = 6, subcommand)]
     Skill(SkillCommand),
 
     /// Read a document as a whole, or the value at a dot-path
@@ -317,6 +326,43 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+#[command(disable_help_subcommand = true)]
+enum EmitCommand {
+    /// Emit a diagnostic log event (stderr under the default split)
+    Log {
+        /// Log level: debug, info, warn, or error
+        level: String,
+        /// Human-readable message; do not place secrets in free text
+        message: String,
+    },
+    /// Emit a terminal result event (stdout under the default split)
+    Result {
+        /// Human-readable result message
+        message: String,
+    },
+    /// Emit a terminal error event and exit with status 1
+    Error {
+        /// Stable machine-readable error code
+        code: String,
+        /// Human-readable error message
+        message: String,
+        /// Suggested corrective action
+        #[arg(long)]
+        hint: Option<String>,
+        /// Mark the failure as safe to retry
+        #[arg(long)]
+        retryable: bool,
+    },
+}
+
+#[derive(Subcommand)]
+#[command(disable_help_subcommand = true)]
+enum ShellCommand {
+    /// Print the sourceable Bash authoring kit as raw Bash on stdout
+    Bash,
+}
+
 #[cfg(feature = "skill")]
 #[derive(Subcommand)]
 #[command(disable_help_subcommand = true)]
@@ -512,12 +558,15 @@ fn main() -> ExitCode {
     if output_to != OutputTo::Split
         && matches!(
             cli.command,
-            Command::ValueGet { .. } | Command::Paths { .. } | Command::Keys { .. }
+            Command::ValueGet { .. }
+                | Command::Paths { .. }
+                | Command::Keys { .. }
+                | Command::Shell(_)
         )
     {
         let event = build_cli_error(
-            "--output-to stdout/stderr is not supported by value/paths/keys; they print a raw scalar, not an event stream",
-            Some("read an AFDATA envelope with `get` instead"),
+            "--output-to stdout/stderr is not supported by raw-output commands (value/paths/keys/shell bash)",
+            Some("redirect their raw stdout with the shell or --stdout-file instead"),
         );
         return emit_event(event, OutputFormat::Json, 2);
     }
@@ -537,6 +586,8 @@ fn main() -> ExitCode {
             input,
             secret_names,
         } => run_render(&input, &secret_names, format),
+        Command::Emit(action) => run_emit(action, format),
+        Command::Shell(action) => run_shell(action),
         #[cfg(feature = "skill")]
         Command::Skill(action) => run_skill(action, format),
         Command::Get {
@@ -858,6 +909,73 @@ fn run_render(input: &Path, secret_names: &[String], format: OutputFormat) -> Ex
                 }
             }
             write_text_exit(&out, 0)
+        }
+    }
+}
+
+fn run_emit(action: EmitCommand, format: OutputFormat) -> ExitCode {
+    match action {
+        EmitCommand::Log { level, message } => {
+            if message.is_empty() {
+                return emit_cli_usage_error(
+                    "log MESSAGE must not be empty",
+                    Some("usage: afdata emit log <LEVEL> <MESSAGE>"),
+                    format,
+                );
+            }
+            if !matches!(level.as_str(), "debug" | "info" | "warn" | "error") {
+                return emit_cli_usage_error(
+                    &format!("invalid log level '{level}'"),
+                    Some("valid levels: debug, info, warn, error"),
+                    format,
+                );
+            }
+            let event = json_log(json!({
+                "level": level,
+                "message": message,
+            }))
+            .build();
+            emit_event(event, format, 0)
+        }
+        EmitCommand::Result { message } => {
+            if message.is_empty() {
+                return emit_cli_usage_error(
+                    "result MESSAGE must not be empty",
+                    Some("usage: afdata emit result <MESSAGE>"),
+                    format,
+                );
+            }
+            let event = json_result(json!({"message": message})).build();
+            emit_event(event, format, 0)
+        }
+        EmitCommand::Error {
+            code,
+            message,
+            hint,
+            retryable,
+        } => {
+            if code.is_empty() || message.is_empty() {
+                return emit_cli_usage_error(
+                    "error CODE and MESSAGE must not be empty",
+                    Some("usage: afdata emit error <CODE> <MESSAGE> [--hint <HINT>] [--retryable]"),
+                    format,
+                );
+            }
+            let event = build_error_event(
+                json_error(&code, &message)
+                    .hint_if_some(hint.as_deref())
+                    .retryable_if(retryable),
+            );
+            emit_event(event, format, 1)
+        }
+    }
+}
+
+fn run_shell(action: ShellCommand) -> ExitCode {
+    match action {
+        ShellCommand::Bash => {
+            const BASH_SOURCE: &str = include_str!("../../bash/afdata.sh");
+            write_text_exit(BASH_SOURCE, 0)
         }
     }
 }
@@ -1248,6 +1366,10 @@ fn emit_findings(
 fn emit_usage_error(message: &str, format: OutputFormat) -> ExitCode {
     let event = build_error_event(json_error("document_usage_error", message));
     emit_event(event, format, 2)
+}
+
+fn emit_cli_usage_error(message: &str, hint: Option<&str>, format: OutputFormat) -> ExitCode {
+    emit_event(build_cli_error(message, hint), format, 2)
 }
 
 /// The resolved `--output-to` selector. Read through [`output_to`], which

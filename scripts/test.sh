@@ -56,19 +56,26 @@ venv_python() {
 }
 
 run_static() {
-  echo "[1/5] Rust (fmt + clippy)"
+  echo "[1/6] Rust (fmt + clippy)"
   (cd "$ROOTPATH" && cargo fmt --all --check)
   (cd "$ROOTPATH" && cargo clippy --all-targets --all-features -- -D warnings)
 
   echo ""
-  echo "[2/5] Spec registry"
+  echo "[2/6] Bash (syntax + optional ShellCheck)"
+  bash -n "$ROOTPATH/bash/afdata.sh" "$ROOTPATH/tests/bash_e2e.sh"
+  if command -v shellcheck >/dev/null 2>&1; then
+    shellcheck -x "$ROOTPATH/bash/afdata.sh" "$ROOTPATH/tests/bash_e2e.sh"
+  fi
+
+  echo ""
+  echo "[3/6] Spec registry"
   (cd "$ROOTPATH" && python3 scripts/validate_registry.py)
   (cd "$ROOTPATH" && python3 scripts/validate_protocol_docs.py)
   (cd "$ROOTPATH" && python3 scripts/validate_api_surface.py)
   (cd "$ROOTPATH" && python3 scripts/sync_offline_assets.py --check)
 
   echo ""
-  echo "[3/5] Go (gofmt + compile)"
+  echo "[4/6] Go (gofmt + compile)"
   unformatted_go="$(
     cd "$ROOTPATH/go" &&
       find . -name '*.go' -type f -print0 | xargs -0 gofmt -l
@@ -81,11 +88,11 @@ run_static() {
   (cd "$ROOTPATH/go" && go test -run '^$' ./...)
 
   echo ""
-  echo "[4/5] Python (syntax)"
+  echo "[5/6] Python (syntax)"
   (cd "$ROOTPATH/python" && python3 -m compileall agent_first_data examples tests >/dev/null)
 
   echo ""
-  echo "[5/5] TypeScript (typecheck)"
+  echo "[6/6] TypeScript (typecheck)"
   ensure_typescript_deps
   (cd "$ROOTPATH/typescript" && npx tsc --noEmit)
 }
@@ -117,7 +124,7 @@ run_package() {
   echo ""
   echo "[package] Rust"
   rust_package_list="$(cd "$ROOTPATH" && cargo package --allow-dirty --no-verify --list)"
-  for asset in spec/registry.json spec/protocol-v1.schema.json skills/agent-first-data/SKILL.md skills/agent-first-data/references/registry.json skills/agent-first-data/references/protocol-v1.schema.json; do
+  for asset in bash/afdata.sh spec/registry.json spec/protocol-v1.schema.json skills/agent-first-data/SKILL.md skills/agent-first-data/references/registry.json skills/agent-first-data/references/protocol-v1.schema.json; do
     if ! grep -qx "$asset" <<<"$rust_package_list"; then
       echo "Rust package missing offline asset: $asset" >&2
       exit 1
@@ -131,6 +138,8 @@ run_package() {
     afdata_bin="$rust_smoke/cargo-root/bin/afdata"
   fi
   "$afdata_bin" --version >/dev/null
+  "$afdata_bin" shell bash > "$rust_smoke/afdata.sh"
+  cmp "$ROOTPATH/bash/afdata.sh" "$rust_smoke/afdata.sh"
   "$afdata_bin" skill validate "$ROOTPATH/skills/agent-first-data"
   # `skill install` must bundle every file in the skill directory (SKILL.md and
   # the whole references/ tree), not just SKILL.md. Install to a scratch dir and
@@ -295,9 +304,20 @@ GO
 }
 
 run_e2e() {
+  local afdata_bin
   echo "[e2e] Four-language canonical CLI"
   ensure_typescript_deps
   (cd "$ROOTPATH" && AFDATA_PYTOOL="$PYTOOL" "$PYTOOL" tests/cli_e2e.py)
+
+  echo ""
+  echo "[e2e] Bash authoring kit"
+  (cd "$ROOTPATH" && cargo build --quiet --bin afdata)
+  if [ -x "$ROOTPATH/target/debug/afdata.exe" ]; then
+    afdata_bin="$ROOTPATH/target/debug/afdata.exe"
+  else
+    afdata_bin="$ROOTPATH/target/debug/afdata"
+  fi
+  AFDATA_BIN="$afdata_bin" bash "$ROOTPATH/tests/bash_e2e.sh"
 }
 
 run_bench() {

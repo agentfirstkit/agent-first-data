@@ -91,6 +91,37 @@ afdata set config.toml server.port 8080 --value-type number
 
 Edits are **source-preserving and atomic** — comments, key order, and formatting survive; a failed write leaves the original untouched, and the CLI refuses to write through a symlink. A bare value is always a string (`007` never becomes `7`); `--value-type string|number|bool|null|json` writes an exact type. `_secret` fields stay redacted even on a directly targeted `get` — `value --reveal-secret` is the auditable opt-in. Every command's first positional is the FILE (`-` reads stdin for reads only); errors carry stable `error.code`s (`document_path_not_found`, `document_type_mismatch`, …). The Rust library is `agent_first_data::document` (`Document` / `DocumentFile`); TOML/YAML/dotenv/INI are feature-gated, JSON is core.
 
+## Writing AFDATA-style Bash scripts
+
+The CLI embeds a sourceable Bash 3.2+ authoring kit:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+_AFDATA_BASH_SOURCE="$("${AFDATA_BIN:-afdata}" shell bash)"
+source /dev/stdin <<<"$_AFDATA_BASH_SOURCE"
+unset _AFDATA_BASH_SOURCE
+
+afdata_args_begin "build.sh [OPTIONS] PACKAGE"
+afdata_args_flag release --release "Build release artifacts"
+afdata_args_positional package PACKAGE "Package to build"
+afdata_args_parse "$@"
+
+afdata_log info "Building ${package}"
+cargo_args=()
+[ "$release" = false ] || cargo_args+=(--release)
+afdata_run cargo build "${cargo_args[@]}"
+afdata_result "Build complete"
+```
+
+The helpers handle long-form argument parsing, `--help`, AFDATA output flags,
+raw config reads, and structured `log`/`result`/`error` events. `afdata_run`
+keeps child stdin/stdout/stderr and TTY interaction untouched; only the Bash
+script's own lifecycle is structured, with a terminal error on child failure.
+Use `afdata_call` when an AFDATA Bash parent invokes an AFDATA Bash child and
+must remain the sole owner of the final result. See the complete
+[Bash authoring kit guide](docs/bash.md).
+
 ## Where to use it: CLI flags, config files, logs, and API responses
 
 - **Building a CLI tool an agent will call** — your output is understood correctly the first time, with no extra schema to ship. Results land on `stdout` and errors on `stderr` by default, so a shell capture or pipe never mistakes a failure for data; a single `--output-to stdout` collapses everything onto one stream when a consumer would rather branch on `kind`.
@@ -156,6 +187,7 @@ afdata skill validate skills/agent-first-data
 ## Docs
 
 - [Specification](spec/agent-first-data.md) — the full convention: every suffix, output formats, protocol, and logging
+- [Bash authoring kit](docs/bash.md) — arguments, config reads, events, and transparent child processes
 - [Agent Skill](skills/agent-first-data/SKILL.md) — for AI-assisted development
 - Per-language API reference: [Rust](rust) · [Go](go) · [Python](python) · [TypeScript](typescript)
 

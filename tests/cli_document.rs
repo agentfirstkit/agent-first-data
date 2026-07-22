@@ -13,9 +13,9 @@
 //! the `cli` feature (the bin target's `required-features`), so the file
 //! still compiles when `cli` is disabled.
 //!
-//! Coverage follows `docs/agent-first-data/cli-design-review-todo.md`
-//! (D1–D7, R1–R7) and `cli-shell-config-todo.md` (§1 paths/keys, §2
-//! `--default`, §3 `--value-type`, §4 number literal fidelity).
+//! Coverage is grouped by the document CLI's design invariants (D1–D7 and
+//! R1–R7), including paths/keys, defaults, exact value types, and number
+//! literal fidelity.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -67,6 +67,124 @@ fn write_temp(dir: &TempDir, name: &str, contents: &str) -> String {
     let path = dir.path().join(name);
     std::fs::write(&path, contents).unwrap();
     path.to_str().unwrap().to_string()
+}
+
+// ═══════════════════════════════════════════
+// Shell authoring kit and scalar event emission
+// ═══════════════════════════════════════════
+
+#[test]
+fn test_shell_bash_outputs_embedded_source() {
+    let output = run(&["shell", "bash"]);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(output.stderr.is_empty());
+    assert_eq!(output.stdout, include_bytes!("../bash/afdata.sh"));
+}
+
+#[test]
+fn test_shell_bash_rejects_output_to_override() {
+    let output = run(&["shell", "bash", "--output-to", "stdout"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let response = json_stderr(&output);
+    assert_eq!(response["error"]["code"], "cli_error");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("raw-output commands"))
+    );
+}
+
+#[test]
+fn test_emit_log_uses_diagnostic_stream() {
+    let output = run(&["emit", "log", "info", "building project"]);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(output.stdout.is_empty());
+    let response = json_stderr(&output);
+    assert_eq!(response["kind"], "log");
+    assert_eq!(response["log"]["level"], "info");
+    assert_eq!(response["log"]["message"], "building project");
+    assert_eq!(response["trace"], serde_json::json!({}));
+}
+
+#[test]
+fn test_emit_result_uses_stdout() {
+    let output = run(&["emit", "result", "build complete"]);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(output.stderr.is_empty());
+    let response = json_stdout(&output);
+    assert_eq!(response["kind"], "result");
+    assert_eq!(response["result"]["message"], "build complete");
+}
+
+#[test]
+fn test_emit_error_uses_stderr_and_failure_status() {
+    let output = run(&[
+        "emit",
+        "error",
+        "build_failed",
+        "build failed",
+        "--hint",
+        "inspect the child output",
+        "--retryable",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let response = json_stderr(&output);
+    assert_eq!(response["kind"], "error");
+    assert_eq!(response["error"]["code"], "build_failed");
+    assert_eq!(response["error"]["message"], "build failed");
+    assert_eq!(response["error"]["hint"], "inspect the child output");
+    assert_eq!(response["error"]["retryable"], true);
+}
+
+#[test]
+fn test_emit_rejects_unknown_log_level_as_usage_error() {
+    let output = run(&["emit", "log", "notice", "building project"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let response = json_stderr(&output);
+    assert_eq!(response["error"]["code"], "cli_error");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("invalid log level"))
+    );
+}
+
+#[test]
+fn test_emit_honors_unified_destination_and_output_format() {
+    let output = run(&[
+        "emit",
+        "log",
+        "warn",
+        "build delayed",
+        "--output-to",
+        "stdout",
+        "--output",
+        "yaml",
+    ]);
+    assert!(output.status.success(), "{:?}", output);
+    assert!(output.stderr.is_empty());
+    let text = String::from_utf8(output.stdout).expect("YAML output must be UTF-8");
+    assert!(text.contains("kind: \"log\""), "{text}");
+    assert!(text.contains("level: \"warn\""), "{text}");
+    assert!(text.contains("message: \"build delayed\""), "{text}");
+}
+
+#[test]
+fn test_emit_usage_error_honors_unified_destination() {
+    let output = run(&[
+        "--output-to",
+        "stdout",
+        "emit",
+        "log",
+        "notice",
+        "building project",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    assert_eq!(json_stdout(&output)["error"]["code"], "cli_error");
 }
 
 // ═══════════════════════════════════════════

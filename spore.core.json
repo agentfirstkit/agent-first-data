@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,9 +13,10 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Fix afdata skill install to bundle the skill's whole directory — SKILL.md plus its references/ files — instead of writing SKILL.md alone; a new SkillAsset concept on the reusable installer makes status report a references-missing install as out-of-date so a plain reinstall repairs it, and uninstall cleans the assets up",
-    "Remove the skill-admin and stream-redirect capabilities from the Go, Python, and TypeScript SDKs, leaving them Rust-only, so the four-language SDKs now synchronize on exactly the core AFDATA contract plus the CLI helpers",
-    "Consolidate the documentation: fold docs/overview.md into the README as the single agent-facing guide and delete it, and state the shared-vs-Rust-only language boundary explicitly in the README, the spec, and spec/api-surface.json"
+    "Add `afdata emit` (log/result/error) to produce a single AFDATA protocol-v1 event from shell-safe scalar arguments, so shell scripts emit the same structured envelopes as the SDKs without hand-writing JSON.",
+    "Add `afdata shell bash`, a sourceable Bash 3.2+ authoring kit embedded in the binary that gives executable scripts AFDATA-style argument parsing with --help, raw config reads, and structured log/result/error events.",
+    "Give the kit transparent child-process wrappers: `afdata_run` passes child stdin/stdout/stderr, TTY, and exit status through unchanged (only the script lifecycle is structured), with an optional --quiet mode that discards successful output but replays it on failure.",
+    "Preserve single terminal-result ownership across cooperating scripts: `afdata_call` keeps child logs and errors live but demotes a successful child result to an info log, so only the outermost script owns the final result."
   ],
   "bonds": [],
   "tree": {

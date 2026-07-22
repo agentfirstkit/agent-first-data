@@ -132,6 +132,36 @@ afdata skill validate skills/example-skill
 - Treat findings as contract issues unless the owning tool intentionally
   documents a non-AFDATA field.
 
+## Bash authoring workflow
+
+When writing a Bash 3.2+ executable that should expose AFDATA-style arguments,
+config access, events, and child-process status, load the bundled authoring kit:
+
+```bash
+_AFDATA_BASH_SOURCE="$("${AFDATA_BIN:-afdata}" shell bash)"
+source /dev/stdin <<<"$_AFDATA_BASH_SOURCE"
+unset _AFDATA_BASH_SOURCE
+```
+
+Use `afdata_args_begin` plus `afdata_args_option` / `afdata_args_flag` /
+`afdata_args_positional` / `afdata_args_rest`, followed by
+`afdata_args_parse "$@"`, instead of rebuilding long-option parsing and help.
+Use `afdata_config_get` for raw scalar config reads, `afdata_log` /
+`afdata_result` / `afdata_error` for script-owned events, and `afdata_run` for
+commands such as cargo, npm, or wrangler. `afdata_run` deliberately executes
+the child directly: its stdin/stdout/stderr, TTY interaction, colors, prompts,
+and exit status pass through unchanged; start/completion are logs and failure
+is a terminal `child_process_failed` error. For noninteractive commands whose
+successful output is not needed, use `afdata_run --quiet`: it discards
+successful child output to save tokens, but replays combined output on stderr
+if the child fails. When an AFDATA Bash parent invokes another AFDATA Bash
+script and will emit the final result, use `afdata_call`; it keeps child logs
+and errors live while converting the child's successful result to an info log,
+so only the outermost script owns the terminal result. Never use quiet mode for
+prompts or servers, and never interpolate secrets into free-form log messages
+or command descriptions. See `docs/bash.md` in a repository checkout for the
+full API and examples.
+
 ## Output stream contract
 
 AFDATA CLIs route protocol events by consumption mode, not by event shape.
