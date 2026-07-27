@@ -520,9 +520,9 @@ def test_cli_render_version_renders_json():
     assert '"version":"1.2.3"' in out
 
 
-def test_cli_handle_version_bare_defaults_to_json():
-    # The one blessed behavior: `--version` always answers with a protocol-v1
-    # event, JSON by default — no more conventional bare-text special case.
+def test_cli_handle_version_bare_inherits_json_default():
+    # `--version` answers with a protocol-v1 event and follows the command's
+    # declared output default.
     out = cli_handle_version_or_continue(
         ["--version"],
         VERSION_VALUE_FLAGS,
@@ -540,6 +540,21 @@ def test_cli_handle_version_bare_defaults_to_json():
     assert parsed["result"]["version"] == "1.2.3"
     assert "build" not in parsed["result"]
     assert parsed["trace"] == {}
+
+
+def test_cli_handle_version_bare_inherits_plain_default():
+    out = cli_handle_version_or_continue(
+        ["--version"],
+        VERSION_VALUE_FLAGS,
+        "agent-cli",
+        None,
+        "1.2.3",
+        None,
+        default_format=OutputFormat.PLAIN,
+    )
+    assert out is not None
+    assert "result.code=version" in out
+    assert "result.version=1.2.3" in out
 
 
 def test_cli_handle_version_honors_explicit_plain_output():

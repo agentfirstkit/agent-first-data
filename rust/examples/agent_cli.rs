@@ -9,8 +9,8 @@
 
 // Minimal agent-first CLI — canonical pattern for tools built on agent-first-data.
 //
-// Demonstrates: human `--help` (one-level) plus orthogonal `--recursive`
-// scope and `--output markdown|json|yaml` format for full surface export,
+// Demonstrates: output-aware `--help` (one-level) plus orthogonal `--recursive`
+// scope and `--output plain|markdown|json|yaml` format for full surface export,
 // _secret flags, nested subcommands, cli_parse_output, cli_parse_log_filters,
 // opt-in startup diagnostics, render, build_cli_error, error hints, and
 // (with the `skill-admin` feature) a `skill` subcommand that installs/uninstalls/
@@ -98,16 +98,22 @@ const WIDGET_SPEC: agent_first_data::skill::SkillSpec = agent_first_data::skill:
     assets: &[],
 };
 
+/// The example's own identity — deliberately not the host crate's. An example
+/// that reported `agent-first-data` as its name and description would teach the
+/// wrong thing about `--help` and `--version`.
+const AGENT_CLI_VERSION: &str = "0.13.0";
+const AGENT_CLI_EXAMPLE_DISPLAY_NAME: &str = "Agent CLI Example";
+
 #[derive(Parser)]
 #[command(
-    name = env!("DISPLAY_NAME"),
+    name = "agent-cli",
     bin_name = "agent-cli",
-    version = env!("CARGO_PKG_VERSION"),
-    about = env!("CARGO_PKG_DESCRIPTION"),
+    version = AGENT_CLI_VERSION,
+    about = "Minimal agent-first CLI example",
     long_about = r#"### Interface Policy
 
 - Agent-facing CLI surfaces should keep stdout structured.
-- Human help remains conventional unless `--output markdown|json|yaml` is requested.
+- Help inherits the CLI's JSON output default; use `--output plain` for conventional text.
 - Binary names are command-specific, so this example sets `name = "agent-cli"` explicitly.
 
 ### Example Usage
@@ -267,30 +273,17 @@ fn main() {
         "unknown" => None,
         sha => Some(sha),
     };
-    match agent_first_data::cli_handle_version_or_continue(
-        &raw,
-        &Cli::command(),
-        "agent-cli",
-        Some(env!("DISPLAY_NAME")),
-        env!("CARGO_PKG_VERSION"),
-        build,
-    ) {
-        Ok(Some(version)) => {
-            stdout!("{version}");
-            std::process::exit(0);
-        }
-        Ok(None) => {}
-        Err(err) => emit_error_exit(OutputFormat::Json, err, 2),
-    }
-
-    // Handle help before clap so `--help --output markdown` can work. Help TEXT
-    // prints to stdout; a help *error* is an error envelope on stderr.
     #[cfg(feature = "cli-help")]
     {
-        match agent_first_data::cli_handle_help_or_continue(
+        // Handle version and help from one shared metadata source before clap.
+        match agent_first_data::cli_handle_version_or_help_or_continue(
             &raw,
             &Cli::command(),
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
+            "agent-cli",
+            Some(AGENT_CLI_EXAMPLE_DISPLAY_NAME),
+            AGENT_CLI_VERSION,
+            build,
         ) {
             Ok(Some(help)) => {
                 stdout!("{help}");
@@ -299,6 +292,23 @@ fn main() {
             Ok(None) => {}
             Err(err) => emit_value_error_exit(OutputFormat::Json, err, 2),
         }
+    }
+
+    #[cfg(not(feature = "cli-help"))]
+    match agent_first_data::cli_handle_version_or_continue(
+        &raw,
+        &Cli::command(),
+        "agent-cli",
+        Some(AGENT_CLI_EXAMPLE_DISPLAY_NAME),
+        AGENT_CLI_VERSION,
+        build,
+    ) {
+        Ok(Some(version)) => {
+            stdout!("{version}");
+            std::process::exit(0);
+        }
+        Ok(None) => {}
+        Err(err) => emit_error_exit(OutputFormat::Json, err, 2),
     }
 
     // try_parse — a clap error becomes a structured error envelope (on stderr),
@@ -651,8 +661,12 @@ mod tests {
             "one-level help must include globals"
         );
         assert!(
-            help.contains(concat!("AFDATA: ", env!("CARGO_PKG_VERSION"))),
-            "one-level help must include AFDATA version"
+            help.contains("--version"),
+            "one-level help must include clap's version flag"
+        );
+        assert!(
+            !help.contains("AFDATA:"),
+            "help should point to --version instead of embedding version metadata"
         );
         assert!(
             !help.contains("--help-all"),
@@ -715,6 +729,90 @@ mod tests {
 
     #[cfg(feature = "cli-help")]
     #[test]
+    fn scoped_help_progressively_discloses_inherited_global_arguments() {
+        let cmd = clap::Command::new("Example Tool")
+            .bin_name("tool")
+            .arg(
+                clap::Arg::new("workspace")
+                    .long("workspace")
+                    .global(true)
+                    .value_name("PATH")
+                    .help("Workspace path"),
+            )
+            .subcommand(
+                clap::Command::new("sync").arg(
+                    clap::Arg::new("limit")
+                        .long("limit")
+                        .value_name("COUNT")
+                        .help("Maximum records"),
+                ),
+            );
+
+        let plain = agent_first_data::cli_render_help_with_options(
+            &cmd,
+            &["sync"],
+            &agent_first_data::HelpOptions::one_level_plain(),
+        );
+        assert!(
+            plain.contains("Usage: tool sync"),
+            "scoped plain help needs an invocable usage:\n{plain}"
+        );
+        assert!(
+            plain.contains("--workspace"),
+            "conventional scoped help must include inherited globals:\n{plain}"
+        );
+
+        let structured = agent_first_data::cli_render_help_with_options(
+            &cmd,
+            &["sync"],
+            &agent_first_data::HelpOptions {
+                scope: agent_first_data::HelpScope::OneLevel,
+                format: agent_first_data::HelpFormat::Json,
+            },
+        );
+        let event: serde_json::Value =
+            serde_json::from_str(&structured).expect("structured help must parse");
+        assert_eq!(event["kind"], "result");
+        assert_eq!(event["result"]["code"], "help");
+        let help = &event["result"]["help"];
+        assert_eq!(help["command_path"], "tool sync");
+        assert_eq!(
+            help["inherited_arguments_from"],
+            serde_json::json!(["tool"])
+        );
+        assert!(help["arguments"].as_array().is_some_and(|arguments| {
+            arguments
+                .iter()
+                .any(|argument| argument["name"] == "--limit")
+        }));
+        assert!(
+            !structured.contains("--workspace"),
+            "structured scoped help must reference, not repeat, inherited globals:\n{structured}"
+        );
+
+        let recursive = agent_first_data::cli_render_help_with_options(
+            &cmd,
+            &[],
+            &agent_first_data::HelpOptions {
+                scope: agent_first_data::HelpScope::Recursive,
+                format: agent_first_data::HelpFormat::Json,
+            },
+        );
+        assert_eq!(
+            recursive.matches("--workspace").count(),
+            1,
+            "recursive help must define a global argument exactly once:\n{recursive}"
+        );
+        let recursive_event: serde_json::Value =
+            serde_json::from_str(&recursive).expect("recursive help must parse");
+        assert_eq!(
+            recursive_event["result"]["help"]["arguments"][0]["global"],
+            true
+        );
+    }
+
+    #[cfg(feature = "cli-help")]
+    #[test]
     fn help_is_plain_text() {
         let cmd = Cli::command();
         let help = agent_first_data::cli_render_help(&cmd, &[]);
@@ -731,20 +829,91 @@ mod tests {
 
     #[cfg(feature = "cli-help")]
     #[test]
-    fn help_handler_root_uses_human_default() {
+    fn help_handler_root_inherits_command_output_default() {
         let cmd = Cli::command();
         let raw = vec!["agent-cli".to_string(), "--help".to_string()];
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("help should render");
-        assert!(help.contains("--output"), "root help must include globals");
+        let event: serde_json::Value =
+            serde_json::from_str(&help).expect("default help must be JSON");
+        assert_eq!(event["kind"], "result");
+        assert_eq!(event["result"]["code"], "help");
         assert!(
-            !help.contains("--api-key-secret"),
-            "human default must not recursively expand leaf flags"
+            event.to_string().contains("--output"),
+            "root help must include globals"
+        );
+        assert!(
+            !event.to_string().contains("--api-key-secret"),
+            "one-level default must not recursively expand leaf flags"
+        );
+    }
+
+    #[cfg(feature = "cli-help")]
+    #[test]
+    fn help_handler_uses_caller_fallback_without_output_argument() {
+        let cmd = clap::Command::new("fixed-json");
+        let raw = vec!["fixed-json".to_string(), "--help".to_string()];
+        let config = agent_first_data::HelpConfig::output_aware_with_fallback(
+            agent_first_data::HelpFormat::Json,
+        );
+        let help = agent_first_data::cli_handle_help_or_continue(&raw, &cmd, &config)
+            .expect("valid help request")
+            .expect("help should render");
+        let event: serde_json::Value =
+            serde_json::from_str(&help).expect("JSON fallback must render a JSON event");
+        assert_eq!(event["kind"], "result");
+        assert_eq!(event["result"]["code"], "help");
+        assert_eq!(event["result"]["help"]["command_path"], "fixed-json");
+
+        let plain_raw = vec![
+            "fixed-json".to_string(),
+            "--help".to_string(),
+            "--output".to_string(),
+            "plain".to_string(),
+        ];
+        let plain = agent_first_data::cli_handle_help_or_continue(&plain_raw, &cmd, &config)
+            .expect("valid explicit plain request")
+            .expect("plain help should render");
+        assert!(
+            plain.contains("Usage: fixed-json"),
+            "an explicit help output must override the fallback: {plain}"
+        );
+    }
+
+    #[cfg(feature = "cli-help")]
+    #[test]
+    fn help_handler_inherits_selected_subcommand_output_default() {
+        let cmd = clap::Command::new("tool").subcommand(
+            clap::Command::new("child").arg(
+                clap::Arg::new("output")
+                    .long("output")
+                    .default_value("yaml"),
+            ),
+        );
+        let raw = vec![
+            "tool".to_string(),
+            "child".to_string(),
+            "--help".to_string(),
+        ];
+        let help = agent_first_data::cli_handle_help_or_continue(
+            &raw,
+            &cmd,
+            &agent_first_data::HelpConfig::output_aware(),
+        )
+        .expect("valid help request")
+        .expect("help should render");
+        assert!(
+            help.starts_with("---") && help.contains("kind: \"result\""),
+            "selected child default must choose YAML help:\n{help}"
+        );
+        assert!(
+            help.contains("command_path: \"tool child\""),
+            "selected command path must survive structured rendering:\n{help}"
         );
     }
 
@@ -756,7 +925,7 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("help should render");
@@ -778,7 +947,7 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("help should render");
@@ -807,7 +976,7 @@ mod tests {
                 let help = agent_first_data::cli_handle_help_or_continue(
                     &raw,
                     &Cli::command(),
-                    &agent_first_data::HelpConfig::human_cli_default(),
+                    &agent_first_data::HelpConfig::output_aware(),
                 )
                 .expect("valid help request")
                 .unwrap_or_else(|| panic!("help should render for --output {output} {extra:?}"));
@@ -859,7 +1028,7 @@ mod tests {
             let help = agent_first_data::cli_handle_help_or_continue(
                 &raw,
                 &secret_default_help_command(),
-                &agent_first_data::HelpConfig::human_cli_default(),
+                &agent_first_data::HelpConfig::output_aware(),
             )
             .expect("valid help request")
             .unwrap_or_else(|| panic!("help should render for --output {output}"));
@@ -883,24 +1052,25 @@ mod tests {
             "agent-cli".to_string(),
             "--help".to_string(),
             "--recursive".to_string(),
+            "--output".to_string(),
+            "plain".to_string(),
         ];
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &Cli::command(),
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("recursive help should render");
-        let occurrences = help.matches("render this help in another format").count();
+        let occurrences = help.matches("\n  --output <OUTPUT>").count();
         assert_eq!(
             occurrences, 1,
-            "recursive plain help must advertise the modifiers exactly once \
+            "recursive plain help must list the global output option exactly once \
              (found {occurrences}):\n{help}"
         );
-        // Descendant command blocks fall back to clap's bare wording.
         assert!(
-            help.contains("Print help\n"),
-            "descendant commands should keep the plain 'Print help' wording:\n{help}"
+            !help.contains("════════"),
+            "recursive plain help must use the compact index rather than full help blocks:\n{help}"
         );
     }
 
@@ -917,7 +1087,7 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("plain help should render");
@@ -941,17 +1111,86 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("json help should render");
         let parsed: serde_json::Value = serde_json::from_str(&help).expect("json help must parse");
         assert_eq!(parsed["result"]["code"], "help");
         assert_eq!(parsed["result"]["help"]["scope"], "one_level");
+        assert_eq!(parsed["result"]["help"]["command_path"], "agent-cli");
+        assert!(parsed["result"]["help"].get("code").is_none());
+        assert!(parsed["result"]["help"].get("versions").is_none());
+        assert!(
+            parsed["result"]["help"].get("description").is_none()
+                && parsed["result"]["help"]
+                    .get("description_markdown")
+                    .is_none(),
+            "default structured help must not embed long-form Markdown"
+        );
+        assert!(
+            !parsed.to_string().contains("### Interface Policy"),
+            "default structured help must not embed Clap long_about"
+        );
         assert!(
             !parsed.to_string().contains("api_key_secret"),
             "one-level json must not expand nested leaf flags"
         );
+    }
+
+    #[cfg(feature = "cli-help")]
+    #[test]
+    fn combined_version_or_help_handler_discloses_version_only_on_request() {
+        let cmd = clap::Command::new("Agent-First Custom")
+            .bin_name("custom")
+            .disable_version_flag(true)
+            .arg(
+                clap::Arg::new("output")
+                    .long("output")
+                    .default_value("json"),
+            )
+            .arg(
+                clap::Arg::new("version")
+                    .short('V')
+                    .long("version")
+                    .action(clap::ArgAction::SetTrue),
+            );
+        let config = agent_first_data::HelpConfig::output_aware();
+        let metadata = (
+            "custom",
+            Some("Agent-First Custom"),
+            "9.8.7",
+            Some("build-123"),
+        );
+
+        let version_raw = vec!["custom".to_string(), "--version".to_string()];
+        let version = agent_first_data::cli_handle_version_or_help_or_continue(
+            &version_raw,
+            &cmd,
+            &config,
+            metadata.0,
+            metadata.1,
+            metadata.2,
+            metadata.3,
+        )
+        .expect("valid version request")
+        .expect("version should render");
+        let version_event: serde_json::Value =
+            serde_json::from_str(&version).expect("version must be JSON");
+
+        let help_raw = vec!["custom".to_string(), "--help".to_string()];
+        let help = agent_first_data::cli_handle_version_or_help_or_continue(
+            &help_raw, &cmd, &config, metadata.0, metadata.1, metadata.2, metadata.3,
+        )
+        .expect("valid help request")
+        .expect("help should render");
+        let help_event: serde_json::Value = serde_json::from_str(&help).expect("help must be JSON");
+        assert_eq!(version_event["result"]["version"], "9.8.7");
+        assert_eq!(version_event["result"]["build"], "build-123");
+        assert_eq!(help_event["result"]["help"]["command_path"], "custom");
+        assert!(help_event["result"]["help"].get("versions").is_none());
+        assert!(!help.contains("9.8.7"));
+        assert!(!help.contains("build-123"));
     }
 
     #[cfg(feature = "cli-help")]
@@ -968,7 +1207,7 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("json help should render");
@@ -976,7 +1215,14 @@ mod tests {
         assert_eq!(parsed["result"]["code"], "help");
         assert_eq!(parsed["result"]["help"]["scope"], "recursive");
         assert!(
-            parsed.to_string().contains("api_key_secret"),
+            parsed["result"]["help"].get("description").is_none()
+                && parsed["result"]["help"]
+                    .get("description_markdown")
+                    .is_none(),
+            "recursive structured help must not embed long-form Markdown"
+        );
+        assert!(
+            parsed.to_string().contains("--api-key-secret"),
             "recursive json export must include nested flags"
         );
     }
@@ -989,11 +1235,13 @@ mod tests {
             "agent-cli".to_string(),
             "--help".to_string(),
             "--recursive".to_string(),
+            "--output".to_string(),
+            "plain".to_string(),
         ];
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("recursive plain help should render");
@@ -1016,7 +1264,7 @@ mod tests {
             agent_first_data::cli_handle_help_or_continue(
                 &raw,
                 &cmd,
-                &agent_first_data::HelpConfig::human_cli_default(),
+                &agent_first_data::HelpConfig::output_aware(),
             )
             .expect("valid non-help request")
             .is_none(),
@@ -1036,7 +1284,7 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("service help should render");
@@ -1064,7 +1312,7 @@ mod tests {
             agent_first_data::cli_handle_help_or_continue(
                 &raw,
                 &cmd,
-                &agent_first_data::HelpConfig::human_cli_default(),
+                &agent_first_data::HelpConfig::output_aware(),
             )
             .expect("valid non-helper request")
             .is_none(),
@@ -1081,7 +1329,7 @@ mod tests {
             agent_first_data::cli_handle_help_or_continue(
                 &raw,
                 &cmd,
-                &agent_first_data::HelpConfig::human_cli_default(),
+                &agent_first_data::HelpConfig::output_aware(),
             )
             .expect("valid non-helper request")
             .is_none(),
@@ -1102,17 +1350,20 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("markdown help should render");
         assert!(
             help.contains(&format!(
                 "# {} - {}",
-                env!("DISPLAY_NAME"),
-                env!("CARGO_PKG_DESCRIPTION")
+                "agent-cli", "Minimal agent-first CLI example"
             )),
             "markdown heading must use display name and Cargo package description"
+        );
+        assert!(
+            help.contains("### Interface Policy"),
+            "Markdown help must preserve the full long-form description"
         );
         assert!(help.contains("```text"), "markdown must wrap clap help");
         assert_eq!(
@@ -1141,14 +1392,11 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("markdown help should render");
-        assert!(
-            help.contains(&format!("# {}", env!("DISPLAY_NAME"))),
-            "markdown must have heading"
-        );
+        assert!(help.contains("# agent-cli"), "markdown must have heading");
         assert!(help.contains("```text"), "markdown must wrap clap help");
         assert_eq!(
             help.matches("Agent-facing CLI surfaces should keep stdout structured.")
@@ -1159,6 +1407,10 @@ mod tests {
         assert!(
             help.contains("--api-key-secret"),
             "recursive markdown export must include nested flags"
+        );
+        assert!(
+            !help.contains("Print this message or the help of the given subcommand"),
+            "Markdown must not resurrect clap's help pseudo-command"
         );
     }
 
@@ -1174,7 +1426,7 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("json help should render");
@@ -1182,7 +1434,7 @@ mod tests {
             serde_json::from_str(&help).expect("inline json help must parse");
         assert_eq!(parsed["result"]["code"], "help");
         assert_eq!(parsed["result"]["help"]["scope"], "one_level");
-        assert_eq!(parsed["result"]["help"]["name"], env!("DISPLAY_NAME"));
+        assert_eq!(parsed["result"]["help"]["name"], "agent-cli");
     }
 
     #[cfg(feature = "cli-help")]
@@ -1198,7 +1450,7 @@ mod tests {
         let err = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect_err("invalid help output must return error");
         assert_eq!(err["kind"], "error");
@@ -1224,7 +1476,7 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("json help should render");
@@ -1249,7 +1501,7 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("yaml help should render");
@@ -1271,7 +1523,7 @@ mod tests {
         let event = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect_err("invalid help output must fail");
         assert_eq!(event["kind"], "error");
@@ -1292,7 +1544,7 @@ mod tests {
         let err = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect_err("missing help output value must return error");
         assert_eq!(err["kind"], "error");
@@ -1317,7 +1569,7 @@ mod tests {
         let err = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect_err("missing help output value must return error");
         assert_eq!(err["kind"], "error");
@@ -1346,7 +1598,7 @@ mod tests {
         let help = agent_first_data::cli_handle_help_or_continue(
             &raw,
             &cmd,
-            &agent_first_data::HelpConfig::human_cli_default(),
+            &agent_first_data::HelpConfig::output_aware(),
         )
         .expect("valid help request")
         .expect("markdown help should render");
@@ -1365,7 +1617,7 @@ mod tests {
             agent_first_data::cli_handle_help_or_continue(
                 &raw,
                 &cmd,
-                &agent_first_data::HelpConfig::human_cli_default(),
+                &agent_first_data::HelpConfig::output_aware(),
             )
             .expect("valid non-help request")
             .is_none(),
@@ -1413,10 +1665,7 @@ mod tests {
                 format: agent_first_data::HelpFormat::Markdown,
             },
         );
-        assert!(
-            md.contains(&format!("# {}", env!("DISPLAY_NAME"))),
-            "markdown must include root"
-        );
+        assert!(md.contains("# agent-cli"), "markdown must include root");
         assert!(
             !md.contains("--api-key-secret"),
             "one-level markdown must not include nested flags"
@@ -1503,6 +1752,64 @@ mod tests {
 
     #[cfg(feature = "cli-help")]
     #[test]
+    fn short_help_flag_is_left_to_the_application() {
+        // `-h` is not a help request: it would be a byte-identical alias for
+        // `--help`, so AFDATA leaves the short for applications that spend it on
+        // something else (`--host`, the psql/mysql convention).
+        let cmd = clap::Command::new("tool")
+            .disable_help_flag(true)
+            .arg(
+                clap::Arg::new("output")
+                    .long("output")
+                    .default_value("json"),
+            )
+            .arg(
+                clap::Arg::new("host")
+                    .short('h')
+                    .long("host")
+                    .value_name("HOST"),
+            );
+        let raw = vec!["tool".to_string(), "-h".to_string(), "myhost".to_string()];
+        assert!(
+            agent_first_data::cli_handle_help_or_continue(
+                &raw,
+                &cmd,
+                &agent_first_data::HelpConfig::output_aware(),
+            )
+            .expect("-h must not be a malformed help request")
+            .is_none(),
+            "-h must fall through to the application's own parser"
+        );
+
+        let long = vec!["tool".to_string(), "--help".to_string()];
+        let rendered = agent_first_data::cli_handle_help_or_continue(
+            &long,
+            &cmd,
+            &agent_first_data::HelpConfig::output_aware(),
+        )
+        .expect("--help must render")
+        .expect("--help is always a help request");
+        let event: serde_json::Value =
+            serde_json::from_str(&rendered).expect("structured help must parse");
+        let arguments = event["result"]["help"]["arguments"]
+            .as_array()
+            .expect("help lists arguments");
+        assert!(
+            arguments
+                .iter()
+                .any(|arg| arg["name"] == "--host" && arg["short"] == "-h"),
+            "an application short must survive in the model: {arguments:?}"
+        );
+        assert!(
+            arguments
+                .iter()
+                .any(|arg| arg["name"] == "--help" && arg.get("short").is_none()),
+            "--help must be advertised without a short: {arguments:?}"
+        );
+    }
+
+    #[cfg(feature = "cli-help")]
+    #[test]
     fn help_json_schema_is_parseable() {
         let cmd = Cli::command();
         let json = agent_first_data::cli_render_help_with_options(
@@ -1513,12 +1820,34 @@ mod tests {
                 format: agent_first_data::HelpFormat::Json,
             },
         );
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("help json must parse");
-        assert_eq!(parsed["code"], "help");
+        let event: serde_json::Value = serde_json::from_str(&json).expect("help json must parse");
+        // Structured help is a protocol-v1 result from every entry point, not a
+        // bare schema object.
+        assert_eq!(event["kind"], "result");
+        assert_eq!(event["result"]["code"], "help");
+        let parsed = &event["result"]["help"];
         assert_eq!(parsed["scope"], "one_level");
-        assert_eq!(parsed["versions"]["afdata"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(parsed["name"], env!("DISPLAY_NAME"));
-        assert_eq!(parsed["subcommands"][0]["arguments"], serde_json::json!([]));
+        assert_eq!(parsed["command_path"], "agent-cli");
+        assert_eq!(parsed["name"], "agent-cli");
+        assert!(
+            parsed["arguments"]
+                .as_array()
+                .is_some_and(|arguments| arguments.iter().any(|arg| arg["name"] == "--version")),
+            "structured help must include clap's lazy --version flag"
+        );
+        assert!(
+            parsed["subcommands"][0].get("arguments").is_none(),
+            "compact one-level summaries must omit empty argument metadata"
+        );
+        assert!(
+            parsed.get("code").is_none()
+                && parsed.get("versions").is_none()
+                && parsed.get("path").is_none()
+                && parsed.get("long_about").is_none()
+                && parsed.get("description").is_none()
+                && parsed.get("description_markdown").is_none(),
+            "structured help must omit redundant paths and long-form Markdown"
+        );
     }
 
     #[cfg(feature = "cli-help")]
@@ -1535,20 +1864,17 @@ mod tests {
         );
         assert!(yaml.starts_with("---"), "yaml help must start with marker");
         assert!(
-            yaml.contains("code: \"help\""),
-            "yaml help must include code"
-        );
-        assert!(
             yaml.contains("scope: \"recursive\""),
             "yaml help must include recursive scope"
         );
         assert!(
-            yaml.contains("versions:") && yaml.contains("afdata:"),
-            "yaml help must include the AFDATA version"
+            yaml.contains("command_path: \"agent-cli\""),
+            "yaml help must include the invocable command path"
         );
+        assert!(!yaml.contains("versions:"));
         assert!(
-            yaml.contains("api_key_secret"),
-            "raw help schema must preserve secret-like argument ids"
+            yaml.contains("--api-key-secret"),
+            "raw help schema must preserve secret-like flag names"
         );
     }
 

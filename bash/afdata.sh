@@ -445,7 +445,7 @@ afdata_args_parse() {
 
     if [ "$_afdata_internal_positional_only" = false ]; then
       case "$_afdata_internal_arg" in
-        -h|--help)
+        --help)
           afdata_args_help
           exit 0
           ;;

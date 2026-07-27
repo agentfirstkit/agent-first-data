@@ -1,7 +1,7 @@
 """Minimal agent-first CLI — canonical pattern for tools built on agent-first-data.
 
-Demonstrates: human --help (one-level) plus orthogonal --recursive scope and
---output json|yaml|markdown format for full surface export, cli_parse_output,
+Demonstrates: output-aware --help (one-level) plus orthogonal --recursive scope
+and --output plain|json|yaml|markdown format for full surface export, cli_parse_output,
 cli_parse_log_filters, render, build_cli_error, --dry-run, and error hints.
 
 Run:  PYTHONPATH=. python3 examples/agent_cli.py --help
@@ -26,6 +26,7 @@ import sys
 
 from agent_first_data import (
     CliEmitter,
+    LogFilters,
     OutputFormat,
     LogLevel,
     build_cli_error,
@@ -39,7 +40,6 @@ from agent_first_data import (
 )
 
 AGENT_CLI_VERSION = "0.13.0"
-AFDATA_VERSION = "0.15.0"
 HELP_DEFAULT_API_KEY_SECRET = "sk-help-default"
 PING_HOST_ENV = "PING_HOST"
 
@@ -64,7 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Minimal agent-first CLI example",
         add_help=False,  # we handle --help ourselves
     )
-    parser.add_argument("--help", "-h", action="store_true", help="Show this help (one-level)")
+    parser.add_argument("--help", action="store_true", help="Show this help (one-level)")
+    parser.add_argument("--version", action="store_true", help="Print version")
     parser.add_argument("--recursive", action="store_true", help="With --help, expand the full command tree (a bare --recursive is ignored)")
     parser.add_argument("--output", default="json", help="Output format: json, yaml, plain; help also accepts markdown")
     parser.add_argument("--json", action="store_true", help="Equivalent to --output json")
@@ -75,15 +76,15 @@ def build_parser() -> argparse.ArgumentParser:
     subs = parser.add_subparsers(dest="command", parser_class=StrictArgumentParser)
 
     echo_p = subs.add_parser("echo", add_help=False, help="Echo back the input as structured output")
-    echo_p.add_argument("--help", "-h", action="store_true", help="Show help for echo")
+    echo_p.add_argument("--help", action="store_true", help="Show help for echo")
     echo_p.add_argument("--dry-run", action="store_true", help="Preview without executing")
 
     ping_p = subs.add_parser("ping", add_help=False, help="Ping a remote target")
-    ping_p.add_argument("--help", "-h", action="store_true", help="Show help for ping")
+    ping_p.add_argument("--help", action="store_true", help="Show help for ping")
     ping_p.add_argument("--host", help="Target host to ping")
 
     cancel_p = subs.add_parser("cancel", add_help=False, help="Return a tool-defined cancellation error")
-    cancel_p.add_argument("--help", "-h", action="store_true", help="Show help for cancel")
+    cancel_p.add_argument("--help", action="store_true", help="Show help for cancel")
 
     return parser
 
@@ -110,7 +111,7 @@ def format_complete_help(parser: argparse.ArgumentParser) -> str:
                 lines.append(f"{parser.prog} {name}")
                 lines.append("=" * 60)
                 lines.append(sub.format_help())
-    return "\n".join(lines) + f"\nAFDATA: {AFDATA_VERSION}\n"
+    return "\n".join(lines) + "\n"
 
 
 def subcommand_about(parser: argparse.ArgumentParser, name: str) -> str:
@@ -145,18 +146,18 @@ def format_markdown_help(parser: argparse.ArgumentParser, command: str | None, r
     sub = find_subparser(parser, command)
     if sub is not None:
         heading = markdown_heading("#", parser.prog, command, subcommand_about(parser, command))
-        return f"{heading}\n\n```text\n{sub.format_help()}{leaf_global_options_note()}```\n\nAFDATA: {AFDATA_VERSION}\n"
+        return f"{heading}\n\n```text\n{sub.format_help()}{leaf_global_options_note()}```\n"
 
     root_heading = markdown_heading("#", parser.prog, None, parser.description or "")
     lines = [root_heading, "", "```text", help_without_description(parser).rstrip(), "```"]
     if not recursive:
-        return "\n".join(lines) + f"\n\nAFDATA: {AFDATA_VERSION}\n"
+        return "\n".join(lines) + "\n"
     for action in parser._subparsers._actions:
         if isinstance(action, argparse._SubParsersAction):
             for name, choice in action.choices.items():
                 sub_heading = markdown_heading("##", parser.prog, name, subcommand_about(parser, name))
                 lines.extend(["", sub_heading, "", "```text", choice.format_help().rstrip(), "```"])
-    return "\n".join(lines) + f"\n\nAFDATA: {AFDATA_VERSION}\n"
+    return "\n".join(lines) + "\n"
 
 
 def find_subparser(parser: argparse.ArgumentParser, command: str | None) -> argparse.ArgumentParser | None:
@@ -235,7 +236,7 @@ def bootstrap_error(fmt: OutputFormat, message: str, hint: str | None = None, ex
 
 
 def help_requested(raw: list[str]) -> bool:
-    return "--help" in raw or "-h" in raw
+    return "--help" in raw
 
 
 def recursive_requested(raw: list[str]) -> bool:
@@ -244,16 +245,21 @@ def recursive_requested(raw: list[str]) -> bool:
     return "--recursive" in raw
 
 
-def log_enabled(filters: list[str], category: str) -> bool:
-    """`all` (what --verbose expands to) is the single wildcard word."""
-    return any(f in (category, "all") for f in filters)
+def log_enabled(filters: LogFilters, category: str) -> bool:
+    """Delegate to the library matcher.
+
+    `LogFilters.enabled` owns the semantics — opt-in when empty, `all` as the
+    single wildcard word (what --verbose expands to), and prefix matching.
+    Reimplementing it here would silently drift from the other three SDKs.
+    """
+    return filters.enabled(category)
 
 
 def build_request_log(command: str | None) -> dict:
     return json_log({"level": "info", "message": "request", "category": "request", "command": command or "none"}).build().to_dict()
 
 
-def build_startup_log(raw: list[str], args, log: list[str]) -> dict:
+def build_startup_log(raw: list[str], args, log: LogFilters) -> dict:
     return json_log({
         "level": "info",
         "message": "startup",
@@ -263,12 +269,12 @@ def build_startup_log(raw: list[str], args, log: list[str]) -> dict:
         "parsed": {
             "command": args.command or "none",
             "output": args.output,
-            "log": log,
+            "log": list(log),
             "verbose": args.verbose,
         },
         "effective_config": {
             "output": args.output,
-            "log": log,
+            "log": list(log),
         },
         "env": startup_env_snapshot(),
     }).build().to_dict()
@@ -320,58 +326,155 @@ def redact_help_default(name: str, value: str) -> str:
     return value
 
 
-def global_help_options(include_recursive: bool) -> list[dict]:
-    """Global flags documented in the structured (json/yaml) help schema so it
-    advertises the help surface — the scope modifier and output formats — like
-    the plain and markdown formats do. Only the target command carries it; a leaf
-    target omits --recursive (nothing to expand)."""
-    opts = [
-        {"name": "--output", "help": "Output format: json, yaml, plain; help also accepts markdown"},
-        {"name": "--json", "help": "Equivalent to --output json"},
-        {"name": "--log", "help": "Log categories (comma-separated); --log all (or --verbose) enables every category"},
-        {"name": "--verbose", "help": "Enable all log categories (shorthand for --log all)"},
-        {
-            "name": "--api-key-secret",
-            "help": "API key used by examples",
-            "default_values": [redact_help_default("--api-key-secret", HELP_DEFAULT_API_KEY_SECRET)],
-        },
+def compact_usage(parser: argparse.ArgumentParser) -> str | None:
+    """Return usage relative to parser.prog; command_path carries the prefix."""
+    rendered = parser.format_usage().strip()
+    prefix = f"usage: {parser.prog}"
+    suffix = rendered.removeprefix(prefix).strip()
+    return suffix or None
+
+
+def argument_schema(action: argparse.Action) -> dict | None:
+    if isinstance(action, argparse._SubParsersAction):
+        return None
+    option_strings = action.option_strings
+    if option_strings:
+        long_name = next((name for name in option_strings if name.startswith("--")), None)
+        name = long_name or option_strings[0]
+    else:
+        name = action.metavar or action.dest.upper()
+
+    out: dict = {"name": name}
+    short = next(
+        (option for option in option_strings if option.startswith("-") and not option.startswith("--")),
+        None,
+    )
+    if short is not None and short != name:
+        out["short"] = short
+    if action.help and action.help is not argparse.SUPPRESS:
+        out["help"] = action.help
+    if action.required:
+        out["required"] = True
+    if isinstance(action, (argparse._AppendAction, argparse._CountAction)):
+        out["repeatable"] = True
+
+    takes_value = option_strings and action.nargs != 0
+    if takes_value:
+        out["value"] = action.metavar or action.dest.upper()
+
+    default = action.default
+    if (
+        default is not None
+        and default is not False
+        and default != ""
+        and default != argparse.SUPPRESS
+    ):
+        out["default"] = (
+            "***" if action.dest.endswith("_secret") else str(default)
+        )
+    return out
+
+
+def command_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    enrich_target_help: bool = False,
+) -> list[dict]:
+    arguments = [
+        schema
+        for action in parser._actions
+        if (schema := argument_schema(action)) is not None
     ]
-    if include_recursive:
-        opts.append({"name": "--recursive", "help": "With --help, expand the full command tree (a bare --recursive is ignored)"})
-    opts.append({"name": "--help", "help": "Show this help (one-level)"})
-    return opts
+    if enrich_target_help:
+        for argument in arguments:
+            if argument["name"] == "--help":
+                argument["help"] = (
+                    "Show help; add --output plain|json|yaml|markdown "
+                    "to choose the format"
+                )
+    return arguments
+
+
+def command_schema(
+    parser: argparse.ArgumentParser,
+    *,
+    name: str,
+    about: str,
+    recursive: bool,
+    enrich_target_help: bool = False,
+) -> dict:
+    out: dict = {"name": name}
+    if about:
+        out["about"] = about
+    if usage := compact_usage(parser):
+        out["usage"] = usage
+    arguments = command_arguments(
+        parser,
+        enrich_target_help=enrich_target_help,
+    )
+    if arguments:
+        out["arguments"] = arguments
+    if recursive:
+        subcommands = subcommand_schemas(parser, recursive=True)
+        if subcommands:
+            out["subcommands"] = subcommands
+    return out
+
+
+def subcommand_schemas(parser: argparse.ArgumentParser, *, recursive: bool) -> list[dict]:
+    commands: list[dict] = []
+    if parser._subparsers is None:
+        return commands
+    for action in parser._subparsers._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        for name, choice in action.choices.items():
+            if recursive:
+                commands.append(
+                    command_schema(
+                        choice,
+                        name=name,
+                        about=subcommand_about(parser, name),
+                        recursive=True,
+                    )
+                )
+            else:
+                item: dict = {"name": name}
+                if about := subcommand_about(parser, name):
+                    item["about"] = about
+                commands.append(item)
+    return commands
 
 
 def help_schema(parser: argparse.ArgumentParser, command: str | None, scope: str) -> dict:
     sub = find_subparser(parser, command)
     if sub is not None:
+        model = command_schema(
+            sub,
+            name=command,
+            about=subcommand_about(parser, command),
+            recursive=scope == "recursive",
+            enrich_target_help=True,
+        )
         return {
-            "code": "help",
             "scope": scope,
-            "versions": {"afdata": AFDATA_VERSION},
-            "name": command,
             "command_path": f"{parser.prog} {command}",
-            "usage": sub.format_usage().strip(),
-            "help": sub.format_help(),
-            "options": global_help_options(False),
+            **model,
         }
-    commands = []
-    for action in parser._subparsers._actions:
-        if isinstance(action, argparse._SubParsersAction):
-            for name, choice in action.choices.items():
-                item = {"name": name, "usage": choice.format_usage().strip()}
-                if scope == "recursive":
-                    item["help"] = choice.format_help()
-                commands.append(item)
+    model = command_schema(
+        parser,
+        name=parser.prog,
+        about=parser.description or "",
+        recursive=False,
+    )
+    model["subcommands"] = subcommand_schemas(
+        parser,
+        recursive=scope == "recursive",
+    )
     return {
-        "code": "help",
         "scope": scope,
-        "versions": {"afdata": AFDATA_VERSION},
-        "name": parser.prog,
         "command_path": parser.prog,
-        "usage": parser.format_usage().strip(),
-        "options": global_help_options(True),
-        "commands": commands,
+        **model,
     }
 
 
@@ -390,13 +493,13 @@ def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
     if conflict is not None:
         sys.exit(bootstrap_error(OutputFormat.JSON, conflict, hint="valid help output formats: plain, markdown, json, yaml"))
 
-    if not explicit or value == "plain":
+    if value == "plain":
         if sub is not None:
-            text = sub.format_help() + leaf_global_options_note() + f"\nAFDATA: {AFDATA_VERSION}\n"
+            text = sub.format_help() + leaf_global_options_note()
         elif recursive:
             text = format_complete_help(parser)
         else:
-            text = parser.format_help() + f"\nAFDATA: {AFDATA_VERSION}\n"
+            text = parser.format_help()
         print(text, end="" if text.endswith("\n") else "\n")
         return
 
@@ -409,18 +512,20 @@ def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
         fmt = cli_parse_output(value)
     except ValueError as e:
         sys.exit(bootstrap_error(OutputFormat.JSON, str(e)))
-    # Successful help output (structured) is stdout: it is the help "payload",
-    # not a diagnostic. --help/--version text never routes through the emitter.
-    print(render(help_schema(parser, args.command, scope), fmt))
+    event = (
+        json_result({"code": "help", "help": help_schema(parser, args.command, scope)})
+        .trace({})
+        .build()
+    )
+    print(render(event.to_dict(), fmt))
 
 
 def main() -> None:
     parser = build_parser()
     raw = sys.argv[1:]
 
-    # --version is now a protocol-v1 version envelope (JSON by default), and
-    # --help TEXT stays conventional text; both are handled here, before the
-    # finite emitter is involved, and go to stdout unchanged.
+    # --version and structured help are protocol-v1 result envelopes (JSON by
+    # default). Explicit plain/markdown help remains raw text.
     try:
         # This example's own value-taking global flags: their space-separated
         # value must not be mistaken for the subcommand boundary that stops the
@@ -433,6 +538,7 @@ def main() -> None:
             "Agent CLI Example",
             AGENT_CLI_VERSION,
             None,
+            default_format=OutputFormat.JSON,
         )
     except ValueError as e:
         sys.exit(bootstrap_error(OutputFormat.JSON, str(e), hint="valid version output formats: json, yaml, plain"))
@@ -455,8 +561,8 @@ def main() -> None:
     if args.json:
         args.output = "json"
 
-    # --help is one-level plain; --recursive expands the tree and --output picks
-    # the format. A bare --recursive (no --help) is ignored and parsing continues.
+    # --help inherits the normal JSON output default; --recursive expands the
+    # tree and --output picks the format. A bare --recursive is ignored.
     if args.help:
         print_help(parser, args, raw)
         return
@@ -499,10 +605,10 @@ def main() -> None:
         # explicit trace, so build the event and hand it to finish (finish_result
         # would build a default-trace result instead).
         if args.dry_run:
-            preview = json_result({"action": "echo", "log": log}).trace({"duration_ms": 0}).build()
+            preview = json_result({"action": "echo", "log": list(log)}).trace({"duration_ms": 0}).build()
             sys.exit(emitter.finish(preview, 0))
 
-        sys.exit(emitter.finish_result({"action": "echo", "log": log}))
+        sys.exit(emitter.finish_result({"action": "echo", "log": list(log)}))
 
     elif args.command == "ping":
         # Step 5: a rich protocol v1 error (hint + trace) → build event + finish.
@@ -542,7 +648,7 @@ def test_recursive_markdown_export_contains_all_subcommand_details():
     parser = build_parser()
     md = format_markdown_help(parser, None, True)
     assert "# agent-cli" in md, "markdown export must include root heading"
-    assert f"AFDATA: {AFDATA_VERSION}" in md, "markdown export must include AFDATA version"
+    assert "AFDATA:" not in md, "help must leave version metadata to --version"
     assert "--dry-run" in md, "recursive markdown export must include echo's --dry-run"
     assert "--host" in md, "recursive markdown export must include ping's --host"
 
@@ -569,8 +675,9 @@ def test_one_level_help_schema_omits_child_flags():
     parser = build_parser()
     schema = help_schema(parser, None, "one_level")
     assert schema["scope"] == "one_level"
-    assert not any("help" in command for command in schema["commands"]), (
-        "one-level schema must not expand child help"
+    assert schema["command_path"] == "agent-cli"
+    assert not any("arguments" in command for command in schema["subcommands"]), (
+        "one-level schema must not expand child arguments"
     )
 
 
@@ -597,10 +704,11 @@ def test_recursive_help_contains_all_subcommand_details():
 def test_help_schema_is_recursive_export():
     parser = build_parser()
     schema = help_schema(parser, None, "recursive")
-    assert schema["code"] == "help"
     assert schema["scope"] == "recursive"
-    assert schema["versions"] == {"afdata": AFDATA_VERSION}
-    assert any("help" in command for command in schema["commands"])
+    assert schema["command_path"] == "agent-cli"
+    assert "code" not in schema
+    assert "versions" not in schema
+    assert any("arguments" in command for command in schema["subcommands"])
 
 
 def test_subcommand_help_scoped():
@@ -715,13 +823,15 @@ def test_parse_log_normalizes():
 
 
 def test_log_enabled_wildcards():
-    assert not log_enabled([], "startup")
-    assert log_enabled(["startup"], "startup")
-    assert not log_enabled(["startup"], "request")
+    assert not log_enabled(cli_parse_log_filters([]), "startup")
+    assert log_enabled(cli_parse_log_filters(["startup"]), "startup")
+    assert not log_enabled(cli_parse_log_filters(["startup"]), "request")
+    # Prefix matching is the library's contract, shared by all four SDKs.
+    assert log_enabled(cli_parse_log_filters(["start"]), "startup")
     # `all` is the single wildcard word; `*` is not special.
-    assert log_enabled(["all"], "startup")
-    assert log_enabled(["all"], "request")
-    assert not log_enabled(["*"], "request")
+    assert log_enabled(cli_parse_log_filters(["all"]), "startup")
+    assert log_enabled(cli_parse_log_filters(["all"]), "request")
+    assert not log_enabled(cli_parse_log_filters(["*"]), "request")
 
 
 def test_log_lines_are_category_tagged():
@@ -731,7 +841,7 @@ def test_log_lines_are_category_tagged():
     assert req["log"]["command"] == "none"
     parser = build_parser()
     args, _ = parser.parse_known_args(["--output", "yaml", "--log", "startup", "--api-key-secret", "sk-test", "ping"])
-    start = build_startup_log(["--output", "yaml", "--log", "startup", "--api-key-secret", "sk-test", "ping"], args, ["startup"])
+    start = build_startup_log(["--output", "yaml", "--log", "startup", "--api-key-secret", "sk-test", "ping"], args, cli_parse_log_filters(["startup"]))
     assert start["kind"] == "log"
     assert start["log"]["category"] == "startup"
     assert start["log"]["argv"] == ["--output", "yaml", "--log", "startup", "--api-key-secret", "***", "ping"]

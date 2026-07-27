@@ -44,13 +44,11 @@ Options:
       --stderr-file <PATH>
           Redirect stderr to this file
 
-  -h, --help
-          Print help. Add --recursive to expand every nested subcommand; add --output json|yaml|markdown to render this help in another format.
+      --help
+          Print help. Add --recursive to expand every nested subcommand; add --output plain|json|yaml|markdown to choose the format.
 
-  -V, --version
+      --version
           Print version
-
-AFDATA: 0.22.0
 ```
 
 ## afdata lint - Lint a JSON/JSONL stream, a JSON Schema, or a document for deterministic AFDATA issues
@@ -58,7 +56,7 @@ AFDATA: 0.22.0
 JSON/JSONL input (the default when no document format is detected) keeps its existing dual-mode behavior: a single JSON value, or one value per line. `--input-format toml|yaml|yml|dotenv|env|ini` (or a recognized file extension) lints a document as a single value instead — the AFDATA naming/suffix rules apply equally there. `toml-frontmatter`/`yaml-frontmatter` address only the `+++`/`---` metadata block of a Markdown file, leaving its body untouched (never auto-detected — the format must be named explicitly).
 
 ```text
-Usage: lint [OPTIONS] <INPUT>
+Usage: afdata lint [OPTIONS] <INPUT>
 
 Arguments:
   <INPUT>
@@ -75,7 +73,7 @@ Options:
 ## afdata validate - Validate one protocol event or a finite protocol event stream (JSON only)
 
 ```text
-Usage: validate [OPTIONS] <INPUT>
+Usage: afdata validate [OPTIONS] <INPUT>
 
 Arguments:
   <INPUT>
@@ -95,7 +93,7 @@ Options:
 ## afdata render - Render JSON or JSONL through AFDATA output formatting and redaction (JSON only)
 
 ```text
-Usage: render [OPTIONS] <INPUT>
+Usage: afdata render [OPTIONS] <INPUT>
 
 Arguments:
   <INPUT>
@@ -112,7 +110,7 @@ Options:
 ## afdata emit - Emit one AFDATA event from shell-safe scalar arguments
 
 ```text
-Usage: emit <COMMAND>
+Usage: afdata emit <COMMAND>
 
 Commands:
   log     Emit a diagnostic log event (stderr under the default split)
@@ -127,7 +125,7 @@ Options:
 ### afdata emit log - Emit a diagnostic log event (stderr under the default split)
 
 ```text
-Usage: log <LEVEL> <MESSAGE>
+Usage: afdata emit log <LEVEL> <MESSAGE>
 
 Arguments:
   <LEVEL>
@@ -144,7 +142,7 @@ Options:
 ### afdata emit result - Emit a terminal result event (stdout under the default split)
 
 ```text
-Usage: result <MESSAGE>
+Usage: afdata emit result <MESSAGE>
 
 Arguments:
   <MESSAGE>
@@ -158,7 +156,7 @@ Options:
 ### afdata emit error - Emit a terminal error event and exit with status 1
 
 ```text
-Usage: error [OPTIONS] <CODE> <MESSAGE>
+Usage: afdata emit error [OPTIONS] <CODE> <MESSAGE>
 
 Arguments:
   <CODE>
@@ -181,7 +179,7 @@ Options:
 ## afdata shell - Export a sourceable shell authoring kit
 
 ```text
-Usage: shell <COMMAND>
+Usage: afdata shell <COMMAND>
 
 Commands:
   bash  Print the sourceable Bash authoring kit as raw Bash on stdout
@@ -194,7 +192,7 @@ Options:
 ### afdata shell bash - Print the sourceable Bash authoring kit as raw Bash on stdout
 
 ```text
-Usage: bash
+Usage: afdata shell bash
 
 Options:
   -h, --help
@@ -204,7 +202,7 @@ Options:
 ## afdata skill - Validate an Agent Skill, or manage the bundled Agent Skill
 
 ```text
-Usage: skill <COMMAND>
+Usage: afdata skill <COMMAND>
 
 Commands:
   validate   Validate a SKILL.md file or skill directory against the Agent Skills spec
@@ -220,7 +218,7 @@ Options:
 ### afdata skill validate - Validate a SKILL.md file or skill directory against the Agent Skills spec
 
 ```text
-Usage: validate <INPUT>
+Usage: afdata skill validate <INPUT>
 
 Arguments:
   <INPUT>
@@ -234,7 +232,7 @@ Options:
 ### afdata skill status - Report whether the bundled Agent Skill is installed for each target agent
 
 ```text
-Usage: status [OPTIONS]
+Usage: afdata skill status [OPTIONS]
 
 Options:
       --agent <AGENT>
@@ -257,7 +255,7 @@ Options:
 ### afdata skill install - Install the bundled Agent Skill for each target agent
 
 ```text
-Usage: install [OPTIONS]
+Usage: afdata skill install [OPTIONS]
 
 Options:
       --agent <AGENT>
@@ -283,7 +281,7 @@ Options:
 ### afdata skill uninstall - Uninstall the bundled Agent Skill for each target agent
 
 ```text
-Usage: uninstall [OPTIONS]
+Usage: afdata skill uninstall [OPTIONS]
 
 Options:
       --agent <AGENT>
@@ -311,7 +309,7 @@ Options:
 With no KEY, emits `{"code":"document","format":...,"value":...}` — the whole document. With KEY, adds `"key"` and narrows `"value"` to that dot-path. `_secret`-suffixed fields (and any `--secret-name`) are redacted to `"***"` anywhere in the output, including a directly-targeted secret leaf — use `value --reveal-secret` to read a secret's real value.
 
 ```text
-Usage: get [OPTIONS] <FILE> [KEY]
+Usage: afdata get [OPTIONS] <FILE> [KEY]
 
 Arguments:
   <FILE>
@@ -336,7 +334,7 @@ Options:
 Only scalars (string/bool/integer/float/null) are supported; arrays and objects are rejected, as are non-finite floats. A secret-named leaf is rejected unless `--reveal-secret` is passed. On failure, stdout is always empty — the error envelope goes to stderr instead (so `x=$(afdata value f k)` never captures a JSON error as data).
 
 ```text
-Usage: value [OPTIONS] <FILE> <KEY>
+Usage: afdata value [OPTIONS] <FILE> <KEY>
 
 Arguments:
   <FILE>
@@ -367,7 +365,7 @@ Options:
 With no KEY, enumerates the document's top-level children. Each line is a full dot-path from the root (grammar-escaped), so it can be piped straight back into `get`/`value`/`unset`/… or extended with `"$p.field"`. A scalar leaf (nothing to enumerate) is an error, the dual of `value`. On failure, stdout is always empty (same contract as `value`). Rejects `--output json` — read a container's structured JSON via `get` instead.
 
 ```text
-Usage: paths [OPTIONS] <FILE> [KEY]
+Usage: afdata paths [OPTIONS] <FILE> [KEY]
 
 Arguments:
   <FILE>
@@ -395,7 +393,7 @@ Options:
 The dual of `paths`: raw, unescaped, unprefixed key names/indices — exactly what a package manager or another tool expects (`lodash.merge`, not `dependencies.lodash\.merge`). Never feed this back into afdata's own dot-path arguments; use `paths` for that. Otherwise identical contract to `paths` (KEY, `--input-format`, `--missing-ok`, `-0`/`--null`, scalar-leaf error, empty stdout on failure, rejects `--output json`).
 
 ```text
-Usage: keys [OPTIONS] <FILE> [KEY]
+Usage: afdata keys [OPTIONS] <FILE> [KEY]
 
 Arguments:
   <FILE>
@@ -423,7 +421,7 @@ Options:
 A bare VALUE is always a string — zero coercion, so `007` or a leading-zero-bearing ID is never silently reinterpreted. Overwriting an *existing* scalar of a different type with a bare VALUE is an argument error (pass `--value-type` to keep the type, or `--value-type string` to convert explicitly); a brand-new key never needs `--value-type`. `--value-type json` is the only entry point for arrays, objects, and an exact-type scalar. Idempotency: setting an already-current value is not special-cased — it just writes the same value again.
 
 ```text
-Usage: set [OPTIONS] <FILE> <KEY> [VALUE]
+Usage: afdata set [OPTIONS] <FILE> <KEY> [VALUE]
 
 Arguments:
   <FILE>
@@ -454,7 +452,7 @@ Options:
 Idempotency: removing an absent KEY is an error (`document_path_not_found`), not a no-op — script around it with `afdata unset ... || true` if absence should be silent.
 
 ```text
-Usage: unset [OPTIONS] <FILE> <KEY>
+Usage: afdata unset [OPTIONS] <FILE> <KEY>
 
 Arguments:
   <FILE>
@@ -476,7 +474,7 @@ Options:
 Extra `FIELD=VALUE` pairs are always strings (the same zero-coercion rule as `set`'s bare VALUE — `add` does not invent its own type syntax; write an exact type afterwards with `set --value-type`). Idempotency: adding a SLUG that already exists is an error (`document_slug_exists`), not a no-op or overwrite.
 
 ```text
-Usage: add [OPTIONS] --slug-field <SLUG_FIELD> <FILE> <KEY> <SLUG> [FIELD=VALUE]...
+Usage: afdata add [OPTIONS] --slug-field <SLUG_FIELD> <FILE> <KEY> <SLUG> [FIELD=VALUE]...
 
 Arguments:
   <FILE>
@@ -507,7 +505,7 @@ Options:
 Idempotency: removing a SLUG that does not exist is an error (`document_slug_not_found`), not a no-op.
 
 ```text
-Usage: remove [OPTIONS] --slug-field <SLUG_FIELD> <FILE> <KEY> <SLUG>
+Usage: afdata remove [OPTIONS] --slug-field <SLUG_FIELD> <FILE> <KEY> <SLUG>
 
 Arguments:
   <FILE>

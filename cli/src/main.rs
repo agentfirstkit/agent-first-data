@@ -41,7 +41,6 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
         remove). `shell bash` exports the sourceable Bash authoring kit. Every \
         data command's first positional is its input; `-` reads stdin. Mutation \
         commands (set/unset/add/remove) never read stdin.",
-    after_help = concat!("AFDATA: ", env!("CARGO_PKG_VERSION")),
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -473,11 +472,27 @@ fn main() -> ExitCode {
             }
         };
 
-    // Handle --version through AFDATA so `--version --output json` works too.
     let build = match env!("GIT_SHA") {
         "unknown" => None,
         sha => Some(sha),
     };
+    #[cfg(feature = "cli-help")]
+    match agent_first_data::cli_handle_version_or_help_or_continue(
+        &raw,
+        &Cli::command(),
+        &agent_first_data::HelpConfig::output_aware(),
+        "afdata",
+        Some(env!("DISPLAY_NAME")),
+        env!("CARGO_PKG_VERSION"),
+        build,
+    ) {
+        Ok(Some(output)) => return write_text_exit(&output, 0),
+        Ok(None) => {}
+        Err(err) => return emit_event(err, OutputFormat::Json, 2),
+    }
+
+    // Without cli-help, still intercept version before clap's plain-text exit.
+    #[cfg(not(feature = "cli-help"))]
     match agent_first_data::cli_handle_version_or_continue(
         &raw,
         &Cli::command(),
@@ -491,25 +506,35 @@ fn main() -> ExitCode {
         Err(err) => return emit_event(err, OutputFormat::Json, 2),
     }
 
-    // Handle --help before clap so `--help --output markdown` works.
-    #[cfg(feature = "cli-help")]
-    match agent_first_data::cli_handle_help_or_continue(
-        &raw,
-        &Cli::command(),
-        &agent_first_data::HelpConfig::human_cli_default(),
-    ) {
-        Ok(Some(help)) => return write_text_exit(&help, 0),
-        Ok(None) => {}
-        Err(err) => return emit_event(err, OutputFormat::Json, 2),
-    }
-
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {
+            // With `cli-help`, `--help`/`--version` never reach clap — the AFDATA
+            // pre-parser answers both. So anything clap still wants to display
+            // help for is a spelling AFDATA deliberately does not accept (`-h`,
+            // `-V`), and clap's renderer would answer in plain text at exit 0,
+            // bypassing the output contract. Report it as a structured error.
+            #[cfg(feature = "cli-help")]
+            if err.kind() == clap::error::ErrorKind::DisplayHelp
+                || err.kind() == clap::error::ErrorKind::DisplayVersion
+            {
+                let event = build_cli_error(
+                    "unsupported flag: afdata spells these out in full",
+                    Some("try: afdata --help (add --output plain for text), or afdata --version"),
+                );
+                return emit_event(event, OutputFormat::Json, 2);
+            }
+            // Without `cli-help` there is no help pre-parser, so clap is the
+            // legitimate renderer for `--help` and its plain text is the answer.
+            #[cfg(not(feature = "cli-help"))]
             if err.kind() == clap::error::ErrorKind::DisplayHelp
                 || err.kind() == clap::error::ErrorKind::DisplayVersion
             {
                 return write_text_exit(&err.render().to_string(), 0);
+            }
+            if err.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
+                let event = build_cli_error("a command is required", Some("try: afdata --help"));
+                return emit_event(event, OutputFormat::Json, 2);
             }
             let event = build_cli_error(&err.to_string(), Some("try: afdata --help"));
             return emit_event(event, OutputFormat::Json, 2);
@@ -726,9 +751,9 @@ fn main() -> ExitCode {
 /// Whether `raw` (the full argv) contains an explicit `--output json` or
 /// `--output=json`. `--output` is a global flag that clap accepts anywhere
 /// in argv (before or after the subcommand), so this scans the whole
-/// vector rather than stopping at the first positional — unlike the
-/// `--help`/`--version` pre-scanners in the shared crate, which
-/// deliberately stop there.
+/// vector rather than stopping at the first positional. The top-level version
+/// pre-scanner stops at that boundary; the help walker separately resolves the
+/// selected command subtree.
 fn explicit_output_json(raw: &[String]) -> bool {
     let mut i = 1; // skip argv[0]
     while i < raw.len() {
@@ -1155,8 +1180,20 @@ fn run_skill_admin_action(
     // — the package smoke installs to a temp dir and asserts the whole tree lands.
     const SKILL_ASSETS: &[SkillAsset] = &[
         SkillAsset {
-            path: "references/rules.md",
-            contents: include_str!("../../skills/agent-first-data/references/rules.md"),
+            path: "references/bash.md",
+            contents: include_str!("../../skills/agent-first-data/references/bash.md"),
+        },
+        SkillAsset {
+            path: "references/cli-protocol.md",
+            contents: include_str!("../../skills/agent-first-data/references/cli-protocol.md"),
+        },
+        SkillAsset {
+            path: "references/documents.md",
+            contents: include_str!("../../skills/agent-first-data/references/documents.md"),
+        },
+        SkillAsset {
+            path: "references/naming-output.md",
+            contents: include_str!("../../skills/agent-first-data/references/naming-output.md"),
         },
         SkillAsset {
             path: "references/registry.json",
@@ -1166,6 +1203,12 @@ fn run_skill_admin_action(
             path: "references/protocol-v1.schema.json",
             contents: include_str!(
                 "../../skills/agent-first-data/references/protocol-v1.schema.json"
+            ),
+        },
+        SkillAsset {
+            path: "references/cli-help-v1.schema.json",
+            contents: include_str!(
+                "../../skills/agent-first-data/references/cli-help-v1.schema.json"
             ),
         },
     ];

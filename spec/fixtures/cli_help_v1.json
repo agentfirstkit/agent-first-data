@@ -1,0 +1,185 @@
+{
+  "valid": [
+    {
+      "kind": "result",
+      "result": {
+        "code": "help",
+        "help": {
+          "scope": "one_level",
+          "command_path": "agent-cli",
+          "name": "agent-cli",
+          "about": "Example agent CLI",
+          "usage": "[OPTIONS] <COMMAND>",
+          "arguments": [
+            {
+              "name": "--output",
+              "value": "FORMAT",
+              "default": "json",
+              "global": true,
+              "help": "Output format"
+            },
+            {
+              "name": "--null",
+              "short": "-0",
+              "help": "Separate entries with NUL"
+            }
+          ],
+          "subcommands": [
+            {
+              "name": "ping",
+              "about": "Ping a remote target"
+            }
+          ]
+        }
+      },
+      "trace": {}
+    },
+    {
+      "kind": "result",
+      "result": {
+        "code": "help",
+        "help": {
+          "scope": "recursive",
+          "command_path": "agent-cli",
+          "name": "agent-cli",
+          "subcommands": [
+            {
+              "name": "ping",
+              "usage": "[OPTIONS]",
+              "arguments": [
+                {
+                  "name": "--host",
+                  "value": "HOST",
+                  "help": "Target host"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "trace": {}
+    },
+    {
+      "kind": "result",
+      "result": {
+        "code": "help",
+        "help": {
+          "scope": "one_level",
+          "command_path": "agent-cli sync",
+          "inherited_arguments_from": [
+            "agent-cli"
+          ],
+          "name": "sync",
+          "arguments": [
+            {
+              "name": "--limit",
+              "value": "COUNT",
+              "help": "Maximum records"
+            }
+          ]
+        }
+      },
+      "trace": {}
+    }
+  ],
+  "invalid": [
+    {
+      "name": "nested help code",
+      "event": {
+        "kind": "result",
+        "result": {
+          "code": "help",
+          "help": {
+            "code": "help",
+            "scope": "one_level",
+            "command_path": "agent-cli",
+            "name": "agent-cli"
+          }
+        },
+        "trace": {}
+      }
+    },
+    {
+      "name": "embedded formatted command help",
+      "event": {
+        "kind": "result",
+        "result": {
+          "code": "help",
+          "help": {
+            "scope": "recursive",
+            "command_path": "agent-cli",
+            "name": "agent-cli",
+            "subcommands": [
+              {
+                "name": "ping",
+                "help": "Usage: agent-cli ping\n\nOptions:\n  --host HOST"
+              }
+            ]
+          }
+        },
+        "trace": {}
+      }
+    },
+    {
+      "name": "positional duplicates its value name",
+      "event": {
+        "kind": "result",
+        "result": {
+          "code": "help",
+          "help": {
+            "scope": "one_level",
+            "command_path": "agent-cli set",
+            "name": "set",
+            "arguments": [
+              {
+                "name": "KEY",
+                "value": "KEY",
+                "required": true
+              }
+            ]
+          }
+        },
+        "trace": {}
+      }
+    },
+    {
+      "name": "help embeds version metadata",
+      "event": {
+        "kind": "result",
+        "result": {
+          "code": "help",
+          "help": {
+            "scope": "one_level",
+            "command_path": "agent-cli",
+            "name": "agent-cli",
+            "versions": {
+              "version": "1.2.3"
+            }
+          }
+        },
+        "trace": {}
+      }
+    },
+    {
+      "name": "false global metadata",
+      "event": {
+        "kind": "result",
+        "result": {
+          "code": "help",
+          "help": {
+            "scope": "one_level",
+            "command_path": "agent-cli",
+            "name": "agent-cli",
+            "arguments": [
+              {
+                "name": "--output",
+                "global": false
+              }
+            ]
+          }
+        },
+        "trace": {}
+      }
+    }
+  ]
+}

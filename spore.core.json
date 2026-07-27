@@ -2,21 +2,31 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
   "intent": [
     "Encode all semantic information in the field name itself so agents parse structured data without external schemas, documentation, or type systems — _ms/_s/_epoch_ms for time, _msats/_sats/_usd_cents for currency, _bytes for size, _secret for auto-redaction",
-    "Define a JSONL output protocol where every line carries a code field (startup for config state, tool-defined for status/progress, ok/error for results) plus a trace object for execution context (duration, token counts, cost, data source) — same structure whether the transport is CLI stdout, HTTP response body, MCP tool result, or SSE stream",
+    "Define a JSONL output protocol where every line carries a kind discriminator (result, error, progress, or log), a payload field named after that kind, and a trace object for execution context (duration, token counts, cost, data source) — same structure whether the transport is CLI stdout, HTTP response body, MCP tool result, or SSE stream",
     "Provide three output formats via --output json|yaml|plain: JSON is the canonical lossless format, YAML preserves structure with quoted strings and --- separators, plain applies suffix-driven human formatting (epoch_ms → RFC 3339, _bytes → human-readable, _secret → ***, _ms ≥ 1000 → seconds)"
   ],
   "license": "MIT",
   "mutations": [
-    "Add `afdata emit` (log/result/error) to produce a single AFDATA protocol-v1 event from shell-safe scalar arguments, so shell scripts emit the same structured envelopes as the SDKs without hand-writing JSON.",
-    "Add `afdata shell bash`, a sourceable Bash 3.2+ authoring kit embedded in the binary that gives executable scripts AFDATA-style argument parsing with --help, raw config reads, and structured log/result/error events.",
-    "Give the kit transparent child-process wrappers: `afdata_run` passes child stdin/stdout/stderr, TTY, and exit status through unchanged (only the script lifecycle is structured), with an optional --quiet mode that discards successful output but replays it on failure.",
-    "Preserve single terminal-result ownership across cooperating scripts: `afdata_call` keeps child logs and errors live but demotes a successful child result to an info log, so only the outermost script owns the final result."
+    "Make CLI help a normal result: --help inherits the command's declared --output default, so a JSON-default CLI answers with a protocol-v1 result.code:\"help\" envelope and --output plain is how a human asks for conventional text",
+    "Add spec/cli-help-v1.schema.json as the normative compact structured-help contract, with fixtures and a validator the test gate runs against real --help output from all four SDK examples and the afdata binary",
+    "Add cli_handle_version_or_help_or_continue() with HelpConfig::output_aware() and output_aware_with_fallback() as the single pre-parse entry point for version and help",
+    "Keep structured help token-efficient: a concise about instead of Markdown long_about, inherited globals referenced through inherited_arguments_from rather than repeated, empty and false metadata omitted, secret defaults rendered as ***, and no version values embedded",
+    "Spell --help and --version out in full, dropping the -h and -V aliases across the CLI, the Bash authoring kit, and all four SDKs, which frees those shorts for applications that need them (such as -h for --host)",
+    "Make version output follow the same explicit-or-inherited --output rule as help",
+    "Honor hide_default_value in structured help so a default hidden from plain help is never disclosed in JSON or YAML",
+    "Emit the same protocol-v1 envelope from cli_render_help_with_options as the pre-parse handler, so structured help validates identically no matter which entry point produced it",
+    "Give Markdown help headings and Usage lines the full invocable command path, so every line of the generated CLI reference can be copied straight into a shell",
+    "Return a structured cli_error when afdata is invoked with no command or with an unsupported short flag, instead of the argument parser's plain-text help at exit 0",
+    "Restructure the Agent Skill into a router plus four focused references (naming and output, CLI and protocol, documents, Bash) and bundle the help schema as an installed skill asset",
+    "Redact secret-suffixed argv values in the Go and TypeScript example startup logs, and use the library's LogFilters prefix matching in the Python example",
+    "Fix Bash authoring-kit examples that aborted on stock macOS Bash 3.2 when a forwarded argument array was empty",
+    "Drop the unused clap-markdown dependency, fix the cli-help-without-cli-help-markdown feature combination, and upgrade noyalib to 0.0.17"
   ],
   "bonds": [],
   "tree": {

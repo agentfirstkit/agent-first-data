@@ -24,7 +24,7 @@ const FNV1A64_PRIME: u64 = 0x0000_0100_0000_01b3;
 #[derive(Clone, Copy, Debug)]
 pub struct SkillAsset<'a> {
     /// Path relative to the skill directory, using `/` separators
-    /// (e.g. `references/rules.md`). Must be relative with no `.` or `..`
+    /// (e.g. `references/naming-output.md`). Must be relative with no `.` or `..`
     /// segment, so an asset can never escape the skill directory.
     pub path: &'a str,
     /// Bundled file contents (typically `include_str!`).
@@ -1213,8 +1213,8 @@ mod tests {
     fn spec_with_assets() -> SkillSpec<'static> {
         const ASSETS: &[SkillAsset] = &[
             SkillAsset {
-                path: "references/rules.md",
-                contents: "# rules\n",
+                path: "references/guide.md",
+                contents: "# guide\n",
             },
             SkillAsset {
                 path: "references/registry.json",
@@ -1235,13 +1235,13 @@ mod tests {
         let dir = temp_skills_dir("assets");
         let opts = options(SkillAgentSelection::Codex, &dir, false);
         let skill_dir = dir.join("agent-first-test");
-        let rules = skill_dir.join("references").join("rules.md");
+        let guide = skill_dir.join("references").join("guide.md");
         let registry = skill_dir.join("references").join("registry.json");
 
         assert!(run_skill_admin(&spec_with_assets(), SkillAction::Install, &opts).is_ok());
         assert_eq!(
-            std::fs::read_to_string(&rules).unwrap_or_default(),
-            "# rules\n"
+            std::fs::read_to_string(&guide).unwrap_or_default(),
+            "# guide\n"
         );
         assert_eq!(
             std::fs::read_to_string(&registry).unwrap_or_default(),
@@ -1251,7 +1251,7 @@ mod tests {
         // A SKILL.md-only install (a bundled asset missing) must report
         // not-current so a plain re-install repopulates it — the exact
         // regression this fixes.
-        std::fs::remove_file(&rules).unwrap();
+        std::fs::remove_file(&guide).unwrap();
         match run_skill_admin(&spec_with_assets(), SkillAction::Status, &opts) {
             Ok(SkillReport::Status { current_all, .. }) => {
                 assert!(
@@ -1262,11 +1262,11 @@ mod tests {
             other => panic!("unexpected status: {other:?}"),
         }
         assert!(run_skill_admin(&spec_with_assets(), SkillAction::Install, &opts).is_ok());
-        assert!(rules.is_file(), "re-install must restore the missing asset");
+        assert!(guide.is_file(), "re-install must restore the missing asset");
 
         assert!(run_skill_admin(&spec_with_assets(), SkillAction::Uninstall, &opts).is_ok());
         assert!(!skill_dir.join(SKILL_FILE_NAME).exists());
-        assert!(!rules.exists(), "uninstall must remove bundled assets");
+        assert!(!guide.exists(), "uninstall must remove bundled assets");
         assert!(
             !skill_dir.join("references").exists(),
             "uninstall must remove now-empty asset directories"

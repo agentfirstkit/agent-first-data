@@ -11,19 +11,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# The non-Rust packages bundle only the core spec data (suffix registry +
-# protocol schema). The Agent Skill (SKILL.md + references/) is not synced into
-# them: skill-admin is a Rust-only capability, so its bundled skill lives only in
-# the Rust CLI (which reads skills/ directly via include_str!).
+# Keep exact machine-readable contracts byte-identical in every language
+# package and in the installed skill. Narrative skill references stay focused
+# and are maintained separately.
 CANONICAL_FILES = (
     Path("spec/registry.json"),
     Path("spec/protocol-v1.schema.json"),
+    Path("spec/cli-help-v1.schema.json"),
 )
 
 PACKAGE_ASSET_ROOTS = (
     Path("go/assets"),
     Path("python/agent_first_data/assets"),
     Path("typescript/assets"),
+    Path("skills/agent-first-data/references"),
 )
 
 

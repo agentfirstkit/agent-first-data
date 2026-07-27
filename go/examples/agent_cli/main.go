@@ -1,7 +1,7 @@
 // Command agent_cli demonstrates canonical CLI helper usage for agent tools.
 //
-// Demonstrates: human --help (one-level) plus orthogonal --recursive scope and
-// --output json|yaml|markdown format for full surface export,
+// Demonstrates: output-aware --help (one-level) plus orthogonal --recursive
+// scope and --output plain|json|yaml|markdown format for full surface export,
 // CliParseOutput, CliParseLogFilters, Render, BuildCliError,
 // --dry-run, and error hints.
 //
@@ -33,15 +33,40 @@ const helpDefaultAPIKeySecret = "sk-help-default"
 const pingHostEnv = "PING_HOST"
 
 type subcommand struct {
-	name  string
-	about string
-	flags string
+	name      string
+	about     string
+	usage     string
+	arguments []helpArgument
+}
+
+type helpArgument struct {
+	name       string
+	short      string
+	help       string
+	value      string
+	defaultVal string
+	required   bool
+	repeatable bool
 }
 
 var subcommands = []subcommand{
-	{name: "echo", about: "Echo back the input as structured output", flags: "  --dry-run    Preview without executing"},
-	{name: "ping", about: "Ping a remote target", flags: "  --host       Target host to ping"},
-	{name: "cancel", about: "Return a tool-defined cancellation error", flags: "  (no flags)"},
+	{
+		name:  "echo",
+		about: "Echo back the input as structured output",
+		usage: "[OPTIONS]",
+		arguments: []helpArgument{
+			{name: "--dry-run", help: "Preview without executing"},
+		},
+	},
+	{
+		name:  "ping",
+		about: "Ping a remote target",
+		usage: "[OPTIONS]",
+		arguments: []helpArgument{
+			{name: "--host", value: "HOST", help: "Target host to ping"},
+		},
+	},
+	{name: "cancel", about: "Return a tool-defined cancellation error"},
 }
 
 // formatRootHelp returns one-level help for the root command. Markdown
@@ -60,13 +85,14 @@ func formatRootHelp(withTitle bool) string {
 	b.WriteString("  --log <FILTERS>    Log categories (comma-separated); --log all (or --verbose) enables every category\n")
 	b.WriteString("  --verbose          Enable all log categories (shorthand for --log all)\n")
 	fmt.Fprintf(&b, "  --api-key-secret <VALUE> API key used by examples (default: %s)\n", redactHelpDefault("--api-key-secret", helpDefaultAPIKeySecret))
+	b.WriteString("  --version          Print version\n")
 	b.WriteString("  --help             Show this help (one-level); add --recursive to expand all subcommands\n")
 	b.WriteString("  --recursive        With --help, expand the full command tree; --output picks the format\n\n")
 	b.WriteString("Commands:\n")
 	for _, sc := range subcommands {
 		fmt.Fprintf(&b, "  %-8s %s\n", sc.name, sc.about)
 	}
-	fmt.Fprintf(&b, "\nAFDATA: %s\n", afdata.Version)
+	b.WriteString("\n")
 	return b.String()
 }
 
@@ -76,7 +102,7 @@ func formatCompleteHelp() string {
 	b.WriteString(formatRootHelp(true))
 	for _, sc := range subcommands {
 		fmt.Fprintf(&b, "\n%s\n%s\n\n", strings.Repeat("=", 60), "agent-cli "+sc.name)
-		fmt.Fprintf(&b, "%s\n%s\n\nFlags:\n%s\n", strings.Repeat("=", 60), sc.about, sc.flags)
+		fmt.Fprintf(&b, "%s\n%s\n\nFlags:\n%s", strings.Repeat("=", 60), sc.about, formatPlainArguments(sc.arguments))
 	}
 	return b.String()
 }
@@ -96,14 +122,11 @@ func formatSubcommandHelp(name string, withGlobals, withTitle bool) string {
 			if withTitle {
 				fmt.Fprintf(&b, "agent-cli %s — %s\n\n", sc.name, sc.about)
 			}
-			fmt.Fprintf(&b, "Flags:\n%s\n", sc.flags)
+			fmt.Fprintf(&b, "Flags:\n%s", formatPlainArguments(sc.arguments))
 			if withGlobals {
 				b.WriteString("\nGlobal options:\n")
 				b.WriteString("  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n")
 				b.WriteString("  --json             Equivalent to --output json\n")
-			}
-			if withGlobals || withTitle {
-				fmt.Fprintf(&b, "\nAFDATA: %s\n", afdata.Version)
 			}
 			return b.String()
 		}
@@ -140,24 +163,71 @@ func formatMarkdownHelp(command string, recursive bool) string {
 	return b.String()
 }
 
-// globalHelpOptions documents the global flags so a structured (json/yaml) help
-// dump advertises the help surface — the scope modifier and the output formats —
-// just like the plain and markdown formats do. Only the target command carries
-// it (descendants omit it) to keep a recursive dump lean. A leaf target omits
-// --recursive, which has nothing to expand.
-func globalHelpOptions(includeRecursive bool) []map[string]any {
-	opts := []map[string]any{
-		{"name": "--output", "help": "Output format: json, yaml, plain (default: json); help also accepts markdown"},
-		{"name": "--json", "help": "Equivalent to --output json"},
-		{"name": "--log", "help": "Log categories (comma-separated); --log all (or --verbose) enables every category"},
-		{"name": "--verbose", "help": "Enable all log categories (shorthand for --log all)"},
-		{"name": "--api-key-secret", "help": "API key used by examples", "default_values": []string{redactHelpDefault("--api-key-secret", helpDefaultAPIKeySecret)}},
+func formatPlainArguments(arguments []helpArgument) string {
+	if len(arguments) == 0 {
+		return "  (no flags)\n"
 	}
-	if includeRecursive {
-		opts = append(opts, map[string]any{"name": "--recursive", "help": "With --help, expand the full command tree (a bare --recursive is ignored)"})
+	var b strings.Builder
+	for _, argument := range arguments {
+		fmt.Fprintf(&b, "  %s", argument.name)
+		if argument.value != "" {
+			fmt.Fprintf(&b, " <%s>", argument.value)
+		}
+		fmt.Fprintf(&b, "    %s\n", argument.help)
 	}
-	opts = append(opts, map[string]any{"name": "--help", "help": "Show this help (one-level)"})
-	return opts
+	return b.String()
+}
+
+func (argument helpArgument) schema() map[string]any {
+	out := map[string]any{"name": argument.name}
+	if argument.short != "" {
+		out["short"] = argument.short
+	}
+	if argument.help != "" {
+		out["help"] = argument.help
+	}
+	if argument.value != "" {
+		out["value"] = argument.value
+	}
+	if argument.defaultVal != "" {
+		out["default"] = argument.defaultVal
+	}
+	if argument.required {
+		out["required"] = true
+	}
+	if argument.repeatable {
+		out["repeatable"] = true
+	}
+	return out
+}
+
+func argumentSchemas(arguments []helpArgument) []map[string]any {
+	out := make([]map[string]any, 0, len(arguments))
+	for _, argument := range arguments {
+		out = append(out, argument.schema())
+	}
+	return out
+}
+
+func rootHelpArguments() []helpArgument {
+	return []helpArgument{
+		{name: "--output", value: "FORMAT", defaultVal: "json", help: "Output format: json, yaml, plain; help also accepts markdown"},
+		{name: "--json", help: "Equivalent to --output json"},
+		{name: "--log", value: "FILTERS", help: "Log categories (comma-separated); --log all (or --verbose) enables every category"},
+		{name: "--verbose", help: "Enable all log categories (shorthand for --log all)"},
+		{name: "--api-key-secret", value: "VALUE", defaultVal: redactHelpDefault("--api-key-secret", helpDefaultAPIKeySecret), help: "API key used by examples"},
+		{name: "--version", help: "Print version"},
+		{name: "--help", help: "Show one-level help; add --recursive for the full command tree and --output plain|json|yaml|markdown to choose the format"},
+		{name: "--recursive", help: "With --help, expand the full command tree"},
+	}
+}
+
+func targetHelpArguments(sc subcommand) []helpArgument {
+	arguments := append([]helpArgument{}, sc.arguments...)
+	return append(arguments, helpArgument{
+		name: "--help",
+		help: "Show help; add --output plain|json|yaml|markdown to choose the format",
+	})
 }
 
 func helpSchema(command, scope string) map[string]any {
@@ -166,16 +236,17 @@ func helpSchema(command, scope string) map[string]any {
 		commandPath += " " + command
 		for _, sc := range subcommands {
 			if sc.name == command {
-				return map[string]any{
-					"code":         "help",
+				schema := map[string]any{
 					"scope":        scope,
-					"versions":     map[string]any{"afdata": afdata.Version},
 					"command_path": commandPath,
 					"name":         sc.name,
 					"about":        sc.about,
-					"flags":        sc.flags,
-					"options":      globalHelpOptions(false),
+					"arguments":    argumentSchemas(targetHelpArguments(sc)),
 				}
+				if sc.usage != "" {
+					schema["usage"] = sc.usage
+				}
+				return schema
 			}
 		}
 	}
@@ -184,19 +255,23 @@ func helpSchema(command, scope string) map[string]any {
 	for _, sc := range subcommands {
 		entry := map[string]any{"name": sc.name, "about": sc.about}
 		if scope == "recursive" {
-			entry["flags"] = sc.flags
+			if sc.usage != "" {
+				entry["usage"] = sc.usage
+			}
+			if len(sc.arguments) > 0 {
+				entry["arguments"] = argumentSchemas(sc.arguments)
+			}
 		}
 		commands = append(commands, entry)
 	}
 	return map[string]any{
-		"code":         "help",
 		"scope":        scope,
-		"versions":     map[string]any{"afdata": afdata.Version},
 		"command_path": commandPath,
 		"name":         "agent-cli",
 		"about":        "Minimal agent-first CLI example",
-		"options":      globalHelpOptions(true),
-		"commands":     commands,
+		"usage":        "[OPTIONS] <COMMAND>",
+		"arguments":    argumentSchemas(rootHelpArguments()),
+		"subcommands":  commands,
 	}
 }
 
@@ -216,7 +291,7 @@ func finishCliError(emitter *afdata.CliEmitter, message, hint string, exitCode i
 	return emitter.Finish(event, exitCode)
 }
 
-func printHelp(command, output string, outputExplicit bool, outputMissing bool, recursive bool) int {
+func printHelp(command, output string, outputMissing bool, recursive bool) int {
 	if outputMissing {
 		return finishCliError(bootstrapEmitter(afdata.OutputFormatJson), "missing value for --output: expected plain, json, yaml, or markdown", "valid help output formats: plain, markdown, json, yaml", 2)
 	}
@@ -227,7 +302,7 @@ func printHelp(command, output string, outputExplicit bool, outputMissing bool, 
 	if recursive {
 		scope = "recursive"
 	}
-	if !outputExplicit || output == "plain" {
+	if output == "plain" {
 		switch {
 		case command != "":
 			fmt.Print(formatSubcommandHelp(command, true, true))
@@ -246,7 +321,11 @@ func printHelp(command, output string, outputExplicit bool, outputMissing bool, 
 	if err != nil {
 		return finishCliError(bootstrapEmitter(afdata.OutputFormatJson), err.Error(), "", 2)
 	}
-	fmt.Println(afdata.Render(helpSchema(command, scope), format, afdata.OutputOptions{}))
+	event := afdata.NewJSONResult(map[string]any{
+		"code": "help",
+		"help": helpSchema(command, scope),
+	}).Trace(map[string]any{}).Build()
+	fmt.Println(afdata.Render(event.Value(), format, afdata.OutputOptions{}))
 	return 0
 }
 
@@ -269,7 +348,7 @@ func buildRequestLog(command string) map[string]any {
 	}
 	builder := afdata.NewJSONLog(map[string]any{
 		"level":    "info",
-		"message":  "event",
+		"message":  "request",
 		"category": "request",
 		"command":  command,
 	}).Trace(map[string]any{})
@@ -283,10 +362,10 @@ func buildStartupLog(args []string, command string, output string, filters afdat
 	}
 	builder := afdata.NewJSONLog(map[string]any{
 		"level":    "info",
-		"message":  "event",
+		"message":  "startup",
 		"category": "startup",
 		"event":    "startup",
-		"argv":     afdata.RedactedValue(args),
+		"argv":     redactArgv(args),
 		"parsed": map[string]any{
 			"command": command,
 			"output":  output,
@@ -301,6 +380,43 @@ func buildStartupLog(args []string, command string, output string, filters afdat
 	}).Trace(map[string]any{})
 	event := builder.Build()
 	return event.Value()
+}
+
+// redactArgv redacts argv values whose long flag names are secret by AFDATA
+// naming, covering both --name-secret=value and --name-secret value.
+//
+// RedactedValue is keyed by field name and cannot help here: a []string carries
+// no keys, so it would pass argv through untouched.
+func redactArgv(args []string) []string {
+	out := make([]string, 0, len(args))
+	redactNext := false
+	for _, arg := range args {
+		if redactNext {
+			redactNext = false
+			if !strings.HasPrefix(arg, "-") {
+				out = append(out, "***")
+				continue
+			}
+		}
+		if strings.HasPrefix(arg, "--") {
+			rest := strings.TrimPrefix(arg, "--")
+			if name, _, found := strings.Cut(rest, "="); found {
+				if isSecretFlagName(name) {
+					out = append(out, "--"+name+"=***")
+					continue
+				}
+			} else if isSecretFlagName(rest) {
+				redactNext = true
+			}
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+func isSecretFlagName(name string) bool {
+	normalized := strings.ReplaceAll(name, "-", "_")
+	return strings.HasSuffix(normalized, "_secret") || strings.HasSuffix(normalized, "_SECRET")
 }
 
 func startupEnvSnapshot() []map[string]any {
@@ -422,7 +538,7 @@ func main() {
 	// each one's space value so it is never mistaken for the subcommand boundary
 	// (afdata's own --output/--output-to are recognized without being listed).
 	versionValueFlags := []string{"--log", "--host", "--api-key-secret"}
-	if out, handled, err := afdata.CliHandleVersionOrContinue(args, versionValueFlags, "agent-cli", "Agent CLI Example", agentCliVersion, ""); handled {
+	if out, handled, err := afdata.CliHandleVersionOrContinue(args, versionValueFlags, "agent-cli", "Agent CLI Example", agentCliVersion, "", afdata.OutputFormatJson); handled {
 		if err != nil {
 			os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), err.Error(), "valid version output formats: json, yaml, plain", 2))
 		}
@@ -443,7 +559,7 @@ func main() {
 			continue
 		}
 		switch args[i] {
-		case "--help", "-h":
+		case "--help":
 			showHelp = true
 		case "--recursive":
 			// A help modifier only: it selects recursive scope when --help is
@@ -495,13 +611,13 @@ func main() {
 		command = positionals[0]
 	}
 
-	// --help is one-level plain; --recursive expands the tree and --output picks
-	// the format. A bare --recursive (no --help) falls through to normal parsing.
+	// --help inherits the normal JSON output default; --recursive expands the
+	// tree and --output picks the format. A bare --recursive falls through.
 	if showHelp {
 		if outputConflict != "" {
 			os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), outputConflict, "valid output formats: json, yaml, plain", 2))
 		}
-		os.Exit(printHelp(command, output, outputExplicit, outputMissing, recursive))
+		os.Exit(printHelp(command, output, outputMissing, recursive))
 	}
 
 	// 1. Parse --output flag with structured error on failure.

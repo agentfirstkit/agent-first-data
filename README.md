@@ -91,6 +91,17 @@ afdata set config.toml server.port 8080 --value-type number
 
 Edits are **source-preserving and atomic** — comments, key order, and formatting survive; a failed write leaves the original untouched, and the CLI refuses to write through a symlink. A bare value is always a string (`007` never becomes `7`); `--value-type string|number|bool|null|json` writes an exact type. `_secret` fields stay redacted even on a directly targeted `get` — `value --reveal-secret` is the auditable opt-in. Every command's first positional is the FILE (`-` reads stdin for reads only); errors carry stable `error.code`s (`document_path_not_found`, `document_type_mismatch`, …). The Rust library is `agent_first_data::document` (`Document` / `DocumentFile`); TOML/YAML/dotenv/INI are feature-gated, JSON is core.
 
+## Token-efficient CLI discovery
+
+Help is a normal result, not an exception to the output contract. `afdata --help`
+answers in the same format as every other command — a protocol-v1 result
+envelope — so an agent discovering an unfamiliar CLI parses the surface instead
+of scraping 80-column prose. `--output plain` is the conventional terminal text;
+`--recursive` is a compact whole-surface index; `--output markdown` is the
+documentation export. The model is deliberately small: no long-form prose, no
+repeated inherited globals, no eagerly embedded version values. The exact
+contract is [`spec/cli-help-v1.schema.json`](spec/cli-help-v1.schema.json).
+
 ## Writing AFDATA-style Bash scripts
 
 The CLI embeds a sourceable Bash 3.2+ authoring kit:
@@ -102,15 +113,18 @@ _AFDATA_BASH_SOURCE="$("${AFDATA_BIN:-afdata}" shell bash)"
 source /dev/stdin <<<"$_AFDATA_BASH_SOURCE"
 unset _AFDATA_BASH_SOURCE
 
-afdata_args_begin "build.sh [OPTIONS] PACKAGE"
+afdata_args_begin "build.sh [OPTIONS] PACKAGE [-- CARGO_ARG ...]"
 afdata_args_flag release --release "Build release artifacts"
 afdata_args_positional package PACKAGE "Package to build"
+afdata_args_rest CARGO_ARG "Arguments forwarded to cargo"
 afdata_args_parse "$@"
 
 afdata_log info "Building ${package}"
-cargo_args=()
-[ "$release" = false ] || cargo_args+=(--release)
-afdata_run cargo build "${cargo_args[@]}"
+if [ "$release" = true ]; then
+  afdata_run cargo build --release ${AFDATA_ARGS_REST[@]+"${AFDATA_ARGS_REST[@]}"}
+else
+  afdata_run cargo build ${AFDATA_ARGS_REST[@]+"${AFDATA_ARGS_REST[@]}"}
+fi
 afdata_result "Build complete"
 ```
 
@@ -130,16 +144,16 @@ must remain the sole owner of the final result. See the complete
 - **Designing an API response or event payload** — units and sensitivity travel *with* the data, across every boundary it crosses.
 - **Auditing for leaked secrets** — one naming rule (`_secret`) makes redaction automatic instead of case-by-case.
 
-## One contract, four languages
+## One shared contract, four languages
 
-The same surface ships identically in Rust, Go, Python, and TypeScript (each in its own casing):
+The shared core surface ships in Rust, Go, Python, and TypeScript (each in its own casing):
 
 - **Protocol builders** `json_result` / `json_error` / `json_progress` / `json_log` → `.build()` → an event; **reader** `decode_protocol_event(text)` → a typed decoded event.
 - **Output** `render(value, format, options)` — the single value × format × options → string entry point.
 - **Redaction** `redacted_value` / `redact_url_secrets` for paths that bypass `render`.
 - **CLI helpers** `cli_parse_output`, `cli_parse_log_filters`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue`, and the `CliEmitter`.
 
-Three tools are **Rust-only** and deliberately outside the cross-language contract: skill admin (`SKILL.md` validation plus install/uninstall/status), stream redirection (`--stdout-file` / `--stderr-file`), and tracing/logging init (`afdata_tracing::try_init`). The exact shared surface is enumerated in [`spec/api-surface.json`](spec/api-surface.json).
+Four capabilities are **Rust-only** and deliberately outside the cross-language contract: output-aware Clap help (`cli_handle_version_or_help_or_continue` and the help renderers), skill admin (`SKILL.md` validation plus install/uninstall/status), stream redirection (`--stdout-file` / `--stderr-file`), and tracing/logging init (`afdata_tracing::try_init`). The exact shared surface is enumerated in [`spec/api-surface.json`](spec/api-surface.json).
 
 ## Adopt it: hand the convention to your coding agent
 
@@ -187,6 +201,9 @@ afdata skill validate skills/agent-first-data
 ## Docs
 
 - [Specification](spec/agent-first-data.md) — the full convention: every suffix, output formats, protocol, and logging
+- [CLI reference](docs/cli.md) — every command and flag, generated from the binary
+- [CLI help v1 schema](spec/cli-help-v1.schema.json) — the exact compact structured-help contract
+- [Protocol v1](docs/protocol-v1.md) and [transport mappings](docs/transport-mappings.md) — the event envelope across CLI, HTTP, MCP, and SSE
 - [Bash authoring kit](docs/bash.md) — arguments, config reads, events, and transparent child processes
 - [Agent Skill](skills/agent-first-data/SKILL.md) — for AI-assisted development
 - Per-language API reference: [Rust](rust) · [Go](go) · [Python](python) · [TypeScript](typescript)

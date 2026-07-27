@@ -380,8 +380,8 @@ function splitFlag(arg: string): { name: string | undefined; inlineValue: string
  * Throws for malformed version requests, for example `--version --output xml`.
  *
  * The one blessed behavior: `--version` always answers with a protocol-v1
- * `kind:"result"` version event — JSON by default, or `--output yaml|plain` (or
- * `--json`) for another format. There is no conventional bare-text path.
+ * `kind:"result"` version event. Explicit `--output`/`--json` wins; otherwise
+ * `defaultOutput` should be the command's normal output default.
  *
  * `valueFlags` is the caller's own value-taking global long flags (with or
  * without leading dashes; the leading dashes are stripped internally). It is the
@@ -401,6 +401,7 @@ export function cliHandleVersionOrContinue(
   displayName: string | undefined,
   version: string,
   build: string | undefined,
+  defaultOutput: OutputFormat = "json",
 ): string | undefined {
   const valueFlagSet = new Set(valueFlags.map((flag) => flag.replace(/^-+/u, "")));
   let versionRequested = false;
@@ -417,7 +418,7 @@ export function cliHandleVersionOrContinue(
 
     const { name: flagName, inlineValue } = splitFlag(arg);
 
-    if (arg === "--version" || arg === "-V") {
+    if (arg === "--version") {
       versionRequested = true;
       i += 1;
       continue;
@@ -475,7 +476,7 @@ export function cliHandleVersionOrContinue(
 
   if (!versionRequested) return undefined;
   if (outputError !== undefined) throw outputError;
-  return cliRenderVersion(name, displayName, version, build, outputFormat ?? "json");
+  return cliRenderVersion(name, displayName, version, build, outputFormat ?? defaultOutput);
 }
 
 /**

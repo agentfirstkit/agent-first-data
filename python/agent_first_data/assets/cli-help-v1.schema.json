@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentfirstkit.org/schemas/agent-first-data/cli-help-v1.schema.json",
+  "title": "AFDATA CLI help v1 event",
+  "description": "Compact, progressively disclosed CLI help carried by an AFDATA result event.",
+  "type": "object",
+  "required": [
+    "kind",
+    "result",
+    "trace"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "kind": {
+      "const": "result"
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "code",
+        "help"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "help"
+        },
+        "help": {
+          "$ref": "#/$defs/help"
+        }
+      }
+    },
+    "trace": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "argument": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "short": {
+          "type": "string",
+          "pattern": "^-[^-]$"
+        },
+        "help": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "const": true
+        },
+        "global": {
+          "const": true
+        },
+        "repeatable": {
+          "const": true
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "default": {
+          "type": "string"
+        },
+        "defaults": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "name": {
+                "pattern": "^-"
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "value"
+                  ]
+                },
+                {
+                  "required": [
+                    "values"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "value",
+              "values"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "default",
+              "defaults"
+            ]
+          }
+        }
+      ]
+    },
+    "command": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "about": {
+          "type": "string",
+          "minLength": 1
+        },
+        "usage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/argument"
+          }
+        },
+        "subcommands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        }
+      }
+    },
+    "help": {
+      "type": "object",
+      "required": [
+        "scope",
+        "command_path",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "enum": [
+            "one_level",
+            "recursive"
+          ]
+        },
+        "command_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "inherited_arguments_from": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "about": {
+          "type": "string",
+          "minLength": 1
+        },
+        "usage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/argument"
+          }
+        },
+        "subcommands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/command"
+          }
+        }
+      }
+    }
+  }
+}

@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = (
     ROOT / "spec" / "agent-first-data.md",
-    ROOT / "skills" / "agent-first-data" / "references" / "rules.md",
+    ROOT / "skills" / "agent-first-data" / "references" / "cli-protocol.md",
     ROOT / "rust" / "README.md",
     ROOT / "python" / "README.md",
     ROOT / "go" / "README.md",

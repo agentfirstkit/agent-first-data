@@ -10,11 +10,11 @@ Agent-First Data has three parts:
 
 1. **[Naming Convention](#part-1-naming-convention)** (required) — encode units and semantics in field names
 2. **[Output Processing](#part-2-output-processing)** (required) — suffix-driven formatting and automatic secret protection
-3. **[Protocol Template](#part-3-protocol-template-recommended-optional)** (optional) — structured format with `code` (required) and `trace` (recommended)
+3. **[Protocol Template](#part-3-protocol-template-recommended-optional)** (optional) — structured format with `kind` and its matching payload (required) and `trace` (recommended)
 
 **Parts 1 and 2 are the core.** Part 3 is optional — a recommended structure that works well with Parts 1 and 2, but you can use AFDATA naming with any JSON structure (REST APIs, GraphQL, databases, etc.).
 
-**Four SDKs, one contract.** This convention — naming, output processing, the protocol template, and the CLI helpers that emit it — is implemented identically in Rust, Go, Python, and TypeScript. The Rust crate additionally bundles `skill`/`skill-admin` (SKILL.md validation plus install/uninstall/status), `stream-redirect` (fd-level output redirection), and `tracing` (logging init); those are Rust-only tools, not part of the cross-language contract. The exact shared surface is enumerated in `spec/api-surface.json`.
+**Four SDKs, one contract.** Naming, output processing, the protocol template, and the core CLI helpers are implemented in Rust, Go, Python, and TypeScript. The Rust crate additionally bundles output-aware Clap help (`cli-help`), `skill`/`skill-admin` (SKILL.md validation plus install/uninstall/status), `stream-redirect` (fd-level output redirection), and `tracing` (logging init); those are Rust-only capabilities, not part of the cross-language API surface. The exact shared surface is enumerated in `spec/api-surface.json`.
 
 **Jump to:**
 - [Quick Reference: All Suffixes](#quick-reference-all-suffixes)
@@ -206,7 +206,7 @@ Same suffixes, kebab-case. An agent reading `--help` output understands units an
 --verbose                  # boolean flag — no suffix needed
 ```
 
-**Long flags only.** Do not define single-letter short flags (`-s`, `-d`, `-l`). Short flags are ambiguous — `-s` could be `--synapse`, `--synopsis`, or `--source`. Agents parsing `--help` output cannot reliably interpret single-letter aliases. Always use the full `--kebab-case` form. The only exception is `-o` for `--output` and built-in flags like `-h`/`-V` from the argument parser.
+**Long flags only.** Do not define single-letter short flags (`-s`, `-d`, `-l`). Short flags are ambiguous — `-s` could be `--synapse`, `--synopsis`, or `--source`. Agents parsing `--help` output cannot reliably interpret single-letter aliases. Always use the full `--kebab-case` form. This applies to `--help` and `--version` too: a `-h`/`-V` alias is byte-identical to its long form, so it buys an agent nothing, and it misleads the human reaching for it because help answers in the command's output format — JSON for an agent-first CLI, not text. Leaving those shorts unclaimed also keeps `-h` available to tools that legitimately spend it on `--host`. An application MAY still declare a short of its own (afdata uses `-0` for `--null`), and the help model reports it in the argument's `short` field.
 
 **Kebab → snake mapping.** CLI flags map 1:1 to JSON field names by replacing hyphens with underscores. When a CLI tool emits a startup log event (Part 3), the `args` field uses the snake_case form:
 
@@ -236,9 +236,76 @@ The flag name and the JSON/YAML field name tell the same story — the suffix ca
 
 **Secret flags** (`--api-key-secret`, `--database-url-secret`) are automatically redacted in startup messages, logs, and YAML/Plain output. Tools should also consider redacting them from `/proc` process listings where possible.
 
-**Human help vs export surface.** Help scope and help format are orthogonal. Scope is controlled by `--recursive`: `--help` is one-level (and `myapp sub --help` is one-level for that subcommand), while `--help --recursive` expands the selected command subtree. Format is controlled by `--output`: plain by default, or `json|yaml|markdown`. So human-facing CLIs use plain one-level `--help`; agent/doc flows use `--help --recursive` (recursive plain), `--help --recursive --output json|yaml` (recursive export), or `--help --recursive --output markdown` (recursive docs). A bare `--recursive` without `--help` is a no-op for help and MUST NOT be consumed by the help layer — it falls through to the application's own parser. Help `markdown` is help-only and SHOULD NOT become a general business output format.
+**Help scope and output.** Help is a normal successful output, not an exception
+to the CLI's output contract. Scope and format are orthogonal. `--help` is
+one-level (and `myapp sub --help` is one-level for that subcommand), while
+`--help --recursive` covers the selected command subtree. `--output` selects
+`plain|json|yaml|markdown`; when omitted, help MUST inherit the command's normal
+`--output` default. Thus a JSON-default CLI makes `myapp --help` equivalent to
+`myapp --help --output json`; humans request conventional text with
+`myapp --help --output plain`. JSON/YAML help is a protocol-v1 terminal result
+with `result.code:"help"` and the help model under `result.help`; it is not a
+raw schema that bypasses the normal result envelope. When the selected command
+exposes `--version`, the help model advertises that flag exactly once.
+It MUST NOT embed version or AFDATA library values; callers request `--version`
+only when those values are needed. Rust callers SHOULD handle both paths before
+Clap parsing with one `cli_handle_version_or_help_or_continue()` invocation.
+Separate version and help handlers are compatibility/lifecycle escape hatches.
 
-**Version output.** Agent-first CLIs should handle `--version` (and `-V`) before the argument parser's built-in plain-text exit, and always answer with a structured protocol-v1 `kind:"result"` version event rather than conventional plain text — JSON by default, or `--output yaml|plain` for another renderer. The payload is `{"kind":"result","result":{"code":"version","name":"<name>","version":"<semver>"},"trace":{...}}`, optionally carrying `display_name` (a human-facing product name) and `build` (an opaque caller-supplied build identifier such as a commit SHA). Only a top-level version request is recognized — scanning stops at the first positional (the subcommand) — and an explicit `--output`/`--json` there is honored; a malformed request (for example `--version --output xml`) returns a `cli_error` event.
+The structured shape is exactly
+[`cli-help-v1.schema.json`](cli-help-v1.schema.json). The root help object
+contains `scope`, an invocable `command_path`, and the selected command's
+`name`; optional command fields are `about`, compact `usage`, `arguments`, and
+`subcommands`. Descendant commands use the same command fields except the
+root-only `scope`, `command_path`, and `inherited_arguments_from`; the latter
+lists ancestor command paths whose help defines global arguments accepted by
+the selected command. `command_path` is the authoritative copyable invocation;
+the root `name` is a command label and MAY differ when a CLI uses a branded
+display name. Argument objects use `name` and optional `short`, `help`,
+`required:true`, `global:true`, `repeatable:true`, `value`/`values`, and
+`default`/`defaults`. Omit empty values and false metadata. A positional's
+`name` already carries its placeholder, so it MUST NOT repeat that placeholder
+as `value` or `values`. Secret defaults MUST render as `***`.
+
+JSON/YAML help MUST NOT expose Clap `long_about` Markdown as `description`.
+Its command model stays field-oriented and token-efficient: concise `about`,
+compact `usage`, structured arguments, and subcommands, plus the enclosing help
+metadata. Recursive plain/JSON/YAML is a compact full-surface index: it includes
+every command and argument once and omits empty/default metadata and repeated
+global options. Scoped structured help likewise keeps inherited global
+arguments at their defining ancestor and names those sources in
+`inherited_arguments_from`; agents request a source command's one-level help
+only when those shared options are relevant. One-level descendants are
+summaries; recursive descendants carry their own compact usage, arguments, and
+children. Scoped plain help is conventional terminal prose and includes
+inherited globals. Markdown is
+the documentation export and MAY retain complete long-form sections such as
+interface policy, workspace shape, examples, and exit codes. If a future
+explicit full structured mode carries that source, it MUST call the opt-in
+field `description_markdown`, not `description`; the field MUST remain absent
+from default and compact structured help. A bare `--recursive` without `--help`
+is a no-op for help and MUST NOT be consumed by the help layer — it falls
+through to the application's own parser. `markdown` is help-only and SHOULD NOT
+become a general business output format.
+
+When `--output` is omitted, help resolves the selected command's declared
+default first, then the nearest ancestor declaration, then the caller's fallback.
+An explicit `--output` or `--json` always wins. A fixed-format CLI with no
+`--output` declaration MUST set the caller fallback to its normal format
+(`HelpConfig::output_aware_with_fallback(HelpFormat::Json)` for a JSON-only
+Rust CLI), rather than silently falling back to human text.
+
+**Version output.** Agent-first CLIs should handle `--version` before
+the argument parser's built-in plain-text exit, and always answer with a
+structured protocol-v1 `kind:"result"` version event rather than conventional
+plain text. An explicit `--output`/`--json` wins; when omitted, version inherits
+the command's normal `--output` default, just like help. The payload is
+`{"kind":"result","result":{"code":"version","name":"<name>","version":"<semver>"},"trace":{...}}`,
+optionally carrying `display_name` (a human-facing product name) and `build` (an
+opaque caller-supplied build identifier such as a commit SHA). Only a top-level
+version request is recognized — scanning stops at the first positional (the
+subcommand) — and a malformed request (for example `--version --output xml`)
+returns a `cli_error` event.
 
 ### Environment variables
 

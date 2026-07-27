@@ -434,9 +434,9 @@ describe("version helpers", () => {
     assert.ok(!("build" in parsed.result));
   });
 
-  it("bare --version defaults to a JSON version event", () => {
-    // The one blessed behavior: `--version` always answers with a protocol-v1
-    // event, JSON by default — no conventional bare-text special case.
+  it("bare --version inherits a JSON command default", () => {
+    // `--version` answers with a protocol-v1 event and follows the command's
+    // declared output default.
     const out = cliHandleVersionOrContinue(["--version"], [], "agent-cli", "Agent CLI Example", "1.2.3", undefined);
     assert.ok(out !== undefined);
     const parsed = JSON.parse(out!.trim());
@@ -445,6 +445,20 @@ describe("version helpers", () => {
     assert.equal(parsed.result.name, "agent-cli");
     assert.equal(parsed.result.display_name, "Agent CLI Example");
     assert.equal(parsed.result.version, "1.2.3");
+  });
+
+  it("bare --version inherits a plain command default", () => {
+    const out = cliHandleVersionOrContinue(
+      ["--version"],
+      [],
+      "agent-cli",
+      undefined,
+      "1.2.3",
+      undefined,
+      "plain",
+    );
+    assert.ok(out?.includes("result.code=version"));
+    assert.ok(out?.includes("result.version=1.2.3"));
   });
 
   it("honors explicit output flags", () => {

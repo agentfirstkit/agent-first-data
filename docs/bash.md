@@ -23,7 +23,7 @@ account_id="$(afdata_config_get "$config_path" cloudflare.account_id)"
 afdata_log info "Preparing ${project} for account ${account_id}"
 
 if [ "$dry_run" = false ]; then
-  afdata_run wrangler deploy "${AFDATA_ARGS_REST[@]}"
+  afdata_run wrangler deploy ${AFDATA_ARGS_REST[@]+"${AFDATA_ARGS_REST[@]}"}
 fi
 
 afdata_result "Deployment complete"
@@ -31,6 +31,12 @@ afdata_result "Deployment complete"
 
 The library supports Bash 3.2 and later. Sourcing it is silent and does not
 change `errexit`, `nounset`, `pipefail`, or any other caller option.
+
+Bash 3.2 — still the stock macOS shell — aborts on `"${arr[@]}"` when the array
+is empty and `nounset` is set. `AFDATA_ARGS_REST` is empty whenever the caller
+passes no trailing arguments, so forward it with the guarded expansion
+`${AFDATA_ARGS_REST[@]+"${AFDATA_ARGS_REST[@]}"}` shown above, and use the same
+form for any array of your own that may be empty.
 
 ## Loading and pinning
 
@@ -99,7 +105,7 @@ Application variable names may not start with the reserved `_afdata_`,
 
 Every parser automatically supports:
 
-- `-h` / `--help`
+- `--help`
 - `--output json|yaml|plain`
 - `--output-to split|stdout|stderr`
 

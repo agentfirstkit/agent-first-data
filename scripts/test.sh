@@ -6,6 +6,9 @@ set -euo pipefail
 # output decode as UTF-8 regardless of OS locale. Windows defaults to cp1252 and
 # chokes on non-ASCII bytes (e.g. em dashes in Go/Rust doc comments).
 export PYTHONUTF8=1
+# E2E imports the help validator from scripts/. Keep test runs from leaving an
+# untracked scripts/__pycache__ directory in the checkout.
+export PYTHONDONTWRITEBYTECODE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOTPATH="$(cd "$SCRIPT_DIR/.." && pwd)"
 MODE="${1:-all}"
@@ -71,6 +74,7 @@ run_static() {
   echo "[3/6] Spec registry"
   (cd "$ROOTPATH" && python3 scripts/validate_registry.py)
   (cd "$ROOTPATH" && python3 scripts/validate_protocol_docs.py)
+  (cd "$ROOTPATH" && python3 scripts/validate_cli_help.py)
   (cd "$ROOTPATH" && python3 scripts/validate_api_surface.py)
   (cd "$ROOTPATH" && python3 scripts/sync_offline_assets.py --check)
 
@@ -124,7 +128,20 @@ run_package() {
   echo ""
   echo "[package] Rust"
   rust_package_list="$(cd "$ROOTPATH" && cargo package --allow-dirty --no-verify --list)"
-  for asset in bash/afdata.sh spec/registry.json spec/protocol-v1.schema.json skills/agent-first-data/SKILL.md skills/agent-first-data/references/registry.json skills/agent-first-data/references/protocol-v1.schema.json; do
+  for asset in \
+    bash/afdata.sh \
+    spec/registry.json \
+    spec/protocol-v1.schema.json \
+    spec/cli-help-v1.schema.json \
+    skills/agent-first-data/SKILL.md \
+    skills/agent-first-data/references/bash.md \
+    skills/agent-first-data/references/cli-protocol.md \
+    skills/agent-first-data/references/documents.md \
+    skills/agent-first-data/references/naming-output.md \
+    skills/agent-first-data/references/registry.json \
+    skills/agent-first-data/references/protocol-v1.schema.json \
+    skills/agent-first-data/references/cli-help-v1.schema.json
+  do
     if ! grep -qx "$asset" <<<"$rust_package_list"; then
       echo "Rust package missing offline asset: $asset" >&2
       exit 1
@@ -196,6 +213,7 @@ wheel = next(Path(sys.argv[1]).glob("*.whl"))
 required = {
     "agent_first_data/assets/registry.json",
     "agent_first_data/assets/protocol-v1.schema.json",
+    "agent_first_data/assets/cli-help-v1.schema.json",
 }
 with zipfile.ZipFile(wheel) as archive:
     names = set(archive.namelist())
@@ -218,6 +236,7 @@ assert event["kind"] == "error"
 assets = files("agent_first_data") / "assets"
 assert (assets / "registry.json").is_file()
 assert (assets / "protocol-v1.schema.json").is_file()
+assert (assets / "cli-help-v1.schema.json").is_file()
 PY
   rm -rf "$py_out"
   [ "$had_py_build" -eq 0 ] && rm -rf "$ROOTPATH/python/build"
@@ -237,6 +256,7 @@ const files = new Set(pack.files.map((file) => file.path));
 const required = [
   "assets/registry.json",
   "assets/protocol-v1.schema.json",
+  "assets/cli-help-v1.schema.json",
 ];
 const missing = required.filter((file) => !files.has(file));
 if (missing.length) {
@@ -262,6 +282,7 @@ const root = dirname(dirname(distIndex));
 for (const file of [
   "assets/registry.json",
   "assets/protocol-v1.schema.json",
+  "assets/cli-help-v1.schema.json",
 ]) {
   if (!existsSync(join(root, file))) throw new Error(`missing ${file}`);
 }
@@ -299,6 +320,7 @@ GO
   (cd "$go_smoke" && go test ./...)
   test -f "$ROOTPATH/go/assets/registry.json"
   test -f "$ROOTPATH/go/assets/protocol-v1.schema.json"
+  test -f "$ROOTPATH/go/assets/cli-help-v1.schema.json"
   rm -rf "$go_smoke"
   return 0
 }

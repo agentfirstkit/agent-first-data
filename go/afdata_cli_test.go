@@ -697,9 +697,9 @@ func TestCliHandleVersionOrContinue_JsonAliasConflict(t *testing.T) {
 	}
 }
 
-func TestCliHandleVersionOrContinue_BareDefaultsToJson(t *testing.T) {
-	// The one blessed behavior: bare --version always answers with a protocol-v1
-	// event, JSON by default — no conventional bare-text special case.
+func TestCliHandleVersionOrContinue_BareInheritsJsonDefault(t *testing.T) {
+	// Bare --version answers with a protocol-v1 event and follows the command's
+	// declared output default.
 	out, handled, err := CliHandleVersionOrContinue(
 		[]string{"--version"},
 		versionValueFlags,
@@ -724,6 +724,21 @@ func TestCliHandleVersionOrContinue_BareDefaultsToJson(t *testing.T) {
 	}
 	if result["display_name"] != "Agent CLI Example" {
 		t.Errorf("bare version missing display_name: %s", out)
+	}
+}
+
+func TestCliHandleVersionOrContinue_BareInheritsPlainDefault(t *testing.T) {
+	out, handled, err := CliHandleVersionOrContinue(
+		[]string{"--version"},
+		versionValueFlags,
+		"agent-cli", "", "1.2.3", "",
+		OutputFormatPlain,
+	)
+	if err != nil || !handled {
+		t.Fatalf("expected handled plain version, got handled=%v err=%v", handled, err)
+	}
+	if !contains(out, "result.code=version") || !contains(out, "result.version=1.2.3") {
+		t.Fatalf("bare version did not inherit plain output: %q", out)
 	}
 }
 

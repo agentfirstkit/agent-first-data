@@ -15,6 +15,9 @@ from typing import Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from scripts.validate_cli_help import validate_help_event
 
 
 @dataclass(frozen=True)
@@ -240,9 +243,8 @@ def assert_broken_pipe_no_traceback(case: CliCase) -> None:
 
 def assert_version(case: CliCase) -> None:
     # Parity check: across all four SDKs `--version` is always a structured
-    # protocol-v1 version event (JSON by default, no conventional bare text),
-    # carrying result.code/name/version, and an explicit `--output` still
-    # applies. Locks the four-language contract against drift.
+    # protocol-v1 version event. These examples all declare JSON as their normal
+    # output default; an explicit `--output` still wins.
     proc = run_cli(case, ("--version",))
     assert proc.returncode == 0, f"{case.name}: --version returned {proc.returncode}, stderr={proc.stderr!r}"
     events = terminal_events(proc)
@@ -258,6 +260,66 @@ def assert_version(case: CliCase) -> None:
     assert "result.code=version" in plain.stdout, (
         f"{case.name}: --version --output plain is not the structured event: {plain.stdout!r}"
     )
+
+
+def assert_help_output_contract(case: CliCase) -> None:
+    proc = run_cli(case, ("--help",))
+    assert proc.returncode == 0, f"{case.name}: --help failed: {proc.stderr!r}"
+    event = json.loads(proc.stdout)
+    validate_help_event(event)
+    help_model = event["result"]["help"]
+    assert help_model["scope"] == "one_level", (
+        f"{case.name}: default help is not one-level: {event!r}"
+    )
+    assert help_model["command_path"], f"{case.name}: help omitted command_path"
+    serialized_help = json.dumps(help_model)
+    assert '"description"' not in serialized_help, (
+        f"{case.name}: default JSON help embeds a long description"
+    )
+    assert '"description_markdown"' not in serialized_help, (
+        f"{case.name}: default JSON help unexpectedly exposes full Markdown"
+    )
+    assert "code" not in help_model, f"{case.name}: help duplicated result.code"
+    assert "versions" not in help_model, f"{case.name}: help eagerly disclosed versions"
+    assert "--version" in json.dumps(help_model), f"{case.name}: help omitted --version"
+    plain = run_cli(case, ("--help", "--output", "plain"))
+    assert plain.returncode == 0, f"{case.name}: plain help failed: {plain.stderr!r}"
+    assert "usage:" in plain.stdout.lower(), (
+        f"{case.name}: explicit plain help is not text: {plain.stdout!r}"
+    )
+    assert "AFDATA:" not in plain.stdout and "Version:" not in plain.stdout, (
+        f"{case.name}: plain help eagerly disclosed version metadata"
+    )
+    recursive = run_cli(case, ("--help", "--recursive"))
+    assert recursive.returncode == 0, f"{case.name}: recursive help failed: {recursive.stderr!r}"
+    recursive_event = json.loads(recursive.stdout)
+    validate_help_event(recursive_event)
+    recursive_help = recursive_event["result"]["help"]
+    assert recursive_help["scope"] == "recursive", (
+        f"{case.name}: recursive help has wrong scope: {recursive_event!r}"
+    )
+    serialized_recursive_help = json.dumps(recursive_help)
+    assert '"description"' not in serialized_recursive_help, (
+        f"{case.name}: recursive JSON help embeds a long description"
+    )
+    assert '"description_markdown"' not in serialized_recursive_help, (
+        f"{case.name}: recursive JSON help unexpectedly exposes full Markdown"
+    )
+
+
+def help_surface_counts(help_model: dict) -> tuple[int, int]:
+    commands_count = 0
+    arguments_count = 0
+
+    def visit(command: dict) -> None:
+        nonlocal commands_count, arguments_count
+        commands_count += 1
+        arguments_count += len(command.get("arguments", []))
+        for child in command.get("subcommands", []):
+            visit(child)
+
+    visit(help_model)
+    return commands_count, arguments_count
 
 
 def assert_afdata_validate() -> None:
@@ -446,11 +508,112 @@ def assert_afdata_cli_capabilities() -> None:
     assert ver.returncode == 0, f"afdata --version --output json failed: {ver.stderr!r}"
     payload = json.loads(ver.stdout)
     assert payload["result"]["version"], f"no version in {ver.stdout!r}"
+    default_help = run_afdata(("--help",), "")
+    assert default_help.returncode == 0, f"afdata --help failed: {default_help.stderr!r}"
+    help_event = json.loads(default_help.stdout)
+    validate_help_event(help_event)
+    help_model = help_event["result"]["help"]
+    assert help_model["command_path"] == "afdata", help_model
+    assert "code" not in help_model and "versions" not in help_model, help_model
+    assert all(
+        argument.get("global") is True
+        for argument in help_model["arguments"]
+        if argument["name"] in {"--output", "--output-to", "--stdout-file", "--stderr-file"}
+    ), f"root global arguments are not marked global: {help_model['arguments']!r}"
+    assert any(argument["name"] == "--version" for argument in help_model["arguments"]), (
+        f"help omitted clap's version flag: {help_model['arguments']!r}"
+    )
+    validated_help = run_afdata(
+        ("validate", "-", "--strict", "--per-event"),
+        default_help.stdout,
+    )
+    assert validated_help.returncode == 0, (
+        f"default help is not a strict protocol event: {validated_help.stderr!r}"
+    )
+    plain = run_afdata(("--help", "--output", "plain"), "")
+    assert plain.returncode == 0, f"afdata --help --output plain failed: {plain.stderr!r}"
+    assert "Usage: afdata" in plain.stdout, f"plain help is not conventional text: {plain.stdout[:80]!r}"
+    recursive_json = run_afdata(("--help", "--recursive", "--output", "json"), "")
+    assert recursive_json.returncode == 0, f"recursive JSON help failed: {recursive_json.stderr!r}"
+    recursive_event = json.loads(recursive_json.stdout)
+    validate_help_event(recursive_event)
+    recursive_model = recursive_event["result"]["help"]
+    commands_count, arguments_count = help_surface_counts(recursive_model)
+    json_budget_bytes = 512 + commands_count * 160 + arguments_count * 120
+    assert len(recursive_json.stdout.encode()) < json_budget_bytes, (
+        "recursive JSON help exceeded its structural payload budget: "
+        f"{len(recursive_json.stdout.encode())} >= {json_budget_bytes} bytes "
+        f"for {commands_count} commands and {arguments_count} arguments"
+    )
+    linted_help = run_afdata(("lint", "-"), recursive_json.stdout)
+    assert linted_help.returncode == 0, (
+        f"recursive JSON help is not valid AFDATA: {linted_help.stderr!r}"
+    )
+    recursive_plain = run_afdata(("--help", "--recursive", "--output", "plain"), "")
+    assert recursive_plain.returncode == 0, f"recursive plain help failed: {recursive_plain.stderr!r}"
+    plain_budget_bytes = 400 + commands_count * 160 + arguments_count * 70
+    assert len(recursive_plain.stdout.encode()) < plain_budget_bytes, (
+        "recursive plain help exceeded its structural payload budget: "
+        f"{len(recursive_plain.stdout.encode())} >= {plain_budget_bytes} bytes "
+        f"for {commands_count} commands and {arguments_count} arguments"
+    )
     md = run_afdata(("--help", "--output", "markdown"), "")
     assert md.returncode == 0, f"afdata --help --output markdown failed: {md.stderr!r}"
     assert md.stdout.lstrip().startswith("# afdata"), f"help is not markdown: {md.stdout[:80]!r}"
     assert "--stdout-file" in md.stdout, f"stream-redirect flag missing from help: {md.stdout[:200]!r}"
     assert "skill" in md.stdout, f"skill command missing from help: {md.stdout[:200]!r}"
+
+    scoped = run_afdata(("set", "--help"), "")
+    assert scoped.returncode == 0, f"afdata set --help failed: {scoped.stderr!r}"
+    scoped_event = json.loads(scoped.stdout)
+    validate_help_event(scoped_event)
+    scoped_help = scoped_event["result"]["help"]
+    assert scoped_help["command_path"] == "afdata set", scoped_help
+    assert scoped_help["inherited_arguments_from"] == ["afdata"], scoped_help
+    scoped_names = {argument["name"] for argument in scoped_help["arguments"]}
+    assert {"FILE", "KEY", "--value-type"} <= scoped_names, scoped_help
+    assert "--output" not in scoped_names, (
+        f"scoped structured help repeated inherited globals: {scoped_help!r}"
+    )
+    scoped_plain = run_afdata(("set", "--help", "--output", "plain"), "")
+    assert scoped_plain.returncode == 0, f"afdata set plain help failed: {scoped_plain.stderr!r}"
+    assert "Usage: afdata set" in scoped_plain.stdout, scoped_plain.stdout[:160]
+    assert "--output" in scoped_plain.stdout, (
+        f"scoped conventional help omitted inherited globals: {scoped_plain.stdout[:300]!r}"
+    )
+
+    missing = run_afdata((), "")
+    assert missing.returncode == 2, f"afdata without a command returned {missing.returncode}"
+    assert not missing.stdout, f"split output leaked an error to stdout: {missing.stdout!r}"
+    missing_event = json.loads(missing.stderr)
+    assert missing_event["error"]["message"] == "a command is required", missing_event
+    assert missing_event["error"]["hint"] == "try: afdata --help", missing_event
+    assert len(missing.stderr.encode()) < 256, (
+        f"missing-command error embedded eager help: {len(missing.stderr.encode())} bytes"
+    )
+
+    # `-h`/`-V` are deliberately unsupported: AFDATA spells both out in full, and
+    # letting them reach Clap would answer in plain text at exit 0, bypassing the
+    # output contract entirely.
+    for short_flag in ("-h", "-V"):
+        short = run_afdata((short_flag,), "")
+        assert short.returncode == 2, (
+            f"afdata {short_flag} returned {short.returncode}, expected a structured error"
+        )
+        assert not short.stdout, f"split output leaked an error to stdout: {short.stdout!r}"
+        short_event = json.loads(short.stderr)
+        assert short_event["error"]["code"] == "cli_error", short_event
+        assert "--help" in short_event["error"]["hint"], short_event
+    scoped_short = run_afdata(("get", "-h"), "")
+    assert scoped_short.returncode == 2, (
+        f"afdata get -h returned {scoped_short.returncode}, expected a structured error"
+    )
+
+    pseudo = run_afdata(("help",), "")
+    assert pseudo.returncode == 2, f"afdata help pseudo-command returned {pseudo.returncode}"
+    assert not pseudo.stdout, f"split output leaked an error to stdout: {pseudo.stdout!r}"
+    pseudo_event = json.loads(pseudo.stderr)
+    assert pseudo_event["error"]["code"] == "cli_error", pseudo_event
 
 
 def assert_afdata_render_redacts() -> None:
@@ -523,6 +686,7 @@ def main() -> None:
         assert_cancelled,
         assert_broken_pipe_no_traceback,
         assert_version,
+        assert_help_output_contract,
     )
     for case in cli_cases():
         for check in checks:

@@ -1,8 +1,8 @@
 /**
  * Minimal agent-first CLI — canonical pattern for tools built on agent-first-data.
  *
- * Demonstrates: human --help (one-level) plus orthogonal --recursive scope and
- * --output json|yaml|markdown format for full surface export, cliParseOutput,
+ * Demonstrates: output-aware --help (one-level) plus orthogonal --recursive
+ * scope and --output plain|json|yaml|markdown format for full surface export,
  * cliParseLogFilters, render, buildCliError, --dry-run, and error hints.
  *
  * Run:  npx tsx examples/agent_cli.ts --help
@@ -50,7 +50,6 @@ import {
 
 const AGENT_CLI_VERSION = "0.13.0";
 const AGENT_CLI_DISPLAY_NAME = "Agent CLI Example";
-const AFDATA_VERSION = "0.15.0";
 const HELP_DEFAULT_API_KEY_SECRET = "sk-help-default";
 const PING_HOST_ENV = "PING_HOST";
 
@@ -63,13 +62,34 @@ const GLOBAL_VALUE_FLAGS = ["--log", "--api-key-secret"];
 interface Subcommand {
   name: string;
   about: string;
-  flags: string;
+  usage?: string;
+  arguments: HelpArgument[];
+}
+
+interface HelpArgument {
+  name: string;
+  short?: string;
+  help?: string;
+  value?: string;
+  default?: string;
+  required?: true;
+  repeatable?: true;
 }
 
 const SUBCOMMANDS: Subcommand[] = [
-  { name: "echo", about: "Echo back the input as structured output", flags: "  --dry-run    Preview without executing" },
-  { name: "ping", about: "Ping a remote target", flags: "  --host       Target host to ping" },
-  { name: "cancel", about: "Return a tool-defined cancellation error", flags: "  (no flags)" },
+  {
+    name: "echo",
+    about: "Echo back the input as structured output",
+    usage: "[OPTIONS]",
+    arguments: [{ name: "--dry-run", help: "Preview without executing" }],
+  },
+  {
+    name: "ping",
+    about: "Ping a remote target",
+    usage: "[OPTIONS]",
+    arguments: [{ name: "--host", value: "HOST", help: "Target host to ping" }],
+  },
+  { name: "cancel", about: "Return a tool-defined cancellation error", arguments: [] },
 ];
 
 /**
@@ -91,6 +111,7 @@ function formatRootHelp(withTitle = true): string {
     "  --log <FILTERS>    Log categories (comma-separated); --log all (or --verbose) enables every category",
     "  --verbose          Enable all log categories (shorthand for --log all)",
     `  --api-key-secret <VALUE> API key used by examples (default: ${redactHelpDefault("--api-key-secret", HELP_DEFAULT_API_KEY_SECRET)})`,
+    "  --version          Print version",
     "  --help             Show this help (one-level); add --recursive to expand all subcommands",
     "  --recursive        With --help, expand the full command tree; --output picks the format",
     "",
@@ -99,7 +120,7 @@ function formatRootHelp(withTitle = true): string {
   for (const sc of SUBCOMMANDS) {
     lines.push(`  ${sc.name.padEnd(8)} ${sc.about}`);
   }
-  return `${lines.join("\n")}\n\nAFDATA: ${AFDATA_VERSION}\n`;
+  return `${lines.join("\n")}\n`;
 }
 
 /** Format recursive help for root command and all subcommands. */
@@ -107,7 +128,7 @@ function formatCompleteHelp(): string {
   const lines = [formatRootHelp().trimEnd()];
   for (const sc of SUBCOMMANDS) {
     lines.push("", "=".repeat(60), `agent-cli ${sc.name}`, "=".repeat(60));
-    lines.push(sc.about, "", "Flags:", sc.flags);
+    lines.push(sc.about, "", "Flags:", formatPlainArguments(sc.arguments).trimEnd());
   }
   return lines.join("\n") + "\n";
 }
@@ -124,13 +145,12 @@ function formatSubcommandHelp(name: string, withGlobals = false, withTitle = tru
   if (!sc) return "";
   // Markdown rendering passes withTitle=false: the heading already shows the
   // `agent-cli <name> - <about>` summary, so the fenced block skips it.
-  let help = withTitle ? `agent-cli ${sc.name} — ${sc.about}\n\nFlags:\n${sc.flags}\n` : `Flags:\n${sc.flags}\n`;
+  let help = withTitle
+    ? `agent-cli ${sc.name} — ${sc.about}\n\nFlags:\n${formatPlainArguments(sc.arguments)}`
+    : `Flags:\n${formatPlainArguments(sc.arguments)}`;
   if (withGlobals) {
     help += "\nGlobal options:\n  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n";
     help += "  --json             Equivalent to --output json\n";
-  }
-  if (withGlobals || withTitle) {
-    help += `\nAFDATA: ${AFDATA_VERSION}\n`;
   }
   return help;
 }
@@ -157,29 +177,54 @@ function formatMarkdownHelp(command: string | undefined, recursive: boolean): st
   return `${lines.join("\n")}\n`;
 }
 
-/**
- * Global flags documented in the structured (json/yaml) help schema so it
- * advertises the help surface — the scope modifier and output formats — like the
- * plain and markdown formats do. Only the target command carries it; a leaf
- * target omits --recursive (nothing to expand).
- */
-function globalHelpOptions(includeRecursive: boolean): JsonValue[] {
-  const opts: JsonValue[] = [
-    { name: "--output", help: "Output format: json, yaml, plain (default: json); help also accepts markdown" },
+function formatPlainArguments(arguments_: HelpArgument[]): string {
+  if (arguments_.length === 0) return "  (no flags)\n";
+  return `${arguments_
+    .map((argument) => {
+      const value = argument.value ? ` <${argument.value}>` : "";
+      return `  ${argument.name}${value}    ${argument.help ?? ""}`.trimEnd();
+    })
+    .join("\n")}\n`;
+}
+
+function rootHelpArguments(): HelpArgument[] {
+  return [
+    {
+      name: "--output",
+      value: "FORMAT",
+      default: "json",
+      help: "Output format: json, yaml, plain; help also accepts markdown",
+    },
     { name: "--json", help: "Equivalent to --output json" },
-    { name: "--log", help: "Log categories (comma-separated); --log all (or --verbose) enables every category" },
+    {
+      name: "--log",
+      value: "FILTERS",
+      help: "Log categories (comma-separated); --log all (or --verbose) enables every category",
+    },
     { name: "--verbose", help: "Enable all log categories (shorthand for --log all)" },
     {
       name: "--api-key-secret",
+      value: "VALUE",
       help: "API key used by examples",
-      default_values: [redactHelpDefault("--api-key-secret", HELP_DEFAULT_API_KEY_SECRET)],
+      default: redactHelpDefault("--api-key-secret", HELP_DEFAULT_API_KEY_SECRET),
+    },
+    { name: "--version", help: "Print version" },
+    {
+      name: "--help",
+      help: "Show one-level help; add --recursive for the full command tree and --output plain|json|yaml|markdown to choose the format",
+    },
+    { name: "--recursive", help: "With --help, expand the full command tree" },
+  ];
+}
+
+function targetHelpArguments(sc: Subcommand): HelpArgument[] {
+  return [
+    ...sc.arguments,
+    {
+      name: "--help",
+      help: "Show help; add --output plain|json|yaml|markdown to choose the format",
     },
   ];
-  if (includeRecursive) {
-    opts.push({ name: "--recursive", help: "With --help, expand the full command tree (a bare --recursive is ignored)" });
-  }
-  opts.push({ name: "--help", help: "Show this help (one-level)" });
-  return opts;
 }
 
 function helpSchema(command: string | undefined, scope: "one_level" | "recursive"): JsonValue {
@@ -188,28 +233,30 @@ function helpSchema(command: string | undefined, scope: "one_level" | "recursive
     const sc = SUBCOMMANDS.find((s) => s.name === command);
     if (sc) {
       return {
-        code: "help",
         scope,
-        versions: { afdata: AFDATA_VERSION },
         command_path: commandPath,
         name: sc.name,
         about: sc.about,
-        flags: sc.flags,
-        options: globalHelpOptions(false),
+        ...(sc.usage ? { usage: sc.usage } : {}),
+        arguments: targetHelpArguments(sc),
       };
     }
   }
   return {
-    code: "help",
     scope,
-    versions: { afdata: AFDATA_VERSION },
     command_path: commandPath,
     name: "agent-cli",
     about: "Minimal agent-first CLI example",
-    options: globalHelpOptions(true),
-    commands: SUBCOMMANDS.map((sc) => {
+    usage: "[OPTIONS] <COMMAND>",
+    arguments: rootHelpArguments(),
+    subcommands: SUBCOMMANDS.map((sc) => {
       const entry: Record<string, JsonValue> = { name: sc.name, about: sc.about };
-      if (scope === "recursive") entry.flags = sc.flags;
+      if (scope === "recursive") {
+        if (sc.usage) entry.usage = sc.usage;
+        if (sc.arguments.length > 0) {
+          entry.arguments = sc.arguments.map((argument) => ({ ...argument }));
+        }
+      }
       return entry;
     }),
   };
@@ -268,13 +315,15 @@ function renderHelpOutput(
   // Scope (--recursive) and format (--output) are orthogonal. A specific
   // subcommand is leaf-level here, so its scope is the same either way.
   const scope = recursive ? "recursive" : "one_level";
-  if (!outputExplicit || outputArg === "plain") {
+  const selectedOutput = outputArg ?? "json";
+  if (selectedOutput === "plain") {
     if (command) return formatSubcommandHelp(command, true);
     return recursive ? formatCompleteHelp() : formatRootHelp();
   }
-  if (outputArg === "markdown") return formatMarkdownHelp(command, recursive);
-  const fmt = cliParseOutput(outputArg);
-  return `${render(helpSchema(command, scope), fmt)}\n`;
+  if (selectedOutput === "markdown") return formatMarkdownHelp(command, recursive);
+  const fmt = cliParseOutput(selectedOutput);
+  const event = jsonResult({ code: "help", help: helpSchema(command, scope) }).trace({}).build();
+  return `${render(event.toJSON(), fmt)}\n`;
 }
 
 function redactHelpDefault(name: string, value: string): string {
@@ -299,13 +348,54 @@ function buildRequestLog(command: string | undefined): JsonValue {
     .toJSON();
 }
 
+/**
+ * Redact argv values whose long flag names are secret by AFDATA naming,
+ * covering both `--name-secret=value` and `--name-secret value`.
+ *
+ * `redactedValue` is keyed by field name and cannot help here: an array of
+ * strings carries no keys, so it would pass argv through untouched.
+ */
+function redactArgv(args: string[]): string[] {
+  const out: string[] = [];
+  let redactNext = false;
+  for (const arg of args) {
+    if (redactNext) {
+      redactNext = false;
+      if (!arg.startsWith("-")) {
+        out.push("***");
+        continue;
+      }
+    }
+    if (arg.startsWith("--")) {
+      const rest = arg.slice(2);
+      const equals = rest.indexOf("=");
+      if (equals >= 0) {
+        const name = rest.slice(0, equals);
+        if (isSecretFlagName(name)) {
+          out.push(`--${name}=***`);
+          continue;
+        }
+      } else if (isSecretFlagName(rest)) {
+        redactNext = true;
+      }
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
+function isSecretFlagName(name: string): boolean {
+  const normalized = name.replace(/-/gu, "_");
+  return normalized.endsWith("_secret") || normalized.endsWith("_SECRET");
+}
+
 function buildStartupLog(args: string[], command: string | undefined, output: string, log: LogFilters, verbose: boolean): JsonValue {
   return jsonLog({
     level: "info",
     message: "startup",
     category: "startup",
     event: "startup",
-    argv: args,
+    argv: redactArgv(args),
     parsed: {
       command: command ?? "none",
       output,
@@ -402,6 +492,7 @@ function main(): void {
       AGENT_CLI_DISPLAY_NAME,
       AGENT_CLI_VERSION,
       undefined,
+      "json",
     );
     if (version !== undefined) {
       process.stdout.write(version);
@@ -416,7 +507,7 @@ function main(): void {
     );
   }
 
-  const showHelp = args.includes("--help") || args.includes("-h");
+  const showHelp = args.includes("--help");
   // A help modifier only: consulted just below when showHelp is true, so a bare
   // --recursive never affects normal command parsing.
   const recursive = args.includes("--recursive");
@@ -434,9 +525,9 @@ function main(): void {
   const positionals = parsedArgs.positionals;
   const command = positionals[0];
 
-  // --help is one-level plain; --recursive expands the tree and --output picks
-  // the format. Help TEXT prints to stdout; a help error is an error envelope on
-  // stderr. A bare --recursive (no --help) falls through to normal parsing.
+  // --help inherits the normal JSON output default; --recursive expands the
+  // tree and --output picks the format. Plain/Markdown remain raw text; a help
+  // error is an envelope on stderr. A bare --recursive falls through.
   if (showHelp) {
     try {
       process.stdout.write(renderHelpOutput(command, resolveOutputArg(args), hasExplicitOutput(args), recursive));
@@ -573,7 +664,7 @@ if (process.env["NODE_TEST_CONTEXT"]) {
       assert.ok(help.includes("echo"), "root --help must include echo");
       assert.ok(help.includes("ping"), "root --help must include ping");
       assert.ok(help.includes("--output"), "root --help must include --output");
-      assert.ok(help.includes(`AFDATA: ${AFDATA_VERSION}`), "root --help must include AFDATA version");
+      assert.ok(!help.includes("AFDATA:"), "help must leave version metadata to --version");
       assert.ok(!help.includes("--help-all"), "root --help must not include removed --help-all");
       assert.ok(!help.includes("--dry-run"), "root --help must NOT include echo's --dry-run");
       assert.ok(!help.includes("--host"), "root --help must NOT include ping's --host");
@@ -621,29 +712,27 @@ if (process.env["NODE_TEST_CONTEXT"]) {
 
     it("help schema is recursive export", () => {
       const schema = helpSchema(undefined, "recursive") as Record<string, unknown>;
-      assert.equal(schema.code, "help");
       assert.equal(schema.scope, "recursive");
-      assert.deepEqual(schema.versions, { afdata: AFDATA_VERSION });
-      const commands = schema.commands as Array<Record<string, unknown>>;
-      assert.ok(commands.some((command) => command.flags !== undefined), "recursive schema must include child flags");
+      assert.equal(schema.command_path, "agent-cli");
+      assert.ok(!("code" in schema));
+      assert.ok(!("versions" in schema));
+      const commands = schema.subcommands as Array<Record<string, unknown>>;
+      assert.ok(commands.some((command) => command.arguments !== undefined), "recursive schema must include child arguments");
     });
 
     it("one-level help schema omits child flags", () => {
       const schema = helpSchema(undefined, "one_level") as Record<string, unknown>;
       assert.equal(schema.scope, "one_level");
-      const commands = schema.commands as Array<Record<string, unknown>>;
-      assert.ok(commands.every((command) => command.flags === undefined), "one-level schema must not expand child flags");
+      const commands = schema.subcommands as Array<Record<string, unknown>>;
+      assert.ok(commands.every((command) => command.arguments === undefined), "one-level schema must not expand child arguments");
     });
 
-    it("--recursive without --help does not render help", () => {
-      // renderHelpOutput is only reached when --help is present; with --output
-      // omitted and recursive=true it stays one-level-or-recursive plain. The
-      // guarantee that a bare --recursive falls through lives in main(), which
-      // only consults `recursive` inside the showHelp branch. Here we assert the
-      // orthogonal contract: recursive flips scope without forcing a format.
-      const oneLevel = renderHelpOutput(undefined, undefined, false, false);
-      const recursivePlain = renderHelpOutput(undefined, undefined, false, true);
-      assert.ok(!oneLevel.includes("--dry-run"), "one-level plain must not expand subcommands");
+    it("help inherits JSON output and recursive plain stays explicit", () => {
+      const oneLevel = JSON.parse(renderHelpOutput(undefined, undefined, false, false));
+      assert.equal(oneLevel.kind, "result");
+      assert.equal(oneLevel.result.code, "help");
+      assert.equal(oneLevel.result.help.scope, "one_level");
+      const recursivePlain = renderHelpOutput(undefined, "plain", true, true);
       assert.ok(recursivePlain.includes("--dry-run"), "recursive plain must expand subcommands");
     });
 
@@ -759,7 +848,7 @@ if (process.env["NODE_TEST_CONTEXT"]) {
       const start = buildStartupLog(raw, "ping", "yaml", cliParseLogFilters(["startup"]), false) as Record<string, any>;
       assert.equal(start["kind"], "log");
       assert.equal(start["log"].category, "startup");
-      assert.deepEqual(start["log"].argv, ["--output", "yaml", "--log", "startup", "--api-key-secret", "sk-test", "ping"]);
+      assert.deepEqual(start["log"].argv, ["--output", "yaml", "--log", "startup", "--api-key-secret", "***", "ping"]);
       assert.deepEqual(start["log"].parsed, { command: "ping", output: "yaml", log: ["startup"], verbose: false });
       assert.deepEqual(start["log"].effective_config, { output: "yaml", log: ["startup"] });
       const env = start["log"].env as Array<Record<string, unknown>>;

@@ -2035,6 +2035,13 @@ fn build_cli_version_omits_absent_display_name_and_build() {
 #[cfg(any(feature = "cli", feature = "cli-help"))]
 fn version_test_command() -> clap::Command {
     clap::Command::new("agent-cli")
+        .version("1.2.3")
+        .arg(
+            clap::Arg::new("output")
+                .long("output")
+                .default_value("json")
+                .action(clap::ArgAction::Set),
+        )
         .arg(
             clap::Arg::new("stdout-file")
                 .long("stdout-file")
@@ -2050,9 +2057,9 @@ fn version_test_command() -> clap::Command {
 
 #[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
-fn cli_handle_version_bare_defaults_to_json() {
-    // The one blessed behavior: `--version` always answers with a protocol-v1
-    // event, JSON by default — no more conventional bare-text special case.
+fn cli_handle_version_bare_inherits_json_command_default() {
+    // `--version` answers with a protocol-v1 event and follows the command's
+    // declared output default.
     let raw = vec!["agent-cli".to_string(), "--version".to_string()];
     let out = cli_handle_version_or_continue(
         &raw,
@@ -2072,6 +2079,23 @@ fn cli_handle_version_bare_defaults_to_json() {
     assert_eq!(parsed["result"]["version"], "1.2.3");
     assert_eq!(parsed["trace"], serde_json::json!({}));
     validate_protocol_event(&parsed, true).expect("strict protocol event");
+}
+
+#[cfg(any(feature = "cli", feature = "cli-help"))]
+#[test]
+fn cli_handle_version_bare_inherits_plain_command_default() {
+    let cmd = clap::Command::new("agent-cli").arg(
+        clap::Arg::new("output")
+            .long("output")
+            .default_value("plain")
+            .action(clap::ArgAction::Set),
+    );
+    let raw = vec!["agent-cli".to_string(), "--version".to_string()];
+    let out = cli_handle_version_or_continue(&raw, &cmd, "agent-cli", None, "1.2.3", None)
+        .expect("valid version request")
+        .expect("version should render");
+    assert!(out.contains("result.code=version"), "{out}");
+    assert!(out.contains("result.version=1.2.3"), "{out}");
 }
 
 #[cfg(any(feature = "cli", feature = "cli-help"))]
@@ -2387,25 +2411,32 @@ fn cli_handle_version_ignores_version_flag_after_subcommand() {
 
 #[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
-fn cli_handle_version_ignores_short_version_flag_after_subcommand() {
-    let raw = vec![
-        "agent-cli".to_string(),
-        "hatch".to_string(),
-        "-V".to_string(),
-        "1.3.0".to_string(),
-    ];
-    assert!(
-        cli_handle_version_or_continue(
-            &raw,
-            &version_test_command(),
-            "agent-cli",
-            None,
-            "1.2.3",
-            None
-        )
-        .expect("subcommand -V must not be a version request")
-        .is_none()
-    );
+fn cli_handle_version_ignores_short_version_flag() {
+    // `-V` is not a version request anywhere: AFDATA spells `--version` out in
+    // full, so the short stays available to the application at every position.
+    for raw in [
+        vec![
+            "agent-cli".to_string(),
+            "hatch".to_string(),
+            "-V".to_string(),
+            "1.3.0".to_string(),
+        ],
+        vec!["agent-cli".to_string(), "-V".to_string()],
+    ] {
+        assert!(
+            cli_handle_version_or_continue(
+                &raw,
+                &version_test_command(),
+                "agent-cli",
+                None,
+                "1.2.3",
+                None
+            )
+            .expect("-V must not be a version request")
+            .is_none(),
+            "-V was treated as a version request: {raw:?}"
+        );
+    }
 }
 
 #[cfg(any(feature = "cli", feature = "cli-help"))]

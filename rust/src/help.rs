@@ -88,9 +88,13 @@ impl HelpOptions {
 #[cfg(feature = "cli-help")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HelpConfig {
-    /// Scope used for `--help` / `-h` when `--recursive` is absent.
+    /// Scope used for `--help` when `--recursive` is absent.
     pub default_scope: HelpScope,
-    /// Format used for help when no explicit `--output` is present.
+    /// Fallback format when the command has no valid default for `--output`.
+    ///
+    /// An explicit `--output` always wins. When it is omitted, the handler
+    /// first inherits the command's own `--output` default so help follows the
+    /// same output contract as every other successful result.
     pub default_format: HelpFormat,
 }
 
@@ -98,16 +102,34 @@ pub struct HelpConfig {
 impl HelpConfig {
     /// The blessed preset for CLIs.
     ///
-    /// `--help` renders one-level plain help by default. Scope and format are
-    /// orthogonal: `--recursive` expands the selected command subtree, while
-    /// `--output json|yaml|markdown` picks the format. So `--help --recursive`
-    /// is recursive plain text and `--help --recursive --output markdown` is a
-    /// recursive Markdown export.
-    pub const fn human_cli_default() -> Self {
+    /// `--help` renders one-level help and inherits the command's own
+    /// `--output` default. Scope and format are orthogonal: `--recursive`
+    /// expands the selected command subtree, while `--output
+    /// plain|json|yaml|markdown` picks the format. Plain is only the fallback
+    /// for commands that do not declare a supported `--output` default.
+    pub const fn output_aware() -> Self {
+        Self::output_aware_with_fallback(HelpFormat::Plain)
+    }
+
+    /// Output-aware help with an explicit fallback format.
+    ///
+    /// Use this for a fixed-format CLI that has no `--output` argument. For
+    /// example, a CLI whose normal output is always protocol JSON should pass
+    /// [`HelpFormat::Json`]. An explicit help `--output`, or a supported
+    /// default declared by the selected command or an ancestor, still wins.
+    pub const fn output_aware_with_fallback(default_format: HelpFormat) -> Self {
         Self {
             default_scope: HelpScope::OneLevel,
-            default_format: HelpFormat::Plain,
+            default_format,
         }
+    }
+
+    /// Compatibility alias for [`Self::output_aware`].
+    ///
+    /// The historical name predates output-default inheritance and is less
+    /// precise: a JSON-default command receives JSON help, not human text.
+    pub const fn human_cli_default() -> Self {
+        Self::output_aware()
     }
 }
 
@@ -117,6 +139,11 @@ impl HelpConfig {
 /// then renders either the selected command only (`OneLevel`) or the selected
 /// command and all descendants (`Recursive`).
 ///
+/// `Plain` and `Markdown` are text. `Json` and `Yaml` are protocol-v1 terminal
+/// results (`result.code:"help"`, model under `result.help`) — the same shape
+/// [`cli_handle_help_or_continue`] emits, so structured help validates against
+/// `cli-help-v1.schema.json` no matter which entry point produced it.
+///
 /// Requires the `cli-help` feature.
 #[cfg(feature = "cli-help")]
 pub fn cli_render_help_with_options(
@@ -124,30 +151,27 @@ pub fn cli_render_help_with_options(
     subcommand_path: &[&str],
     options: &HelpOptions,
 ) -> String {
-    let target = walk_to_subcommand(cmd, subcommand_path);
+    let selected = scoped_help_command(cmd, subcommand_path);
+    let target = &selected.conventional_command;
     let mut rendered = match options.format {
-        HelpFormat::Plain => {
-            let mut help = match options.scope {
-                HelpScope::OneLevel => render_help_one_level_plain(target),
-                HelpScope::Recursive => {
-                    let mut buf = String::new();
-                    render_help_recursive_plain(target, &[], &mut buf);
-                    buf
-                }
-            };
-            append_afdata_version_line(&mut help);
-            help
-        }
-        HelpFormat::Markdown => {
-            let mut help = render_help_markdown(cmd, subcommand_path, options.scope);
-            append_afdata_version_line(&mut help);
-            help
-        }
+        HelpFormat::Plain => match options.scope {
+            HelpScope::OneLevel => render_help_one_level_plain(target),
+            HelpScope::Recursive => {
+                let mut buf = String::new();
+                render_help_recursive_plain(target, &[], &mut buf);
+                buf
+            }
+        },
+        HelpFormat::Markdown => render_help_markdown(
+            target,
+            std::slice::from_ref(&selected.command_path),
+            options.scope,
+        ),
         HelpFormat::Json => {
-            serialize_json_output(&build_help_schema(cmd, subcommand_path, options.scope))
+            serialize_json_output(help_result_event(&selected, options.scope).as_value())
         }
         HelpFormat::Yaml => render_yaml(
-            &build_help_schema(cmd, subcommand_path, options.scope),
+            help_result_event(&selected, options.scope).as_value(),
             &OutputOptions {
                 redaction: Redactor::new().policy(RedactionPolicy::Off),
                 style: PlainStyle::Raw,
@@ -162,24 +186,6 @@ pub fn cli_render_help_with_options(
     }
     rendered.push('\n');
     rendered
-}
-
-#[cfg(feature = "cli-help")]
-fn append_afdata_version_line(help: &mut String) {
-    const LINE: &str = concat!("AFDATA: ", env!("CARGO_PKG_VERSION"));
-    if help.lines().any(|line| line.trim() == LINE) {
-        return;
-    }
-    if !help.is_empty() && !help.ends_with('\n') {
-        help.push('\n');
-    }
-    help.push_str(LINE);
-    help.push('\n');
-}
-
-#[cfg(feature = "cli-help")]
-fn afdata_versions_value() -> Value {
-    serde_json::json!({ "afdata": env!("CARGO_PKG_VERSION") })
 }
 
 /// Render recursive plain-text help for a clap command tree.
@@ -232,6 +238,78 @@ pub fn cli_handle_help_or_continue(
     cmd: &clap::Command,
     config: &HelpConfig,
 ) -> Result<Option<String>, Value> {
+    cli_handle_help_or_continue_inner(raw_args, cmd, config)
+}
+
+/// Handle a top-level version or help request through one early entry point.
+///
+/// This is the preferred CLI entry point when both helpers are enabled. The
+/// caller supplies `name`, `display_name`, `version`, and `build` for the
+/// version branch. Help is derived from `cmd` and intentionally does not repeat
+/// version values. Version takes precedence when both flags are present,
+/// matching the traditional two-call sequence.
+///
+/// Requires the `cli-help` feature.
+#[cfg(feature = "cli-help")]
+#[allow(clippy::too_many_arguments)]
+pub fn cli_handle_version_or_help_or_continue(
+    raw_args: &[String],
+    cmd: &clap::Command,
+    config: &HelpConfig,
+    name: &str,
+    display_name: Option<&str>,
+    version: &str,
+    build: Option<&str>,
+) -> Result<Option<String>, Value> {
+    match crate::cli::cli_handle_version_or_continue(
+        raw_args,
+        cmd,
+        name,
+        display_name,
+        version,
+        build,
+    ) {
+        Ok(Some(rendered)) => return Ok(Some(rendered)),
+        Ok(None) => {}
+        Err(event) => return Err(event.into()),
+    }
+    // This entry point answers `--version` itself, so the command exposes the
+    // flag whether or not the caller declared it on clap — an app has no reason
+    // to, since the pre-parser intercepts the flag before clap ever sees it.
+    // Materializing it on the clone is what makes help advertise `-V, --version`
+    // exactly once; the model still carries only the flag, never its value. The
+    // clone is used for rendering only, so the action is never dispatched.
+    let cmd = version_aware_help_command(cmd);
+    cli_handle_help_or_continue(raw_args, &cmd, config)
+}
+
+/// Clone `cmd` with a `--version` flag it can advertise in help.
+///
+/// Skipped when the command already exposes one (declared as an argument, or
+/// auto-generated by clap from `Command::version`), and `-V` is claimed only
+/// when no other argument owns that short.
+#[cfg(feature = "cli-help")]
+fn version_aware_help_command(cmd: &clap::Command) -> clap::Command {
+    let already_exposed = cmd.get_arguments().any(|arg| {
+        arg.get_long() == Some("version") || arg.get_short().is_some_and(|short| short == 'V')
+    }) || (!cmd.is_disable_version_flag_set()
+        && (cmd.get_version().is_some() || cmd.get_long_version().is_some()));
+    if already_exposed {
+        return cmd.clone();
+    }
+    let version_flag = clap::Arg::new("version")
+        .long("version")
+        .help("Print version")
+        .action(clap::ArgAction::SetTrue);
+    cmd.clone().disable_version_flag(true).arg(version_flag)
+}
+
+#[cfg(feature = "cli-help")]
+fn cli_handle_help_or_continue_inner(
+    raw_args: &[String],
+    cmd: &clap::Command,
+    config: &HelpConfig,
+) -> Result<Option<String>, Value> {
     let parsed = parse_help_request(raw_args, cmd);
     if !parsed.help_requested {
         return Ok(None);
@@ -244,18 +322,13 @@ pub fn cli_handle_help_or_continue(
         return Err(event.into());
     }
 
-    let (scope, format) = resolve_help_options(&parsed, config);
+    let (scope, format) = resolve_help_options(&parsed, cmd, config);
     let path: Vec<&str> = parsed.subcommand_path.iter().map(String::as_str).collect();
     // The one blessed structured shape: `--help --output json|yaml` wraps the
     // help schema in a protocol-v1 `kind:"result"` event (`code:"help"`), the
     // same envelope discipline as the version handler. Plain/Markdown stay text.
     if matches!(format, HelpFormat::Json | HelpFormat::Yaml) {
-        let event = crate::protocol::json_result(serde_json::json!({
-            "code": "help",
-            "help": build_help_schema(cmd, &path, scope),
-        }))
-        .trace(serde_json::json!({}))
-        .build();
+        let event = help_result_event(&scoped_help_command(cmd, &path), scope);
         let rendered = match format {
             HelpFormat::Json => serialize_json_output(event.as_value()),
             HelpFormat::Yaml => render_yaml(
@@ -273,9 +346,22 @@ pub fn cli_handle_help_or_continue(
     Ok(Some(cli_render_help_with_options(cmd, &path, &options)))
 }
 
+/// Wrap a help model in the protocol-v1 terminal result every structured help
+/// path shares.
+#[cfg(feature = "cli-help")]
+fn help_result_event(selected: &ScopedHelpCommand, scope: HelpScope) -> crate::protocol::Event {
+    crate::protocol::json_result(serde_json::json!({
+        "code": "help",
+        "help": build_selected_help_schema(selected, scope),
+    }))
+    .trace(serde_json::json!({}))
+    .build()
+}
+
 #[cfg(feature = "cli-help")]
 fn resolve_help_options(
     parsed: &ParsedHelpRequest,
+    cmd: &clap::Command,
     config: &HelpConfig,
 ) -> (HelpScope, HelpFormat) {
     // Scope and format are orthogonal: `--recursive` selects one-level vs
@@ -285,35 +371,94 @@ fn resolve_help_options(
     } else {
         config.default_scope
     };
-    let format = parsed.output_format.unwrap_or(config.default_format);
+    let format = parsed
+        .output_format
+        .or_else(|| command_output_default(cmd, &parsed.subcommand_path))
+        .unwrap_or(config.default_format);
     (scope, format)
 }
 
 #[cfg(feature = "cli-help")]
-fn walk_to_subcommand<'a>(cmd: &'a clap::Command, path: &[&str]) -> &'a clap::Command {
+fn command_output_default(cmd: &clap::Command, path: &[String]) -> Option<HelpFormat> {
     let mut current = cmd;
+    let mut format = command_output_default_here(current);
     for name in path {
-        current = current.find_subcommand(name).unwrap_or(current);
+        let Some(next) = current.find_subcommand(name) else {
+            break;
+        };
+        current = next;
+        if let Some(selected) = command_output_default_here(current) {
+            format = Some(selected);
+        }
     }
-    current
+    format
 }
 
 #[cfg(feature = "cli-help")]
-fn walk_to_subcommand_with_names<'a>(
-    cmd: &'a clap::Command,
-    path: &[&str],
-) -> (&'a clap::Command, Vec<String>) {
+fn command_output_default_here(cmd: &clap::Command) -> Option<HelpFormat> {
+    cmd.get_arguments()
+        .find(|arg| arg.get_long() == Some("output"))
+        .and_then(|arg| arg.get_default_values().first())
+        .and_then(|value| value.to_str())
+        .and_then(HelpFormat::parse)
+}
+
+#[cfg(feature = "cli-help")]
+struct ScopedHelpCommand {
+    local_command: clap::Command,
+    conventional_command: clap::Command,
+    command_path: String,
+    inherited_arguments_from: Vec<String>,
+}
+
+#[cfg(feature = "cli-help")]
+fn scoped_help_command(cmd: &clap::Command, path: &[&str]) -> ScopedHelpCommand {
     let mut current = cmd;
-    let mut names = vec![cmd.get_name().to_string()];
+    let mut command_names = vec![cmd.get_bin_name().unwrap_or(cmd.get_name()).to_string()];
+    let mut inherited_groups = Vec::new();
+
     for name in path {
-        if let Some(next) = current.find_subcommand(name) {
-            current = next;
-            names.push(next.get_name().to_string());
-        } else {
+        let Some(next) = current.find_subcommand(name) else {
             break;
+        };
+        let globals: Vec<clap::Arg> = current
+            .get_arguments()
+            .filter(|arg| arg.is_global_set() && !arg.is_hide_set())
+            .cloned()
+            .collect();
+        if !globals.is_empty() {
+            inherited_groups.push((command_names.join(" "), globals));
+        }
+        current = next;
+        command_names.push(next.get_name().to_string());
+    }
+
+    let command_path = command_names.join(" ");
+    let local_command = current.clone().bin_name(command_path.clone());
+    let mut conventional_command = local_command.clone();
+    let mut inherited_arguments_from = Vec::new();
+    for (source, arguments) in inherited_groups {
+        let mut inherited_from_source = false;
+        for argument in arguments {
+            let already_declared = conventional_command
+                .get_arguments()
+                .any(|candidate| candidate.get_id() == argument.get_id());
+            if !already_declared {
+                conventional_command = conventional_command.arg(argument);
+                inherited_from_source = true;
+            }
+        }
+        if inherited_from_source {
+            inherited_arguments_from.push(source);
         }
     }
-    (current, names)
+
+    ScopedHelpCommand {
+        local_command,
+        conventional_command,
+        command_path,
+        inherited_arguments_from,
+    }
 }
 
 #[cfg(feature = "cli-help")]
@@ -356,87 +501,163 @@ fn help_arg_is_secret(arg: &clap::Arg, context: &RedactionContext) -> bool {
 /// only advertise the `--output` formats (they have nothing to expand).
 #[cfg(feature = "cli-help")]
 fn enriched_help_command(cmd: &clap::Command) -> clap::Command {
-    let cmd = redact_secret_help_defaults(cmd.clone());
+    // The canonical discovery surface is `--help`; never let clap synthesize
+    // its legacy `help` pseudo-command while rendering an isolated subtree.
+    let cmd = redact_secret_help_defaults(cmd.clone()).disable_help_subcommand(true);
     let description = if visible_subcommands(&cmd).next().is_some() {
         HELP_FLAG_WITH_SUBCOMMANDS
     } else {
         HELP_FLAG_LEAF
     };
-    // clap auto-generates `-h, --help` lazily during build, so `mut_arg` cannot
-    // reach it yet. Replace it with an explicit flag carrying the enriched
-    // description. This command is only rendered, never parsed (afdata handles
-    // `--help` before clap), so the action is immaterial.
-    cmd.disable_help_flag(true).arg(
-        clap::Arg::new("help")
-            .short('h')
-            .long("help")
-            .help(description)
-            .long_help(description)
-            .action(clap::ArgAction::Help),
-    )
+    let has_explicit_version = cmd.get_arguments().any(|arg| {
+        arg.get_long() == Some("version") || arg.get_short().is_some_and(|short| short == 'V')
+    });
+    let exposes_auto_version = !cmd.is_disable_version_flag_set()
+        && (cmd.get_version().is_some() || cmd.get_long_version().is_some());
+    // `--help` has no short. `-h` would be a byte-identical alias, and the whole
+    // point of this release is that help answers in the command's output format:
+    // a short flag that returns JSON is a trap for the human reaching for it, and
+    // an agent gains nothing from two spellings. `-h` therefore stays the
+    // application's to spend (`--host`, the psql/mysql convention).
+    let help_flag = clap::Arg::new("help")
+        .long("help")
+        .help(description)
+        .long_help(description)
+        .action(clap::ArgAction::Help);
+    // clap auto-generates its help flag lazily during build, so `mut_arg` cannot
+    // reach it yet. The built-in version flag is lazy for the same reason, so
+    // materialize both before the compact schema reads `get_arguments()`.
+    let mut enriched = cmd.disable_help_flag(true).arg(help_flag);
+    if exposes_auto_version && !has_explicit_version {
+        enriched = enriched.disable_version_flag(true).arg(
+            clap::Arg::new("version")
+                .long("version")
+                .help("Print version")
+                .action(clap::ArgAction::Version),
+        );
+    }
+    enriched
 }
 
-/// Description for the `-h, --help` flag on commands that have subcommands.
+/// Description for the `--help` flag on commands that have subcommands.
 #[cfg(feature = "cli-help")]
 const HELP_FLAG_WITH_SUBCOMMANDS: &str = "Print help. Add --recursive to expand every nested subcommand; \
-     add --output json|yaml|markdown to render this help in another format.";
+     add --output plain|json|yaml|markdown to choose the format.";
 
-/// Description for the `-h, --help` flag on leaf commands (no subcommands).
+/// Description for the `--help` flag on leaf commands (no subcommands).
 #[cfg(feature = "cli-help")]
 const HELP_FLAG_LEAF: &str =
-    "Print help. Add --output json|yaml|markdown to render this help in another format.";
+    "Print help. Add --output plain|json|yaml|markdown to choose the format.";
 
 #[cfg(feature = "cli-help")]
 fn render_help_recursive_plain(cmd: &clap::Command, parent_path: &[&str], buf: &mut String) {
     use std::fmt::Write;
 
-    // Build the full command path (e.g. "myapp service start")
     let mut cmd_path = parent_path.to_vec();
-    cmd_path.push(cmd.get_name());
-    let path_str = cmd_path.join(" ");
-
-    // Separator between commands (skip for the first one)
-    if !buf.is_empty() {
-        let _ = writeln!(buf);
-        let _ = writeln!(buf, "{}", "═".repeat(60));
-    }
-
-    // Header: "myapp service start — description"
+    cmd_path.push(if parent_path.is_empty() {
+        cmd.get_bin_name().unwrap_or(cmd.get_name())
+    } else {
+        cmd.get_name()
+    });
+    let path = cmd_path.join(" ");
+    let usage = compact_usage(cmd, &path);
     if let Some(about) = cmd.get_about() {
-        let _ = writeln!(buf, "{path_str} — {about}");
+        let _ = writeln!(buf, "{usage} — {about}");
     } else {
-        let _ = writeln!(buf, "{path_str}");
+        let _ = writeln!(buf, "{usage}");
     }
-    let _ = writeln!(buf);
 
-    // Render clap's built-in help for this command (usage, args, options).
-    // Only the target command (top of the recursion) advertises the help
-    // modifiers; repeating them on every descendant block would be pure noise.
     let is_target = parent_path.is_empty();
-    let styled = if is_target {
-        enriched_help_command(cmd).render_long_help()
+    let owned = if is_target {
+        Some(enriched_help_command(cmd))
     } else {
-        redact_secret_help_defaults(cmd.clone()).render_long_help()
+        None
     };
-    let help_text = styled.to_string();
-    let _ = write!(buf, "{help_text}");
+    let source = owned.as_ref().unwrap_or(cmd);
+    for arg in source.get_arguments().filter(|arg| !arg.is_hide_set()) {
+        let _ = writeln!(buf, "  {}", compact_plain_argument(arg));
+    }
 
-    // Recurse into visible subcommands
-    for sub in cmd.get_subcommands() {
-        if sub.get_name() == "help" || sub.is_hide_set() {
-            continue; // skip clap's auto-generated "help" subcommand
+    for sub in visible_subcommands(cmd) {
+        if !buf.ends_with('\n') {
+            let _ = writeln!(buf);
         }
         render_help_recursive_plain(sub, &cmd_path, buf);
     }
 }
 
 #[cfg(feature = "cli-help")]
-fn render_help_markdown(cmd: &clap::Command, subcommand_path: &[&str], scope: HelpScope) -> String {
-    let (target, names) = walk_to_subcommand_with_names(cmd, subcommand_path);
+fn compact_usage(cmd: &clap::Command, path: &str) -> String {
+    let rendered = cmd.clone().render_usage().to_string();
+    let usage = rendered.strip_prefix("Usage: ").unwrap_or(&rendered);
+    let invocation = cmd.get_bin_name().unwrap_or(cmd.get_name());
+    usage.strip_prefix(invocation).map_or_else(
+        || format!("{path} {usage}"),
+        |suffix| format!("{path}{suffix}"),
+    )
+}
+
+#[cfg(feature = "cli-help")]
+fn compact_usage_suffix(cmd: &clap::Command) -> String {
+    let rendered = cmd.clone().render_usage().to_string();
+    let usage = rendered.strip_prefix("Usage: ").unwrap_or(&rendered);
+    usage
+        .strip_prefix(cmd.get_bin_name().unwrap_or(cmd.get_name()))
+        .unwrap_or(usage)
+        .trim()
+        .to_string()
+}
+
+#[cfg(feature = "cli-help")]
+fn compact_plain_argument(arg: &clap::Arg) -> String {
+    use std::fmt::Write;
+
+    let mut rendered = String::new();
+    if let Some(short) = arg.get_short() {
+        let _ = write!(rendered, "-{short}");
+        if arg.get_long().is_some() {
+            rendered.push_str(", ");
+        }
+    }
+    if let Some(long) = arg.get_long() {
+        let _ = write!(rendered, "--{long}");
+    } else if arg.get_short().is_none() {
+        rendered.push_str(
+            &arg.get_value_names()
+                .and_then(|names| names.first())
+                .map_or_else(|| arg.get_id().to_string(), ToString::to_string),
+        );
+    }
+    if argument_takes_values(arg)
+        && let Some(names) = arg.get_value_names()
+        && (arg.get_long().is_some() || arg.get_short().is_some())
+    {
+        for name in names {
+            let _ = write!(rendered, " <{name}>");
+        }
+    }
+    if matches!(
+        arg.get_action(),
+        clap::ArgAction::Append | clap::ArgAction::Count
+    ) {
+        rendered.push_str("...");
+    }
+    let defaults = redacted_default_values(arg);
+    if !defaults.is_empty() {
+        let _ = write!(rendered, " [default={}]", defaults.join(","));
+    }
+    if let Some(help) = arg.get_help() {
+        let _ = write!(rendered, ": {help}");
+    }
+    rendered
+}
+
+#[cfg(feature = "cli-help")]
+fn render_help_markdown(cmd: &clap::Command, names: &[String], scope: HelpScope) -> String {
     let mut buf = String::new();
-    render_markdown_command(target, &names, &mut buf, 1, true);
+    render_markdown_command(cmd, names, &mut buf, 1, true);
     if matches!(scope, HelpScope::Recursive) {
-        render_markdown_descendants(target, &names, &mut buf, 2);
+        render_markdown_descendants(cmd, names, &mut buf, 2);
     }
     buf
 }
@@ -473,6 +694,9 @@ fn render_markdown_command(
         let _ = writeln!(buf);
     }
     let heading_level = "#".repeat(level.max(1));
+    // The joined path is the invocable command, not the (possibly branded)
+    // `Command::name` — a reader must be able to copy the heading and the
+    // fenced `Usage:` line straight into a shell.
     let path = names.join(" ");
     if let Some(about) = cmd.get_about() {
         let _ = writeln!(buf, "{heading_level} {path} - {about}");
@@ -485,7 +709,9 @@ fn render_markdown_command(
     }
     let _ = writeln!(buf);
     let _ = writeln!(buf, "```text");
-    let help = markdown_help_block_command(cmd, enrich).render_long_help();
+    let help = markdown_help_block_command(cmd, enrich)
+        .bin_name(path.clone())
+        .render_long_help();
     write_trimmed_help(buf, &help.to_string());
     if !buf.ends_with('\n') {
         let _ = writeln!(buf);
@@ -533,7 +759,7 @@ fn markdown_help_block_command(cmd: &clap::Command, enrich: bool) -> clap::Comma
     let cmd = if enrich {
         enriched_help_command(cmd)
     } else {
-        redact_secret_help_defaults(cmd.clone())
+        redact_secret_help_defaults(cmd.clone()).disable_help_subcommand(true)
     };
     cmd.about(None::<&str>).long_about(None::<&str>)
 }
@@ -577,7 +803,12 @@ fn parse_help_request(raw_args: &[String], cmd: &clap::Command) -> ParsedHelpReq
         }
 
         let (flag_name, inline_value) = split_flag(arg);
-        if matches!(arg, "--help" | "-h") {
+        // Long form only. `-h` and `--help` would be byte-identical aliases, so
+        // the short buys nothing for an agent and misleads a human (it answers in
+        // the command's output format, which for an agent-first CLI is JSON, not
+        // text). Leaving the short unclaimed also keeps it available to apps that
+        // spend `-h` on `--host`, and removes a whole class of collision.
+        if arg == "--help" {
             help_requested = true;
             i += 1;
             continue;
@@ -712,16 +943,34 @@ fn flag_takes_value(cmd: &clap::Command, raw_flag: &str) -> bool {
 }
 
 #[cfg(feature = "cli-help")]
-fn build_help_schema(cmd: &clap::Command, subcommand_path: &[&str], scope: HelpScope) -> Value {
-    let (target, names) = walk_to_subcommand_with_names(cmd, subcommand_path);
-    let mut schema = command_schema(target, &names, matches!(scope, HelpScope::Recursive), true);
+fn build_selected_help_schema(selected: &ScopedHelpCommand, scope: HelpScope) -> Value {
+    let mut schema = command_schema(
+        &selected.local_command,
+        matches!(scope, HelpScope::Recursive),
+        true,
+    );
     if let Value::Object(map) = &mut schema {
-        map.insert("code".to_string(), Value::String("help".to_string()));
         map.insert(
             "scope".to_string(),
             Value::String(help_scope_tag(scope).to_string()),
         );
-        map.insert("versions".to_string(), afdata_versions_value());
+        map.insert(
+            "command_path".to_string(),
+            Value::String(selected.command_path.clone()),
+        );
+        if !selected.inherited_arguments_from.is_empty() {
+            map.insert(
+                "inherited_arguments_from".to_string(),
+                Value::Array(
+                    selected
+                        .inherited_arguments_from
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
     }
     schema
 }
@@ -735,44 +984,55 @@ fn help_scope_tag(scope: HelpScope) -> &'static str {
 }
 
 #[cfg(feature = "cli-help")]
-fn command_schema(cmd: &clap::Command, names: &[String], recursive: bool, enrich: bool) -> Value {
+fn command_schema(cmd: &clap::Command, recursive: bool, enrich: bool) -> Value {
     let subcommands: Vec<Value> = visible_subcommands(cmd)
         .map(|sub| {
-            let mut child_names = names.to_vec();
-            child_names.push(sub.get_name().to_string());
             if recursive {
                 // Descendants never re-advertise the help modifiers (enrich=false).
-                command_schema(sub, &child_names, true, false)
+                command_schema(sub, true, false)
             } else {
-                command_summary_schema(sub, &child_names)
+                command_summary_schema(sub)
             }
         })
         .collect();
 
-    serde_json::json!({
-        "name": cmd.get_name(),
-        "command_path": names.join(" "),
-        "path": names,
-        "about": styled_to_value(cmd.get_about()),
-        "long_about": styled_to_value(cmd.get_long_about()),
-        "usage": cmd.clone().render_usage().to_string(),
-        "arguments": command_arguments_schema(cmd, enrich),
-        "subcommands": subcommands,
-    })
+    let mut schema = serde_json::Map::new();
+    schema.insert(
+        "name".to_string(),
+        Value::String(cmd.get_name().to_string()),
+    );
+    insert_non_empty(
+        &mut schema,
+        "about",
+        cmd.get_about().map(ToString::to_string).unwrap_or_default(),
+    );
+    let usage = compact_usage_suffix(cmd);
+    if !usage.is_empty() {
+        schema.insert("usage".to_string(), Value::String(usage));
+    }
+    let arguments = command_arguments_schema(cmd, enrich);
+    if !arguments.is_empty() {
+        schema.insert("arguments".to_string(), Value::Array(arguments));
+    }
+    if !subcommands.is_empty() {
+        schema.insert("subcommands".to_string(), Value::Array(subcommands));
+    }
+    Value::Object(schema)
 }
 
 #[cfg(feature = "cli-help")]
-fn command_summary_schema(cmd: &clap::Command, names: &[String]) -> Value {
-    serde_json::json!({
-        "name": cmd.get_name(),
-        "command_path": names.join(" "),
-        "path": names,
-        "about": styled_to_value(cmd.get_about()),
-        "long_about": styled_to_value(cmd.get_long_about()),
-        "usage": Value::Null,
-        "arguments": [],
-        "subcommands": [],
-    })
+fn command_summary_schema(cmd: &clap::Command) -> Value {
+    let mut schema = serde_json::Map::new();
+    schema.insert(
+        "name".to_string(),
+        Value::String(cmd.get_name().to_string()),
+    );
+    insert_non_empty(
+        &mut schema,
+        "about",
+        cmd.get_about().map(ToString::to_string).unwrap_or_default(),
+    );
+    Value::Object(schema)
 }
 
 #[cfg(feature = "cli-help")]
@@ -797,14 +1057,106 @@ fn command_arguments_schema(cmd: &clap::Command, enrich: bool) -> Vec<Value> {
         .collect()
 }
 
+/// Insert `key` only when `value` is a non-empty string.
+///
+/// `cli-help-v1.schema.json` sets `minLength: 1` on every optional string, and
+/// the spec requires omitting empty values. Clap happily returns `Some("")` for
+/// an explicit `about("")` / `help("")` / `value_name("")`, so every optional
+/// string goes through this gate rather than being inserted on `Some(..)` alone.
+#[cfg(feature = "cli-help")]
+fn insert_non_empty(schema: &mut serde_json::Map<String, Value>, key: &str, value: String) {
+    if !value.is_empty() {
+        schema.insert(key.to_string(), Value::String(value));
+    }
+}
+
 #[cfg(feature = "cli-help")]
 fn argument_schema(arg: &clap::Arg) -> Value {
-    let value_names: Vec<String> = arg
-        .get_value_names()
-        .map(|names| names.iter().map(ToString::to_string).collect())
-        .unwrap_or_default();
-    let default_values: Vec<String> = arg
-        .get_default_values()
+    let mut schema = serde_json::Map::new();
+    if let Some(long) = arg.get_long() {
+        schema.insert("name".to_string(), Value::String(format!("--{long}")));
+    } else if let Some(short) = arg.get_short() {
+        schema.insert("name".to_string(), Value::String(format!("-{short}")));
+    } else {
+        schema.insert(
+            "name".to_string(),
+            Value::String(
+                arg.get_value_names()
+                    .and_then(|names| names.first())
+                    .map_or_else(|| arg.get_id().to_string(), ToString::to_string),
+            ),
+        );
+    }
+    if arg.get_long().is_some()
+        && let Some(short) = arg.get_short()
+    {
+        schema.insert("short".to_string(), Value::String(format!("-{short}")));
+    }
+    insert_non_empty(
+        &mut schema,
+        "help",
+        arg.get_help().map(ToString::to_string).unwrap_or_default(),
+    );
+    if arg.is_required_set() {
+        schema.insert("required".to_string(), Value::Bool(true));
+    }
+    if arg.is_global_set() {
+        schema.insert("global".to_string(), Value::Bool(true));
+    }
+    if matches!(
+        arg.get_action(),
+        clap::ArgAction::Append | clap::ArgAction::Count
+    ) {
+        schema.insert("repeatable".to_string(), Value::Bool(true));
+    }
+    if (arg.get_long().is_some() || arg.get_short().is_some())
+        && argument_takes_values(arg)
+        && let Some(names) = arg.get_value_names()
+    {
+        if names.len() == 1 {
+            insert_non_empty(&mut schema, "value", names[0].to_string());
+        } else {
+            let values: Vec<Value> = names
+                .iter()
+                .map(ToString::to_string)
+                .filter(|name| !name.is_empty())
+                .map(Value::String)
+                .collect();
+            if !values.is_empty() {
+                schema.insert("values".to_string(), Value::Array(values));
+            }
+        }
+    }
+    let defaults = redacted_default_values(arg);
+    if !defaults.is_empty() {
+        if defaults.len() == 1 {
+            schema.insert("default".to_string(), Value::String(defaults[0].clone()));
+        } else {
+            schema.insert(
+                "defaults".to_string(),
+                Value::Array(defaults.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
+    Value::Object(schema)
+}
+
+#[cfg(feature = "cli-help")]
+fn argument_takes_values(arg: &clap::Arg) -> bool {
+    matches!(
+        arg.get_action(),
+        clap::ArgAction::Set | clap::ArgAction::Append
+    )
+}
+
+#[cfg(feature = "cli-help")]
+fn redacted_default_values(arg: &clap::Arg) -> Vec<String> {
+    // An author who called `hide_default_value(true)` hid it from clap's own
+    // help; the structured model must not disclose what plain help withholds.
+    if arg.is_hide_default_value_set() {
+        return Vec::new();
+    }
+    arg.get_default_values()
         .iter()
         .map(|value| {
             if help_arg_is_secret(arg, &RedactionContext::default()) {
@@ -813,22 +1165,5 @@ fn argument_schema(arg: &clap::Arg) -> Value {
                 value.to_string_lossy().to_string()
             }
         })
-        .collect();
-    serde_json::json!({
-        "id": arg.get_id().to_string(),
-        "kind": if arg.get_long().is_some() || arg.get_short().is_some() { "option" } else { "argument" },
-        "long": arg.get_long(),
-        "short": arg.get_short().map(|c| c.to_string()),
-        "help": styled_to_value(arg.get_help()),
-        "long_help": styled_to_value(arg.get_long_help()),
-        "required": arg.is_required_set(),
-        "action": format!("{:?}", arg.get_action()),
-        "value_names": value_names,
-        "default_values": default_values,
-    })
-}
-
-#[cfg(feature = "cli-help")]
-fn styled_to_value(value: Option<&clap::builder::StyledStr>) -> Value {
-    value.map_or(Value::Null, |s| Value::String(s.to_string()))
+        .collect()
 }

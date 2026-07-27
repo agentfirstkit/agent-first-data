@@ -554,11 +554,10 @@ pub fn cli_render_version(
 /// `std::env::args()`. The helper intentionally runs before clap or another
 /// parser so explicit `--output json|yaml|plain` is honored instead of being
 /// bypassed by built-in version handling. `cmd` is the caller's own
-/// `clap::Command` (typically `Cli::command()`) — used only to look up which
-/// flags take a value (the same style of lookup `cli_handle_help_or_continue`
-/// does, feature-gated separately since this parser only needs `cli`), so any
-/// global flag the caller defines (`--stdout-file`, or one added later) is
-/// recognized without the pre-parser having to hardcode its name.
+/// `clap::Command` (typically `Cli::command()`) — used to inherit the declared
+/// `--output` default and to look up which flags take a value, so any global
+/// flag the caller defines (`--stdout-file`, or one added later) is recognized
+/// without the pre-parser having to hardcode its name.
 ///
 /// Only a *top-level* version request is recognized: scanning stops at the first
 /// positional argument (the subcommand), so `tool sub --version <value>` leaves
@@ -569,9 +568,10 @@ pub fn cli_render_version(
 ///
 /// The one blessed behavior: `--version` always answers with a protocol-v1
 /// `kind:"result"` version event (payload `{ "code": "version", "name", ...
-/// }`, see [`build_cli_version`]) — JSON by default, or `--output yaml|plain`
-/// (or `--json`) for another format. Returns a standard [`build_cli_error`]
-/// event when the request is malformed, for example `--version --output xml`.
+/// }`, see [`build_cli_version`]). An explicit `--output`/`--json` wins;
+/// otherwise the handler inherits the command's declared `--output` default,
+/// falling back to JSON. Returns a standard [`build_cli_error`] event when the
+/// request is malformed, for example `--version --output xml`.
 #[cfg(any(feature = "cli", feature = "cli-help"))]
 pub fn cli_handle_version_or_continue(
     raw_args: &[String],
@@ -597,8 +597,20 @@ pub fn cli_handle_version_or_continue(
         display_name,
         version,
         build,
-        parsed.output_format.unwrap_or(OutputFormat::Json),
+        parsed
+            .output_format
+            .or_else(|| command_output_default(cmd))
+            .unwrap_or(OutputFormat::Json),
     )))
+}
+
+#[cfg(any(feature = "cli", feature = "cli-help"))]
+fn command_output_default(cmd: &clap::Command) -> Option<OutputFormat> {
+    cmd.get_arguments()
+        .find(|arg| arg.get_long() == Some("output"))
+        .and_then(|arg| arg.get_default_values().first())
+        .and_then(|value| value.to_str())
+        .and_then(|value| cli_parse_output(value).ok())
 }
 
 #[cfg(any(feature = "cli", feature = "cli-help"))]
@@ -629,7 +641,7 @@ fn parse_version_request(raw_args: &[String], cmd: &clap::Command) -> ParsedVers
         }
 
         let (flag_name, inline_value) = split_flag(arg);
-        if matches!(arg, "--version" | "-V") {
+        if arg == "--version" {
             version_requested = true;
             i += 1;
             continue;

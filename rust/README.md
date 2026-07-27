@@ -24,7 +24,7 @@ fn main() {
 }
 ```
 
-Useful names use Rust casing: `output_json`, `output_yaml`, `output_plain`, `output_json_with_options`, `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `is_valid_rfc3339`, `is_valid_bcp47`, `cli_parse_output`, `cli_output`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue`, and `decode_protocol_event`.
+Useful names use Rust casing: `output_json`, `output_yaml`, `output_plain`, `output_json_with_options`, `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `is_valid_rfc3339`, `is_valid_bcp47`, `cli_parse_output`, `cli_output`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_help_or_continue`, and `decode_protocol_event`.
 
 Tracing integration is behind the `tracing` feature: `afdata_tracing::try_init_json`, `try_init_plain`, and `try_init_yaml` return initialization errors; the older `init_*` helpers remain for fire-and-forget setup. CLI help rendering is behind `cli-help`; skill administration is behind `skill-admin`; stdout/stderr file redirection is behind `stream-redirect`.
 
@@ -60,7 +60,8 @@ Canonical flags are `--stdout-file` and `--stderr-file`. They redirect the corre
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - Prefer `try_init_*` for Rust tracing startup so failures, such as another global subscriber already being installed, are visible to the caller.
 - `build_cli_error(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
-- Use `cli_handle_version_or_continue()` before clap parsing so it can intercept `--version`/`-V` before clap's own built-in handling: it always answers with a protocol-v1 `kind:"result"` version event, JSON by default, or `--output yaml|plain`/`--json` for another format.
+- Prefer one `cli_handle_version_or_help_or_continue()` call before Clap parsing. It intercepts `--version` and `--help` (long forms only — a `-h`/`-V` alias would be byte-identical and is deliberately left to the application); version metadata is emitted only for a version request, while help advertises the flag without repeating its values. Omitted `--output` inherits the selected command's declared default, then the nearest ancestor default; recursive plain/JSON/YAML is a compact index rather than repeated Clap help blocks.
+- `cli_handle_version_or_continue()` and `cli_handle_help_or_continue()` remain available for integrations that must keep the phases separate. Use `HelpConfig::output_aware()` for help-default inheritance; a fixed-format CLI without `--output` uses `HelpConfig::output_aware_with_fallback(HelpFormat::Json)` (or its actual normal format).
 - `stream-redirect` is Unix fd-level redirection where supported. It is stream destination control, not a second AFDATA protocol stream, and it does not implement rotation.
 
 ## Reference

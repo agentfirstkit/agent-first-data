@@ -18,8 +18,8 @@ func TestRootHelpIsOneLevel(t *testing.T) {
 			t.Errorf("root --help missing %q", want)
 		}
 	}
-	if !containsStr(help, "AFDATA: "+afdata.Version) {
-		t.Errorf("root --help missing AFDATA version")
+	if containsStr(help, "AFDATA:") || containsStr(help, "Version:") {
+		t.Errorf("root --help should disclose version metadata only through --version")
 	}
 	for _, notWant := range []string{"--help-all", "--dry-run", "--host", "--stream", "--result-only"} {
 		if containsStr(help, notWant) {
@@ -73,19 +73,21 @@ func TestRecursivePlainContainsSubcommandDetails(t *testing.T) {
 
 func TestHelpSchemaIsRecursiveExport(t *testing.T) {
 	schema := helpSchema("", "recursive")
-	if schema["code"] != "help" || schema["scope"] != "recursive" {
+	if schema["scope"] != "recursive" || schema["command_path"] != "agent-cli" {
 		t.Fatalf("unexpected help schema header: %v", schema)
 	}
-	versions, ok := schema["versions"].(map[string]any)
-	if !ok || versions["afdata"] != afdata.Version {
-		t.Fatalf("help schema must include only the AFDATA version: %v", schema["versions"])
+	if _, ok := schema["code"]; ok {
+		t.Fatalf("help model must not duplicate the envelope code: %v", schema)
 	}
-	commands, ok := schema["commands"].([]map[string]any)
+	if _, ok := schema["versions"]; ok {
+		t.Fatalf("help model must leave version details to --version: %v", schema)
+	}
+	commands, ok := schema["subcommands"].([]map[string]any)
 	if !ok || len(commands) == 0 {
-		t.Fatalf("commands missing from schema: %v", schema["commands"])
+		t.Fatalf("subcommands missing from schema: %v", schema["subcommands"])
 	}
-	if _, ok := commands[0]["flags"]; !ok {
-		t.Fatalf("recursive schema should include child flags: %v", commands[0])
+	if _, ok := commands[0]["arguments"]; !ok {
+		t.Fatalf("recursive schema should include child arguments: %v", commands[0])
 	}
 }
 
@@ -94,12 +96,12 @@ func TestHelpSchemaOneLevelOmitsChildFlags(t *testing.T) {
 	if schema["scope"] != "one_level" {
 		t.Fatalf("unexpected scope: %v", schema["scope"])
 	}
-	commands, ok := schema["commands"].([]map[string]any)
+	commands, ok := schema["subcommands"].([]map[string]any)
 	if !ok || len(commands) == 0 {
-		t.Fatalf("commands missing from schema: %v", schema["commands"])
+		t.Fatalf("subcommands missing from schema: %v", schema["subcommands"])
 	}
-	if _, ok := commands[0]["flags"]; ok {
-		t.Fatalf("one-level schema must not include child flags: %v", commands[0])
+	if _, ok := commands[0]["arguments"]; ok {
+		t.Fatalf("one-level schema must not include child arguments: %v", commands[0])
 	}
 }
 
@@ -297,14 +299,13 @@ func TestLogLinesAreCategoryTagged(t *testing.T) {
 	if start["kind"] != "log" || startPayload["category"] != "startup" {
 		t.Errorf("startup log not tagged correctly: %v", start)
 	}
-	// argv is now a []interface{} after RedactedValue conversion
-	// Note: RedactArgv was deleted in 0.16; argv redaction is no longer automatic
-	argvRaw, ok := startPayload["argv"].([]interface{})
+	argvRaw, ok := startPayload["argv"].([]string)
 	if !ok {
-		t.Fatalf("argv not []interface{}: %#v", startPayload["argv"])
+		t.Fatalf("argv not []string: %#v", startPayload["argv"])
 	}
-	// Arguments are passed through as-is, not redacted (RedactArgv removed in 0.16)
-	argvExpected := []interface{}{"--output", "yaml", "--log", "startup", "--api-key-secret", "sk-test", "ping"}
+	// A secret-suffixed flag's value must never reach the startup log. This is
+	// the spore's own naming convention applied to its own diagnostics.
+	argvExpected := []string{"--output", "yaml", "--log", "startup", "--api-key-secret", "***", "ping"}
 	if len(argvRaw) != len(argvExpected) {
 		t.Fatalf("argv length = %d, want %d: %v", len(argvRaw), len(argvExpected), argvRaw)
 	}

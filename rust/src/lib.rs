@@ -17,8 +17,9 @@
 //!   [`build_cli_error`], [`build_cli_version`], [`cli_render_version`]
 //! - (feature `cli` or `cli-help`): [`cli_handle_version_or_continue`] (needs a `&clap::Command`
 //!   to recognize the caller's own value-taking global flags)
-//! - (feature `cli-help`): configurable clap help rendering via [`cli_render_help_with_options`]
-//!   and [`cli_handle_help_or_continue`]
+//! - (feature `cli-help`): configurable clap help rendering via [`cli_render_help_with_options`];
+//!   use [`cli_handle_version_or_help_or_continue`] as the preferred Rust entry point
+//!   for top-level version/help handling
 //! - (feature `cli-help-markdown`): [`cli_render_help_markdown`] — recursive Markdown help
 //! - (feature `skill`): [`skill::validate_skill`] / [`skill::validate_skill_named`] — strict
 //!   Agent Skills `SKILL.md` front-matter validation
@@ -65,10 +66,12 @@ pub use cli::{
     cli_parse_log_filters, cli_parse_output, cli_render_version,
 };
 pub use formatting::render;
+#[cfg(feature = "cli-help-markdown")]
+pub use help::cli_render_help_markdown;
 #[cfg(feature = "cli-help")]
 pub use help::{
-    HelpConfig, HelpFormat, HelpOptions, HelpScope, cli_handle_help_or_continue, cli_render_help,
-    cli_render_help_markdown, cli_render_help_with_options,
+    HelpConfig, HelpFormat, HelpOptions, HelpScope, cli_handle_help_or_continue,
+    cli_handle_version_or_help_or_continue, cli_render_help, cli_render_help_with_options,
 };
 pub use protocol::{
     BuildError, DecodedError, DecodedEvent, DecodedLog, DecodedProgress, DecodedResult,

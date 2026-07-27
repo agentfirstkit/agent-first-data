@@ -451,6 +451,8 @@ def cli_handle_version_or_continue(
     display_name: str | None,
     version: str,
     build: str | None,
+    *,
+    default_format: OutputFormat = OutputFormat.JSON,
 ) -> str | None:
     """Render version output if --version/-V is present; otherwise return None.
 
@@ -461,8 +463,8 @@ def cli_handle_version_or_continue(
 
     The one blessed behavior: ``--version``/``-V`` always answers with a
     protocol-v1 ``kind:"result"`` version event (see :func:`build_cli_version`) —
-    JSON by default, or ``--json`` / ``--output <json|yaml|plain>`` to select
-    another format.
+    An explicit ``--json`` / ``--output <json|yaml|plain>`` wins; otherwise
+    ``default_format`` should be the command's normal output default.
 
     Only a top-level version request is recognized: scanning stops at the first
     positional argument (the subcommand), so ``tool sub --version <value>``
@@ -490,7 +492,7 @@ def cli_handle_version_or_continue(
             break
 
         flag_name, inline_value = _split_flag(arg)
-        if arg in ("--version", "-V"):
+        if arg == "--version":
             version_requested = True
             i += 1
             continue
@@ -560,7 +562,7 @@ def cli_handle_version_or_continue(
         display_name,
         version,
         build,
-        output_format if output_format is not None else OutputFormat.JSON,
+        output_format if output_format is not None else default_format,
     )
 
 

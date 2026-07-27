@@ -411,9 +411,9 @@ func splitVersionFlag(arg string) (name string, value string, hasInline bool) {
 
 // CliHandleVersionOrContinue renders version output if --version/-V is present.
 // It returns handled=false when no version flag was present. --version always
-// answers with a structured protocol-v1 version event — JSON by default, or the
-// format requested via --output json|yaml|plain (or the --json alias). There is
-// no conventional bare-text path.
+// answers with a structured protocol-v1 version event. An explicit
+// --output/--json wins; otherwise the optional defaultFormats entry should be
+// the command's normal output default (JSON when omitted).
 //
 // valueFlags is the caller's own value-taking global long flags (with or without
 // leading dashes; each is normalized by stripping leading '-'). The pre-parser
@@ -424,7 +424,7 @@ func splitVersionFlag(arg string) (name string, value string, hasInline bool) {
 // Only a top-level version request is recognized: scanning stops at the first
 // positional argument (the subcommand), so "tool sub --version <value>" leaves
 // --version for the subcommand's parser rather than printing the tool version.
-func CliHandleVersionOrContinue(args []string, valueFlags []string, name, displayName, version, build string) (out string, handled bool, err error) {
+func CliHandleVersionOrContinue(args []string, valueFlags []string, name, displayName, version, build string, defaultFormats ...OutputFormat) (out string, handled bool, err error) {
 	valueFlagSet := make(map[string]struct{}, len(valueFlags))
 	for _, flag := range valueFlags {
 		valueFlagSet[strings.TrimLeft(flag, "-")] = struct{}{}
@@ -445,7 +445,7 @@ func CliHandleVersionOrContinue(args []string, valueFlags []string, name, displa
 		if !strings.HasPrefix(arg, "-") {
 			break
 		}
-		if arg == "--version" || arg == "-V" {
+		if arg == "--version" {
 			versionRequested = true
 			i++
 			continue
@@ -525,7 +525,14 @@ func CliHandleVersionOrContinue(args []string, valueFlags []string, name, displa
 	}
 	format := outputFormat
 	if !outputExplicit {
-		format = OutputFormatJson
+		switch len(defaultFormats) {
+		case 0:
+			format = OutputFormatJson
+		case 1:
+			format = defaultFormats[0]
+		default:
+			return "", true, fmt.Errorf("expected at most one default version output format")
+		}
 	}
 	return CliRenderVersion(name, displayName, version, build, format), true, nil
 }
