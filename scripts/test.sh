@@ -77,6 +77,7 @@ run_static() {
   (cd "$ROOTPATH" && python3 scripts/validate_cli_help.py)
   (cd "$ROOTPATH" && python3 scripts/validate_api_surface.py)
   (cd "$ROOTPATH" && python3 scripts/sync_offline_assets.py --check)
+  (cd "$ROOTPATH" && python3 scripts/validate_no_binaries.py)
 
   echo ""
   echo "[4/6] Go (gofmt + compile)"

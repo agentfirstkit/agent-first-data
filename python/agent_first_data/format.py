@@ -613,6 +613,63 @@ def redact_url_secrets(url: str, *, secret_names: Sequence[str] = ()) -> str:
     return redacted if redacted is not None else url
 
 
+def redact_argv(
+    args: Sequence[str],
+    *,
+    secret_names: Sequence[str] = (),
+    policy: RedactionPolicy | None = None,
+) -> list[str]:
+    """Redact secret values out of a command line.
+
+    A long flag whose name is secret by AFDATA naming (``--api-key-secret``, or
+    an exact ``secret_names`` entry) has its value replaced by ``***``, in both
+    ``--flag=value`` and ``--flag value`` spellings. Everything else is
+    preserved byte-for-byte.
+
+    Free text is deliberately never scanned: a bare ``api_key_secret=sk-live``
+    positional, or a secret-looking token after a non-secret flag, is left
+    alone. AFDATA decides sensitivity from the *field name*, and argv is no
+    exception — rename the flag rather than pattern-matching values. A flag with
+    no value (end of argv, or followed by another flag) is likewise left
+    inspectable.
+
+    Only long (``--``) flags are recognized, matching the convention's
+    long-flags-only rule.
+
+    Intended for CLIs that record their own invocation — startup diagnostics,
+    audit trails, crash reports — where writing argv verbatim would put a
+    credential in the log.
+    """
+    if policy is RedactionPolicy.Off:
+        return list(args)
+    context = _RedactionContext.from_names(secret_names)
+    out: list[str] = []
+    redact_next = False
+    for arg in args:
+        if redact_next:
+            redact_next = False
+            if not arg.startswith("-"):
+                out.append("***")
+                continue
+        if arg.startswith("--"):
+            rest = arg[2:]
+            name, sep, _value = rest.partition("=")
+            if sep:
+                if _is_secret_flag_name(name, context):
+                    out.append(f"--{name}=***")
+                    continue
+            elif _is_secret_flag_name(rest, context):
+                redact_next = True
+        out.append(arg)
+    return out
+
+
+def _is_secret_flag_name(flag_name: str, context: _RedactionContext) -> bool:
+    """Whether a long flag's name is secret, normalizing kebab-case to snake_case."""
+    normalized = flag_name.replace("-", "_")
+    return context.is_secret_key(normalized) or context.is_secret_key(flag_name)
+
+
 def _apply_redaction(value: Any, secret_names: Sequence[str], policy: RedactionPolicy | None) -> None:
     context = _RedactionContext.from_names(secret_names)
     _apply_redaction_policy_with_context(value, policy, context)

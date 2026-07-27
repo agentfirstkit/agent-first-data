@@ -113,7 +113,7 @@
       "python": null,
       "typescript": null,
       "go": null,
-      "note": "Rust-only typed protocol-validation error (stable rule slug + JSON pointer + message) returned by validate_protocol_event/validate_protocol_stream. Python/TS/Go SDKs still surface validation failures as a plain message (ValueError / Error / error), not yet upgraded to the typed violation — a tracked cross-SDK gap."
+      "note": "Rust-only typed protocol-validation error (stable rule slug + JSON pointer + message) returned by validate_protocol_event/validate_protocol_stream. Python/TS/Go SDKs still surface validation failures as a plain message (ValueError / Error / error), not yet upgraded to the typed violation \u2014 a tracked cross-SDK gap."
     },
     {
       "id": "build_cli_error",
@@ -187,7 +187,7 @@
       "python": "render",
       "typescript": "render",
       "go": "Render",
-      "note": "The single value × format × options → String entry point. Replaces the former output_json/output_yaml/output_plain (+ _with_options) and cli_output/cli_output_with_options families. Rust/Go take an explicit OutputOptions argument (OutputOptions: Default); Python/TS keep it an optional keyword/parameter."
+      "note": "The single value \u00d7 format \u00d7 options \u2192 String entry point. Replaces the former output_json/output_yaml/output_plain (+ _with_options) and cli_output/cli_output_with_options families. Rust/Go take an explicit OutputOptions argument (OutputOptions: Default); Python/TS keep it an optional keyword/parameter."
     },
     {
       "id": "redacted_value",
@@ -204,6 +204,15 @@
       "python": "redact_url_secrets",
       "typescript": "redactUrlSecrets",
       "go": "RedactURLSecrets"
+    },
+    {
+      "id": "redact_argv",
+      "kind": "fn",
+      "rust": "redact_argv",
+      "python": "redact_argv",
+      "typescript": "redactArgv",
+      "go": "RedactArgv",
+      "note": "Rust/Go also expose it as a configured Redactor method (.argv()/.Argv()) for custom secret_names/policy; Python/TS take secret_names/policy as keyword arguments, matching redacted_value/redact_url_secrets."
     },
     {
       "id": "redactor",

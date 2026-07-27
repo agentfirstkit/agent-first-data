@@ -218,7 +218,7 @@ func containsStr(s, sub string) bool {
 func TestOutputFlagMissing(t *testing.T) {
 	for _, args := range [][]string{
 		{"--output"},
-		{"--output", "--json"},
+		{"--output", "--recursive"},
 		{"--output="},
 	} {
 		if !outputFlagMissing(args) {
@@ -228,7 +228,6 @@ func TestOutputFlagMissing(t *testing.T) {
 	for _, args := range [][]string{
 		{"--output", "json"},
 		{"--output=json"},
-		{"--json"},
 	} {
 		if outputFlagMissing(args) {
 			t.Fatalf("outputFlagMissing(%v) = true", args)

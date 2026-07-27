@@ -671,9 +671,11 @@ def test_cli_handle_version_supports_inline_output_format():
     assert 'version: "1.2.3"' in out
 
 
-def test_cli_handle_version_json_alias():
+def test_cli_handle_version_ignores_json_flag():
+    # --json belongs to the application: it must not select a format, and it
+    # must not conflict with one. --output yaml still wins.
     out = cli_handle_version_or_continue(
-        ["--version", "--json"],
+        ["--version", "--json", "--output", "yaml"],
         VERSION_VALUE_FLAGS,
         "agent-cli",
         None,
@@ -681,15 +683,13 @@ def test_cli_handle_version_json_alias():
         None,
     )
     assert out is not None
-    parsed = json.loads(out.strip())
-    assert parsed["kind"] == "result"
-    assert parsed["result"]["version"] == "1.2.3"
+    assert out.startswith("---\n")
 
 
-def test_cli_handle_version_json_alias_conflict():
+def test_cli_handle_version_conflicting_output_formats():
     with pytest.raises(ValueError, match="conflicting output formats"):
         cli_handle_version_or_continue(
-            ["--version", "--json", "--output", "yaml"],
+            ["--version", "--output", "json", "--output", "yaml"],
             VERSION_VALUE_FLAGS,
             "agent-cli",
             None,

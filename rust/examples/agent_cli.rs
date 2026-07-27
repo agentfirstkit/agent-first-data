@@ -130,10 +130,6 @@ struct Cli {
     #[arg(long, default_value = "json")]
     output: String,
 
-    /// Equivalent to --output json; conflicts with other explicit output formats
-    #[arg(long)]
-    json: bool,
-
     /// Log categories (comma-separated). Use `--log all` (or --verbose) to
     /// enable every category and discover them from the tagged output.
     #[arg(long, value_delimiter = ',')]
@@ -329,14 +325,8 @@ fn main() {
     #[cfg(feature = "stream-redirect")]
     let _stream_redirect_args = (&cli.stdout_file, &cli.stderr_file);
 
-    // Parse --output/--json and --log
-    let output = resolve_output(&cli.output, cli.json).unwrap_or_else(|e| {
-        emit_error_exit(
-            OutputFormat::Json,
-            build_cli_error(&e, Some("valid values: json, yaml, plain")),
-            2,
-        )
-    });
+    // Parse --output and --log
+    let output = cli.output.clone();
     let format = cli_parse_output(&output).unwrap_or_else(|e| {
         emit_error_exit(
             OutputFormat::Json,
@@ -364,6 +354,7 @@ fn main() {
     }
     if log.enabled("startup") {
         let _ = emitter.emit(build_startup_log(
+            &raw,
             cli.command.as_ref(),
             &output,
             &log,
@@ -442,19 +433,6 @@ fn command_label(command: Option<&Command>) -> &'static str {
     }
 }
 
-fn resolve_output(output: &str, json: bool) -> Result<String, String> {
-    if json && output != "json" {
-        return Err(format!(
-            "conflicting output formats: --json conflicts with --output {output}"
-        ));
-    }
-    if json {
-        Ok("json".to_string())
-    } else {
-        Ok(output.to_string())
-    }
-}
-
 fn build_request_log(command: Option<&Command>) -> Event {
     agent_first_data::json_log(serde_json::json!({
         "level": "info",
@@ -466,6 +444,7 @@ fn build_request_log(command: Option<&Command>) -> Event {
 }
 
 fn build_startup_log(
+    raw: &[String],
     command: Option<&Command>,
     output: &str,
     log: &agent_first_data::LogFilters,
@@ -476,6 +455,10 @@ fn build_startup_log(
         "message": "startup",
         "category": "startup",
         "event": "startup",
+        // Recording the invocation is useful diagnostics; recording it verbatim
+        // would put a credential in the log. `redact_argv` applies the same
+        // `_secret` naming rule the rest of AFDATA uses.
+        "argv": agent_first_data::redact_argv(raw),
         "parsed": {
                 "command": command_label(command),
                 "output": output,
@@ -1889,17 +1872,6 @@ mod tests {
     }
 
     #[test]
-    fn json_alias_resolves_to_json_output() {
-        assert_eq!(resolve_output("json", true).expect("json alias"), "json");
-    }
-
-    #[test]
-    fn json_alias_conflicts_with_other_output_formats() {
-        let err = resolve_output("yaml", true).expect_err("json/yaml conflict");
-        assert!(err.contains("conflicting output formats"));
-    }
-
-    #[test]
     fn parse_log_normalizes() {
         let f = cli_parse_log_filters(&["Startup", " REQUEST ", "startup"]);
         assert_eq!(f.as_slice(), &["startup", "request"]);
@@ -1935,7 +1907,18 @@ mod tests {
             host: Some("example.com".to_string()),
             timeout_ms: 5000,
         };
-        let v = build_startup_log(Some(&command), "yaml", &log, false).into_value();
+        let raw = vec![
+            "agent-cli".to_string(),
+            "--api-key-secret".to_string(),
+            "sk-test".to_string(),
+            "ping".to_string(),
+        ];
+        let v = build_startup_log(&raw, Some(&command), "yaml", &log, false).into_value();
+        // The example must not teach logging a credential.
+        assert_eq!(
+            v["log"]["argv"],
+            serde_json::json!(["agent-cli", "--api-key-secret", "***", "ping"])
+        );
         assert_eq!(v["kind"], "log");
         assert_eq!(v["log"]["category"], "startup");
         assert_eq!(v["log"]["event"], "startup");

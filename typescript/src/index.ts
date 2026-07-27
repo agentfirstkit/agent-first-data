@@ -29,6 +29,7 @@ export {
   type OutputOptions,
   outputOptionsForPolicy,
   redactedValue,
+  redactArgv,
   redactUrlSecrets,
   normalizeUtcOffset,
   isValidRfc3339Date,

@@ -83,6 +83,43 @@ func TestRedactURLFixtures(t *testing.T) {
 	}
 }
 
+func TestRedactArgvFixtures(t *testing.T) {
+	for _, tc := range loadFixture("redact_argv.json") {
+		name := tc["name"].(string)
+		t.Run(name, func(t *testing.T) {
+			input := toStringSlice(tc["input"])
+			expected := toStringSlice(tc["expected"])
+			got := redactorFromCase(tc).Argv(input)
+			if len(got) != len(expected) {
+				t.Fatalf("got %q, want %q", got, expected)
+			}
+			for i := range expected {
+				if got[i] != expected[i] {
+					t.Errorf("argv[%d] = %q, want %q (full: %q)", i, got[i], expected[i], got)
+				}
+			}
+		})
+	}
+}
+
+func TestRedactArgvDefaultHelperMatchesDefaultRedactor(t *testing.T) {
+	args := []string{"tool", "--api-key-secret=sk-live"}
+	got := RedactArgv(args)
+	want := Redactor{}.Argv(args)
+	if len(got) != len(want) || got[1] != want[1] {
+		t.Errorf("RedactArgv = %q, Redactor{}.Argv = %q", got, want)
+	}
+}
+
+func toStringSlice(value any) []string {
+	items := value.([]any)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.(string))
+	}
+	return out
+}
+
 func TestRedactFixtures(t *testing.T) {
 	for _, tc := range loadFixture("redact.json") {
 		name := tc["name"].(string)

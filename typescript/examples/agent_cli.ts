@@ -44,6 +44,7 @@ import {
   cliHandleVersionOrContinue,
   cliParseLogFilters,
   cliParseOutput,
+  redactArgv,
   CliEmitter,
   LogFilters,
 } from "../src/index.js";
@@ -55,7 +56,7 @@ const PING_HOST_ENV = "PING_HOST";
 
 // This tool's own value-taking global long flags. The version pre-parser
 // consults them so a global flag's space-separated value (e.g. `--log a,b`) is
-// never mistaken for the subcommand boundary. `--output`/`--json` are handled
+// never mistaken for the subcommand boundary. `--output` is handled
 // by the pre-parser directly, so they need not be listed here.
 const GLOBAL_VALUE_FLAGS = ["--log", "--api-key-secret"];
 
@@ -107,7 +108,6 @@ function formatRootHelp(withTitle = true): string {
     "",
     "Options:",
     "  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown",
-    "  --json             Equivalent to --output json",
     "  --log <FILTERS>    Log categories (comma-separated); --log all (or --verbose) enables every category",
     "  --verbose          Enable all log categories (shorthand for --log all)",
     `  --api-key-secret <VALUE> API key used by examples (default: ${redactHelpDefault("--api-key-secret", HELP_DEFAULT_API_KEY_SECRET)})`,
@@ -150,7 +150,6 @@ function formatSubcommandHelp(name: string, withGlobals = false, withTitle = tru
     : `Flags:\n${formatPlainArguments(sc.arguments)}`;
   if (withGlobals) {
     help += "\nGlobal options:\n  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n";
-    help += "  --json             Equivalent to --output json\n";
   }
   return help;
 }
@@ -195,7 +194,6 @@ function rootHelpArguments(): HelpArgument[] {
       default: "json",
       help: "Output format: json, yaml, plain; help also accepts markdown",
     },
-    { name: "--json", help: "Equivalent to --output json" },
     {
       name: "--log",
       value: "FILTERS",
@@ -263,7 +261,7 @@ function helpSchema(command: string | undefined, scope: "one_level" | "recursive
 }
 
 function hasExplicitOutput(args: string[]): boolean {
-  return args.includes("--json") || args.includes("--output") || args.some((a) => a.startsWith("--output="));
+  return args.includes("--output") || args.some((a) => a.startsWith("--output="));
 }
 
 function outputFlagMissing(args: string[]): boolean {
@@ -284,22 +282,10 @@ function argValue(args: string[], flag: string): string | undefined {
   return value !== undefined && !value.startsWith("-") ? value : undefined;
 }
 
-function outputConflict(args: string[]): string | undefined {
-  if (!args.includes("--json")) return undefined;
-  const explicit = argValue(args.filter((arg) => arg !== "--json"), "--output");
-  if (explicit !== undefined && explicit !== "json") {
-    return `conflicting output formats: --json conflicts with --output ${explicit}`;
-  }
-  return undefined;
-}
-
 function resolveOutputArg(args: string[]): string | undefined {
   if (outputFlagMissing(args)) {
     throw new Error("missing value for --output: expected json, yaml, or plain");
   }
-  const conflict = outputConflict(args);
-  if (conflict !== undefined) throw new Error(conflict);
-  if (args.includes("--json")) return "json";
   return argValue(args, "--output") ?? (hasExplicitOutput(args) ? "" : "json");
 }
 
@@ -348,47 +334,6 @@ function buildRequestLog(command: string | undefined): JsonValue {
     .toJSON();
 }
 
-/**
- * Redact argv values whose long flag names are secret by AFDATA naming,
- * covering both `--name-secret=value` and `--name-secret value`.
- *
- * `redactedValue` is keyed by field name and cannot help here: an array of
- * strings carries no keys, so it would pass argv through untouched.
- */
-function redactArgv(args: string[]): string[] {
-  const out: string[] = [];
-  let redactNext = false;
-  for (const arg of args) {
-    if (redactNext) {
-      redactNext = false;
-      if (!arg.startsWith("-")) {
-        out.push("***");
-        continue;
-      }
-    }
-    if (arg.startsWith("--")) {
-      const rest = arg.slice(2);
-      const equals = rest.indexOf("=");
-      if (equals >= 0) {
-        const name = rest.slice(0, equals);
-        if (isSecretFlagName(name)) {
-          out.push(`--${name}=***`);
-          continue;
-        }
-      } else if (isSecretFlagName(rest)) {
-        redactNext = true;
-      }
-    }
-    out.push(arg);
-  }
-  return out;
-}
-
-function isSecretFlagName(name: string): boolean {
-  const normalized = name.replace(/-/gu, "_");
-  return normalized.endsWith("_secret") || normalized.endsWith("_SECRET");
-}
-
 function buildStartupLog(args: string[], command: string | undefined, output: string, log: LogFilters, verbose: boolean): JsonValue {
   return jsonLog({
     level: "info",
@@ -429,7 +374,6 @@ function strictParseArgs(args: string[]) {
       help: { type: "boolean", short: "h" },
       recursive: { type: "boolean" },
       output: { type: "string" },
-      json: { type: "boolean" },
       log: { type: "string" },
       verbose: { type: "boolean" },
       "api-key-secret": { type: "string" },
@@ -791,11 +735,11 @@ if (process.env["NODE_TEST_CONTEXT"]) {
     });
 
     it("detects missing output values before falling back to json", () => {
-      for (const args of [["--output"], ["--output", "--json"], ["--output="]]) {
+      for (const args of [["--output"], ["--output", "--recursive"], ["--output="]]) {
         assert.equal(outputFlagMissing(args), true, `${args.join(" ")} must be missing`);
         assert.throws(() => resolveOutputArg(args), /missing value for --output/);
       }
-      for (const args of [["--output", "json"], ["--output=json"], ["--json"]]) {
+      for (const args of [["--output", "json"], ["--output=json"]]) {
         assert.equal(outputFlagMissing(args), false, `${args.join(" ")} must not be missing`);
       }
     });

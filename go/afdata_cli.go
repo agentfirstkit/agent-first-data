@@ -412,7 +412,7 @@ func splitVersionFlag(arg string) (name string, value string, hasInline bool) {
 // CliHandleVersionOrContinue renders version output if --version/-V is present.
 // It returns handled=false when no version flag was present. --version always
 // answers with a structured protocol-v1 version event. An explicit
-// --output/--json wins; otherwise the optional defaultFormats entry should be
+// --output wins; otherwise the optional defaultFormats entry should be
 // the command's normal output default (JSON when omitted).
 //
 // valueFlags is the caller's own value-taking global long flags (with or without
@@ -447,16 +447,6 @@ func CliHandleVersionOrContinue(args []string, valueFlags []string, name, displa
 		}
 		if arg == "--version" {
 			versionRequested = true
-			i++
-			continue
-		}
-		if arg == "--json" {
-			if outputExplicit && outputFormat != OutputFormatJson {
-				err = fmt.Errorf("conflicting output formats: --json conflicts with previous output format")
-			} else {
-				outputFormat = OutputFormatJson
-				outputExplicit = true
-			}
 			i++
 			continue
 		}

@@ -534,6 +534,60 @@ func (r Redactor) URL(rawURL string) string {
 	return rawURL
 }
 
+// Argv redacts secret values out of a command line, using the redactor's
+// policy and secret names.
+//
+// A long flag whose name is secret by AFDATA naming (--api-key-secret, or an
+// exact SecretNames entry) has its value replaced by "***", in both
+// --flag=value and --flag value spellings. Everything else is preserved
+// byte-for-byte.
+//
+// Free text is deliberately never scanned: a bare api_key_secret=sk-live
+// positional, or a secret-looking token after a non-secret flag, is left alone.
+// AFDATA decides sensitivity from the field name, and argv is no exception —
+// rename the flag rather than pattern-matching values. A flag with no value
+// (end of argv, or followed by another flag) is likewise left inspectable.
+//
+// Only long (--) flags are recognized, matching the convention's
+// long-flags-only rule.
+func (r Redactor) Argv(args []string) []string {
+	out := make([]string, 0, len(args))
+	if r.Policy == RedactionOff {
+		return append(out, args...)
+	}
+	context := newRedactionContext(r)
+	redactNext := false
+	for _, arg := range args {
+		if redactNext {
+			redactNext = false
+			if !strings.HasPrefix(arg, "-") {
+				out = append(out, "***")
+				continue
+			}
+		}
+		if rest, ok := strings.CutPrefix(arg, "--"); ok {
+			if name, _, found := strings.Cut(rest, "="); found {
+				if isSecretFlagName(name, context) {
+					out = append(out, "--"+name+"=***")
+					continue
+				}
+			} else if isSecretFlagName(rest, context) {
+				redactNext = true
+			}
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+// isSecretFlagName reports whether a long flag's name is secret by AFDATA
+// naming, normalizing the kebab-case flag spelling to the snake_case field
+// spelling the convention is defined in.
+func isSecretFlagName(flagName string, context redactionContext) bool {
+	normalized := strings.ReplaceAll(flagName, "-", "_")
+	return context.isSecretKey(normalized) || context.isSecretKey(flagName)
+}
+
 // PlainStyle controls plain (logfmt) rendering style. It affects plain output
 // ONLY; JSON and YAML are structure-preserving and ignore it.
 type PlainStyle string
@@ -624,6 +678,18 @@ func RedactedValue(value any) any {
 // For extra secret names, use Redactor.URL.
 func RedactURLSecrets(rawURL string) string {
 	return Redactor{}.URL(rawURL)
+}
+
+// RedactArgv redacts secret values out of a command line, using default
+// options. Returns args with the value of every _secret-suffixed long flag
+// replaced by "***", covering both --flag=value and --flag value.
+// For extra secret names or a non-default policy, use Redactor.Argv.
+//
+// Intended for CLIs that record their own invocation — startup diagnostics,
+// audit trails, crash reports — where writing argv verbatim would put a
+// credential in the log.
+func RedactArgv(args []string) []string {
+	return Redactor{}.Argv(args)
 }
 
 // NormalizeUTCOffset normalizes a fixed UTC offset string to AFDATA canonical form.

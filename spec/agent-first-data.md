@@ -206,7 +206,16 @@ Same suffixes, kebab-case. An agent reading `--help` output understands units an
 --verbose                  # boolean flag — no suffix needed
 ```
 
-**Long flags only.** Do not define single-letter short flags (`-s`, `-d`, `-l`). Short flags are ambiguous — `-s` could be `--synapse`, `--synopsis`, or `--source`. Agents parsing `--help` output cannot reliably interpret single-letter aliases. Always use the full `--kebab-case` form. This applies to `--help` and `--version` too: a `-h`/`-V` alias is byte-identical to its long form, so it buys an agent nothing, and it misleads the human reaching for it because help answers in the command's output format — JSON for an agent-first CLI, not text. Leaving those shorts unclaimed also keeps `-h` available to tools that legitimately spend it on `--host`. An application MAY still declare a short of its own (afdata uses `-0` for `--null`), and the help model reports it in the argument's `short` field.
+**One spelling per concept.** `--output` is the only format selector AFDATA
+recognizes. A `--json` alias means exactly `--output json`, so it buys an agent
+nothing and costs the application a flag name it may want for something else (a
+`--json <FILE>` input, say) — a pre-parser that claims `--json` would both
+hijack the flag and misread its value as a subcommand. Applications own
+`--json`; AFDATA does not.
+
+**Long flags only.** Do not define single-letter short flags (`-s`, `-d`, `-l`). Short flags are ambiguous — `-s` could be `--synapse`, `--synopsis`, or `--source`. Agents parsing `--help` output cannot reliably interpret single-letter aliases. Always use the full `--kebab-case` form. An application MAY still declare a short where it carries real meaning — afdata spends `-0` on `--null`, and a tool imitating an established interface may owe its users `-h` for `--host` — and the help model reports it in the argument's `short` field.
+
+The AFDATA help and version handlers claim **no** shorts of their own: `-h`/`-V` would be byte-identical aliases of `--help`/`--version`, which buys an agent nothing and misleads the human reaching for them (help answers in the command's output format, which for an agent-first CLI is JSON, not text). Leaving them unclaimed is also what keeps those letters available to the application. What an application then does with `-h` is its own decision, not this convention's.
 
 **Kebab → snake mapping.** CLI flags map 1:1 to JSON field names by replacing hyphens with underscores. When a CLI tool emits a startup log event (Part 3), the `args` field uses the snake_case form:
 
@@ -265,7 +274,10 @@ display name. Argument objects use `name` and optional `short`, `help`,
 `required:true`, `global:true`, `repeatable:true`, `value`/`values`, and
 `default`/`defaults`. Omit empty values and false metadata. A positional's
 `name` already carries its placeholder, so it MUST NOT repeat that placeholder
-as `value` or `values`. Secret defaults MUST render as `***`.
+as `value` or a single-element `values`. A positional that takes several values
+has several placeholders: it lists every one in `values`, the first of which
+equals `name`, so the model never disagrees with its own `usage`. Secret
+defaults MUST render as `***`.
 
 JSON/YAML help MUST NOT expose Clap `long_about` Markdown as `description`.
 Its command model stays field-oriented and token-efficient: concise `about`,
@@ -290,7 +302,7 @@ become a general business output format.
 
 When `--output` is omitted, help resolves the selected command's declared
 default first, then the nearest ancestor declaration, then the caller's fallback.
-An explicit `--output` or `--json` always wins. A fixed-format CLI with no
+An explicit `--output` always wins. A fixed-format CLI with no
 `--output` declaration MUST set the caller fallback to its normal format
 (`HelpConfig::output_aware_with_fallback(HelpFormat::Json)` for a JSON-only
 Rust CLI), rather than silently falling back to human text.
@@ -298,7 +310,7 @@ Rust CLI), rather than silently falling back to human text.
 **Version output.** Agent-first CLIs should handle `--version` before
 the argument parser's built-in plain-text exit, and always answer with a
 structured protocol-v1 `kind:"result"` version event rather than conventional
-plain text. An explicit `--output`/`--json` wins; when omitted, version inherits
+plain text. An explicit `--output` wins; when omitted, version inherits
 the command's normal `--output` default, just like help. The payload is
 `{"kind":"result","result":{"code":"version","name":"<name>","version":"<semver>"},"trace":{...}}`,
 optionally carrying `display_name` (a human-facing product name) and `build` (an

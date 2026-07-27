@@ -82,6 +82,11 @@ closed to `***`.
 AFDATA never scans arbitrary prose. Before interpolating a URL into a message,
 call `redact_url_secrets`.
 
+A CLI that records its own invocation (startup diagnostics, audit trail, crash
+report) must pass argv through `redact_argv` first, or a `--*-secret` flag's
+value lands in the log verbatim. It redacts by flag name, not by value shape:
+free text and positionals are left alone.
+
 ## Rendering contract
 
 Use one `render(value, format, options)` boundary:

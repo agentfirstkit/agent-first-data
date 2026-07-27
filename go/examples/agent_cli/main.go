@@ -81,7 +81,6 @@ func formatRootHelp(withTitle bool) string {
 	b.WriteString("Usage: agent-cli [OPTIONS] <COMMAND>\n\n")
 	b.WriteString("Options:\n")
 	b.WriteString("  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n")
-	b.WriteString("  --json             Equivalent to --output json\n")
 	b.WriteString("  --log <FILTERS>    Log categories (comma-separated); --log all (or --verbose) enables every category\n")
 	b.WriteString("  --verbose          Enable all log categories (shorthand for --log all)\n")
 	fmt.Fprintf(&b, "  --api-key-secret <VALUE> API key used by examples (default: %s)\n", redactHelpDefault("--api-key-secret", helpDefaultAPIKeySecret))
@@ -126,7 +125,6 @@ func formatSubcommandHelp(name string, withGlobals, withTitle bool) string {
 			if withGlobals {
 				b.WriteString("\nGlobal options:\n")
 				b.WriteString("  --output <FORMAT>  Output format: json, yaml, plain (default: json); help also accepts markdown\n")
-				b.WriteString("  --json             Equivalent to --output json\n")
 			}
 			return b.String()
 		}
@@ -212,7 +210,6 @@ func argumentSchemas(arguments []helpArgument) []map[string]any {
 func rootHelpArguments() []helpArgument {
 	return []helpArgument{
 		{name: "--output", value: "FORMAT", defaultVal: "json", help: "Output format: json, yaml, plain; help also accepts markdown"},
-		{name: "--json", help: "Equivalent to --output json"},
 		{name: "--log", value: "FILTERS", help: "Log categories (comma-separated); --log all (or --verbose) enables every category"},
 		{name: "--verbose", help: "Enable all log categories (shorthand for --log all)"},
 		{name: "--api-key-secret", value: "VALUE", defaultVal: redactHelpDefault("--api-key-secret", helpDefaultAPIKeySecret), help: "API key used by examples"},
@@ -365,7 +362,7 @@ func buildStartupLog(args []string, command string, output string, filters afdat
 		"message":  "startup",
 		"category": "startup",
 		"event":    "startup",
-		"argv":     redactArgv(args),
+		"argv":     afdata.RedactArgv(args),
 		"parsed": map[string]any{
 			"command": command,
 			"output":  output,
@@ -382,43 +379,6 @@ func buildStartupLog(args []string, command string, output string, filters afdat
 	return event.Value()
 }
 
-// redactArgv redacts argv values whose long flag names are secret by AFDATA
-// naming, covering both --name-secret=value and --name-secret value.
-//
-// RedactedValue is keyed by field name and cannot help here: a []string carries
-// no keys, so it would pass argv through untouched.
-func redactArgv(args []string) []string {
-	out := make([]string, 0, len(args))
-	redactNext := false
-	for _, arg := range args {
-		if redactNext {
-			redactNext = false
-			if !strings.HasPrefix(arg, "-") {
-				out = append(out, "***")
-				continue
-			}
-		}
-		if strings.HasPrefix(arg, "--") {
-			rest := strings.TrimPrefix(arg, "--")
-			if name, _, found := strings.Cut(rest, "="); found {
-				if isSecretFlagName(name) {
-					out = append(out, "--"+name+"=***")
-					continue
-				}
-			} else if isSecretFlagName(rest) {
-				redactNext = true
-			}
-		}
-		out = append(out, arg)
-	}
-	return out
-}
-
-func isSecretFlagName(name string) bool {
-	normalized := strings.ReplaceAll(name, "-", "_")
-	return strings.HasSuffix(normalized, "_secret") || strings.HasSuffix(normalized, "_SECRET")
-}
-
 func startupEnvSnapshot() []map[string]any {
 	item := map[string]any{"key": pingHostEnv}
 	value, ok := os.LookupEnv(pingHostEnv)
@@ -427,15 +387,6 @@ func startupEnvSnapshot() []map[string]any {
 		item["value"] = value
 	}
 	return []map[string]any{item}
-}
-
-func containsArg(args []string, want string) bool {
-	for _, arg := range args {
-		if arg == want {
-			return true
-		}
-	}
-	return false
 }
 
 func outputFlagMissing(args []string) bool {
@@ -454,10 +405,8 @@ func validateStrictArgs(args []string) (string, string) {
 	root := flag.NewFlagSet("agent-cli", flag.ContinueOnError)
 	root.SetOutput(io.Discard)
 	root.Bool("help", false, "")
-	root.Bool("h", false, "")
 	root.Bool("recursive", false, "")
 	root.String("output", "json", "")
-	root.Bool("json", false, "")
 	root.String("log", "", "")
 	root.Bool("verbose", false, "")
 	root.String("api-key-secret", helpDefaultAPIKeySecret, "")
@@ -475,7 +424,6 @@ func validateStrictArgs(args []string) (string, string) {
 		fs := flag.NewFlagSet("agent-cli echo", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		fs.Bool("help", false, "")
-		fs.Bool("h", false, "")
 		fs.Bool("dry-run", false, "")
 		if err := fs.Parse(rest); err != nil {
 			return err.Error(), "try: agent-cli echo --help"
@@ -487,7 +435,6 @@ func validateStrictArgs(args []string) (string, string) {
 		fs := flag.NewFlagSet("agent-cli ping", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		fs.Bool("help", false, "")
-		fs.Bool("h", false, "")
 		fs.String("host", "", "")
 		if err := fs.Parse(rest); err != nil {
 			return err.Error(), "try: agent-cli ping --help"
@@ -499,7 +446,6 @@ func validateStrictArgs(args []string) (string, string) {
 		fs := flag.NewFlagSet("agent-cli cancel", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		fs.Bool("help", false, "")
-		fs.Bool("h", false, "")
 		if err := fs.Parse(rest); err != nil {
 			return err.Error(), "try: agent-cli cancel --help"
 		}
@@ -521,8 +467,6 @@ func main() {
 	installSigpipeHandler()
 
 	output := "json"
-	outputExplicit := false
-	outputConflict := ""
 	dryRun := false
 	logArg := ""
 	host := ""
@@ -549,12 +493,8 @@ func main() {
 	for i := 0; i < len(args); i++ {
 		if strings.HasPrefix(args[i], "--output=") {
 			output = strings.TrimPrefix(args[i], "--output=")
-			outputExplicit = true
 			if output == "" {
 				outputMissing = true
-			}
-			if output != "json" && containsArg(args[:i], "--json") {
-				outputConflict = "conflicting output formats: --output " + output + " conflicts with --json"
 			}
 			continue
 		}
@@ -567,22 +507,12 @@ func main() {
 			// command parsing.
 			recursive = true
 		case "--output":
-			outputExplicit = true
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				i++
 				output = args[i]
-				if output != "json" && containsArg(args[:i], "--json") {
-					outputConflict = "conflicting output formats: --output " + output + " conflicts with --json"
-				}
 			} else {
 				outputMissing = true
 			}
-		case "--json":
-			if outputExplicit && output != "json" {
-				outputConflict = "conflicting output formats: --json conflicts with --output " + output
-			}
-			output = "json"
-			outputExplicit = true
 		case "--log":
 			i++
 			if i < len(args) {
@@ -614,18 +544,12 @@ func main() {
 	// --help inherits the normal JSON output default; --recursive expands the
 	// tree and --output picks the format. A bare --recursive falls through.
 	if showHelp {
-		if outputConflict != "" {
-			os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), outputConflict, "valid output formats: json, yaml, plain", 2))
-		}
 		os.Exit(printHelp(command, output, outputMissing, recursive))
 	}
 
 	// 1. Parse --output flag with structured error on failure.
 	if outputMissing {
 		os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), "missing value for --output: expected json, yaml, or plain", "valid output formats: json, yaml, plain", 2))
-	}
-	if outputConflict != "" {
-		os.Exit(finishCliError(bootstrapEmitter(afdata.OutputFormatJson), outputConflict, "valid output formats: json, yaml, plain", 2))
 	}
 	format, err := afdata.CliParseOutput(output)
 	if err != nil {

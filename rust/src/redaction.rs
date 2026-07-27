@@ -95,6 +95,54 @@ impl Redactor {
         apply_redaction_policy_with_context(value, self.policy, &context);
     }
 
+    /// Redact secret *values* out of a command line, using this redactor's
+    /// policy and secret names.
+    ///
+    /// A long flag whose name is secret by AFDATA naming (`--api-key-secret`,
+    /// or an exact `secret_names` entry) has its value replaced by `***`, in
+    /// both `--flag=value` and `--flag value` spellings. Everything else is
+    /// preserved byte-for-byte.
+    ///
+    /// Free text is deliberately never scanned: a bare `api_key_secret=sk-live`
+    /// positional, or a secret-looking token after a non-secret flag, is left
+    /// alone. AFDATA decides sensitivity from the *field name*, and argv is no
+    /// exception — rename the flag rather than pattern-matching values. A flag
+    /// with no value (end of argv, or followed by another flag) is likewise
+    /// left inspectable.
+    ///
+    /// Only long (`--`) flags are recognized, matching the convention's
+    /// long-flags-only rule.
+    pub fn argv<S: AsRef<str>>(&self, args: &[S]) -> Vec<String> {
+        if matches!(self.policy, RedactionPolicy::Off) {
+            return args.iter().map(|arg| arg.as_ref().to_string()).collect();
+        }
+        let context = RedactionContext::from_redactor(self);
+        let mut out = Vec::with_capacity(args.len());
+        let mut redact_next = false;
+        for arg in args {
+            let arg = arg.as_ref();
+            if redact_next {
+                redact_next = false;
+                if !arg.starts_with('-') {
+                    out.push("***".to_string());
+                    continue;
+                }
+            }
+            if let Some(rest) = arg.strip_prefix("--") {
+                if let Some((name, _)) = rest.split_once('=') {
+                    if is_secret_flag_name(name, &context) {
+                        out.push(format!("--{name}=***"));
+                        continue;
+                    }
+                } else if is_secret_flag_name(rest, &context) {
+                    redact_next = true;
+                }
+            }
+            out.push(arg.to_string());
+        }
+        out
+    }
+
     /// True when `name` would be treated as a secret field name by this
     /// redactor: an exact `_secret`/`_SECRET` suffix, or an exact match
     /// against a configured `secret_names` entry.
@@ -145,6 +193,19 @@ pub fn redacted_value(value: &Value) -> Value {
     Redactor::new().value(value)
 }
 
+/// Redact secret values out of a command line, using default options.
+///
+/// Returns `args` with the value of every `_secret`-suffixed long flag replaced
+/// by `***`, covering both `--flag=value` and `--flag value`. Use
+/// [`Redactor::argv`] for custom `secret_names` or a non-default policy.
+///
+/// Intended for CLIs that record their own invocation — startup diagnostics,
+/// audit trails, crash reports — where writing argv verbatim would put a
+/// credential in the log.
+pub fn redact_argv<S: AsRef<str>>(args: &[S]) -> Vec<String> {
+    Redactor::new().argv(args)
+}
+
 /// Redact secret components of a single URL string, using default options.
 ///
 /// Returns `url` with its userinfo password and any `_secret`-suffixed query
@@ -181,7 +242,10 @@ fn key_has_url_suffix(key: &str) -> bool {
     key.ends_with("_url") || key.ends_with("_URL")
 }
 
-#[cfg(feature = "cli-help")]
+/// Whether a long flag's name is secret, normalizing the kebab-case flag
+/// spelling to the snake_case field spelling the convention is defined in.
+///
+/// Ungated: core argv redaction relies on it, not just the `cli-help` renderer.
 pub(crate) fn is_secret_flag_name(flag_name: &str, context: &RedactionContext) -> bool {
     let normalized = flag_name.replace('-', "_");
     context.is_secret_key(&normalized) || context.is_secret_key(flag_name)

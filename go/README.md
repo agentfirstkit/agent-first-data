@@ -26,7 +26,7 @@ func main() {
 }
 ```
 
-Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `OutputOptionsForPolicy`, `RedactedValue`, `RedactURLSecrets`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `IsValidRFC3339`, `IsValidBCP47`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, `CliHandleVersionOrContinue`, and `DecodeProtocolEvent`.
+Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `OutputOptionsForPolicy`, `RedactedValue`, `RedactURLSecrets`, `RedactArgv`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `IsValidRFC3339`, `IsValidBCP47`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, `CliHandleVersionOrContinue`, and `DecodeProtocolEvent`.
 
 Scoped redaction and extra secret names use the `Redactor` struct:
 
@@ -43,7 +43,7 @@ fmt.Println(r.URL("https://api.example.com/?authorization=abc"))
 - YAML keeps original keys and values (structure-preserving, like JSON), sorting keys by UTF-16 code unit order and quoting/escaping unsafe keys and string scalars. Plain strips formatting suffixes, formats values, sorts the same way, and renders nested objects/arrays as canonical JSON.
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - `build_cli_error(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
-- Use `CliHandleVersionOrContinue()` before argument parsing so `--version` always answers with a structured protocol-v1 `kind:"result"` version event. Explicit `--output`/`--json` wins; pass the command's normal output as the optional final argument (JSON when omitted), plus its value-taking global flag names.
+- Use `CliHandleVersionOrContinue()` before argument parsing so `--version` always answers with a structured protocol-v1 `kind:"result"` version event. An explicit `--output` wins; pass the command's normal output as the optional final argument (JSON when omitted), plus its value-taking global flag names.
 
 ## Reference
 

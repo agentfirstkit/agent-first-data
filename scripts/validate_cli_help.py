@@ -87,12 +87,25 @@ def _validate_argument(value: Any, path: str, schema: dict[str, Any]) -> None:
         raise HelpValidationError(f"{path} cannot contain both value and values")
     if "default" in argument and "defaults" in argument:
         raise HelpValidationError(f"{path} cannot contain both default and defaults")
-    if not argument["name"].startswith("-") and (
-        "value" in argument or "values" in argument
-    ):
-        raise HelpValidationError(
-            f"{path} positional name already carries its value placeholder"
-        )
+    if not argument["name"].startswith("-"):
+        # A positional's name already carries its placeholder, so a single
+        # value/values entry would only repeat it. A positional taking several
+        # values genuinely has several placeholders: it lists every one, the
+        # first of which is the name.
+        if "value" in argument:
+            raise HelpValidationError(
+                f"{path} positional name already carries its value placeholder"
+            )
+        values = argument.get("values")
+        if values is not None:
+            if len(values) < 2:
+                raise HelpValidationError(
+                    f"{path} positional name already carries its value placeholder"
+                )
+            if values[0] != argument["name"]:
+                raise HelpValidationError(
+                    f"{path}.values[0] must be the positional's own name"
+                )
 
 
 def _validate_command(
@@ -130,6 +143,11 @@ def _validate_command(
     for key in ("about", "usage"):
         if key in command:
             _require_nonempty_string(command[key], f"{path}.{key}")
+    # A compact usage is one line. Scraping a parser's rendered usage would
+    # otherwise smuggle its terminal-width wrapping and column padding into the
+    # field, which is neither compact nor machine-friendly.
+    if "usage" in command and ("\n" in command["usage"] or "\r" in command["usage"]):
+        raise HelpValidationError(f"{path}.usage must be a single line")
 
     arguments = command.get("arguments", [])
     if not isinstance(arguments, list) or ("arguments" in command and not arguments):

@@ -72,6 +72,43 @@ fn test_redact_url_fixtures() {
 }
 
 #[test]
+fn test_redact_argv_fixtures() {
+    let cases = load_fixture("redact_argv.json");
+    for case in cases.as_array().expect("redact_argv.json must be an array") {
+        let name = case["name"].as_str().expect("missing name");
+        let input: Vec<String> = case["input"]
+            .as_array()
+            .expect("input must be an array")
+            .iter()
+            .map(|arg| {
+                arg.as_str()
+                    .expect("argv entry must be a string")
+                    .to_string()
+            })
+            .collect();
+        let expected: Vec<String> = case["expected"]
+            .as_array()
+            .expect("expected must be an array")
+            .iter()
+            .map(|arg| {
+                arg.as_str()
+                    .expect("argv entry must be a string")
+                    .to_string()
+            })
+            .collect();
+        let redactor = redactor_from_case(case);
+        let got = redactor.argv(&input);
+        assert_eq!(got, expected, "[redact_argv/{name}]");
+    }
+}
+
+#[test]
+fn test_redact_argv_default_helper_matches_default_redactor() {
+    let args = vec!["tool".to_string(), "--api-key-secret=sk-live".to_string()];
+    assert_eq!(redact_argv(&args), Redactor::new().argv(&args));
+}
+
+#[test]
 fn test_redact_fixtures() {
     let cases = load_fixture("redact.json");
     for case in cases.as_array().expect("redact.json must be an array") {
@@ -2286,11 +2323,15 @@ fn cli_handle_version_supports_inline_output_format() {
 
 #[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
-fn cli_handle_version_supports_json_alias() {
+fn cli_handle_version_ignores_json_flag() {
+    // `--json` is the application's flag, not AFDATA's: it must not select a
+    // format and must not conflict with one. `--output yaml` still wins.
     let raw = vec![
         "agent-cli".to_string(),
         "--version".to_string(),
         "--json".to_string(),
+        "--output".to_string(),
+        "yaml".to_string(),
     ];
     let out = cli_handle_version_or_continue(
         &raw,
@@ -2302,18 +2343,20 @@ fn cli_handle_version_supports_json_alias() {
     )
     .expect("valid version request")
     .expect("version should render");
-    let parsed: Value = serde_json::from_str(out.trim()).expect("version json must parse");
-    assert_eq!(parsed["kind"], "result");
-    assert_eq!(parsed["result"]["version"], "1.2.3");
+    assert!(
+        out.contains("kind: \"result\""),
+        "--output yaml must still select YAML: {out}"
+    );
 }
 
 #[cfg(any(feature = "cli", feature = "cli-help"))]
 #[test]
-fn cli_handle_version_rejects_json_alias_conflict() {
+fn cli_handle_version_rejects_conflicting_output_formats() {
     let raw = vec![
         "agent-cli".to_string(),
         "--version".to_string(),
-        "--json".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
         "--output".to_string(),
         "yaml".to_string(),
     ];
@@ -2325,16 +2368,10 @@ fn cli_handle_version_rejects_json_alias_conflict() {
         "1.2.3",
         None,
     )
-    .expect_err("conflicting formats must return error")
+    .expect_err("conflicting --output values must be rejected")
     .into_value();
     assert_eq!(err["kind"], "error");
-    assert!(
-        err["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("conflicting output formats")),
-        "error should mention conflict: {}",
-        err["error"]["message"]
-    );
+    assert_eq!(err["error"]["code"], "cli_error");
 }
 
 #[cfg(any(feature = "cli", feature = "cli-help"))]

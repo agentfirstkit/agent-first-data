@@ -37,6 +37,7 @@ from agent_first_data import (
     cli_handle_version_or_continue,
     cli_parse_log_filters,
     cli_parse_output,
+    redact_argv,
 )
 
 AGENT_CLI_VERSION = "0.13.0"
@@ -68,7 +69,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="store_true", help="Print version")
     parser.add_argument("--recursive", action="store_true", help="With --help, expand the full command tree (a bare --recursive is ignored)")
     parser.add_argument("--output", default="json", help="Output format: json, yaml, plain; help also accepts markdown")
-    parser.add_argument("--json", action="store_true", help="Equivalent to --output json")
     parser.add_argument("--log", default="", help="Log categories (comma-separated); --log all (or --verbose) enables every category")
     parser.add_argument("--verbose", action="store_true", help="Enable all log categories (shorthand for --log all)")
     parser.add_argument("--api-key-secret", default=HELP_DEFAULT_API_KEY_SECRET, help=f"API key used by examples (default: {redact_help_default('--api-key-secret', HELP_DEFAULT_API_KEY_SECRET)})")
@@ -96,7 +96,6 @@ def leaf_global_options_note() -> str:
     return (
         "\nGlobal options:\n"
         "  --output <FORMAT>  Output format: json, yaml, plain; help also accepts markdown\n"
-        "  --json             Equivalent to --output json\n"
     )
 
 
@@ -170,7 +169,7 @@ def find_subparser(parser: argparse.ArgumentParser, command: str | None) -> argp
 
 
 def output_explicit(raw: list[str]) -> bool:
-    return "--json" in raw or "--output" in raw or any(arg.startswith("--output=") for arg in raw)
+    return "--output" in raw or any(arg.startswith("--output=") for arg in raw)
 
 
 def output_missing(raw: list[str]) -> bool:
@@ -190,18 +189,7 @@ def output_value(raw: list[str], default: str | None = None) -> str | None:
         idx = raw.index("--output")
         if idx + 1 < len(raw) and not raw[idx + 1].startswith("-"):
             return raw[idx + 1]
-    if "--json" in raw:
-        return "json"
     return default
-
-
-def output_conflict(raw: list[str]) -> str | None:
-    if "--json" not in raw:
-        return None
-    output_without_json = output_value([arg for arg in raw if arg != "--json"])
-    if output_without_json is not None and output_without_json != "json":
-        return f"conflicting output formats: --json conflicts with --output {output_without_json}"
-    return None
 
 
 def parse_cli_args(parser: argparse.ArgumentParser, raw: list[str]):
@@ -265,7 +253,7 @@ def build_startup_log(raw: list[str], args, log: LogFilters) -> dict:
         "message": "startup",
         "category": "startup",
         "event": "startup",
-        "argv": _redact_argv_local(raw),
+        "argv": redact_argv(raw),
         "parsed": {
             "command": args.command or "none",
             "output": args.output,
@@ -290,35 +278,6 @@ def startup_env_snapshot() -> list[dict]:
     return snapshot
 
 
-def _redact_argv_local(args) -> list[str]:
-    """Redact argv values whose long flag names are secret by AFDATA naming.
-
-    Covers both --name-secret=value and --name-secret value.
-    """
-    out: list[str] = []
-    redact_next = False
-    for arg in args:
-        if redact_next:
-            if arg.startswith("-"):
-                out.append(arg)
-            else:
-                out.append("***")
-            redact_next = False
-            continue
-        if arg.startswith("--"):
-            rest = arg[2:]
-            if "=" in rest:
-                name, _value = rest.split("=", 1)
-                normalized = name.replace("-", "_")
-                if normalized.endswith("_secret") or normalized.endswith("_SECRET"):
-                    out.append(f"--{name}=***")
-                    continue
-            elif rest.replace("-", "_").endswith("_secret") or rest.replace("-", "_").endswith("_SECRET"):
-                redact_next = True
-        out.append(arg)
-    return out
-
-
 def redact_help_default(name: str, value: str) -> str:
     normalized = name.lstrip("-").replace("-", "_")
     if normalized.endswith("_secret") or normalized.endswith("_SECRET"):
@@ -327,11 +286,30 @@ def redact_help_default(name: str, value: str) -> str:
 
 
 def compact_usage(parser: argparse.ArgumentParser) -> str | None:
-    """Return usage relative to parser.prog; command_path carries the prefix."""
-    rendered = parser.format_usage().strip()
-    prefix = f"usage: {parser.prog}"
-    suffix = rendered.removeprefix(prefix).strip()
-    return suffix or None
+    """Return compact usage relative to parser.prog; command_path carries the prefix.
+
+    Built from the parser's own actions rather than scraped from
+    ``format_usage()``: argparse wraps its usage line at terminal width and pads
+    the continuations, which would put newlines and column alignment inside a
+    single-line schema field. Every option is already described in ``arguments``,
+    so usage collapses them to ``[OPTIONS]`` — the same compact shape the Rust,
+    Go, and TypeScript examples emit.
+    """
+    parts: list[str] = []
+    if any(
+        action.option_strings and action.help is not argparse.SUPPRESS
+        for action in parser._actions
+    ):
+        parts.append("[OPTIONS]")
+    for action in parser._actions:
+        if action.option_strings:
+            continue
+        if isinstance(action, argparse._SubParsersAction):
+            parts.append("<COMMAND>")
+            continue
+        name = action.metavar or action.dest.upper()
+        parts.append(f"<{name}>" if action.required else f"[{name}]")
+    return " ".join(parts) or None
 
 
 def argument_schema(action: argparse.Action) -> dict | None:
@@ -481,7 +459,6 @@ def help_schema(parser: argparse.ArgumentParser, command: str | None, scope: str
 def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
     explicit = output_explicit(raw)
     value = output_value(raw, args.output)
-    conflict = output_conflict(raw)
     sub = find_subparser(parser, args.command)
     # Scope (--recursive) and format (--output) are orthogonal. A specific
     # subcommand is leaf-level here, so its scope is the same either way.
@@ -490,8 +467,6 @@ def print_help(parser: argparse.ArgumentParser, args, raw: list[str]) -> None:
 
     if output_missing(raw) or (explicit and value is None):
         sys.exit(bootstrap_error(OutputFormat.JSON, "missing value for --output: expected plain, json, yaml, or markdown", hint="valid help output formats: plain, markdown, json, yaml"))
-    if conflict is not None:
-        sys.exit(bootstrap_error(OutputFormat.JSON, conflict, hint="valid help output formats: plain, markdown, json, yaml"))
 
     if value == "plain":
         if sub is not None:
@@ -529,7 +504,7 @@ def main() -> None:
     try:
         # This example's own value-taking global flags: their space-separated
         # value must not be mistaken for the subcommand boundary that stops the
-        # top-level version scan. (--output/--output-to/--json/--version are
+        # top-level version scan. (--output/--output-to/--version are
         # recognized by the pre-parser itself.)
         version = cli_handle_version_or_continue(
             raw,
@@ -555,11 +530,6 @@ def main() -> None:
         args = parse_cli_args(parser, raw)
     except ArgumentParserError as e:
         sys.exit(bootstrap_error(cli_error_format_from_raw(raw), str(e), hint="try: agent-cli --help"))
-    conflict = output_conflict(raw)
-    if conflict is not None:
-        sys.exit(bootstrap_error(OutputFormat.JSON, conflict, hint="valid output formats: json, yaml, plain"))
-    if args.json:
-        args.output = "json"
 
     # --help inherits the normal JSON output default; --recursive expands the
     # tree and --output picks the format. A bare --recursive is ignored.
@@ -795,10 +765,10 @@ def test_parse_output_all_variants():
 
 
 def test_output_missing_detection():
-    for raw in (["--output"], ["--output", "--json"], ["--output="]):
+    for raw in (["--output"], ["--output", "--recursive"], ["--output="]):
         assert output_missing(raw), f"{raw} must be treated as missing --output value"
-    for raw in (["--output", "json"], ["--output=json"], ["--json"]):
-        assert not output_missing(raw), f"{raw} must have a valid output value or alias"
+    for raw in (["--output", "json"], ["--output=json"]):
+        assert not output_missing(raw), f"{raw} must have a valid output value"
 
 
 def test_parse_cli_args_is_strict():

@@ -17,7 +17,7 @@ console.log(render(event.toJSON(), "json"));
 console.log(render(event.toJSON(), "plain"));
 ```
 
-Useful names use TypeScript casing: `render`, `outputOptionsForPolicy`, `redactedValue`, `redactUrlSecrets`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `isValidRfc3339`, `isValidBcp47`, `decodeProtocolEvent`, `cliParseOutput`, `cliParseLogFilters`, `buildCliError`, `buildCliVersion`, and `cliHandleVersionOrContinue`.
+Useful names use TypeScript casing: `render`, `outputOptionsForPolicy`, `redactedValue`, `redactUrlSecrets`, `redactArgv`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `isValidRfc3339`, `isValidBcp47`, `decodeProtocolEvent`, `cliParseOutput`, `cliParseLogFilters`, `buildCliError`, `buildCliVersion`, and `cliHandleVersionOrContinue`.
 
 ## Behavior Notes
 
@@ -26,7 +26,7 @@ Useful names use TypeScript casing: `render`, `outputOptionsForPolicy`, `redacte
 - YAML keeps original keys and values (structure-preserving, like JSON), sorting keys by UTF-16 code unit order and quoting/escaping unsafe keys and string scalars. Plain strips formatting suffixes, formats values, sorts the same way, and renders nested objects/arrays as canonical JSON.
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - `buildCliError(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
-- Use `cliHandleVersionOrContinue()` before argument parsing so `--version` always answers with a structured protocol-v1 `kind:"result"` version event. Explicit `--output`/`--json` wins; pass the command's normal output as `defaultOutput` (JSON when omitted), plus its value-taking global flag names.
+- Use `cliHandleVersionOrContinue()` before argument parsing so `--version` always answers with a structured protocol-v1 `kind:"result"` version event. An explicit `--output` wins; pass the command's normal output as `defaultOutput` (JSON when omitted), plus its value-taking global flag names.
 
 ## Reference
 

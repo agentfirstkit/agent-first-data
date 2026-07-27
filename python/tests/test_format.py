@@ -25,6 +25,7 @@ from agent_first_data import (
     OutputOptions,
     OutputFormat,
     redacted_value,
+    redact_argv,
     redact_url_secrets,
     render,
     normalize_utc_offset,
@@ -62,6 +63,23 @@ def test_redact_url_fixtures():
         options = _redaction_options(case)
         got = redact_url_secrets(case["input"], secret_names=options.secret_names)
         assert got == case["expected"], f"[redact_url/{name}] got {got!r}"
+
+
+def test_redact_argv_fixtures():
+    for case in _load("redact_argv.json"):
+        name = case["name"]
+        options = _redaction_options(case)
+        got = redact_argv(
+            case["input"],
+            secret_names=options.secret_names,
+            policy=options.policy,
+        )
+        assert got == case["expected"], f"[redact_argv/{name}] got {got!r}"
+
+
+def test_redact_argv_default_matches_explicit_defaults():
+    args = ["tool", "--api-key-secret=sk-live"]
+    assert redact_argv(args) == redact_argv(args, secret_names=(), policy=None)
 
 
 def test_redaction_options_fixtures():

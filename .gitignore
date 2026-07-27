@@ -8,3 +8,5 @@
 
 # Python venv (test/release scripts provision the package-local one)
 /python/.venv/
+__pycache__/
+*.pyc

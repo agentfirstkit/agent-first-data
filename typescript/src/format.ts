@@ -560,6 +560,70 @@ export function redactUrlSecrets(url: string, options?: { secretNames?: readonly
 }
 
 /**
+ * Redact secret values out of a command line.
+ *
+ * A long flag whose name is secret by AFDATA naming (`--api-key-secret`, or an
+ * exact `secretNames` entry) has its value replaced by `***`, in both
+ * `--flag=value` and `--flag value` spellings. Everything else is preserved
+ * byte-for-byte.
+ *
+ * Free text is deliberately never scanned: a bare `api_key_secret=sk-live`
+ * positional, or a secret-looking token after a non-secret flag, is left alone.
+ * AFDATA decides sensitivity from the *field name*, and argv is no exception —
+ * rename the flag rather than pattern-matching values. A flag with no value
+ * (end of argv, or followed by another flag) is likewise left inspectable.
+ *
+ * Only long (`--`) flags are recognized, matching the convention's
+ * long-flags-only rule.
+ *
+ * Intended for CLIs that record their own invocation — startup diagnostics,
+ * audit trails, crash reports — where writing argv verbatim would put a
+ * credential in the log.
+ */
+export function redactArgv(
+  args: readonly string[],
+  options?: { secretNames?: readonly string[]; policy?: RedactionPolicy },
+): string[] {
+  if (options?.policy === RedactionPolicy.Off) return [...args];
+  const secretNames = secretNameSet(options ?? {});
+  const out: string[] = [];
+  let redactNext = false;
+  for (const arg of args) {
+    if (redactNext) {
+      redactNext = false;
+      if (!arg.startsWith("-")) {
+        out.push("***");
+        continue;
+      }
+    }
+    if (arg.startsWith("--")) {
+      const rest = arg.slice(2);
+      const equals = rest.indexOf("=");
+      if (equals >= 0) {
+        const name = rest.slice(0, equals);
+        if (isSecretFlagName(name, secretNames)) {
+          out.push(`--${name}=***`);
+          continue;
+        }
+      } else if (isSecretFlagName(rest, secretNames)) {
+        redactNext = true;
+      }
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
+/**
+ * Whether a long flag's name is secret, normalizing the kebab-case flag
+ * spelling to the snake_case field spelling the convention is defined in.
+ */
+function isSecretFlagName(flagName: string, secretNames: ReadonlySet<string>): boolean {
+  const normalized = flagName.replace(/-/gu, "_");
+  return isSecretKey(normalized, secretNames) || isSecretKey(flagName, secretNames);
+}
+
+/**
  * Normalize a fixed UTC offset string to "UTC" or ±HH:MM.
  * This helper handles fixed offsets only; IANA timezone names and DST rules
  * are intentionally out of scope.

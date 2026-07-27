@@ -147,7 +147,8 @@
         },
         "usage": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[^\\n\\r]+$"
         },
         "arguments": {
           "type": "array",
@@ -203,7 +204,8 @@
         },
         "usage": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[^\\n\\r]+$"
         },
         "arguments": {
           "type": "array",

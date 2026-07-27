@@ -80,6 +80,29 @@
         }
       },
       "trace": {}
+    },
+    {
+      "kind": "result",
+      "result": {
+        "code": "help",
+        "help": {
+          "scope": "one_level",
+          "command_path": "agent-cli set",
+          "name": "set",
+          "usage": "<KEY> <VALUE>",
+          "arguments": [
+            {
+              "name": "KEY",
+              "values": [
+                "KEY",
+                "VALUE"
+              ],
+              "required": true
+            }
+          ]
+        }
+      },
+      "trace": {}
     }
   ],
   "invalid": [
@@ -174,6 +197,47 @@
               {
                 "name": "--output",
                 "global": false
+              }
+            ]
+          }
+        },
+        "trace": {}
+      }
+    },
+    {
+      "name": "multi-line usage",
+      "event": {
+        "kind": "result",
+        "result": {
+          "code": "help",
+          "help": {
+            "scope": "one_level",
+            "command_path": "agent-cli",
+            "name": "agent-cli",
+            "usage": "[--output OUTPUT] [--verbose]\n                 [--log LOG] <COMMAND>"
+          }
+        },
+        "trace": {}
+      }
+    },
+    {
+      "name": "positional values omitting its own name",
+      "event": {
+        "kind": "result",
+        "result": {
+          "code": "help",
+          "help": {
+            "scope": "one_level",
+            "command_path": "agent-cli set",
+            "name": "set",
+            "arguments": [
+              {
+                "name": "KEY",
+                "values": [
+                  "VALUE",
+                  "EXTRA"
+                ],
+                "required": true
               }
             ]
           }

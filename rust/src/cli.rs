@@ -568,7 +568,7 @@ pub fn cli_render_version(
 ///
 /// The one blessed behavior: `--version` always answers with a protocol-v1
 /// `kind:"result"` version event (payload `{ "code": "version", "name", ...
-/// }`, see [`build_cli_version`]). An explicit `--output`/`--json` wins;
+/// }`, see [`build_cli_version`]). An explicit `--output` wins;
 /// otherwise the handler inherits the command's declared `--output` default,
 /// falling back to JSON. Returns a standard [`build_cli_error`] event when the
 /// request is malformed, for example `--version --output xml`.
@@ -620,9 +620,25 @@ struct ParsedVersionRequest {
     output_error: Option<String>,
 }
 
+/// Drop argv[0] from a raw argument vector.
+///
+/// `raw_args` is documented as the full argv, so argv[0] is the program path and
+/// never an argument. The one concession is a caller that passes bare arguments:
+/// argv[0] can never start with `-`, so a leading `-` means the vector is
+/// already stripped. Matching argv[0] against subcommand names would be a
+/// second, unsafe concession — a binary legitimately named after one of its own
+/// subcommands would have its program path parsed as that subcommand.
+#[cfg(any(feature = "cli", feature = "cli-help"))]
+pub(crate) fn strip_argv0(raw_args: &[String]) -> &[String] {
+    match raw_args.first() {
+        Some(first) if first.starts_with('-') => raw_args,
+        _ => raw_args.get(1..).unwrap_or(&[]),
+    }
+}
+
 #[cfg(any(feature = "cli", feature = "cli-help"))]
 fn parse_version_request(raw_args: &[String], cmd: &clap::Command) -> ParsedVersionRequest {
-    let args = raw_args.get(1..).unwrap_or(&[]);
+    let args = strip_argv0(raw_args);
     let mut version_requested = false;
     let mut output_format = None;
     let mut output_error = None;
@@ -643,17 +659,6 @@ fn parse_version_request(raw_args: &[String], cmd: &clap::Command) -> ParsedVers
         let (flag_name, inline_value) = split_flag(arg);
         if arg == "--version" {
             version_requested = true;
-            i += 1;
-            continue;
-        }
-
-        if arg == "--json" {
-            set_version_output_format(
-                &mut output_format,
-                OutputFormat::Json,
-                "--json",
-                &mut output_error,
-            );
             i += 1;
             continue;
         }

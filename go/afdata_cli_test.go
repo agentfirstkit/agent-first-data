@@ -666,9 +666,11 @@ func TestCliHandleVersionOrContinue_HonorsOutputFlag(t *testing.T) {
 	}
 }
 
-func TestCliHandleVersionOrContinue_JsonAlias(t *testing.T) {
+func TestCliHandleVersionOrContinue_IgnoresJsonFlag(t *testing.T) {
+	// --json belongs to the application: it must not select a format, and it
+	// must not conflict with one. --output yaml still wins.
 	out, handled, err := CliHandleVersionOrContinue(
-		[]string{"--version", "--json"},
+		[]string{"--version", "--json", "--output", "yaml"},
 		versionValueFlags,
 		"agent-cli", "", "1.2.3", "",
 	)
@@ -678,14 +680,14 @@ func TestCliHandleVersionOrContinue_JsonAlias(t *testing.T) {
 	if !handled {
 		t.Fatal("expected handled")
 	}
-	if !contains(out, "\"kind\":\"result\"") || !contains(out, "\"version\":\"1.2.3\"") {
-		t.Errorf("json alias version output = %s", out)
+	if !contains(out, "kind: \"result\"") {
+		t.Errorf("--output yaml must still select YAML: %s", out)
 	}
 }
 
-func TestCliHandleVersionOrContinue_JsonAliasConflict(t *testing.T) {
+func TestCliHandleVersionOrContinue_ConflictingOutputFormats(t *testing.T) {
 	_, handled, err := CliHandleVersionOrContinue(
-		[]string{"--version", "--json", "--output", "yaml"},
+		[]string{"--version", "--output", "json", "--output", "yaml"},
 		versionValueFlags,
 		"agent-cli", "", "1.2.3", "",
 	)

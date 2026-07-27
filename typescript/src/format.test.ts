@@ -20,6 +20,7 @@ import {
   PlainStyle,
   type OutputOptions,
   outputOptionsForPolicy,
+  redactArgv,
   redactUrlSecrets,
   type JsonValue,
   normalizeUtcOffset,
@@ -60,6 +61,24 @@ describe("redact_url fixtures", () => {
       assert.equal(redactUrlSecrets(tc.input, options), tc.expected);
     });
   }
+});
+
+// --- argv redaction fixtures ---
+
+describe("redact_argv fixtures", () => {
+  for (const tc of load("redact_argv.json")) {
+    it(tc.name, () => {
+      const options = redactionOptions(tc);
+      assert.deepEqual(redactArgv(tc.input, options), tc.expected);
+    });
+  }
+});
+
+describe("redact_argv default helper", () => {
+  it("matches an explicitly defaulted call", () => {
+    const args = ["tool", "--api-key-secret=sk-live"];
+    assert.deepEqual(redactArgv(args), redactArgv(args, { secretNames: [] }));
+  });
 });
 
 // --- Redact fixtures (default full redaction via redactedValue) ---

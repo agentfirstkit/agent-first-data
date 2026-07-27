@@ -8,7 +8,8 @@
 //! - Protocol reader: [`decode_protocol_event`] parses and strict-validates one protocol
 //!   line into a typed [`DecodedEvent`]
 //! - Redaction: [`redacted_value`] / [`Redactor::value`] (JSON values), [`redact_url_secrets`] /
-//!   [`Redactor::url`] (URL strings) — `Redactor` carries custom `secret_names`/`policy`
+//!   [`Redactor::url`] (URL strings), [`redact_argv`] / [`Redactor::argv`] (command lines) —
+//!   `Redactor` carries custom `secret_names`/`policy`
 //! - Output rendering: [`render`] — the single `value × format × options → String` entry point
 //!   for JSON, YAML, and plain (logfmt) output
 //! - Parse utilities: [`normalize_utc_offset`], [`is_valid_rfc3339_date`],
@@ -80,7 +81,8 @@ pub use protocol::{
     json_progress, json_result, validate_protocol_event, validate_protocol_stream,
 };
 pub use redaction::{
-    OutputOptions, PlainStyle, RedactionPolicy, Redactor, redact_url_secrets, redacted_value,
+    OutputOptions, PlainStyle, RedactionPolicy, Redactor, redact_argv, redact_url_secrets,
+    redacted_value,
 };
 pub use validation::{
     is_valid_bcp47, is_valid_rfc3339, is_valid_rfc3339_date, is_valid_rfc3339_time,

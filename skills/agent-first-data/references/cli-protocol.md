@@ -88,8 +88,10 @@ Return a protocol result:
 {"kind":"result","result":{"code":"version","name":"tool","version":"1.2.3"},"trace":{}}
 ```
 
-Optional fields are `display_name` and opaque `build`. Explicit `--output` or
-`--json` wins; otherwise inherit the command's declared output default.
+Optional fields are `display_name` and opaque `build`. An explicit `--output`
+wins; otherwise inherit the command's declared output default. `--output` is the
+only format selector AFDATA recognizes — never claim a `--json` alias, which
+belongs to the application.
 
 Only recognize version before the first positional/subcommand. A malformed
 request such as `--version --output xml` returns a structured CLI error.

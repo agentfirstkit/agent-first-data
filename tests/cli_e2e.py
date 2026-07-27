@@ -189,20 +189,17 @@ def assert_invalid_output_fallback(case: CliCase) -> None:
     assert events[0]["kind"] == "error", f"{case.name}: expected error fallback, got {events[0]!r}"
 
 
-def assert_json_alias(case: CliCase) -> None:
+def assert_json_flag_is_not_afdata_s(case: CliCase) -> None:
+    # `--json` is a plain application flag now. These examples do not declare
+    # one, so it must surface as an unknown argument rather than being silently
+    # consumed as a second spelling of `--output json`.
     proc = run_cli(case, ("--json", *case.success_args))
-    assert proc.returncode == 0, f"{case.name}: --json returned {proc.returncode}, stderr={proc.stderr!r}"
+    assert proc.returncode != 0, (
+        f"{case.name}: --json was consumed by AFDATA instead of reaching the app"
+    )
     events = terminal_events(proc)
-    assert len(events) == 1, f"{case.name}: expected one JSON event, got {events!r}"
-    assert events[0]["kind"] == "result", f"{case.name}: --json did not emit result: {events[0]!r}"
-
-
-def assert_format_conflict_fallback(case: CliCase) -> None:
-    proc = run_cli(case, ("--json", "--output", "plain", *case.success_args))
-    assert proc.returncode != 0, f"{case.name}: output conflict unexpectedly succeeded"
-    events = terminal_events(proc)
-    assert len(events) == 1, f"{case.name}: expected one conflict error, got {events!r}"
-    assert events[0]["kind"] == "error", f"{case.name}: expected conflict error, got {events[0]!r}"
+    assert len(events) == 1, f"{case.name}: expected one error, got {events!r}"
+    assert events[0]["kind"] == "error", f"{case.name}: expected error, got {events[0]!r}"
 
 
 def assert_cancelled(case: CliCase) -> None:
@@ -681,8 +678,7 @@ def main() -> None:
         assert_startup_log,
         assert_unknown_arg,
         assert_invalid_output_fallback,
-        assert_json_alias,
-        assert_format_conflict_fallback,
+        assert_json_flag_is_not_afdata_s,
         assert_cancelled,
         assert_broken_pipe_no_traceback,
         assert_version,

@@ -380,7 +380,7 @@ function splitFlag(arg: string): { name: string | undefined; inlineValue: string
  * Throws for malformed version requests, for example `--version --output xml`.
  *
  * The one blessed behavior: `--version` always answers with a protocol-v1
- * `kind:"result"` version event. Explicit `--output`/`--json` wins; otherwise
+ * `kind:"result"` version event. An explicit `--output` wins; otherwise
  * `defaultOutput` should be the command's normal output default.
  *
  * `valueFlags` is the caller's own value-taking global long flags (with or
@@ -420,15 +420,6 @@ export function cliHandleVersionOrContinue(
 
     if (arg === "--version") {
       versionRequested = true;
-      i += 1;
-      continue;
-    }
-    if (arg === "--json") {
-      if (outputFormat !== undefined && outputFormat !== "json") {
-        outputError = new Error("conflicting output formats: --json conflicts with previous output format");
-      } else {
-        outputFormat = "json";
-      }
       i += 1;
       continue;
     }

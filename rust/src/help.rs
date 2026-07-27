@@ -784,10 +784,7 @@ struct ParsedHelpRequest {
 
 #[cfg(feature = "cli-help")]
 fn parse_help_request(raw_args: &[String], cmd: &clap::Command) -> ParsedHelpRequest {
-    let args = match raw_args.first() {
-        Some(first) if first.starts_with('-') || cmd.find_subcommand(first).is_some() => raw_args,
-        _ => raw_args.get(1..).unwrap_or(&[]),
-    };
+    let args = crate::cli::strip_argv0(raw_args);
     let mut help_requested = false;
     let mut recursive_requested = false;
     let mut output_format = None;
@@ -819,16 +816,6 @@ fn parse_help_request(raw_args: &[String], cmd: &clap::Command) -> ParsedHelpReq
         // through to the application's own parser untouched.
         if arg == "--recursive" {
             recursive_requested = true;
-            i += 1;
-            continue;
-        }
-        if arg == "--json" {
-            set_help_output_format(
-                &mut output_format,
-                HelpFormat::Json,
-                "--json",
-                &mut output_error,
-            );
             i += 1;
             continue;
         }
@@ -1108,6 +1095,27 @@ fn argument_schema(arg: &clap::Arg) -> Value {
         clap::ArgAction::Append | clap::ArgAction::Count
     ) {
         schema.insert("repeatable".to_string(), Value::Bool(true));
+    }
+    // A positional's `name` already carries its (single) placeholder, so it says
+    // nothing more. A positional that takes several values has several
+    // placeholders, though, and dropping all but the first would leave the model
+    // disagreeing with its own `usage` — so it lists every one.
+    if arg.get_long().is_none()
+        && arg.get_short().is_none()
+        && let Some(names) = arg.get_value_names()
+        && names.len() > 1
+    {
+        schema.insert(
+            "values".to_string(),
+            Value::Array(
+                names
+                    .iter()
+                    .map(ToString::to_string)
+                    .filter(|name| !name.is_empty())
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
     }
     if (arg.get_long().is_some() || arg.get_short().is_some())
         && argument_takes_values(arg)

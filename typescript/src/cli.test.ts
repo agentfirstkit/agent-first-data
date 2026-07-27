@@ -467,15 +467,17 @@ describe("version helpers", () => {
     assert.ok(out?.includes("result.version=1.2.3"));
   });
 
-  it("supports --json as --output json", () => {
-    const out = cliHandleVersionOrContinue(["--version", "--json"], [], "agent-cli", undefined, "1.2.3", undefined);
-    assert.ok(out?.includes('"kind":"result"'));
-    assert.ok(out?.includes('"version":"1.2.3"'));
+  it("ignores --json, which belongs to the application", () => {
+    // It must not select a format and must not conflict with one.
+    const out = cliHandleVersionOrContinue(
+      ["--version", "--json", "--output", "yaml"], [], "agent-cli", undefined, "1.2.3", undefined,
+    );
+    assert.ok(out?.includes('kind: "result"'), `--output yaml must still win: ${out}`);
   });
 
-  it("rejects --json with another explicit output format", () => {
+  it("rejects conflicting --output values", () => {
     assert.throws(
-      () => cliHandleVersionOrContinue(["--version", "--json", "--output", "yaml"], [], "agent-cli", undefined, "1.2.3", undefined),
+      () => cliHandleVersionOrContinue(["--version", "--output", "json", "--output", "yaml"], [], "agent-cli", undefined, "1.2.3", undefined),
       /conflicting output formats/
     );
   });
