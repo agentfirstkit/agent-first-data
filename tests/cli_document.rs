@@ -509,9 +509,19 @@ fn test_paths_and_keys_missing_ok_and_null_separator() {
     let parse_error = run_with_stdin(&["keys", "-", "nope", "--missing-ok"], b"not-json");
     assert!(!parse_error.status.success());
 
-    let null_sep = run_with_stdin(&["paths", "-", "-0"], br#"{"a":1,"b":2}"#);
+    let null_sep = run_with_stdin(&["paths", "-", "--null"], br#"{"a":1,"b":2}"#);
     assert!(null_sep.status.success(), "{:?}", null_sep);
     assert_eq!(null_sep.stdout, b"a\0b\0");
+
+    // A key may contain a newline, which is exactly why the line-separated
+    // default is unsafe for machine consumption.
+    let newline_key = run_with_stdin(&["paths", "-", "--null"], br#"{"a":1,"b\nc":2}"#);
+    assert!(newline_key.status.success(), "{:?}", newline_key);
+    assert_eq!(newline_key.stdout, b"a\0b\nc\0");
+
+    // `-0` is not an alias: AFDATA spells its flags out in full.
+    let short_form = run_with_stdin(&["paths", "-", "-0"], br#"{"a":1}"#);
+    assert_eq!(short_form.status.code(), Some(2));
 }
 
 #[test]

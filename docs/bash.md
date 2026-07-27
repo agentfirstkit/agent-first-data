@@ -126,6 +126,31 @@ host="$(afdata_config_get config.toml server.host localhost)"
 token_secret="$(afdata_cli value config.toml service.token_secret --reveal-secret)"
 ```
 
+### Iterating a container safely
+
+`afdata paths` and `afdata keys` print one entry per line, which is convenient
+until a key contains a newline — JSON permits it, and a line-based loop then
+silently reads one key as two. It does not fail; it just quietly does the wrong
+thing.
+
+`--null` separates entries with NUL instead, the one byte a key cannot contain:
+
+```bash
+# Wrong for a key like "weird\nkey" — no error, just an extra iteration.
+afdata paths config.json | while IFS= read -r path; do ...; done
+
+# Unambiguous.
+while IFS= read -r -d "" path; do
+  afdata_log info "found ${path}"
+done < <(afdata paths config.json --null)
+
+# Or hand the whole set to another program.
+afdata paths config.json --null | xargs -0 -n1 echo
+```
+
+Use it whenever the output is consumed by a program rather than read by a
+person. `keys` takes the same flag.
+
 The event helpers are thin wrappers around `afdata emit`:
 
 ```bash

@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,14 +13,12 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Add redact_argv across Rust, Go, Python, and TypeScript so a CLI can record its own invocation without writing a credential to its log, redacting by flag name and never by scanning free text",
-    "Remove the --json alias from every pre-parser: --output is the only format selector AFDATA recognizes, and --json now belongs to the application instead of being hijacked with its value misread as a subcommand",
-    "Fix top-level help resolution when a binary is named after one of its own subcommands, and give the version and help pre-parsers one shared rule for argv[0]",
-    "List every placeholder of a multi-value positional in the structured help model, so the model no longer contradicts its own usage line",
-    "Keep structured help usage on a single line, enforced by a schema pattern and by the help validator rather than left to each implementation",
-    "Honor hide_default_value and omit empty strings in structured help, so JSON and YAML never disclose what plain help withholds",
-    "Stop publishing build artifacts: untrack a stray Go example binary and Python bytecode, ignore them at the source, and fail the gate when any binary file is tracked in the package",
-    "Leave -h and -V to the application: the AFDATA help and version handlers claim no short flags, which is what keeps those letters available for a tool that owes its users -h for --host"
+    "Render Markdown help from the shared help model instead of the argument parser's own help writer, so --output selects a format and never a different set of commands or arguments",
+    "Make the Markdown export real Markdown — heading, prose, usage, and argument/subcommand tables — instead of concatenated terminal help blocks with no Markdown structure",
+    "Add a gate check asserting that json, plain, and markdown describe the same commands and the same arguments at one scope, verified against a reintroduced regression",
+    "Drop the -0 alias for --null on paths and keys: a short flag that merely abbreviates a flag of afdata's own invention, which the convention's own rule rejects",
+    "Document --null where a reader meets it, in the Bash authoring guide and the README, including why line-separated output is unsafe when a JSON key contains a newline",
+    "Fix the spec's short-flag example to cite imitation of an established interface rather than an abbreviation of afdata's own flag"
   ],
   "bonds": [],
   "tree": {

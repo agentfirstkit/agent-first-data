@@ -199,7 +199,7 @@ enum Command {
         #[arg(long = "missing-ok")]
         missing_ok: bool,
         /// Separate lines with NUL instead of newline (for `xargs -0`/`read -d ''`)
-        #[arg(short = '0', long = "null")]
+        #[arg(long = "null")]
         null: bool,
     },
     /// List a container's child key names or array indices, one per line — for external tools
@@ -223,7 +223,7 @@ enum Command {
         #[arg(long = "missing-ok")]
         missing_ok: bool,
         /// Separate lines with NUL instead of newline (for `xargs -0`/`read -d ''`)
-        #[arg(short = '0', long = "null")]
+        #[arg(long = "null")]
         null: bool,
     },
     /// Set a value at a dot-path, preserving the document's source formatting

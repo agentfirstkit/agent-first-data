@@ -341,6 +341,10 @@ run_e2e() {
     afdata_bin="$ROOTPATH/target/debug/afdata"
   fi
   AFDATA_BIN="$afdata_bin" bash "$ROOTPATH/tests/bash_e2e.sh"
+
+  echo ""
+  echo "[e2e] Help formats describe one surface"
+  (cd "$ROOTPATH" && python3 scripts/validate_help_formats_agree.py "$afdata_bin")
 }
 
 run_bench() {

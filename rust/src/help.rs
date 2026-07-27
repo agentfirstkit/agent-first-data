@@ -501,14 +501,14 @@ fn help_arg_is_secret(arg: &clap::Arg, context: &RedactionContext) -> bool {
 /// only advertise the `--output` formats (they have nothing to expand).
 #[cfg(feature = "cli-help")]
 fn enriched_help_command(cmd: &clap::Command) -> clap::Command {
-    // The canonical discovery surface is `--help`; never let clap synthesize
-    // its legacy `help` pseudo-command while rendering an isolated subtree.
-    let cmd = redact_secret_help_defaults(cmd.clone()).disable_help_subcommand(true);
-    let description = if visible_subcommands(&cmd).next().is_some() {
+    let description = if visible_subcommands(cmd).next().is_some() {
         HELP_FLAG_WITH_SUBCOMMANDS
     } else {
         HELP_FLAG_LEAF
     };
+    // The canonical discovery surface is `--help`; never let clap synthesize
+    // its legacy `help` pseudo-command while rendering an isolated subtree.
+    let cmd = redact_secret_help_defaults(cmd.clone()).disable_help_subcommand(true);
     let has_explicit_version = cmd.get_arguments().any(|arg| {
         arg.get_long() == Some("version") || arg.get_short().is_some_and(|short| short == 'V')
     });
@@ -695,28 +695,135 @@ fn render_markdown_command(
     }
     let heading_level = "#".repeat(level.max(1));
     // The joined path is the invocable command, not the (possibly branded)
-    // `Command::name` — a reader must be able to copy the heading and the
-    // fenced `Usage:` line straight into a shell.
+    // `Command::name` — a reader must be able to copy the heading and the usage
+    // line straight into a shell.
     let path = names.join(" ");
     if let Some(about) = cmd.get_about() {
         let _ = writeln!(buf, "{heading_level} {path} - {about}");
     } else {
         let _ = writeln!(buf, "{heading_level} {path}");
     }
+    // Long-form prose is the one thing Markdown keeps that the compact model
+    // drops: this is the documentation export, so interface policy and examples
+    // belong here. The *surface* below still comes from the shared model.
     if let Some(long_about) = markdown_long_about(cmd) {
         let _ = writeln!(buf);
         write_trimmed_help(buf, &long_about);
     }
+
+    let usage_suffix = compact_usage_suffix(cmd);
     let _ = writeln!(buf);
-    let _ = writeln!(buf, "```text");
-    let help = markdown_help_block_command(cmd, enrich)
-        .bin_name(path.clone())
-        .render_long_help();
-    write_trimmed_help(buf, &help.to_string());
-    if !buf.ends_with('\n') {
-        let _ = writeln!(buf);
+    if usage_suffix.is_empty() {
+        let _ = writeln!(buf, "```text\n{path}\n```");
+    } else {
+        let _ = writeln!(buf, "```text\n{path} {usage_suffix}\n```");
     }
-    let _ = writeln!(buf, "```");
+
+    // Arguments come from the same `command_arguments_schema` the JSON model
+    // uses, so `--output markdown` cannot disagree with `--output json` about
+    // what the command accepts. Rendering through a parser's own help writer is
+    // what previously reintroduced flags this CLI does not accept.
+    let arguments = command_arguments_schema(cmd, enrich);
+    if !arguments.is_empty() {
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "| Argument | Description |");
+        let _ = writeln!(buf, "| --- | --- |");
+        for argument in &arguments {
+            let _ = writeln!(
+                buf,
+                "| {} | {} |",
+                markdown_argument_signature(argument),
+                markdown_argument_description(argument)
+            );
+        }
+    }
+
+    let subcommands: Vec<&clap::Command> = visible_subcommands(cmd).collect();
+    if !subcommands.is_empty() {
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "| Command | Summary |");
+        let _ = writeln!(buf, "| --- | --- |");
+        for sub in subcommands {
+            let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
+            let _ = writeln!(
+                buf,
+                "| `{} {}` | {} |",
+                path,
+                sub.get_name(),
+                markdown_cell(&about)
+            );
+        }
+    }
+}
+
+/// Render one argument's invocation form from the shared model entry.
+#[cfg(feature = "cli-help")]
+fn markdown_argument_signature(argument: &Value) -> String {
+    let name = argument["name"].as_str().unwrap_or_default();
+    let mut rendered = String::from(name);
+    if let Some(short) = argument.get("short").and_then(Value::as_str) {
+        rendered.push_str(", ");
+        rendered.push_str(short);
+    }
+    if let Some(value) = argument.get("value").and_then(Value::as_str) {
+        rendered.push_str(&format!(" <{value}>"));
+    } else if let Some(values) = argument.get("values").and_then(Value::as_array) {
+        // A positional carries its own placeholder in `name`; a repeated one
+        // lists every placeholder, the first of which is that name.
+        let placeholders: Vec<String> = values
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|value| *value != name)
+            .map(|value| format!(" <{value}>"))
+            .collect();
+        rendered.push_str(&placeholders.join(""));
+    }
+    if argument.get("repeatable").and_then(Value::as_bool) == Some(true) {
+        rendered.push_str("...");
+    }
+    format!("`{}`", markdown_cell(&rendered))
+}
+
+/// Render one argument's help text plus the metadata the model carries.
+#[cfg(feature = "cli-help")]
+fn markdown_argument_description(argument: &Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(help) = argument.get("help").and_then(Value::as_str) {
+        parts.push(markdown_cell(help));
+    }
+    let mut notes = Vec::new();
+    if argument.get("required").and_then(Value::as_bool) == Some(true) {
+        notes.push("required".to_string());
+    }
+    if argument.get("global").and_then(Value::as_bool) == Some(true) {
+        notes.push("global".to_string());
+    }
+    if let Some(default) = argument.get("default").and_then(Value::as_str) {
+        notes.push(format!("default: `{}`", markdown_cell(default)));
+    } else if let Some(defaults) = argument.get("defaults").and_then(Value::as_array) {
+        let joined: Vec<String> = defaults
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|value| format!("`{}`", markdown_cell(value)))
+            .collect();
+        if !joined.is_empty() {
+            notes.push(format!("defaults: {}", joined.join(", ")));
+        }
+    }
+    if !notes.is_empty() {
+        parts.push(format!("*({})*", notes.join(", ")));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        parts.join(" ")
+    }
+}
+
+/// Escape the two characters that would break out of a Markdown table cell.
+#[cfg(feature = "cli-help")]
+fn markdown_cell(text: &str) -> String {
+    text.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
 #[cfg(feature = "cli-help")]
@@ -752,16 +859,6 @@ fn strip_leading_about_paragraph<'a>(long_about: &'a str, about: &str) -> &'a st
     rest.strip_prefix("\r\n\r\n")
         .or_else(|| rest.strip_prefix("\n\n"))
         .unwrap_or(long_about)
-}
-
-#[cfg(feature = "cli-help")]
-fn markdown_help_block_command(cmd: &clap::Command, enrich: bool) -> clap::Command {
-    let cmd = if enrich {
-        enriched_help_command(cmd)
-    } else {
-        redact_secret_help_defaults(cmd.clone()).disable_help_subcommand(true)
-    };
-    cmd.about(None::<&str>).long_about(None::<&str>)
 }
 
 #[cfg(feature = "cli-help")]
