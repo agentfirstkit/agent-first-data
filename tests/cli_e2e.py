@@ -369,6 +369,43 @@ def assert_afdata_lint_schema_secret() -> None:
     assert ok.returncode == 0, f"afdata lint rejected a null secret schema default/examples: {ok.stdout!r}"
 
 
+def assert_afdata_lint_schema_suffix_types() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "duration_ms": {"type": ["integer", "null"], "minimum": 0},
+            "callback_url": {"type": "string"},
+            "created_rfc3339": {"type": "string"},
+            "nested": {
+                "type": "object",
+                "properties": {
+                    "payload_bytes": {"type": "integer", "minimum": 0},
+                },
+            },
+        },
+    }
+    proc = run_afdata(("lint", "-"), json.dumps(schema) + "\n")
+    assert proc.returncode == 0, (
+        "afdata lint treated JSON Schema descriptors as runtime values: "
+        f"{proc.stdout!r} {proc.stderr!r}"
+    )
+
+    schema["properties"]["duration_ms"] = {"type": "string"}
+    invalid = run_afdata(("lint", "-"), json.dumps(schema) + "\n")
+    assert invalid.returncode != 0, "afdata lint accepted an incompatible schema suffix type"
+    findings = terminal_events(invalid)[0]["error"]["findings"]
+    assert findings[0]["rule_id"] == "suffix_type_mismatch", findings
+
+    # A `properties` object whose values are not schemas (an object or a
+    # boolean) is runtime data using `properties` as a field name, so its
+    # values keep the ordinary runtime suffix check.
+    data = run_afdata(("lint", "-"), '{"properties":{"timeout_ms":"5000"}}\n')
+    assert data.returncode != 0, "afdata lint skipped runtime data under a `properties` field"
+    findings = terminal_events(data)[0]["error"]["findings"]
+    assert findings[0]["rule_id"] == "suffix_type_mismatch", findings
+    assert findings[0]["pointer"] == "/properties/timeout_ms", findings
+
+
 def assert_afdata_lint_bcp47() -> None:
     proc = run_afdata(("lint", "-"), '{"language_bcp47":"zh_CN"}\n')
     assert proc.returncode != 0, "afdata lint accepted malformed BCP 47 tag"
@@ -693,6 +730,7 @@ def main() -> None:
         assert_afdata_validate_strict_event,
         assert_afdata_validate_stream_error,
         assert_afdata_lint_schema_secret,
+        assert_afdata_lint_schema_suffix_types,
         assert_afdata_lint_bcp47,
         assert_afdata_lint_strict_strings,
         assert_afdata_lint_numeric_and_url,

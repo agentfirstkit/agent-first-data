@@ -2331,7 +2331,7 @@ fn lint_value(value: &Value, pointer: &str, findings: &mut Vec<Finding>) {
         Value::Object(map) => {
             if let Some(Value::Object(properties)) = map.get("properties") {
                 for (name, schema) in properties {
-                    lint_secret_schema_property(
+                    lint_schema_property(
                         name,
                         schema,
                         &join_pointer(pointer, "properties"),
@@ -2340,6 +2340,16 @@ fn lint_value(value: &Value, pointer: &str, findings: &mut Vec<Finding>) {
                 }
             }
             for (key, child) in map {
+                // A JSON Schema `properties` object maps public field names to
+                // schema descriptors. Those descriptors are not runtime field
+                // values, so applying `lint_suffix_type` to the descriptor
+                // object itself would reject every correctly typed suffix
+                // property (for example `duration_ms: {"type":"integer"}`).
+                // Each property is checked by `lint_schema_property` above and
+                // its descriptor is recursively inspected there.
+                if key == "properties" && child.is_object() {
+                    continue;
+                }
                 lint_suffix_type(key, child, &join_pointer(pointer, key), findings);
                 lint_value(child, &join_pointer(pointer, key), findings);
             }
@@ -2353,44 +2363,127 @@ fn lint_value(value: &Value, pointer: &str, findings: &mut Vec<Finding>) {
     }
 }
 
-fn lint_secret_schema_property(
+fn lint_schema_property(
     name: &str,
     schema: &Value,
     properties_pointer: &str,
     findings: &mut Vec<Finding>,
 ) {
-    if !name.ends_with("_secret") {
-        return;
-    }
-    let Some(obj) = schema.as_object() else {
-        return;
-    };
     let property_pointer = join_pointer(properties_pointer, name);
-    for field in ["default", "example"] {
-        if let Some(value) = obj.get(field)
-            && !is_redacted_secret_literal(value)
-        {
-            findings.push(Finding::error(
-                "secret_schema_value_exposed",
-                join_pointer(&property_pointer, field),
-                format!("schema property {name:?} exposes secret {field}"),
-            ));
-        }
+    // A JSON Schema is always an object or a boolean. A scalar or array here
+    // means the enclosing `properties` object is runtime data that happens to
+    // use `properties` as a field name, not a property map, so the value keeps
+    // the ordinary runtime suffix check.
+    if !matches!(schema, Value::Object(_) | Value::Bool(_)) {
+        lint_suffix_type(name, schema, &property_pointer, findings);
+        lint_value(schema, &property_pointer, findings);
+        return;
     }
-    if let Some(Value::Array(examples)) = obj.get("examples") {
-        for (idx, value) in examples.iter().enumerate() {
-            if !is_redacted_secret_literal(value) {
+    if name.ends_with("_secret")
+        && let Some(obj) = schema.as_object()
+    {
+        for field in ["default", "example"] {
+            if let Some(value) = obj.get(field)
+                && !is_redacted_secret_literal(value)
+            {
                 findings.push(Finding::error(
                     "secret_schema_value_exposed",
-                    join_pointer(
-                        &join_pointer(&property_pointer, "examples"),
-                        &idx.to_string(),
-                    ),
-                    format!("schema property {name:?} exposes secret example"),
+                    join_pointer(&property_pointer, field),
+                    format!("schema property {name:?} exposes secret {field}"),
                 ));
             }
         }
+        if let Some(Value::Array(examples)) = obj.get("examples") {
+            for (idx, value) in examples.iter().enumerate() {
+                if !is_redacted_secret_literal(value) {
+                    findings.push(Finding::error(
+                        "secret_schema_value_exposed",
+                        join_pointer(
+                            &join_pointer(&property_pointer, "examples"),
+                            &idx.to_string(),
+                        ),
+                        format!("schema property {name:?} exposes secret example"),
+                    ));
+                }
+            }
+        }
     }
+    lint_schema_suffix_type(name, schema, &property_pointer, findings);
+    lint_value(schema, &property_pointer, findings);
+}
+
+fn lint_schema_suffix_type(name: &str, schema: &Value, pointer: &str, findings: &mut Vec<Finding>) {
+    let (expected, description): (&[&str], &str) = if name.ends_with("_bytes") {
+        (&["integer"], "an integer byte count")
+    } else if name.ends_with("_epoch_s") || name.ends_with("_epoch_ms") {
+        (&["integer"], "an integer epoch timestamp")
+    } else if name.ends_with("_epoch_ns") {
+        (&["string"], "a decimal integer string")
+    } else if name.ends_with("_sats") || name.ends_with("_msats") {
+        (
+            &["integer", "string"],
+            "an integer or decimal integer string",
+        )
+    } else if name.ends_with("_percent") || is_duration_suffix(name) {
+        (&["integer", "number"], "a numeric value")
+    } else if is_currency_minor_unit_suffix(name) {
+        (&["integer"], "an integer currency amount")
+    } else if name.ends_with("_rfc3339")
+        || name.ends_with("_url")
+        || name.ends_with("_bcp47")
+        || name.ends_with("_rfc3339_date")
+        || name.ends_with("_rfc3339_time")
+        || name.ends_with("_utc_offset")
+    {
+        (&["string"], "a string")
+    } else {
+        return;
+    };
+
+    if !schema_accepts_any_type(schema, expected) {
+        findings.push(Finding::error(
+            "suffix_type_mismatch",
+            join_pointer(pointer, "type"),
+            format!("schema property {name:?} must allow {description}"),
+        ));
+    }
+}
+
+fn schema_accepts_any_type(schema: &Value, expected: &[&str]) -> bool {
+    let Some(object) = schema.as_object() else {
+        // Boolean schemas and unresolved references do not declare a
+        // contradictory primitive type at this location.
+        return true;
+    };
+
+    if let Some(schema_type) = object.get("type") {
+        return match schema_type {
+            Value::String(value) => expected.contains(&value.as_str()),
+            Value::Array(values) => values.iter().any(|value| {
+                value
+                    .as_str()
+                    .is_some_and(|value| expected.contains(&value))
+            }),
+            _ => true,
+        };
+    }
+
+    for keyword in ["anyOf", "oneOf"] {
+        if let Some(Value::Array(branches)) = object.get(keyword) {
+            return branches
+                .iter()
+                .any(|branch| schema_accepts_any_type(branch, expected));
+        }
+    }
+    if let Some(Value::Array(branches)) = object.get("allOf") {
+        return branches
+            .iter()
+            .all(|branch| schema_accepts_any_type(branch, expected));
+    }
+
+    // With no local primitive constraint, a `$ref`, `const`, or other schema
+    // keyword may still admit the required type. Do not invent a mismatch.
+    true
 }
 
 fn is_redacted_secret_literal(value: &Value) -> bool {
