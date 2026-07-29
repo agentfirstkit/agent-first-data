@@ -176,6 +176,14 @@ impl From<std::io::Error> for CliEmitterError {
 /// - [`OutputTo::Stdout`] / [`OutputTo::Stderr`] are event-stream mode: every
 ///   event, including `error`, is collapsed onto that one stream so a consumer
 ///   reading it in order (`kind`-branching) sees preserved ordering.
+///
+/// A command is an event stream when it produces more than one caller-needed
+/// output over time — a chunked payload, or an address the caller must act on
+/// before the command can report its outcome. Such a command defaults to
+/// [`OutputTo::Stdout`] and rejects an explicit `split`, because splitting it
+/// would strand the caller's data on the diagnostic stream. If a
+/// `kind:"progress"` event carries a payload the caller must read, the command
+/// is an event stream that has not declared itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputTo {
     /// Finite one-shot: `result` → stdout, `error`/`progress`/`log` → stderr.

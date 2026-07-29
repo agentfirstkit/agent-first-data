@@ -654,8 +654,38 @@ producer). Every event stays on ONE stream so ordering is preserved; splitting a
 stream across `stdout` and `stderr` would lose ordering and is prohibited. That
 stream's destination is chosen by the emitter (`stdout` by default).
 
+**Choosing the mode.** A command is an event stream when it produces **more than
+one caller-needed output over time**; otherwise it is finite. Two shapes qualify
+even though each looks like a single operation:
+
+- a payload delivered in chunks — an opening event, N batches carrying the rows,
+  a terminator. The batches carry the data, which therefore does not fit in the
+  single terminal event finite mode allows.
+- an operation that reports something the caller must act on *before* it can
+  finish — a served address to connect to, a URL a human must visit — and then
+  reports its outcome. Both are caller-needed, and an unbounded wait separates
+  them.
+
+Neither fits finite mode, whose defining limit is *at most one* terminal event.
+Splitting either across `stdout` and `stderr` strands the caller's data on the
+diagnostic stream: the row batches or the address land on `stderr` while only a
+terminator or a shutdown acknowledgement reaches `stdout`.
+
+An event-stream command therefore defaults to `--output-to stdout` rather than
+`split`, and rejects an explicit `--output-to split` as a usage error — the same
+way a raw-scalar reader rejects a non-default destination. Its intermediate
+data-carrying events stay `kind:"progress"`: once the whole stream shares one
+destination, `kind` no longer decides routing, and the command still emits
+exactly one terminal event.
+
+The invariant this preserves: **data the caller captures is never routed to the
+diagnostic stream.** A `kind:"progress"` event carrying a payload the caller
+must read is not a finite command with an unusual payload; it is an event stream
+that has not declared itself.
+
 Destination selection:
-- CLI tools SHOULD expose `--output-to <split|stdout|stderr>`, default `split`.
+- CLI tools SHOULD expose `--output-to <split|stdout|stderr>`, default `split`
+  for a finite command and `stdout` for an event-stream command.
   `split` is finite mode above. `stdout`/`stderr` select event-stream mode and
   collapse the whole envelope stream — every `kind`, including `error` — onto
   that one stream. `--output` selects an event's **format**; `--output-to`
