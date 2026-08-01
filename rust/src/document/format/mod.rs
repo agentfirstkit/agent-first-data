@@ -49,6 +49,22 @@ impl Format {
         }
     }
 
+    /// Exact CLI token accepted by `--input-format` and emitted in result
+    /// payloads. Unlike [`Self::name`], this is stable machine data rather than
+    /// a display label.
+    #[must_use]
+    pub const fn cli_name(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Toml => "toml",
+            Self::Yaml => "yaml",
+            Self::Dotenv => "dotenv",
+            Self::Ini => "ini",
+            Self::TomlFrontmatter => "toml-frontmatter",
+            Self::YamlFrontmatter => "yaml-frontmatter",
+        }
+    }
+
     /// Detect format from file extension.
     pub fn detect(path: &Path) -> Option<Self> {
         let file_name = path.file_name().and_then(|name| name.to_str())?;
@@ -196,11 +212,6 @@ impl Format {
             }
         }
     }
-
-    /// Reject mutation before a backend-specific value is changed or written.
-    pub fn ensure_writable(&self, _operation: &str) -> DocumentResult<()> {
-        Ok(())
-    }
 }
 
 #[cfg(feature = "dotenv")]
@@ -229,6 +240,19 @@ mod tests {
 
         for (format, expected) in cases {
             assert_eq!(format.name(), expected);
+        }
+
+        let cli_names = [
+            (Format::Json, "json"),
+            (Format::Toml, "toml"),
+            (Format::Yaml, "yaml"),
+            (Format::Dotenv, "dotenv"),
+            (Format::Ini, "ini"),
+            (Format::TomlFrontmatter, "toml-frontmatter"),
+            (Format::YamlFrontmatter, "yaml-frontmatter"),
+        ];
+        for (format, expected) in cli_names {
+            assert_eq!(format.cli_name(), expected);
         }
     }
 }

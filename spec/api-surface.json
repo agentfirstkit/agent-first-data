@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Canonical cross-SDK API surface for the shared AFDATA contract (protocol builders/reader, output, redaction, CLI helpers, core types). The four SDKs synchronize on exactly two things: this core contract and the CLI helpers (the `cli` surface). Everything else is Rust-only: cli-help, skill-admin, tracing, and stream-redirect are implementation utilities that live only in the Rust crate; the Go/Python/TypeScript SDKs do not ship them. A `null` entry for a language means the symbol is intentionally absent there; add a `note` explaining why. Validated by scripts/validate_api_surface.py, wired into scripts/test.sh's static phase.",
+  "description": "Canonical cross-SDK API surface for the shared AFDATA contract (protocol builders/reader, output, redaction, CLI primitives, core types). The closed-world CliSpec compiler and help-v2 are the only lifecycle/help contract; the Rust reference ships first. Skill administration, tracing, stream redirection, and the whole `document` module are Rust-only and outside this manifest, so the checked count is the shared contract, not the crate's full public surface. A null entry means that language has no required top-level export for the group; the note records the idiomatic equivalent or the deliberate contract gap. Reverse export checks still reject undeclared public symbols. Validated by scripts/validate_api_surface.py, wired into scripts/test.sh's static phase.",
   "groups": [
     {
       "id": "json_result",
@@ -113,7 +113,7 @@
       "python": null,
       "typescript": null,
       "go": null,
-      "note": "Rust-only typed protocol-validation error (stable rule slug + JSON pointer + message) returned by validate_protocol_event/validate_protocol_stream. Python/TS/Go SDKs still surface validation failures as a plain message (ValueError / Error / error), not yet upgraded to the typed violation \u2014 a tracked cross-SDK gap."
+      "note": "Rust-only typed protocol-validation error (stable rule slug + JSON pointer + message) returned by validate_protocol_event/validate_protocol_stream. Python/TS/Go SDKs still surface validation failures as a plain message (ValueError / Error / error), not yet upgraded to the typed violation — a tracked cross-SDK gap."
     },
     {
       "id": "build_cli_error",
@@ -187,7 +187,7 @@
       "python": "render",
       "typescript": "render",
       "go": "Render",
-      "note": "The single value \u00d7 format \u00d7 options \u2192 String entry point. Replaces the former output_json/output_yaml/output_plain (+ _with_options) and cli_output/cli_output_with_options families. Rust/Go take an explicit OutputOptions argument (OutputOptions: Default); Python/TS keep it an optional keyword/parameter."
+      "note": "The single value × format × options → String entry point. Replaces the former output_json/output_yaml/output_plain (+ _with_options) and cli_output/cli_output_with_options families. Rust/Go take an explicit OutputOptions argument (OutputOptions: Default); Python/TS keep it an optional keyword/parameter."
     },
     {
       "id": "redacted_value",
@@ -405,7 +405,7 @@
       "python": null,
       "typescript": "outputOptionsForPolicy",
       "go": "OutputOptionsForPolicy",
-      "note": "Rust/Python expose this as an associated function/classmethod (OutputOptions::for_policy / OutputOptions.for_policy), not a separate top-level export. Go/TS don't have that pattern, so it's a free function."
+      "note": "Python exposes this as a classmethod (OutputOptions.for_policy). Rust has no such function: it implements `From<RedactionPolicy> for OutputOptions`, so the equivalent is `OutputOptions::from(policy)` or `policy.into()`."
     },
     {
       "id": "cli_event_writer",
@@ -451,12 +451,265 @@
       "go": "CliRenderVersion"
     },
     {
-      "id": "cli_handle_version_or_continue",
+      "id": "cli_spec",
+      "kind": "type",
+      "rust": "CliSpec",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference compiler for cli-spec-v1; the other SDK compilers are intentionally deferred to the shared-fixture migration."
+    },
+    {
+      "id": "built_cli_spec",
+      "kind": "type",
+      "rust": "BuiltCliSpec",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only validated cli-spec-v1 registry."
+    },
+    {
+      "id": "bound_cli_spec",
+      "kind": "type",
+      "rust": "BoundCliSpec",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only registry with exact action-handler coverage."
+    },
+    {
+      "id": "command_spec",
+      "kind": "type",
+      "rust": "CommandSpec",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference cli-spec-v1 command declaration."
+    },
+    {
+      "id": "arg_spec",
+      "kind": "type",
+      "rust": "ArgSpec",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference cli-spec-v1 argument declaration."
+    },
+    {
+      "id": "arg_syntax",
+      "kind": "type",
+      "rust": "ArgSyntax",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference long-or-positional syntax model."
+    },
+    {
+      "id": "arg_value_type",
+      "kind": "type",
+      "rust": "ArgValueType",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference closed CLI argument type enum."
+    },
+    {
+      "id": "cli_value",
+      "kind": "type",
+      "rust": "CliValue",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference portable resolved CLI value."
+    },
+    {
+      "id": "combination",
+      "kind": "type",
+      "rust": "Combination",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference registered legal invocation shape."
+    },
+    {
+      "id": "fixed_value",
+      "kind": "type",
+      "rust": "FixedValue",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference scalar-or-one_of fixed enum constraint."
+    },
+    {
+      "id": "output_spec",
+      "kind": "type",
+      "rust": "OutputSpec",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference closed raw/protocol output contract."
+    },
+    {
+      "id": "output_lifecycle",
+      "kind": "type",
+      "rust": "OutputLifecycle",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference finite-or-stream lifecycle enum."
+    },
+    {
+      "id": "output_plan",
+      "kind": "type",
+      "rust": "OutputPlan",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only resolved output plan."
+    },
+    {
+      "id": "cli_outcome",
+      "kind": "type",
+      "rust": "CliOutcome",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only closed Run/Help/Version resolution outcome."
+    },
+    {
+      "id": "resolved_invocation",
+      "kind": "type",
+      "rust": "ResolvedInvocation",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only projected typed invocation."
+    },
+    {
+      "id": "resolved_docs",
+      "kind": "type",
+      "rust": "ResolvedDocs",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only resolved `--docs` request; carries the output plan, not rendered bytes."
+    },
+    {
+      "id": "resolved_help",
+      "kind": "type",
+      "rust": "ResolvedHelp",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only help-v2 outcome and output plan."
+    },
+    {
+      "id": "resolved_version",
+      "kind": "type",
+      "rust": "ResolvedVersion",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only version outcome and output plan."
+    },
+    {
+      "id": "cli_help_v2",
+      "kind": "type",
+      "rust": "CliHelpV2",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference cli-help-v2 model."
+    },
+    {
+      "id": "cli_error",
+      "kind": "type",
+      "rust": "CliError",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only structured closed-world CLI error."
+    },
+    {
+      "id": "cli_error_rule",
+      "kind": "type",
+      "rust": "CliErrorRule",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference closed CLI error rule enum."
+    },
+    {
+      "id": "cli_spec_error",
+      "kind": "type",
+      "rust": "CliSpecError",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only cli-spec-v1 build error."
+    },
+    {
+      "id": "build_afdata_cli",
       "kind": "fn",
-      "rust": "cli_handle_version_or_continue",
-      "python": "cli_handle_version_or_continue",
-      "typescript": "cliHandleVersionOrContinue",
-      "go": "CliHandleVersionOrContinue"
+      "rust": "build_afdata_cli",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "AFDATA adapter for the Rust reference compiler: the only place a cli-spec outcome becomes a protocol event. Rust-only for the same reason the compiler is."
+    },
+    {
+      "id": "cli_help_event",
+      "kind": "fn",
+      "rust": "cli_help_event",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "AFDATA adapter for the Rust reference compiler: the only place a cli-spec outcome becomes a protocol event. Rust-only for the same reason the compiler is."
+    },
+    {
+      "id": "cli_version_event",
+      "kind": "fn",
+      "rust": "cli_version_event",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "AFDATA adapter for the Rust reference compiler: the only place a cli-spec outcome becomes a protocol event. Rust-only for the same reason the compiler is."
+    },
+    {
+      "id": "cli_error_event",
+      "kind": "fn",
+      "rust": "cli_error_event",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "AFDATA adapter for the Rust reference compiler: the only place a cli-spec outcome becomes a protocol event. Rust-only for the same reason the compiler is."
+    },
+    {
+      "id": "cli_shape",
+      "kind": "type",
+      "rust": "CliShape",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "One legal shape inside a cli-help-v2 response. Rust-only, like the compiler that produces it."
+    },
+    {
+      "id": "render_cli_reference",
+      "kind": "fn",
+      "rust": "render_cli_reference",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Offline Markdown reference rendered from a built registry. Deliberately a separate capability rather than a help format, so the agent-facing discovery path stays minimal. Rust-only, like the compiler it reads."
+    },
+    {
+      "id": "synthetic_invocation",
+      "kind": "type",
+      "rust": "SyntheticInvocation",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only compiler-generated type-correct registry fixture."
     }
   ]
 }

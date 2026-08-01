@@ -14,7 +14,13 @@ Agent-First Data has three parts:
 
 **Parts 1 and 2 are the core.** Part 3 is optional — a recommended structure that works well with Parts 1 and 2, but you can use AFDATA naming with any JSON structure (REST APIs, GraphQL, databases, etc.).
 
-**Four SDKs, one contract.** Naming, output processing, the protocol template, and the core CLI helpers are implemented in Rust, Go, Python, and TypeScript. The Rust crate additionally bundles output-aware Clap help (`cli-help`), `skill`/`skill-admin` (SKILL.md validation plus install/uninstall/status), `stream-redirect` (fd-level output redirection), and `tracing` (logging init); those are Rust-only capabilities, not part of the cross-language API surface. The exact shared surface is enumerated in `spec/api-surface.json`.
+**Four SDKs, one contract.** Naming, output processing, the protocol template,
+and the established core helpers are implemented in Rust, Go, Python, and
+TypeScript. Rust is the reference compiler for the new closed-world
+`cli-spec-v1` registry and `cli-help-v2`; the other SDK compilers follow the
+same serialized model and fixtures. The Rust crate also bundles
+`skill`/`skill-admin`, `stream-redirect`, and tracing integration. The exact
+shared legacy surface is enumerated in `spec/api-surface.json`.
 
 **Jump to:**
 - [Quick Reference: All Suffixes](#quick-reference-all-suffixes)
@@ -160,7 +166,14 @@ Sub-cent precision — `_{code}_micro` for integer micro-units, one millionth (1
 | `_secret` | redact the entire value/subtree to `***` | `api_key_secret: "sk-or-v1-abc..."` |
 | `_url` | redact secret components **inside** the URL value (userinfo password, secret-named query params); the rest of the URL is preserved | `callback_url: "https://h/cb?code_secret=..."` |
 
-All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Any `_secret` value — scalar, object, or array — becomes the scalar string `***`, so a secret-marked container never leaks through JSON, YAML, Plain, or collision fallback. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `OutputOptions.redaction.secret_names` (a configured `Redactor` in Rust/Go, keyword arguments in Python/TS) at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction; formatting suffix stripping is a Plain-only concern, controlled by AFDATA suffixes in Plain's default readable style. AFDATA does not define named redaction profiles; use the default, `secret_names`, `RedactionTraceOnly`, or `RedactionNone` deliberately at the serialization boundary. YAML is always schema-preserving, regardless of style. Callers that need schema-preserving Plain rendering can use `OutputOptions` with the `Raw` output style.
+All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Any `_secret` value — scalar, object, or array — becomes the scalar string `***`, so a secret-marked container never leaks through JSON, YAML, Plain, or collision fallback. Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `OutputOptions.redaction.secret_names` (a configured `Redactor` in Rust/Go, keyword arguments in Python/TS) at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction; formatting suffix stripping is a Plain-only concern, controlled by AFDATA suffixes in Plain's default readable style. AFDATA does not define named redaction profiles; use the default `All`, `secret_names`, `TraceOnly`, or `Off` deliberately at the serialization boundary. YAML is always schema-preserving, regardless of style. Callers that need schema-preserving Plain rendering can use `OutputOptions` with `PlainStyle::Raw`.
+
+**Guarantee boundary.** `_secret` protects a structured field only when that
+value passes through an AFDATA redactor or renderer. It does not scrub process
+argv, shell history, `/proc`, a parent process, free-form prose, or third-party
+logs. Keep live secrets out of argv. A CLI that records its invocation must
+call `redact_argv` before logging argv, but that only protects the resulting
+structured log; it cannot retroactively protect the process boundary.
 
 The marker `***` has exactly one meaning in AFDATA output: a value was redacted because its field name, URL query parameter name, or explicit `secret_names` entry made it sensitive. It is not used for serialization failures, truncation, unsupported types, or arbitrary “maybe secret” guesses.
 
@@ -178,9 +191,11 @@ Independently of the parameter convention, the **userinfo password** component i
 
 **Input must be a single URL.** The standalone helper processes a string iff it begins with a scheme (`^[A-Za-z][A-Za-z0-9+.-]*://`) and contains no whitespace; any other string — including a URL embedded in surrounding prose — is returned unchanged. Callers that build messages around a URL redact the URL **before** interpolating it: `format("connect {}: {}", redact_url_secrets(url), err)`.
 
-**Surgical replacement.** Only the secret spans (a secret parameter's value bytes after `=` up to the next `&`/`#`/end; the password bytes after the first `:` in userinfo up to the authority's last `@`) are replaced with the literal `***`. Every other byte — scheme, host, path, fragment, benign parameters, percent-encoding, ordering — is preserved exactly. Implementations parse with their URL library but must not re-serialize the whole URL (normalization differs across libraries and would break cross-language parity); output equals input outside the redacted spans.
+**Surgical replacement.** Only the secret spans (a secret parameter's value bytes after `=` up to the next `&`/`#`/end; the password bytes after the first `:` in userinfo up to the authority's last `@`) are replaced with the literal `***`. Every other byte — scheme, host, path, benign parameters, percent-encoding, ordering — is preserved exactly. Implementations parse with their URL library but must not re-serialize the whole URL (normalization differs across libraries and would break cross-language parity); output equals input outside the redacted spans.
 
-**Automatic application via the `_url` suffix.** Redaction applies `redact_url_secrets` to the string value of any field whose name ends in `_url`/`_URL` — and **only** those fields. No payload string is scanned: the trigger is the field name, exactly like `_secret`. So `final_url` and `callback_url` are scrubbed automatically, while a free-form `error` or `message` field is never touched even if it contains a URL (redact such a URL with the helper before interpolating it). `RedactionNone` disables it along with all other redaction; `RedactionTraceOnly` scopes it to the `trace` subtree. A `_url` value with surrounding whitespace is trimmed before URL redaction. A `_url` value that cannot be parsed as a clean scheme-prefixed URL is replaced with `***` rather than silently passing through a likely malformed secret-bearing value when it carries either internal whitespace or an `@` credential sigil — for example a schemeless connection string `user:pass@host:5432/db`, which has no scheme anchor for the surgical span logic. A schemeless, `@`-free, whitespace-free value (e.g. a relative URL `/cb?page=2`) still passes through unchanged. The `secret_names` list applies to query-parameter names inside `_url` values as well. (A field carrying both meanings, e.g. `token_url_secret`, ends in `_secret` and so its whole value is redacted to `***`.)
+**The fragment is parameters too, when it holds them.** A fragment written as `k=v(&k=v)*` is subject to the same secret-parameter rule as the query — the OAuth implicit flow returns tokens there, so a fragment is a routine place for a credential to be, and treating it as opaque text means `?token_secret=` is redacted while `#token_secret=` is not. A fragment whose segments contain no `=` carries no parameters and is preserved byte for byte (`#section`, `#`, `#a/b?c`). `secret_names` applies inside the fragment as well.
+
+**Automatic application via the `_url` suffix.** Redaction applies `redact_url_secrets` to the string value of any field whose name ends in `_url`/`_URL` — and **only** those fields. No payload string is scanned: the trigger is the field name, exactly like `_secret`. So `final_url` and `callback_url` are scrubbed automatically, while a free-form `error` or `message` field is never touched even if it contains a URL (redact such a URL with the helper before interpolating it). `Off` disables it along with all other redaction; `TraceOnly` scopes it to the `trace` subtree. A `_url` value with surrounding whitespace is trimmed before URL redaction. A `_url` value that cannot be parsed as a clean scheme-prefixed URL is replaced with `***` rather than silently passing through a likely malformed secret-bearing value when it carries either internal whitespace or an `@` credential sigil — for example a schemeless connection string `user:pass@host:5432/db`, which has no scheme anchor for the surgical span logic. A schemeless, `@`-free, whitespace-free value (e.g. a relative URL `/cb?page=2`) still passes through unchanged. The `secret_names` list applies to query-parameter names inside `_url` values as well. (A field carrying both meanings, e.g. `token_url_secret`, ends in `_secret` and so its whole value is redacted to `***`.)
 
 ### No suffix needed
 
@@ -202,7 +217,7 @@ Same suffixes, kebab-case. An agent reading `--help` output understands units an
 --timeout-ms 5000          # milliseconds
 --cache-ttl-s 3600         # seconds
 --max-size-bytes 1048576   # bytes
---api-key-secret sk-xxx    # redact from logs and process listings
+--api-key-secret SECRET    # sensitivity marker only; keep live secrets out of argv
 --max-buffer-bytes 1048576 # bytes as an integer, never a "10MiB" string
 --port 8080                # no suffix needed — meaning obvious
 --verbose                  # boolean flag — no suffix needed
@@ -215,7 +230,19 @@ nothing and costs the application a flag name it may want for something else (a
 hijack the flag and misread its value as a subcommand. Applications own
 `--json`; AFDATA does not.
 
-**Long flags only.** Do not define single-letter short flags (`-s`, `-d`, `-l`). Short flags are ambiguous — `-s` could be `--synapse`, `--synopsis`, or `--source`. Agents parsing `--help` output cannot reliably interpret single-letter aliases. Always use the full `--kebab-case` form. An application MAY still declare a short where it carries real meaning — a tool imitating an established interface may owe its users `-h` for `--host`, or `-f` for `--follow` on a log command — and the help model reports it in the argument's `short` field. Imitation is the bar: a short that merely abbreviates a flag of your own invention fails it.
+**Long flags only.** Do not define single-letter short flags (`-s`, `-d`,
+`-l`). Short flags are ambiguous — `-s` could be `--synapse`, `--synopsis`, or
+`--source` — and agents parsing help output cannot reliably interpret them.
+Always use the full `--kebab-case` form. An application MAY still declare a
+short where it carries real meaning: a tool imitating an established interface
+may owe its users `-h` for `--host`, or `-f` for `--follow` on a log command.
+Imitation is the bar — a short that merely abbreviates a flag of your own
+invention fails it.
+
+Note that a CLI compiled from `cli-spec-v1` (Part 3) cannot take that
+permission: the registry admits no single-letter aliases or clusters, because
+each would add a second spelling to every legal invocation shape. That is a
+property of one compiler, not of this naming convention.
 
 The AFDATA help and version handlers claim **no** shorts of their own: `-h`/`-V` would be byte-identical aliases of `--help`/`--version`, which buys an agent nothing and misleads the human reaching for them (help answers in the command's output format, which for an agent-first CLI is JSON, not text). Leaving them unclaimed is also what keeps those letters available to the application. What an application then does with `-h` is its own decision, not this convention's.
 
@@ -245,81 +272,78 @@ trace: {}
 
 The flag name and the JSON/YAML field name tell the same story — the suffix carries the unit even in structure-preserving output, with no separate mapping table or `--help` prose explaining "timeout is in milliseconds" needed.
 
-**Secret flags** (`--api-key-secret`, `--database-url-secret`) are automatically redacted in startup messages, logs, and YAML/Plain output. Tools should also consider redacting them from `/proc` process listings where possible.
+**Secret flags** (`--api-key-secret`, `--database-url-secret`) carry the same
+naming signal as structured fields, but argv is outside AFDATA's automatic
+redaction boundary. If a tool must record its invocation, it must call
+`redact_argv` before placing argv in a structured startup event or log. That
+does not protect shell history, `/proc`, parent-process inspection, or logs
+written by code that bypasses the AFDATA redactor; prefer a non-argv secret
+source.
 
-**Help scope and output.** Help is a normal successful output, not an exception
-to the CLI's output contract. Scope and format are orthogonal. `--help` is
-one-level (and `myapp sub --help` is one-level for that subcommand), while
-`--help --recursive` covers the selected command subtree. `--output` selects
-`plain|json|yaml|markdown`; when omitted, help MUST inherit the command's normal
-`--output` default. Thus a JSON-default CLI makes `myapp --help` equivalent to
-`myapp --help --output json`; humans request conventional text with
-`myapp --help --output plain`. JSON/YAML help is a protocol-v1 terminal result
-with `result.code:"help"` and the help model under `result.help`; it is not a
-raw schema that bypasses the normal result envelope. When the selected command
-exposes `--version`, the help model advertises that flag exactly once.
-It MUST NOT embed version or AFDATA library values; callers request `--version`
-only when those values are needed. Rust callers SHOULD handle both paths before
-Clap parsing with one `cli_handle_version_or_help_or_continue()` invocation.
-Separate version and help handlers are compatibility/lifecycle escape hatches.
+**Closed-world invocation registry.** An AFDATA CLI MUST be compiled from one
+serializable `cli-spec-v1` registry. Each command declares local `ArgSpec`s and
+one or more named `Combination`s. A combination consists only of fixed finite
+enum values, explicitly required arguments, optional arguments whose arbitrary
+subsets are legal, and an output contract. Every other application argument is
+forbidden. An invocation is legal only when it matches exactly one
+combination. Zero matches return `code:"cli_unregistered_combination"`,
+`retryable:false`, and exit 2. Multiple matches are a spec build error, not a
+runtime priority decision.
 
-The structured shape is exactly
-[`cli-help-v1.schema.json`](cli-help-v1.schema.json). The root help object
-contains `scope`, an invocable `command_path`, and the selected command's
-`name`; optional command fields are `about`, compact `usage`, `arguments`, and
-`subcommands`. Descendant commands use the same command fields except the
-root-only `scope`, `command_path`, and `inherited_arguments_from`; the latter
-lists ancestor command paths whose help defines global arguments accepted by
-the selected command. `command_path` is the authoritative copyable invocation;
-the root `name` is a command label and MAY differ when a CLI uses a branded
-display name. Argument objects use `name` and optional `short`, `help`,
-`required:true`, `global:true`, `repeatable:true`, `value`/`values`, and
-`default`/`defaults`. Omit empty values and false metadata. A positional's
-`name` already carries its placeholder, so it MUST NOT repeat that placeholder
-as `value` or a single-element `values`. A positional that takes several values
-has several placeholders: it lists every one in `values`, the first of which
-equals `name`, so the model never disagrees with its own `usage`. Secret
-defaults MUST render as `***`.
+The registry is the only truth source for tokenization, type validation,
+combination matching, resolved typed values, output planning, and help.
+Applications MUST NOT maintain a second clap/argparse/flag definition,
+post-parse `requires`/`conflicts` policy, ignored compatibility option, or
+application global. The full command path comes first, followed by that
+command's options and positionals. Built-in lifecycle/output names are
+reserved: `--help`, `--docs`, `--version`, `--output`, `--output-to`,
+`--stdout-file`, and `--stderr-file`.
 
-JSON/YAML help MUST NOT expose Clap `long_about` Markdown as `description`.
-Its command model stays field-oriented and token-efficient: concise `about`,
-compact `usage`, structured arguments, and subcommands, plus the enclosing help
-metadata. Recursive plain/JSON/YAML is a compact full-surface index: it includes
-every command and argument once and omits empty/default metadata and repeated
-global options. Scoped structured help likewise keeps inherited global
-arguments at their defining ancestor and names those sources in
-`inherited_arguments_from`; agents request a source command's one-level help
-only when those shared options are relevant. One-level descendants are
-summaries; recursive descendants carry their own compact usage, arguments, and
-children. Scoped plain help is conventional terminal prose and includes
-inherited globals. Markdown is
-the documentation export and MAY retain complete long-form sections such as
-interface policy, workspace shape, examples, and exit codes. If a future
-explicit full structured mode carries that source, it MUST call the opt-in
-field `description_markdown`, not `description`; the field MUST remain absent
-from default and compact structured help. A bare `--recursive` without `--help`
-is a no-op for help and MUST NOT be consumed by the help layer — it falls
-through to the application's own parser. `markdown` is help-only and SHOULD NOT
-become a general business output format.
+**Help scope and output.** Help is generated directly from the same registry
+and answers in **one** round trip: `myapp [command] --help` returns every
+registered shape of that command, each complete, plus the next-level
+`... --help` commands. It does not make the agent solve a requires/conflicts
+graph. There is no second help level — the only thing it could omit is the
+optional arguments, and a caller that stopped at the first level would neither
+have them nor know they existed, which is the defect this design removes.
+`--docs` renders the whole registry as Markdown; there is no recursive help
+mode in v2.
 
-When `--output` is omitted, help resolves the selected command's declared
-default first, then the nearest ancestor declaration, then the caller's fallback.
-An explicit `--output` always wins. A fixed-format CLI with no
-`--output` declaration MUST set the caller fallback to its normal format
-(`HelpConfig::output_aware_with_fallback(HelpFormat::Json)` for a JSON-only
-Rust CLI), rather than silently falling back to human text.
+JSON/YAML help is a protocol-v1 terminal result with `result.code:"help"` and a
+`cli-help-v2` model under `result.help`; the exact contract is
+[`cli-help-v2.schema.json`](cli-help-v2.schema.json). Bare help defaults to
+JSON. Humans request the equivalent plain catalog with `--output plain`, which
+carries the same shapes, argument meanings, and defaults — a different
+rendering, never a smaller one. Each shape's `usage` is generated rather than
+handwritten and shows fixed, required, optional, and output arguments, naming
+a closed value set inline (`--output <json|yaml|plain>`) and redacting secret
+values as placeholders. A fixed argument whose own default already satisfies
+it is shown bracketed, because the parser accepts the call without it.
+`notes` and `defaults` are keyed by the spelling `usage` uses. Subcommands
+sort deterministically; shapes keep their registration order.
 
-**Version output.** Agent-first CLIs should handle `--version` before
-the argument parser's built-in plain-text exit, and always answer with a
-structured protocol-v1 `kind:"result"` version event rather than conventional
-plain text. An explicit `--output` wins; when omitted, version inherits
-the command's normal `--output` default, just like help. The payload is
-`{"kind":"result","result":{"code":"version","name":"<name>","version":"<semver>"},"trace":{...}}`,
-optionally carrying `display_name` (a human-facing product name) and `build` (an
-opaque caller-supplied build identifier such as a commit SHA). Only a top-level
-version request is recognized — scanning stops at the first positional (the
-subcommand) — and a malformed request (for example `--version --output xml`)
-returns a `cli_error` event.
+Help-v2 is an invocation contract, not a catalog of every domain outcome.
+Command-specific idempotency, runtime error codes, side effects, and recovery
+semantics stay in the owning tool's focused documentation and tests; they do
+not expand `CliSpec` or the generic help schema.
+
+Output arguments do not select a business combination and do not participate
+in overlap checks. The compiler first selects exactly one application shape,
+then validates output only against that combination's closed `raw` or
+`protocol` contract. Parse and match failures do not trust unresolved output
+arguments: stdout remains empty, stderr receives one strict JSON error event,
+and the process exits 2. The failure is named by `error.code` — one
+`cli_*` code per failure kind, beside the `document_*` codes and read the same
+way — with the offending argument in `message` and the next command to run in
+`hint`. Neither ever carries a raw value. A CLI not compiled from a registry
+reports the generic `cli_error`; see
+[`protocol-v1.schema.json`](protocol-v1.schema.json).
+
+**Version output.** The registry automatically adds version as a root-only
+lifecycle combination. It emits
+`{"kind":"result","result":{"code":"version","name":"<name>","version":"<semver>"},"trace":{}}`
+through `CliSpec.lifecycle_output`. A version token under a subcommand is
+recognized but rejected as `unregistered_combination`.
 
 ### Environment variables
 
@@ -474,6 +498,10 @@ JSON is the canonical format. YAML mirrors it exactly — same keys, same values
 
 **All CLI output formats automatically redact `_secret` fields.** Matching recognizes `_secret` and `_SECRET` only. Any `_secret` value — scalar, object, or array — is replaced with `***`. Legacy field names can be protected by passing `OutputOptions.redaction.secret_names` at serialization time; this opt-in list is exact field-name equality. The `Raw` output style disables Plain's formatting suffix stripping while keeping the selected redaction policy; YAML is always structure-preserving regardless of `OutputStyle`.
 
+**One policy, three paths, and a scope that only exists on one of them.** The redaction policy governs structured values, argv, and standalone URLs alike. `Off` disables all three. `TraceOnly` narrows redaction to the `trace` subtree of a *structured value*, and narrows nothing else: a command line and a bare URL have no non-`trace` half to leave alone, so both are redacted in full, exactly as under the default. `TraceOnly` says *where* to redact inside a value, never *how much* to redact overall — reading it as "off" for argv and URLs would turn a scoping option into a silent opt-out on the two paths that exist to make diagnostics safe.
+
+**Stripping the `_secret` suffix is the companion of having redacted the value, never an unconditional rename.** Plain drops the suffix only from a field whose value is the `***` marker. Where redaction did not apply — `Off`, or a field outside `trace` under `TraceOnly` — the suffix stays, because removing it would emit the live secret *and* delete the only mark saying it is one, leaving nothing downstream to protect. So `Off` renders `api_key_secret=sk-live-xxx`, not `api_key=sk-live-xxx`. This makes the registry's `strip_key: true` for `_secret` a statement about the default policy, under which every such value is redacted.
+
 **Format characteristics:**
 - **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
 - **YAML** — multi-line, original keys, raw values (same semantics as JSON), keys sorted, secrets redacted by default
@@ -481,7 +509,7 @@ JSON is the canonical format. YAML mirrors it exactly — same keys, same values
 
 ### yaml
 
-Each JSON line becomes a YAML document, separated by `---`. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float). YAML is **structure-preserving**, like JSON: it keeps every key and value exactly as written — no suffix stripping, no value reformatting — regardless of `OutputStyle`. **Secrets automatically redacted.**
+Each JSON line becomes a YAML document, separated by `---`. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float). YAML is **structure-preserving**, like JSON: it keeps every key and value exactly as written — no suffix stripping, no value reformatting — regardless of `PlainStyle`. **Secrets automatically redacted.**
 
 ```yaml
 ---
@@ -654,6 +682,11 @@ producer). Every event stays on ONE stream so ordering is preserved; splitting a
 stream across `stdout` and `stderr` would lose ordering and is prohibited. That
 stream's destination is chosen by the emitter (`stdout` by default).
 
+A multiplex transport owns lifecycle state per request or logical stream.
+`CliEmitter` represents one such logical stream; AFDATA does not provide a
+global keyed-emitter registry or treat the whole multiplex connection as one
+finite CLI invocation.
+
 **Choosing the mode.** A command is an event stream when it produces **more than
 one caller-needed output over time**; otherwise it is finite. Two shapes qualify
 even though each looks like a single operation:
@@ -710,7 +743,7 @@ Optional stream redirection:
 - an event stream can be sent to a file by collapsing it (`--output-to stdout`)
   and redirecting that stream (`--stdout-file <PATH>`); there is no separate
   events-file flag
-- `--output` continues to select stdout format (`json`, `yaml`, `plain`, and help-specific `markdown`); it does not select stream destinations
+- `--output` continues to select stdout format (`json`, `yaml`, `plain`); it does not select stream destinations
 - implementations SHOULD install stream redirection before version/help handling, logging/tracing initialization, and other early output
 - startup failures to create/open the files SHOULD fail startup with a structured error when a stream is still available
 - redirection is a process-level file-descriptor concern applied beneath the
@@ -998,7 +1031,7 @@ kind=log log.args.compression_level=9 log.args.input_path=/data/backup.tar.gz lo
 ```
 
 Note:
-- **Key stripping (Plain only)**: formatting suffixes such as `api_key_secret` → `api_key`, `timeout_s` → `timeout`, `max_file_size_bytes` → `max_file_size`
+- **Key stripping (Plain only)**: formatting suffixes such as `api_key_secret` → `api_key`, `timeout_s` → `timeout`, `max_file_size_bytes` → `max_file_size` (`_secret` only once its value has been redacted — see above)
 - **Secret protection**: `api_key_secret` redacted in all three formats
 - **Suffix formatting (Plain only)**: `_bytes` → `10.0GiB`, `_s` → `30s`; JSON and YAML keep the raw integer
 

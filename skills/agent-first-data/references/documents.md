@@ -50,6 +50,13 @@ Secret leaves require the explicit, auditable `--reveal-secret` option.
 `--default VALUE` applies only when the path is absent or null; an empty string
 is a real value.
 
+`get` preserves JSON types and structure inside its result envelope. `value`
+deliberately stringifies one scalar into raw shell bytes. Use `get` (or the
+typed library API) for read-modify-write work; use `value` only when the next
+consumer explicitly wants a scalar string. For a CLI round trip, take the
+typed value from `get` and write it with the matching `set --value-type`
+(`json` for a container); never feed `value` output back when type matters.
+
 `paths` emits root-relative grammar-escaped paths that feed back into
 `get`/`value`/`unset`. `keys` emits raw immediate names for external tools.
 They differ when a key contains a dot or space.
@@ -69,8 +76,17 @@ afdata set config.toml cache.value ignored --value-type null
 afdata set config.toml routes '[{"path":"/"}]' --value-type json
 ```
 
-`--value-type json` is the only way to write an object or array. Replacing an
-existing scalar with a different kind requires an explicit value type.
+`--value-type json` is the only way to write an object or array. Overwriting
+anything that is not already a string requires an explicit value type — a
+differently-typed scalar, and also an existing array or object, where a bare
+value would discard the whole container. The error names both ways out: keep
+what is there (`--value-type json` for a container, its own type for a scalar),
+or replace it deliberately with `--value-type string`.
+
+`set` creates missing object parents along the dot-path. It does not replace an
+existing scalar or incompatible container in the middle of the path; that is a
+path/type error. Treat parent creation as part of the requested mutation and
+review the full path before writing.
 
 For secrets, do not put values in argv. Use
 `--secret-from stdin|prompt|fd:<N>|env:<VAR>`. There is no inline argv form.
@@ -107,10 +123,24 @@ Branch on stable `error.code`, not message text. Common runtime codes include:
 - `document_slug_not_found`
 - `document_slug_exists`
 - `document_parse_failed`
+- `document_format_unknown`
+- `document_write_would_corrupt`
 - `document_io_failed`
 - `document_not_scalar`
 - `document_not_container`
 - `document_secret_redacted`
+
+`document_format_unknown` means the file's extension named no format, so
+nothing was parsed — pass `--input-format`. It is distinct from
+`document_parse_failed`, which means a parser read the file and rejected it.
+
+`document_write_would_corrupt` means the edit was rendered, read back, and
+found unparseable, so it was refused before reaching disk. The file is
+unchanged. Treat it as a bug in the tool, not as something to retry.
+
+No error message quotes document content: a parse failure reports the format
+and position, a type mismatch reports the path and the type it found. Branch on
+the code and the path, never on a value you expect to see echoed back.
 
 Malformed invocation is `document_usage_error` with exit 2; runtime document
 errors exit 1. A successful mutation result includes the path written.

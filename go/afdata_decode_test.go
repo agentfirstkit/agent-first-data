@@ -141,6 +141,19 @@ func TestDecodeProtocolEventRejectsUnknownKind(t *testing.T) {
 	}
 }
 
+func TestProtocolDecodeFixtures(t *testing.T) {
+	for _, tc := range loadFixture("protocol_decode.json") {
+		name := tc["name"].(string)
+		t.Run(name, func(t *testing.T) {
+			_, err := DecodeProtocolEvent(tc["input_line"].(string))
+			valid := tc["valid"].(bool)
+			if (err == nil) != valid {
+				t.Fatalf("valid = %v, error = %v", valid, err)
+			}
+		})
+	}
+}
+
 func asEventDecodeError(err error, target **EventDecodeError) bool {
 	if e, ok := err.(*EventDecodeError); ok {
 		*target = e
@@ -181,6 +194,12 @@ func TestNumberFidelityFixtures(t *testing.T) {
 				gotYAML := Render(result.Result, OutputFormatYaml, OutputOptions{})
 				if gotYAML != expectedYAML {
 					t.Errorf("yaml got %q, want %q", gotYAML, expectedYAML)
+				}
+			}
+			if expectedPlain, ok := tc["expected_plain"].(string); ok {
+				gotPlain := Render(result.Result, OutputFormatPlain, OutputOptions{})
+				if gotPlain != expectedPlain {
+					t.Errorf("plain got %q, want %q", gotPlain, expectedPlain)
 				}
 			}
 		})

@@ -14,14 +14,11 @@
 //!   for JSON, YAML, and plain (logfmt) output
 //! - Parse utilities: [`normalize_utc_offset`], [`is_valid_rfc3339_date`],
 //!   [`is_valid_rfc3339_time`], [`is_valid_rfc3339`], [`is_valid_bcp47`]
-//! - CLI helpers: [`cli_parse_output`], [`cli_parse_log_filters`] (returns [`LogFilters`]),
-//!   [`build_cli_error`], [`build_cli_version`], [`cli_render_version`]
-//! - (feature `cli` or `cli-help`): [`cli_handle_version_or_continue`] (needs a `&clap::Command`
-//!   to recognize the caller's own value-taking global flags)
-//! - (feature `cli-help`): configurable clap help rendering via [`cli_render_help_with_options`];
-//!   use [`cli_handle_version_or_help_or_continue`] as the preferred Rust entry point
-//!   for top-level version/help handling
-//! - (feature `cli-help-markdown`): [`cli_render_help_markdown`] — recursive Markdown help
+//! - Closed-world CLI compiler: [`CliSpec`], [`CommandSpec`], [`ArgSpec`],
+//!   [`Combination`], and [`OutputSpec`] generate parsing, typed
+//!   [`ResolvedInvocation`] values, output plans, and help-v2 from one registry.
+//! - Established CLI utilities: [`cli_parse_output`], [`cli_parse_log_filters`]
+//!   (returns [`LogFilters`]), and [`CliEmitter`].
 //! - (feature `skill`): [`skill::validate_skill`] / [`skill::validate_skill_named`] — strict
 //!   Agent Skills `SKILL.md` front-matter validation
 //! - (feature `skill-admin`): [`skill::run_skill_admin`] — install/uninstall/status a spore's
@@ -52,28 +49,43 @@ pub mod skill;
 /// pluggable JSON/TOML/YAML/dotenv/INI backends).
 pub mod document;
 
+// The closed-world CLI compiler: spec types, build gates, argv resolution, and
+// the help-v2 model. Nothing else in this crate may reference it — only the
+// adapter below does — which `cargo build --no-default-features` proves.
+#[cfg(feature = "cli")]
+mod cli_spec;
+
+// The AFDATA CLI surface: output format parsing, the emitter, and version
+// payloads.
+#[cfg(feature = "cli")]
 mod cli;
+
+// The one place the compiler and AFDATA meet.
+#[cfg(feature = "cli")]
+mod cli_afdata;
+
 mod formatting;
-#[cfg(feature = "cli-help")]
-mod help;
 mod protocol;
 mod redaction;
 mod validation;
 
-#[cfg(any(feature = "cli", feature = "cli-help"))]
-pub use cli::cli_handle_version_or_continue;
+#[cfg(feature = "cli")]
 pub use cli::{
-    CliEmitter, CliEmitterError, LogFilters, OutputFormat, OutputTo, build_cli_version,
-    cli_parse_log_filters, cli_parse_output, cli_render_version,
+    CliEmitter, CliEmitterError, LogFilters, OutputTo, build_cli_version, cli_parse_log_filters,
+    cli_parse_output, cli_render_version,
 };
-pub use formatting::render;
-#[cfg(feature = "cli-help-markdown")]
-pub use help::cli_render_help_markdown;
-#[cfg(feature = "cli-help")]
-pub use help::{
-    HelpConfig, HelpFormat, HelpOptions, HelpScope, cli_handle_help_or_continue,
-    cli_handle_version_or_help_or_continue, cli_render_help, cli_render_help_with_options,
+#[cfg(feature = "cli")]
+pub use cli_afdata::{
+    build_afdata_cli, cli_error_event, cli_help_event, cli_version_event, render_cli_reference,
 };
+#[cfg(feature = "cli")]
+pub use cli_spec::{
+    ArgSpec, ArgSyntax, ArgValueType, BoundCliSpec, BuiltCliSpec, CliError, CliErrorRule,
+    CliHelpV2, CliOutcome, CliShape, CliSpec, CliSpecError, CliValue, Combination, CommandSpec,
+    FixedValue, OutputLifecycle, OutputPlan, OutputSpec, ResolvedDocs, ResolvedHelp,
+    ResolvedInvocation, ResolvedVersion, SyntheticInvocation,
+};
+pub use formatting::{OutputFormat, render};
 pub use protocol::{
     BuildError, DecodedError, DecodedEvent, DecodedLog, DecodedProgress, DecodedResult,
     ErrorBuilder, Event, EventDecodeError, LogBuilder, LogLevel, ProgressBuilder,

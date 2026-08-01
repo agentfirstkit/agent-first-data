@@ -3,5 +3,3 @@ bin/
 
 # `go build` inside an example directory writes a binary named after that
 # directory, next to its source. Nothing generated belongs in the package.
-examples/*/agent_cli
-examples/*/*.test

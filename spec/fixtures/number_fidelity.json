@@ -46,5 +46,13 @@
     "input_line": "{\"kind\":\"result\",\"result\":{\"created_epoch_ns\":1707868800000000000000},\"trace\":{}}",
     "expected_json": "{\"created_epoch_ns\":1707868800000000000000}",
     "expected_yaml": "---\ncreated_epoch_ns: 1707868800000000000000"
+  },
+  {
+    "name": "currency_above_i64_falls_back_to_original_literal",
+    "description": "Integer-required money formatting is bounded by signed i64 in every SDK. A larger decoded literal must keep its original key and exact digits instead of saturating or rounding through float64.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"fee_jpy\":9223372036854775808,\"price_usd_cents\":9223372036854775808},\"trace\":{}}",
+    "expected_json": "{\"fee_jpy\":9223372036854775808,\"price_usd_cents\":9223372036854775808}",
+    "expected_yaml": "---\nfee_jpy: 9223372036854775808\nprice_usd_cents: 9223372036854775808",
+    "expected_plain": "fee_jpy=9223372036854775808 price_usd_cents=9223372036854775808"
   }
 ]

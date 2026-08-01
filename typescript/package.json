@@ -1,6 +1,6 @@
 {
   "name": "agent-first-data",
-  "version": "0.26.2",
+  "version": "0.27.0",
   "description": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
   "license": "MIT",
   "repository": {
@@ -24,7 +24,7 @@
   "scripts": {
     "build": "tsc",
     "prepack": "npm run build",
-    "test": "tsx --test src/*.test.ts examples/agent_cli.ts"
+    "test": "tsx --test src/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
@@ -32,6 +32,6 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "lossless-json": "^4.3.0"
+    "lossless-json": "^4.3.1"
   }
 }

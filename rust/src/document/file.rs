@@ -161,12 +161,8 @@ impl DocumentFile {
         let path = path.as_ref().to_path_buf();
         let format = match format_override {
             Some(format) => format,
-            None => Format::detect(&path).ok_or_else(|| DocumentError::ParseError {
-                format: "format".to_string(),
-                detail: format!(
-                    "cannot detect format from file extension `{}`; pass an explicit format",
-                    path.display()
-                ),
+            None => Format::detect(&path).ok_or_else(|| DocumentError::FormatUnknown {
+                path: path.display().to_string(),
             })?,
         };
         let source = fs::read_to_string(&path).map_err(|error| DocumentError::IoError {
@@ -241,7 +237,6 @@ impl Document {
     /// [`DocumentError::UnsupportedOperation`].
     pub fn set(&mut self, key: &str, value: Value) -> DocumentResult<()> {
         let mut new_doc = self.value.clone();
-        self.format.ensure_writable("set")?;
         crate::document::set_path(&mut new_doc, key, &value, &[])?;
         let target = crate::document::get_path(&new_doc, key, &[])?;
         #[allow(unreachable_patterns)]
@@ -307,7 +302,6 @@ impl Document {
         fields: &[(String, Value)],
     ) -> DocumentResult<()> {
         let mut value = self.value.clone();
-        self.format.ensure_writable("add")?;
         let keyed_lists = [KeyedList {
             prefix: key,
             slug_field,
@@ -369,7 +363,6 @@ impl Document {
     /// [`DocumentError::UnsupportedOperation`].
     pub fn remove(&mut self, key: &str, slug: &str, slug_field: &str) -> DocumentResult<()> {
         let mut value = self.value.clone();
-        self.format.ensure_writable("remove")?;
         let keyed_lists = [KeyedList {
             prefix: key,
             slug_field,
@@ -421,14 +414,57 @@ impl Document {
     /// [`DocumentFile::save`] to persist it.
     ///
     /// Idempotent, like [`HashSet::remove`](std::collections::HashSet::remove):
-    /// returns `Ok(false)` when `key` is already absent (nothing is staged) and
-    /// `Ok(true)` when it was removed.
+    /// returns `Ok(false)` when there was nothing at `key` to remove (nothing
+    /// is staged), and `Ok(true)` when it was removed.
+    ///
+    /// "Nothing there" does not depend on how deep the path is. A missing leaf
+    /// and a missing ancestor are the same fact — `a.b.c` is absent whether
+    /// `a.b` exists or not — so both answer `Ok(false)`. Only a path that is
+    /// *malformed* stays an error: bad syntax, an index into a non-array, or a
+    /// segment that tries to traverse through a scalar. Those describe a caller
+    /// asking something incoherent, not a document that already lacks the key.
     pub fn unset(&mut self, key: &str) -> DocumentResult<bool> {
-        if self.value_at(key).is_err() {
-            return Ok(false);
+        let segments = crate::document::parse_path(key)?;
+        let (leaf, parents) = segments.split_last().ok_or(DocumentError::EmptyPath)?;
+        let parent = if parents.is_empty() {
+            &self.value
+        } else {
+            let parent_path = crate::document::join_path(parents);
+            match crate::document::get_path_ref(&self.value, &parent_path, &[]) {
+                Ok(parent) => parent,
+                // The ancestor is absent, so the leaf below it is too.
+                Err(DocumentError::UnknownSegment { .. }) => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        };
+        match parent {
+            Value::Object(object) => {
+                if !object.contains_key(leaf) {
+                    return Ok(false);
+                }
+            }
+            Value::Array(array) => {
+                let index =
+                    leaf.parse::<usize>()
+                        .map_err(|_| DocumentError::UnregisteredArray {
+                            path: crate::document::join_path(parents),
+                        })?;
+                if index >= array.len() {
+                    return Err(DocumentError::IndexOutOfBounds {
+                        path: crate::document::join_path(parents),
+                        index,
+                        len: array.len(),
+                    });
+                }
+            }
+            value => {
+                return Err(DocumentError::NotTraversable {
+                    path: crate::document::join_path(parents),
+                    got: value.kind_name().to_string(),
+                });
+            }
         }
         let mut value = self.value.clone();
-        self.format.ensure_writable("unset")?;
         crate::document::unset_path(&mut value, key)?;
         #[allow(unreachable_patterns)]
         let output = match self.format {
@@ -506,6 +542,18 @@ impl DocumentFile {
     /// it is not exported, so callers cannot write arbitrary raw text that
     /// bypasses the parse/edit path.
     pub(crate) fn save_atomic(&self, new_source: &str) -> DocumentResult<()> {
+        // Read back what is about to be written, before writing it. A
+        // source-preserving edit splices text, and a splice that lands in the
+        // wrong place can produce a file this very parser rejects — an INI key
+        // added to a section that had already closed, for one. Of the three
+        // possible outcomes, reporting success and leaving an unreadable file
+        // behind is the only unrecoverable one.
+        Document::parse(new_source, self.format).map_err(|error| {
+            DocumentError::WriteWouldCorrupt {
+                format: self.format.name().to_string(),
+                detail: error.redacted_message(),
+            }
+        })?;
         write_atomic(&self.path, new_source.as_bytes(), "write")
     }
 }
@@ -772,6 +820,43 @@ mod tests {
         assert_eq!(doc.source(), saved);
     }
 
+    #[test]
+    fn save_refuses_source_its_own_parser_rejects() {
+        // The read-back guard, exercised directly: no backend should be able to
+        // splice text into this shape any more, so the corrupt source is
+        // supplied by hand rather than provoked through a verb.
+        let dir = tempfile::tempdir().unwrap();
+        let original = "[db]\nhost=localhost\n";
+        let path = write_temp(dir.path(), "config.ini", original);
+        let doc = DocumentFile::open(&path, None).unwrap();
+
+        let error = doc
+            .save_atomic("[db]\nhost=localhost\n\n[db]\nport=5432\n")
+            .unwrap_err();
+        assert_eq!(error.code(), "document_write_would_corrupt");
+        // The whole point is that the guard runs before any bytes land.
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn save_writes_source_the_parser_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(dir.path(), "config.ini", "[db]\nhost=localhost\n");
+        let mut doc = DocumentFile::open(&path, None).unwrap();
+
+        doc.set("db.port", Value::String("5432".to_string()))
+            .unwrap();
+        doc.save().unwrap();
+
+        // A key added to a section that is not the file's last one used to be
+        // appended at end of file, re-opening a section that had closed.
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[db]\nhost=localhost\nport=5432\n"
+        );
+        assert!(DocumentFile::open(&path, None).is_ok());
+    }
+
     #[cfg(unix)]
     #[test]
     fn atomic_save_preserves_file_mode() {
@@ -848,6 +933,46 @@ mod tests {
         assert_eq!(
             doc.value_at("imap.port").unwrap(),
             Value::from(serde_json::json!(993))
+        );
+    }
+
+    #[test]
+    fn unset_is_false_for_anything_already_absent() {
+        let mut doc = Document::parse(
+            r#"{"service":{"host":"example","ports":[80]}}"#,
+            Format::Json,
+        )
+        .unwrap();
+
+        // Absent is absent, at any depth — the answer must not change with the
+        // number of segments the caller had to write to name the same nothing.
+        assert!(!doc.unset("service.missing").unwrap());
+        assert!(!doc.unset("missing.parent").unwrap());
+        assert!(!doc.unset("missing.deeply.nested").unwrap());
+
+        // Still errors: these describe a path no document could satisfy, not a
+        // document that happens not to carry the key.
+        assert!(doc.unset("service.host.child").is_err()); // through a scalar
+        assert!(doc.unset("service.ports.9").is_err()); // index out of range
+        assert!(doc.unset(r"service\q").is_err()); // malformed syntax
+    }
+
+    #[cfg(feature = "yaml")]
+    #[test]
+    fn yaml_write_rejects_cst_ambiguous_mapping_segments() {
+        let mut numeric = Document::parse("\"123\": value\n", Format::Yaml).unwrap();
+        assert!(
+            numeric
+                .set("123", Value::String("changed".to_string()))
+                .is_err()
+        );
+        assert!(numeric.unset("123").is_err());
+
+        let mut bracketed = Document::parse("\"a[0]\": value\n", Format::Yaml).unwrap();
+        assert!(
+            bracketed
+                .set("a[0]", Value::String("changed".to_string()))
+                .is_err()
         );
     }
 }

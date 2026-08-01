@@ -113,5 +113,30 @@
     "name": "userinfo password containing at sign",
     "input": "postgres://user:p@ss@host/db",
     "expected": "postgres://user:***@host/db"
+  },
+  {
+    "name": "fragment parameters are redacted like query parameters",
+    "input": "https://h/p?token_secret=QUERYLEAK#token_secret=FRAGLEAK",
+    "expected": "https://h/p?token_secret=***#token_secret=***"
+  },
+  {
+    "name": "fragment parameters are redacted with no query present",
+    "input": "https://h/cb#access_token_secret=abc&state=xyz",
+    "expected": "https://h/cb#access_token_secret=***&state=xyz"
+  },
+  {
+    "name": "fragment without parameters is preserved byte for byte",
+    "input": "https://h/p#a/b?c",
+    "expected": "https://h/p#a/b?c"
+  },
+  {
+    "name": "secret_names applies inside the fragment",
+    "input": "https://h/cb#token=abc&page=2",
+    "expected": "https://h/cb#token=***&page=2",
+    "options": {
+      "secret_names": [
+        "token"
+      ]
+    }
   }
 ]

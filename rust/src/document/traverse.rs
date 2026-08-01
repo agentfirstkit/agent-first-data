@@ -94,7 +94,7 @@ pub fn get_path_ref<'a>(
             _ => {
                 return Err(DocumentError::NotTraversable {
                     path: path.to_string(),
-                    got: format!("{:?}", current),
+                    got: current.kind_name().to_string(),
                 });
             }
         }
@@ -112,8 +112,7 @@ pub fn get_path(root: &Value, path: &str, keyed_lists: &[KeyedList<'_>]) -> Docu
 /// no coercion happens here; callers that accept CLI strings (e.g. the
 /// `afdata` binary) construct the typed `Value` first, via
 /// [`crate::document::coerce::value_from_type`] (an explicit `--value-type`)
-/// or a bare `Value::String` (zero coercion — see `cli-shell-config-todo.md`
-/// §3), before calling this.
+/// or a bare `Value::String` (zero coercion), before calling this.
 pub fn set_path(
     root: &mut Value,
     path: &str,
@@ -271,7 +270,7 @@ fn set_path_recursive(
         }
         _ => Err(DocumentError::NotTraversable {
             path: accumulated_prefix.clone(),
-            got: format!("{:?}", current),
+            got: current.kind_name().to_string(),
         }),
     }
 }
@@ -357,7 +356,7 @@ fn unset_path_recursive(
         }
         _ => Err(DocumentError::NotTraversable {
             path: accumulated_prefix.clone(),
-            got: format!("{:?}", current),
+            got: current.kind_name().to_string(),
         }),
     }
 }

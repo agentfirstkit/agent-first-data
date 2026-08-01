@@ -1,0 +1,566 @@
+//! AFDATA adapter for the closed-world CLI core.
+//!
+//! [`crate::cli_spec`] decides whether an invocation is legal and what it
+//! resolved to. It deliberately knows nothing about how AFDATA expresses that
+//! decision. This module is the only place where the two meet: it turns a
+//! resolved outcome into a protocol event and owns AFDATA's `_secret` naming
+//! convention.
+
+use crate::cli_spec::{
+    ArgValueType, BuiltCliSpec, CliError, CliSpec, CliSpecError, ResolvedHelp, ResolvedVersion,
+};
+use crate::protocol::{Event, json_error, json_result};
+
+/// Build a registry under AFDATA's naming conventions.
+///
+/// `ArgSpec::sensitive` is not an independent switch. AFDATA already decides
+/// what a secret is by the `_secret` suffix, and the same convention drives
+/// config keys, log fields, and redaction. Deriving the bit from the argument
+/// id keeps one source of truth: an argument cannot be sensitive to the parser
+/// while staying invisible to redaction downstream. Marking a differently named
+/// argument sensitive is the reverse mistake, so it fails the build instead of
+/// silently diverging.
+pub fn build_afdata_cli(mut spec: CliSpec) -> Result<BuiltCliSpec, CliSpecError> {
+    for command in &mut spec.commands {
+        for argument in &mut command.arguments {
+            let suffixed = argument.argument_id.ends_with("_secret");
+            let is_flag = matches!(argument.value_type, ArgValueType::Flag);
+            if argument.sensitive && !suffixed {
+                return Err(CliSpecError {
+                    rule: "sensitive_without_secret_suffix",
+                    message: format!(
+                        "argument `{}` is marked sensitive; rename it to `{}_secret` so AFDATA \
+                         redaction covers it too",
+                        argument.argument_id, argument.argument_id
+                    ),
+                });
+            }
+            if argument.sensitive && is_flag {
+                return Err(CliSpecError {
+                    rule: "sensitive_flag",
+                    message: format!(
+                        "flag `{}` is marked sensitive, but a flag carries no value to redact",
+                        argument.argument_id
+                    ),
+                });
+            }
+            // A flag has no value, so `_secret` in its name says what the flag
+            // is *about* — `--reveal-secret` asks to reveal one, it does not
+            // carry one. Marking it would put the sensitive bit on something
+            // that structurally cannot leak, which reads as a real credential
+            // to anything downstream that trusts the bit.
+            argument.sensitive = suffixed && !is_flag;
+        }
+    }
+    spec.build()
+}
+
+/// Wrap a resolved help response in a `cli-help-v2` result event.
+pub fn cli_help_event(help: &ResolvedHelp) -> Event {
+    json_result(serde_json::json!({
+        "code": "help",
+        "help": help.model(),
+    }))
+    .build()
+}
+
+/// Wrap a resolved version response in a protocol result event.
+///
+/// This delegates to [`crate::build_cli_version`] rather than assembling its
+/// own payload. There is one version shape — `{code, name, version}` plus
+/// `display_name`/`build` when the registry carries them — and it is the same
+/// one the Go, Python, and TypeScript SDKs emit.
+pub fn cli_version_event(version: &ResolvedVersion) -> Event {
+    crate::cli::build_cli_version(
+        version.name(),
+        version.display_name(),
+        version.version(),
+        version.build(),
+    )
+}
+
+/// Render an offline Markdown reference for a whole registry.
+///
+/// help-v2 is deliberately lossy: it answers "how do I call this" one command
+/// at a time, in as few tokens as possible. A reference manual wants the
+/// opposite, so it is a separate capability rather than a format on the
+/// discovery path — the agent's `--help` never grows a documentation mode, and
+/// the manual can never disagree with the parser, because both are this
+/// registry. `--docs` is injected into every registry, so a tool exposes this
+/// without registering a command, and without spending a line of its
+/// subcommand listing on something no agent calls.
+///
+/// What is deliberately *not* repeated: a lone combination's description and
+/// id — the command heading already carries the description, and the id only
+/// matters for telling siblings apart — plus the shared output defaults and
+/// each command's arguments per combination. help repeats those because each help
+/// response is read alone; a document is read in order.
+pub fn render_cli_reference(cli: &BuiltCliSpec) -> String {
+    let spec = cli.spec();
+    let name = spec.name.as_str();
+    let mut commands: Vec<&crate::cli_spec::CommandSpec> = spec
+        .commands
+        .iter()
+        .filter(|command| !command.combinations.is_empty())
+        .collect();
+    commands.sort_by(|left, right| left.command_path.cmp(&right.command_path));
+
+    let path_of = |command: &crate::cli_spec::CommandSpec| {
+        if command.command_path.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} {}", command.command_path.join(" "))
+        }
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("# {name} CLI reference\n\n"));
+    out.push_str(&format!(
+        "<!-- Generated by `{name} --docs`. Do not edit by hand. -->\n\n"
+    ));
+    if let Some(about) = &spec.about {
+        out.push_str(&format!("{about}\n\n"));
+    }
+    out.push_str(&format!(
+        "`{name}` is compiled from a closed `cli-spec-v1` registry: one source for argv parsing, \
+         typed invocation values, which parameter combinations are legal, output contracts, and \
+         help. An invocation runs only when it matches exactly one registered combination.\n\n"
+    ));
+
+    // Everything AFDATA registers on the caller's behalf, in one place. Split
+    // across sections it reads as unrelated trivia, and `--version`/`--docs`
+    // fall through the gap entirely — they belong to no command, so no command
+    // section would ever mention them.
+    let baseline = baseline_output(&commands);
+    out.push_str("## Global arguments\n\n");
+    out.push_str(
+        "AFDATA registers these; no command declares them, and the syntax in \
+         [Commands](#commands) leaves them out.\n\n",
+    );
+    out.push_str("| Argument | Where | What it does |\n|---|---|---|\n");
+    out.push_str(
+        "| `--help` | every command | Every legal shape of that command, complete, plus its \
+         subcommands. JSON by default; `--output plain` for a terminal. |\n",
+    );
+    out.push_str(&format!(
+        "| `--version` | {name} only | Name, version, and build identity as one protocol result. \
+         |\n"
+    ));
+    out.push_str(&format!(
+        "| `--docs` | {name} only | This document, rendered from the registry. |\n"
+    ));
+    if let Some(crate::cli_spec::OutputSpec::Protocol {
+        formats,
+        destinations,
+        default_format,
+        default_destination,
+        ..
+    }) = &baseline
+    {
+        out.push_str(&format!(
+            "| `--output <FORMAT>` | per output contract | Render as {} (default \
+             `{default_format}`). |\n",
+            formats.join(", ")
+        ));
+        out.push_str(&format!(
+            "| `--output-to <DESTINATION>` | per output contract | Route results and diagnostics \
+             to {} (default `{default_destination}`). |\n",
+            destinations.join(", ")
+        ));
+    }
+    out.push_str(
+        "| `--stdout-file <PATH>`, `--stderr-file <PATH>` | per output contract | Append that \
+         stream to a file instead. |\n\n",
+    );
+    let baseline_line = baseline.as_ref().map(describe_output);
+    // The table above already lists the arguments and their values; the only
+    // thing left to say is what a successful call actually writes.
+    if baseline.is_some() {
+        out.push_str(
+            "Success output is protocol events, on those terms, unless a command's own \
+             **Output** line says otherwise.\n\n",
+        );
+    }
+    out.push_str(
+        "A **shape** is one legal set of arguments that may appear together, under a stable id. \
+         Where a command has more than one, each id is a heading below. `--help` returns them \
+         all at once, so discovering a command costs one call; there is no recursive mode across \
+         commands, and this document is that view.\n\n",
+    );
+
+    out.push_str("## Commands\n\n");
+    for command in &commands {
+        let path = path_of(command);
+        let anchor = path.replace(' ', "-");
+        let about = command.about.as_deref().unwrap_or("");
+        out.push_str(&format!("- [`{path}`](#{anchor}) — {about}\n"));
+    }
+    out.push('\n');
+
+    for command in &commands {
+        let path = path_of(command);
+        out.push_str(&format!("### `{path}`\n\n"));
+        if let Some(about) = &command.about {
+            out.push_str(&format!("{about}\n\n"));
+        }
+
+        let Some(model) = cli.help(&command.command_path) else {
+            continue;
+        };
+        for shape in &model.shapes {
+            if model.shapes.len() > 1 {
+                let differs = shape.about.as_deref().unwrap_or_default();
+                out.push_str(&format!("#### `{}` — {differs}\n\n", shape.id));
+            }
+            out.push_str(&format!(
+                "```\n{}\n```\n\n",
+                trim_output_arguments(&shape.usage)
+            ));
+        }
+
+        let combinations: Vec<&crate::cli_spec::Combination> =
+            command.combinations.iter().collect();
+        let contracts = output_contracts(&combinations);
+        let is_baseline =
+            matches!((contracts.as_slice(), &baseline_line), ([only], Some(line)) if only == line);
+        if !is_baseline {
+            out.push_str(&render_output(&contracts));
+        }
+
+        let documented: Vec<&crate::cli_spec::ArgSpec> = command
+            .arguments
+            .iter()
+            .filter(|argument| argument.about.is_some())
+            .collect();
+        if !documented.is_empty() {
+            if model.shapes.len() > 1 {
+                // One table per command, so it necessarily spans shapes that
+                // cannot be used together; the syntax above is what says which
+                // argument belongs where.
+                out.push_str("Arguments across every shape above:\n\n");
+            }
+            out.push_str("| Argument | Meaning |\n|---|---|\n");
+            for argument in documented {
+                let about = argument.about.as_deref().unwrap_or_default();
+                // The same spelling the usage line above uses, so the table can
+                // be read against it without translating ids back to flags.
+                out.push_str(&format!(
+                    "| `{}` | {about} |\n",
+                    crate::cli_spec::argument_key(argument)
+                ));
+            }
+            out.push('\n');
+        }
+    }
+
+    out.push_str("## Exit codes\n\n");
+    out.push_str(
+        "| Code | Meaning |\n|---|---|\n\
+         | 0 | The command ran and succeeded. |\n\
+         | 1 | The command ran and failed. The event carries a domain `error.code`. |\n\
+         | 2 | The invocation was rejected before anything ran. `error.code` is one of the \
+         `cli_*` codes below. |\n\n\
+         The split is the useful one for a caller: exit 2 means the call was never made, so \
+         retrying it unchanged cannot help, while exit 1 means it was.\n\n",
+    );
+
+    out.push_str("## CLI errors\n\n");
+    out.push_str(
+        "Every structural failure emits one strict JSON `kind:\"error\"` event on stderr, leaves \
+         stdout empty, and exits 2. The `code` names the failure — `cli_unknown_argument` for an \
+         unknown spelling, `cli_unregistered_combination` for registered arguments in a mixture \
+         that is not, and one each for `cli_unknown_command`, `cli_missing_argument_value`, \
+         `cli_invalid_argument_value`, `cli_duplicate_argument`, `cli_unexpected_positional`, and \
+         `cli_invalid_utf8`. `message` names the offending argument and `hint` gives the command \
+         to run next; neither ever quotes a raw value, including secrets. These are decided \
+         before any config, secret source, filesystem, network, or domain I/O.\n\n\
+         Domain failures (exit 1) carry their own stable `error.code` instead, drawn from \
+         whatever this tool defines rather than from the `cli_*` set. No error message quotes a \
+         raw value it was given — an error event is routinely logged, and the input may hold \
+         secrets.\n",
+    );
+    out
+}
+
+/// One line per command saying what its success output is, because the usage
+/// line can only show that by omission.
+fn describe_output(output: &crate::cli_spec::OutputSpec) -> String {
+    use crate::cli_spec::OutputSpec;
+    match output {
+        OutputSpec::Raw { file_sinks } => format!(
+            "raw bytes on success; rejects `--output` and `--output-to`{}. Failures are still \
+             strict JSON on stderr",
+            render_file_sinks(file_sinks)
+        ),
+        OutputSpec::Protocol {
+            formats,
+            destinations,
+            default_format,
+            default_destination,
+            file_sinks,
+            ..
+        } => format!(
+            "protocol events; `--output` {} (default `{default_format}`), `--output-to` {} \
+             (default `{default_destination}`){}",
+            formats.join("/"),
+            destinations.join("/"),
+            render_file_sinks(file_sinks),
+        ),
+    }
+}
+
+/// Each distinct output contract a command exposes, in a stable order.
+fn output_contracts(combinations: &[&crate::cli_spec::Combination]) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for combination in combinations {
+        let line = describe_output(&combination.output);
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+/// The output contract most commands share, if there is one worth hoisting.
+///
+/// Deterministic: ties break on the rendered description, never on registration
+/// order, so the same registry always renders the same document.
+fn baseline_output(
+    commands: &[&crate::cli_spec::CommandSpec],
+) -> Option<crate::cli_spec::OutputSpec> {
+    let mut counts: std::collections::BTreeMap<String, (usize, crate::cli_spec::OutputSpec)> =
+        std::collections::BTreeMap::new();
+    for command in commands {
+        let mut contracts: Vec<&crate::cli_spec::OutputSpec> = Vec::new();
+        for combination in &command.combinations {
+            if !contracts.contains(&&combination.output) {
+                contracts.push(&combination.output);
+            }
+        }
+        if let [only] = contracts.as_slice() {
+            let entry = counts
+                .entry(describe_output(only))
+                .or_insert((0, (*only).clone()));
+            entry.0 += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by(|left, right| left.1.0.cmp(&right.1.0).then_with(|| right.0.cmp(&left.0)))
+        .filter(|(_, (count, _))| *count > 1)
+        .map(|(_, (_, spec))| spec)
+}
+
+fn render_output(contracts: &[String]) -> String {
+    match contracts {
+        [] => String::new(),
+        [only] => format!("Output: {only}.\n\n"),
+        many => {
+            let mut out = String::from("Output differs by combination:\n\n");
+            for line in many {
+                out.push_str(&format!("- {line}\n"));
+            }
+            out.push('\n');
+            out
+        }
+    }
+}
+
+/// Drop the trailing AFDATA output arguments from a usage line.
+///
+/// The compiler always renders them last and in a fixed order, and their names
+/// are reserved, so no application argument can be mistaken for one. A document
+/// states the output contract once per command; only `--help`, whose response
+/// is read on its own, needs them inline.
+fn trim_output_arguments(usage: &str) -> &str {
+    let cut = ["[--output ", "[--stdout-file ", "[--stderr-file "]
+        .iter()
+        .filter_map(|marker| usage.find(marker))
+        .min();
+    match cut {
+        Some(index) => usage[..index].trim_end(),
+        None => usage,
+    }
+}
+
+fn render_file_sinks(file_sinks: &[String]) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    if file_sinks.iter().any(|sink| sink == "stdout") {
+        names.push("`--stdout-file`");
+    }
+    if file_sinks.iter().any(|sink| sink == "stderr") {
+        names.push("`--stderr-file`");
+    }
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!("; redirect with {}", names.join(" or "))
+    }
+}
+
+/// Wrap a CLI-resolution failure in an event whose `code` names the failure.
+///
+/// The classification lives in `code`, the way `document_path_not_found` and
+/// its siblings already do — not in a second field beside a generic
+/// `cli_error`. One error taxonomy, one place to read it, and the skill's
+/// standing instruction ("branch on `error.code`") covers CLI errors too.
+///
+/// The event never carries raw argument values; `message` names the offending
+/// argument, and `hint` says what to run next.
+pub fn cli_error_event(error: &CliError) -> Event {
+    let builder = json_error(error.rule.code(), &error.message).hint(&error.hint);
+    match builder.build() {
+        Ok(event) => event,
+        Err(_) => json_error("cli_error", "failed to build CLI error")
+            .build()
+            .unwrap_or_else(|_| {
+                // All literals above are valid; this branch is unreachable
+                // but keeps production code panic-free.
+                json_result(serde_json::json!({"code":"internal_cli_error"})).build()
+            }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli_spec::{ArgSpec, CliOutcome, Combination, CommandSpec, OutputSpec};
+
+    fn output() -> OutputSpec {
+        OutputSpec::protocol_finite(["json"], ["split"], "json", "split")
+    }
+
+    fn spec_with(argument: ArgSpec) -> CliSpec {
+        let id = argument.argument_id.clone();
+        CliSpec::new("demo", "1").command(
+            CommandSpec::root().arg(argument).combination(
+                Combination::new("only")
+                    .action("only")
+                    .required([id])
+                    .output(output()),
+            ),
+        )
+    }
+
+    #[test]
+    fn secret_suffix_drives_the_sensitive_bit() {
+        let built = build_afdata_cli(spec_with(ArgSpec::option("--dsn-secret", "DSN"))).unwrap();
+        let argument = &built.spec().commands[0].arguments[0];
+        assert!(argument.sensitive);
+    }
+
+    #[test]
+    fn sensitive_without_the_suffix_fails_the_build() {
+        let error = build_afdata_cli(spec_with(ArgSpec::option("--token", "TOKEN").sensitive()))
+            .unwrap_err();
+        assert_eq!(error.rule, "sensitive_without_secret_suffix");
+    }
+
+    #[test]
+    fn a_plain_argument_stays_insensitive() {
+        let built = build_afdata_cli(spec_with(ArgSpec::option("--host", "HOST"))).unwrap();
+        assert!(!built.spec().commands[0].arguments[0].sensitive);
+    }
+
+    // Locks the version payload shape. `--version` is a discovery entry point
+    // agents parse, and it lost `display_name`/`build` once before by going
+    // through a second, hand-rolled payload instead of `build_cli_version`.
+    #[test]
+    fn version_events_carry_the_full_documented_payload() {
+        let built = CliSpec::new("demo", "1.2.3")
+            .display_name("Demo Tool")
+            .build_id("abc1234")
+            .command(CommandSpec::root())
+            .build()
+            .unwrap();
+        let CliOutcome::Version(version) = built.resolve_from(["demo", "--version"]).unwrap()
+        else {
+            panic!("expected a version outcome");
+        };
+        assert_eq!(
+            cli_version_event(&version).as_value(),
+            &serde_json::json!({
+                "kind": "result",
+                "result": {
+                    "code": "version",
+                    "name": "demo",
+                    "display_name": "Demo Tool",
+                    "version": "1.2.3",
+                    "build": "abc1234",
+                },
+                "trace": {},
+            })
+        );
+    }
+
+    #[test]
+    fn version_events_omit_absent_metadata() {
+        let built = CliSpec::new("demo", "1.2.3")
+            .command(CommandSpec::root())
+            .build()
+            .unwrap();
+        let CliOutcome::Version(version) = built.resolve_from(["demo", "--version"]).unwrap()
+        else {
+            panic!("expected a version outcome");
+        };
+        let payload = serde_json::to_string(cli_version_event(&version).as_value()).unwrap();
+        assert!(!payload.contains("display_name"), "{payload}");
+        assert!(!payload.contains("build"), "{payload}");
+    }
+
+    #[test]
+    fn cli_error_events_never_carry_a_secret_value() {
+        let built = build_afdata_cli(spec_with(ArgSpec::option("--dsn-secret", "DSN"))).unwrap();
+        let error = built
+            .resolve_from([
+                "demo",
+                "--dsn-secret",
+                "postgres://user:password@example.test/db",
+                "--unknown",
+            ])
+            .unwrap_err();
+        let serialized = serde_json::to_string(cli_error_event(&error).as_value()).unwrap();
+        assert!(!serialized.contains("password"));
+        // The classification is the code, not a field beside it.
+        assert!(serialized.contains("\"code\":\"cli_unknown_argument\""));
+        // The command to run next reaches the caller through `hint`, which is
+        // the channel every error event already has.
+        assert!(serialized.contains("run `demo --help`"));
+    }
+
+    #[test]
+    fn a_secret_named_flag_is_not_marked_sensitive() {
+        // `--reveal-secret` asks to reveal a secret; it does not carry one, and
+        // a flag has no value that could leak. The suffix must not put the
+        // sensitive bit on it.
+        let built = build_afdata_cli(spec_with(ArgSpec::flag("--reveal-secret"))).unwrap();
+        let argument = built
+            .spec()
+            .commands
+            .iter()
+            .flat_map(|command| &command.arguments)
+            .find(|argument| argument.argument_id == "reveal_secret")
+            .expect("the flag is registered");
+        assert!(!argument.sensitive, "a flag has no value to redact");
+    }
+
+    #[test]
+    fn marking_a_flag_sensitive_is_a_contradiction() {
+        let error = build_afdata_cli(spec_with(ArgSpec::flag("--reveal-secret").sensitive()))
+            .expect_err("a sensitive flag must not build");
+        assert_eq!(error.rule, "sensitive_flag");
+    }
+
+    #[test]
+    fn a_value_carrying_secret_argument_is_still_marked() {
+        let built = build_afdata_cli(spec_with(ArgSpec::option("--dsn-secret", "DSN"))).unwrap();
+        let argument = built
+            .spec()
+            .commands
+            .iter()
+            .flat_map(|command| &command.arguments)
+            .find(|argument| argument.argument_id == "dsn_secret")
+            .expect("the option is registered");
+        assert!(argument.sensitive, "an option with a value still counts");
+    }
+}

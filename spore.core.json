@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.26.2",
+  "version": "0.27.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,9 +13,13 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Define how to tell a finite command from an event stream: a command producing more than one caller-needed output over time is an event stream, so it defaults to --output-to stdout and rejects an explicit split rather than stranding its data on the diagnostic stream",
-    "Name the two shapes that qualify — a payload delivered in chunks whose batches carry the data, and an operation that reports an address the caller must act on before it can report its outcome — neither of which fits finite mode's limit of at most one terminal event",
-    "State the invariant the policy protects: data the caller captures is never routed to the diagnostic stream, so a progress event carrying a payload the caller must read is an event stream that has not declared itself"
+    "Replace help-v1 with a closed-world CLI compiler: one cli-spec-v1 registry is the single source for argv parsing, typed values, legal argument combinations, output contracts, help, and the offline reference, and an invocation runs only when it matches exactly one registered shape",
+    "Answer help in one round trip — --help returns every shape of a command complete with its optional arguments and closed value sets, and the second level --help-combination is gone because all it could omit is what a caller would then never discover",
+    "Name CLI failures in error.code like every other error: eight cli_* codes replace the generic cli_error and its parallel rule, command_path, and argument_names fields",
+    "Make redaction path-aware and policy-consistent: a _secret name marks its whole subtree, a URL fragment goes through the same redactor as the query, plain rendering keeps the suffix until the value is masked, and a boolean flag that merely names a secret is no longer marked sensitive",
+    "Hold the three README promises to their flagship cases: lint reports an unlabelled field as a missing_suffix warning, INI and dotenv edits can no longer save a file that stops parsing, and protocol-v1.schema.json is validated against the implementation event by event",
+    "Make Document::unset idempotent at any path depth: a missing ancestor means the leaf is absent too, so it answers false instead of erroring, while a path no document could satisfy still errors",
+    "Render the offline --docs reference from the registry without tool-specific text, so a consumer's generated CLI reference no longer cites files only agent-first-data ships"
   ],
   "bonds": [],
   "tree": {

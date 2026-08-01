@@ -12,19 +12,17 @@ and diffs it against each SDK's real exports:
   its equivalents in the other three languages, or it's an internal helper
   that shouldn't be exported).
 
-Scope: only the "shared contract" surface (protocol builders/reader, output,
-redaction, CLI helpers, core types) — the same groups listed in the README's
-"One contract, four languages" section. cli-help, skill-admin, tracing, and
-stream-redirect are intentionally out of scope: they are Rust-only tools, not
-part of the cross-language contract, so the Go/Python/TypeScript SDKs do not
-ship them.
+Scope: the shared contract surface (protocol builders/reader, output,
+redaction, CLI primitives, and core types) plus explicit Rust-only entries for
+the reference `CliSpec` compiler. Skill admin, tracing, and stream redirection
+remain feature-gated Rust implementation utilities.
 
 A Rust `pub use` block directly preceded by `#[cfg(feature = "...")]` is
 "feature-gated": it's never required to have a manifest entry (the reverse
 "undeclared" check ignores it), but if the manifest *does* declare one of its
-names — as it does for `output_yaml`/`output_yaml_with_options`, which are
-gated behind the on-by-default `yaml` feature but still part of the shared
-cross-language contract — that still counts as found.
+names — as it does for `CliEmitter`/`cli_parse_output` and the rest of the
+block behind the on-by-default `cli` feature, which are still part of the
+shared cross-language contract — that still counts as found.
 """
 
 from __future__ import annotations
@@ -48,6 +46,33 @@ def fail(messages: list[str]) -> None:
     raise SystemExit(1)
 
 
+def default_features() -> set[str]:
+    """The features Cargo.toml turns on by default."""
+    text = (ROOT / "Cargo.toml").read_text()
+    m = re.search(r"^default\s*=\s*\[(.*?)\]", text, re.M | re.S)
+    return set(re.findall(r'"([^"]+)"', m.group(1))) if m else set()
+
+
+def is_optional_cfg(cfg_line: str, defaults: set[str]) -> bool:
+    """Whether a `#[cfg(...)]` really makes the export below it optional.
+
+    A `#[cfg(feature = "cli")]` export is public API for everyone who did not
+    opt out, so exempting it from the reverse check the way a genuinely
+    optional feature is exempted hides real drift: gating the CLI block took 37
+    symbols out of the check at a stroke, and `ResolvedDocs` was exported with
+    no manifest entry while this script still printed ok.
+
+    Conservative on purpose — a cfg naming any on-by-default feature counts as
+    always-exported, so the strict direction applies.
+    """
+    if not cfg_line.startswith("#[cfg("):
+        return False
+    features = re.findall(r'feature\s*=\s*"([^"]+)"', cfg_line)
+    if not features:
+        return True
+    return not any(feature in defaults for feature in features)
+
+
 def extract_rust() -> tuple[set[str], set[str]]:
     """Returns `(always_exported, feature_gated_exported)`.
 
@@ -60,6 +85,7 @@ def extract_rust() -> tuple[set[str], set[str]]:
     text = (ROOT / "rust" / "src" / "lib.rs").read_text()
     always: set[str] = set()
     gated: set[str] = set()
+    defaults = default_features()
     lines = text.splitlines()
     i = 0
     prev_nonblank = ""
@@ -76,7 +102,7 @@ def extract_rust() -> tuple[set[str], set[str]]:
                     break
             full = " ".join(block)
             inner = full.split("{", 1)[1].rsplit("}", 1)[0]
-            target = gated if prev_nonblank.startswith("#[cfg(") else always
+            target = gated if is_optional_cfg(prev_nonblank, defaults) else always
             for ident in inner.split(","):
                 ident = ident.strip()
                 if ident:
@@ -87,7 +113,7 @@ def extract_rust() -> tuple[set[str], set[str]]:
             # brace matcher above never sees them).
             m_single = re.match(r"pub use (?:\w+::)+(\w+);", stripped)
             if m_single:
-                target = gated if prev_nonblank.startswith("#[cfg(") else always
+                target = gated if is_optional_cfg(prev_nonblank, defaults) else always
                 target.add(m_single.group(1))
         if stripped:
             prev_nonblank = stripped
@@ -120,8 +146,10 @@ def extract_typescript() -> set[str]:
 
 def extract_go() -> set[str]:
     names: set[str] = set()
-    for filename in ("afdata.go", "afdata_cli.go", "afdata_decode.go"):
-        text = (ROOT / "go" / filename).read_text()
+    for path in sorted((ROOT / "go").glob("*.go")):
+        if path.name.endswith("_test.go"):
+            continue
+        text = path.read_text()
         for m in re.finditer(r"^func (New)?([A-Z]\w*)", text, re.MULTILINE):
             names.add((m.group(1) or "") + m.group(2))
         for m in re.finditer(r"^type ([A-Z]\w*)", text, re.MULTILINE):

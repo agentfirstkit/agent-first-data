@@ -2,43 +2,48 @@
 
 ```bash
 cargo add agent-first-data
-# for tracing integration:
-cargo add agent-first-data --features tracing
+# data/protocol surface only — no CLI compiler, emitter, tracing, or skill admin:
+cargo add agent-first-data --no-default-features
 ```
 
 ```rust
-use agent_first_data::{json_result, output_json, output_plain};
+use agent_first_data::{OutputFormat, OutputOptions, json_result, render};
 use serde_json::json;
 
 fn main() {
-    let value = json_result(json!({
+    let event = json_result(json!({
         "api_key_secret": "sk-123",
         "latency_ms": 1280,
         "db_url": "postgres://user:p@ss@db/app?token_secret=abc"
     }))
-    .build()
-    .expect("valid afdata event");
+    .build();
 
-    println!("{}", output_json(&value));
-    println!("{}", output_plain(&value));
+    let options = OutputOptions::default();
+    println!("{}", render(event.as_value(), OutputFormat::Json, &options));
+    println!("{}", render(event.as_value(), OutputFormat::Plain, &options));
 }
 ```
 
-Useful names use Rust casing: `output_json`, `output_yaml`, `output_plain`, `output_json_with_options`, `redacted_value`, `redact_secrets_in_place`, `redact_url_secrets`, `redact_argv`, `normalize_utc_offset`, `is_valid_rfc3339_date`, `is_valid_rfc3339_time`, `is_valid_rfc3339`, `is_valid_bcp47`, `cli_parse_output`, `cli_output`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_help_or_continue`, and `decode_protocol_event`.
+Useful names use Rust casing: `render` (the single
+`value × format × options → String` entry point), `OutputFormat`,
+`OutputOptions`, `Redactor`, `redacted_value`, `redact_url_secrets`,
+`redact_argv`, `normalize_utc_offset`, `is_valid_rfc3339_date`,
+`is_valid_rfc3339_time`, `is_valid_rfc3339`, `is_valid_bcp47`, `CliSpec`,
+`CommandSpec`, `ArgSpec`, `Combination`, `OutputSpec`, `CliOutcome`,
+`build_afdata_cli`, and `decode_protocol_event`.
 
-Tracing integration is behind the `tracing` feature: `afdata_tracing::try_init_json`, `try_init_plain`, and `try_init_yaml` return initialization errors; the older `init_*` helpers remain for fire-and-forget setup. CLI help rendering is behind `cli-help`; skill administration is behind `skill-admin`; stdout/stderr file redirection is behind `stream-redirect`.
+Every feature below is on by default; `--no-default-features` opts out. Tracing integration is behind `tracing`: `afdata_tracing::try_init` is the single entry point and returns an error if a global subscriber is already installed. The whole CLI surface — `CliSpec`, help-v2 and version resolution, the `CliEmitter`, and the AFDATA adapter — is behind `cli`; skill administration is behind `skill-admin`; stdout/stderr file redirection is behind `stream-redirect`. `render` and `OutputFormat` stay available with every feature off.
 
 ```rust
-use agent_first_data::{afdata_tracing, RedactionOptions};
+use agent_first_data::afdata_tracing::{self, LogFormat};
+use agent_first_data::Redactor;
 use tracing_subscriber::EnvFilter;
 
 fn init_logging() -> Result<(), tracing_subscriber::util::TryInitError> {
-    afdata_tracing::try_init_json_with_options(
+    afdata_tracing::try_init(
         EnvFilter::new("info"),
-        RedactionOptions {
-            secret_names: vec!["authorization".to_string()],
-            ..RedactionOptions::default()
-        },
+        LogFormat::Json,
+        Redactor::new().secret_names(["authorization"]),
     )
 }
 ```
@@ -58,10 +63,17 @@ Canonical flags are `--stdout-file` and `--stderr-file`. They redirect the corre
 - `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed and internal whitespace redacts the whole field.
 - YAML/plain quote and escape keys as well as values, sort by UTF-16 code unit order, and render nested objects in arrays as canonical JSON.
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
-- Prefer `try_init_*` for Rust tracing startup so failures, such as another global subscriber already being installed, are visible to the caller.
-- `build_cli_error(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
-- Prefer one `cli_handle_version_or_help_or_continue()` call before Clap parsing. It intercepts `--version` and `--help` (long forms only — a `-h`/`-V` alias would be byte-identical and is deliberately left to the application); version metadata is emitted only for a version request, while help advertises the flag without repeating its values. Omitted `--output` inherits the selected command's declared default, then the nearest ancestor default; recursive plain/JSON/YAML is a compact index rather than repeated Clap help blocks.
-- `cli_handle_version_or_continue()` and `cli_handle_help_or_continue()` remain available for integrations that must keep the phases separate. Use `HelpConfig::output_aware()` for help-default inheritance; a fixed-format CLI without `--output` uses `HelpConfig::output_aware_with_fallback(HelpFormat::Json)` (or its actual normal format).
+- Prefer `afdata_tracing::try_init` for Rust tracing startup so failures, such as another global subscriber already being installed, are visible to the caller.
+- Build new CLIs from one `CliSpec`. Register each command-local argument and
+  every legal `Combination`, call `build()`, bind exact `action_id` handlers,
+  then resolve to `CliOutcome`. Parsing, typed values, output planning, and
+  help-v2 all come from that registry.
+- `CliError` carries a closed rule, the selected command path, and normalized
+  argument names — never raw values. `cli_error_event` renders it as a strict
+  protocol event; `exit_code()` is the process status.
+- `synthetic_invocations()` generates type-correct argv for every combination
+  and every fixed `one_of` member, so the same registered shapes can be
+  round-trip tested independently of help placeholders.
 - `stream-redirect` is Unix fd-level redirection where supported. It is stream destination control, not a second AFDATA protocol stream, and it does not implement rotation.
 
 ## Reference

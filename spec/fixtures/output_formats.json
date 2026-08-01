@@ -300,15 +300,13 @@
   {
     "name": "float_exponent_rendering",
     "input": {
-      "small_percent": 1e-07,
-      "huge_s": 1e+21
+      "small_percent": 1e-07
     },
     "expected_json": {
-      "small_percent": 1e-07,
-      "huge_s": 1e+21
+      "small_percent": 1e-07
     },
-    "expected_yaml": "---\nhuge_s: 1e+21\nsmall_percent: 1e-7",
-    "expected_plain": "huge=1e+21s small=1e-7%"
+    "expected_yaml": "---\nsmall_percent: 1e-7",
+    "expected_plain": "small=1e-7%"
   },
   {
     "name": "out_of_range_epoch_falls_through",
@@ -404,5 +402,71 @@
     },
     "expected_yaml": "---\nendpoint_url: \"https://h/api?timeout_ms=5000&size_bytes=1048576&token_secret=***&page=2\"\nlatency_ms: 1280",
     "expected_plain": "endpoint_url=\"https://h/api?timeout_ms=5000&size_bytes=1048576&token_secret=***&page=2\" latency=1.28s"
+  },
+  {
+    "name": "plain_top_level_string_is_not_empty",
+    "input": "hello",
+    "expected_json": "hello",
+    "expected_yaml": "---\n\"hello\"",
+    "expected_plain": "hello"
+  },
+  {
+    "name": "plain_top_level_null_is_not_empty",
+    "input": null,
+    "expected_json": null,
+    "expected_yaml": "---\nnull",
+    "expected_plain": "null"
+  },
+  {
+    "name": "plain_top_level_array_is_not_empty",
+    "input": [1, 2],
+    "expected_json": [1, 2],
+    "expected_yaml": "---\n- 1\n- 2",
+    "expected_plain": "[1,2]"
+  },
+  {
+    "name": "plain_empty_containers_are_explicit",
+    "input": {
+      "empty_array": [],
+      "empty_object": {}
+    },
+    "expected_json": {
+      "empty_array": [],
+      "empty_object": {}
+    },
+    "expected_yaml": "---\nempty_array: []\nempty_object: {}",
+    "expected_plain": "empty_array=[] empty_object={}"
+  },
+  {
+    "name": "plain_top_level_empty_object_is_explicit",
+    "input": {},
+    "expected_json": {},
+    "expected_yaml": "---",
+    "expected_plain": "{}"
+  },
+  {
+    "name": "yaml_c0_controls_are_escaped",
+    "input": {
+      "message": "a\u0001b\u001fc"
+    },
+    "expected_json": {
+      "message": "a\u0001b\u001fc"
+    },
+    "expected_yaml": "---\nmessage: \"a\\u0001b\\u001fc\""
+  },
+  {
+    "name": "yaml_ambiguous_keys_are_quoted",
+    "input": {
+      "123": "number",
+      "null": "null",
+      "true": "boolean"
+    },
+    "expected_json": {
+      "123": "number",
+      "null": "null",
+      "true": "boolean"
+    },
+    "expected_yaml": "---\n\"123\": \"number\"\n\"null\": \"null\"\n\"true\": \"boolean\"",
+    "expected_plain": "123=number null=null true=boolean"
   }
 ]

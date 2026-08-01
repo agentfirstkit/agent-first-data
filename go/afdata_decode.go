@@ -3,6 +3,7 @@ package afdata
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -80,6 +81,13 @@ func DecodeProtocolEvent(text string) (DecodedEvent, error) {
 	dec.UseNumber()
 	if err := dec.Decode(&value); err != nil {
 		return nil, &EventDecodeError{msg: fmt.Sprintf("invalid JSON: %v", err)}
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, &EventDecodeError{msg: "invalid JSON: trailing data after event"}
+		}
+		return nil, &EventDecodeError{msg: fmt.Sprintf("invalid JSON: trailing data: %v", err)}
 	}
 
 	if err := ValidateProtocolEvent(value, true); err != nil {

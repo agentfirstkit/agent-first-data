@@ -104,10 +104,7 @@ func TestCliParseLogFilters_PreservesOrder(t *testing.T) {
 // ═══════════════════════════════════════════
 
 func TestBuildCLIError_RequiredFields(t *testing.T) {
-	event, err := BuildCLIError("missing --sql", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	event := BuildCLIError("missing --sql", "")
 	v := event.Value()
 	if v["kind"] != "error" {
 		t.Errorf("kind = %v", v["kind"])
@@ -134,10 +131,7 @@ func TestBuildCLIError_RequiredFields(t *testing.T) {
 }
 
 func TestBuildCLIError_WithHint(t *testing.T) {
-	event, err := BuildCLIError("bad flag", "try --help")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	event := BuildCLIError("bad flag", "try --help")
 	v := event.Value()
 	errPayload := v["error"].(map[string]any)
 	if errPayload["hint"] != "try --help" {
@@ -146,10 +140,7 @@ func TestBuildCLIError_WithHint(t *testing.T) {
 }
 
 func TestBuildCLIError_WithoutHintHasNoHintKey(t *testing.T) {
-	event, err := BuildCLIError("oops", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	event := BuildCLIError("oops", "")
 	v := event.Value()
 	errPayload := v["error"].(map[string]any)
 	if _, ok := errPayload["hint"]; ok {
@@ -158,10 +149,7 @@ func TestBuildCLIError_WithoutHintHasNoHintKey(t *testing.T) {
 }
 
 func TestBuildCLIError_IsValidJson(t *testing.T) {
-	event, err := BuildCLIError("oops", "")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	event := BuildCLIError("oops", "")
 	v := event.Value()
 	s := Render(v, OutputFormatJson, OutputOptions{})
 	if s == "" {
@@ -169,6 +157,14 @@ func TestBuildCLIError_IsValidJson(t *testing.T) {
 	}
 	if !contains(s, "error") {
 		t.Errorf("json %q missing 'error'", s)
+	}
+}
+
+func TestBuildCLIError_EmptyMessageUsesPlaceholder(t *testing.T) {
+	event := BuildCLIError("", "")
+	errPayload := event.Value()["error"].(map[string]any)
+	if errPayload["message"] != "unspecified error" {
+		t.Errorf("message = %v", errPayload["message"])
 	}
 }
 
@@ -584,10 +580,6 @@ func TestCliEmitterFinishOtherWriteFailureReturnsFour(t *testing.T) {
 // Version helpers
 // ═══════════════════════════════════════════
 
-// versionValueFlags mirrors the example's own value-taking global flags, so the
-// pre-parser recognizes their space-separated values.
-var versionValueFlags = []string{"--log", "--stdout-file", "--stderr-file"}
-
 func TestBuildCliVersion_StandardShape(t *testing.T) {
 	v := BuildCliVersion("agent-cli", "Agent CLI Example", "1.2.3", "abc1234")
 	if v["kind"] != "result" {
@@ -646,210 +638,6 @@ func TestCliRenderVersion_Json(t *testing.T) {
 	}
 	if result["display_name"] != "Agent CLI Example" || result["build"] != "abc1234" {
 		t.Errorf("json version missing display_name/build: %s", out)
-	}
-}
-
-func TestCliHandleVersionOrContinue_HonorsOutputFlag(t *testing.T) {
-	out, handled, err := CliHandleVersionOrContinue(
-		[]string{"--version", "--output", "plain"},
-		versionValueFlags,
-		"agent-cli", "Agent CLI Example", "1.2.3", "",
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !handled {
-		t.Fatal("expected handled")
-	}
-	if !contains(out, "kind=result") || !contains(out, "result.version=1.2.3") {
-		t.Errorf("plain version output = %s", out)
-	}
-}
-
-func TestCliHandleVersionOrContinue_IgnoresJsonFlag(t *testing.T) {
-	// --json belongs to the application: it must not select a format, and it
-	// must not conflict with one. --output yaml still wins.
-	out, handled, err := CliHandleVersionOrContinue(
-		[]string{"--version", "--json", "--output", "yaml"},
-		versionValueFlags,
-		"agent-cli", "", "1.2.3", "",
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !handled {
-		t.Fatal("expected handled")
-	}
-	if !contains(out, "kind: \"result\"") {
-		t.Errorf("--output yaml must still select YAML: %s", out)
-	}
-}
-
-func TestCliHandleVersionOrContinue_ConflictingOutputFormats(t *testing.T) {
-	_, handled, err := CliHandleVersionOrContinue(
-		[]string{"--version", "--output", "json", "--output", "yaml"},
-		versionValueFlags,
-		"agent-cli", "", "1.2.3", "",
-	)
-	if !handled {
-		t.Fatal("expected handled")
-	}
-	if err == nil || !contains(err.Error(), "conflicting output formats") {
-		t.Fatalf("expected conflict error, got %v", err)
-	}
-}
-
-func TestCliHandleVersionOrContinue_BareInheritsJsonDefault(t *testing.T) {
-	// Bare --version answers with a protocol-v1 event and follows the command's
-	// declared output default.
-	out, handled, err := CliHandleVersionOrContinue(
-		[]string{"--version"},
-		versionValueFlags,
-		"agent-cli", "Agent CLI Example", "1.2.3", "",
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !handled {
-		t.Fatal("expected handled")
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &parsed); err != nil {
-		t.Fatalf("bare --version must render json: %v (%q)", err, out)
-	}
-	result := parsed["result"].(map[string]any)
-	if parsed["kind"] != "result" || result["code"] != "version" {
-		t.Errorf("bare version wrong shape: %s", out)
-	}
-	if result["name"] != "agent-cli" || result["version"] != "1.2.3" {
-		t.Errorf("bare version missing name/version: %s", out)
-	}
-	if result["display_name"] != "Agent CLI Example" {
-		t.Errorf("bare version missing display_name: %s", out)
-	}
-}
-
-func TestCliHandleVersionOrContinue_BareInheritsPlainDefault(t *testing.T) {
-	out, handled, err := CliHandleVersionOrContinue(
-		[]string{"--version"},
-		versionValueFlags,
-		"agent-cli", "", "1.2.3", "",
-		OutputFormatPlain,
-	)
-	if err != nil || !handled {
-		t.Fatalf("expected handled plain version, got handled=%v err=%v", handled, err)
-	}
-	if !contains(out, "result.code=version") || !contains(out, "result.version=1.2.3") {
-		t.Fatalf("bare version did not inherit plain output: %q", out)
-	}
-}
-
-func TestCliHandleVersionOrContinue_ReturnsNoneWithoutVersion(t *testing.T) {
-	_, handled, err := CliHandleVersionOrContinue(
-		[]string{"ping"},
-		versionValueFlags,
-		"agent-cli", "", "1.2.3", "",
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if handled {
-		t.Fatal("expected handled=false")
-	}
-}
-
-func TestCliHandleVersionOrContinue_RejectsInvalidOutput(t *testing.T) {
-	_, handled, err := CliHandleVersionOrContinue(
-		[]string{"--version", "--output", "xml"},
-		versionValueFlags,
-		"agent-cli", "", "1.2.3", "",
-	)
-	if !handled {
-		t.Fatal("expected handled")
-	}
-	if err == nil || !contains(err.Error(), "xml") {
-		t.Fatalf("expected xml error, got %v", err)
-	}
-}
-
-func TestCliHandleVersionOrContinue_IgnoresVersionFlagAfterSubcommand(t *testing.T) {
-	// A subcommand that takes its own --version <value> must not be hijacked
-	// by the top-level pre-parser.
-	for _, args := range [][]string{
-		{"hatch", "--version", "1.3.0"},
-		{"hatch", "-V", "1.3.0"},
-	} {
-		_, handled, err := CliHandleVersionOrContinue(args, versionValueFlags, "agent-cli", "", "1.2.3", "")
-		if err != nil {
-			t.Fatalf("unexpected error for %v: %v", args, err)
-		}
-		if handled {
-			t.Fatalf("expected handled=false for %v", args)
-		}
-	}
-}
-
-func TestCliHandleVersionOrContinue_HonorsOutputFlagBeforeTopLevelVersion(t *testing.T) {
-	// A known output flag consumes its value, so a trailing top-level
-	// --version is still recognized.
-	out, handled, err := CliHandleVersionOrContinue(
-		[]string{"--output", "json", "--version"},
-		versionValueFlags,
-		"agent-cli", "", "1.2.3", "",
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !handled {
-		t.Fatal("expected handled")
-	}
-	if !contains(out, `"version":"1.2.3"`) {
-		t.Fatalf("expected version json, got %q", out)
-	}
-}
-
-func TestCliHandleVersionOrContinue_SkipsCallerDefinedValueFlag(t *testing.T) {
-	// A caller's own value-taking global flag (here a comma-list --log) must have
-	// its space-separated value recognized through valueFlags, not a hardcoded
-	// list. Without that, "request,startup" would be mistaken for the subcommand
-	// boundary and the trailing --version would be dropped.
-	out, handled, err := CliHandleVersionOrContinue(
-		[]string{"--log", "request,startup", "--version"},
-		[]string{"--log"},
-		"hypha", "", "1.2.3", "",
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !handled {
-		t.Fatal("expected handled")
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &parsed); err != nil {
-		t.Fatalf("version json must parse: %v (%q)", err, out)
-	}
-	result := parsed["result"].(map[string]any)
-	if result["name"] != "hypha" || result["version"] != "1.2.3" {
-		t.Errorf("version missing name/version: %s", out)
-	}
-}
-
-func TestCliHandleVersionOrContinue_SkipsOutputToSpaceValue(t *testing.T) {
-	// A preceding --output-to <value> (space form) must not be mistaken for the
-	// subcommand boundary; the trailing --version must still be recognized.
-	out, handled, err := CliHandleVersionOrContinue(
-		[]string{"--output-to", "stdout", "--version"},
-		versionValueFlags,
-		"agent-cli", "", "1.2.3", "",
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !handled {
-		t.Fatal("expected handled")
-	}
-	if !contains(out, `"version":"1.2.3"`) {
-		t.Fatalf("expected version json, got %q", out)
 	}
 }
 

@@ -36,7 +36,7 @@ pub enum LogFormat {
     Yaml,
 }
 
-/// A tracing Layer that outputs AFDATA-compliant log lines to stdout.
+/// A tracing Layer that outputs AFDATA-compliant log lines to stderr.
 pub struct AfdataLayer {
     format: LogFormat,
     redactor: crate::Redactor,
@@ -114,6 +114,9 @@ where
         }
     }
 
+    // A tracing layer emits diagnostic log events, so stderr is its sanctioned
+    // default sink under the finite-command channel policy.
+    #[allow(clippy::disallowed_methods)]
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let meta = event.metadata();
 
@@ -192,7 +195,7 @@ where
         // Format using the library's own output functions.
         let line = self.format_value(value.as_value());
 
-        let mut out = io::stdout().lock();
+        let mut out = io::stderr().lock();
         let _ = out.write_all(line.as_bytes());
         let _ = out.write_all(b"\n");
     }

@@ -44,6 +44,42 @@ function loadObject(name: string): any {
   return JSON.parse(readFileSync(join(FIXTURES_DIR, name), "utf-8"));
 }
 
+describe("builder contract fixtures", () => {
+  for (const tc of load("builder_contract.json")) {
+    it(tc.name, () => {
+      let builder = jsonError("code", "message");
+      switch (tc.action) {
+        case "empty_code": builder = jsonError("", "message"); break;
+        case "empty_message": builder = jsonError("code", ""); break;
+        case "empty_hint": builder.hint(""); break;
+        case "bulk_non_object": builder.fields(1); break;
+        case "reserved_field": builder.field("code", "other"); break;
+        case "non_object_trace": builder.trace(1 as unknown as Record<string, JsonValue>); break;
+        case "serialization_failure": {
+          const circular: Record<string, unknown> = {};
+          circular.self = circular;
+          builder.field("bad", circular as unknown as JsonValue);
+          break;
+        }
+        default: throw new Error(`unknown action ${tc.action}`);
+      }
+      let event;
+      let built = false;
+      try {
+        event = builder.build();
+        built = true;
+      } catch (error) {
+        assert.ok(error instanceof EventBuildError);
+      }
+      assert.equal(built, tc.should_build);
+      if (built && tc.hint_present !== undefined) {
+        const payload = event!.toJSON() as Record<string, JsonValue>;
+        assert.equal("hint" in (payload.error as Record<string, JsonValue>), tc.hint_present);
+      }
+    });
+  }
+});
+
 function redactionOptions(tc: any): { policy?: RedactionPolicy; secretNames?: readonly string[] } {
   const opts = tc.options ?? {};
   return {
@@ -141,6 +177,142 @@ describe("security fixtures", () => {
       }
     });
   }
+});
+
+// --- URL fragments carry secrets too ---
+
+describe("url fragment redaction", () => {
+  it("redacts fragment params like query params", () => {
+    assert.equal(
+      redactUrlSecrets("https://h/p?token_secret=QUERYLEAK#token_secret=FRAGLEAK"),
+      "https://h/p?token_secret=***#token_secret=***",
+    );
+  });
+
+  it("redacts fragment params without a query", () => {
+    // The OAuth implicit-flow shape: the credential exists only after '#'.
+    assert.equal(
+      redactUrlSecrets("https://h/cb#access_token_secret=abc&state=xyz"),
+      "https://h/cb#access_token_secret=***&state=xyz",
+    );
+  });
+
+  it("preserves a fragment that is not in k=v shape", () => {
+    for (const url of ["https://h/p?a=1#section", "https://h/p#", "https://h/p#a/b?c"]) {
+      assert.equal(redactUrlSecrets(url), url);
+    }
+  });
+
+  it("honors secretNames inside the fragment", () => {
+    assert.equal(
+      redactUrlSecrets("https://h/cb#token=abc&page=2", { secretNames: ["token"] }),
+      "https://h/cb#token=***&page=2",
+    );
+  });
+
+  it("redacts a fragment param inside a _url field", () => {
+    // The `_url` suffix routes the field value through the same URL logic.
+    assert.deepEqual(redactedValue({ callback_url: "https://h/cb#id_token_secret=abc&state=1" }), {
+      callback_url: "https://h/cb#id_token_secret=***&state=1",
+    });
+  });
+});
+
+// --- One policy meaning across value, argv, url ---
+
+describe("redaction policy across value, argv and url", () => {
+  const scopedValue = () => ({
+    result: { api_key_secret: "sk-result" },
+    trace: { api_key_secret: "sk-trace" },
+  });
+  const argv = () => ["tool", "--api-key-secret=sk-live"];
+  const url = "https://u:pw@h/cb?token_secret=abc";
+
+  it("All redacts every path", () => {
+    const policy = RedactionPolicy.All;
+    assert.deepEqual(redactedValue(scopedValue(), { policy }), {
+      result: { api_key_secret: "***" },
+      trace: { api_key_secret: "***" },
+    });
+    assert.deepEqual(redactArgv(argv(), { policy }), ["tool", "--api-key-secret=***"]);
+    assert.equal(redactUrlSecrets(url, { policy }), "https://u:***@h/cb?token_secret=***");
+  });
+
+  it("TraceOnly scopes a value but redacts argv and url in full", () => {
+    const policy = RedactionPolicy.TraceOnly;
+    // Scoped input: only the `trace` half is scrubbed.
+    assert.deepEqual(redactedValue(scopedValue(), { policy }), {
+      result: { api_key_secret: "sk-result" },
+      trace: { api_key_secret: "***" },
+    });
+    // Unscoped input: a command line and a bare URL have no non-`trace` half to
+    // leave alone, so they are redacted like `All`.
+    assert.deepEqual(redactArgv(argv(), { policy }), ["tool", "--api-key-secret=***"]);
+    assert.equal(redactUrlSecrets(url, { policy }), "https://u:***@h/cb?token_secret=***");
+  });
+
+  it("Off disables every path", () => {
+    const policy = RedactionPolicy.Off;
+    assert.deepEqual(redactedValue(scopedValue(), { policy }), scopedValue());
+    assert.deepEqual(redactArgv(argv(), { policy }), argv());
+    assert.equal(redactUrlSecrets(url, { policy }), url);
+  });
+
+  it("an omitted policy redacts a url like All", () => {
+    assert.equal(redactUrlSecrets(url), redactUrlSecrets(url, { policy: RedactionPolicy.All }));
+  });
+});
+
+// --- `_secret` stripping follows redaction ---
+
+function plain(value: JsonValue, policy: RedactionPolicy): string {
+  return render(value, "plain", outputOptionsForPolicy(policy));
+}
+
+describe("plain _secret stripping follows redaction", () => {
+  it("strips the suffix once the value is redacted", () => {
+    assert.equal(plain({ api_key_secret: "sk-live-xxx" }, RedactionPolicy.All), "api_key=***");
+  });
+
+  it("keeps the suffix when redaction is off", () => {
+    // Stripping here would hand a live credential to a reader under a name that
+    // no longer says it is one.
+    assert.equal(
+      plain({ api_key_secret: "sk-live-xxx" }, RedactionPolicy.Off),
+      "api_key_secret=sk-live-xxx",
+    );
+    assert.equal(
+      plain({ API_KEY_SECRET: "sk-live-xxx" }, RedactionPolicy.Off),
+      "API_KEY_SECRET=sk-live-xxx",
+    );
+  });
+
+  it("keeps the suffix outside trace under TraceOnly", () => {
+    assert.equal(
+      plain(
+        { api_key_secret: "sk-live-xxx", trace: { request_secret: "top-secret" } },
+        RedactionPolicy.TraceOnly,
+      ),
+      "api_key_secret=sk-live-xxx trace.request=***",
+    );
+  });
+
+  it("keeps the suffix on an unredacted subtree", () => {
+    assert.equal(
+      plain({ db_secret: { password: "hunter2" } }, RedactionPolicy.Off),
+      "db_secret.password=hunter2",
+    );
+    assert.equal(plain({ db_secret: { password: "hunter2" } }, RedactionPolicy.All), "db=***");
+  });
+
+  it("an unstripped secret key does not collide with its stem", () => {
+    // Keeping the suffix also means no collision to fall back from: both fields
+    // keep their own name and value.
+    assert.equal(
+      plain({ api_key: "public", api_key_secret: "sk-live-xxx" }, RedactionPolicy.Off),
+      "api_key=public api_key_secret=sk-live-xxx",
+    );
+  });
 });
 
 // --- Protocol fixtures ---
@@ -299,6 +471,10 @@ describe("number fidelity fixtures", () => {
         const gotYaml = render(result, "yaml");
         assert.equal(gotYaml, tc.expected_yaml, `[number_fidelity/${tc.name}] yaml mismatch`);
       }
+      if (tc.expected_plain !== undefined) {
+        const gotPlain = render(result, "plain");
+        assert.equal(gotPlain, tc.expected_plain, `[number_fidelity/${tc.name}] plain mismatch`);
+      }
     });
   }
 
@@ -313,6 +489,30 @@ describe("number fidelity fixtures", () => {
     const plain = render((decoded as { result: JsonValue }).result, "plain");
     assert.equal(plain, "cpu=85.5% duration=42ms size=5.0MiB");
   });
+
+  it("renders native bigint exactly and marks unsafe native integers", () => {
+    assert.equal(render({ amount: 9_007_199_254_740_993n }, "json"), '{"amount":9007199254740993}');
+    assert.equal(
+      render({ fee_jpy: 1_000_000_000_000_000_000_000n }, "plain"),
+      "fee_jpy=1000000000000000000000",
+    );
+    assert.equal(
+      render({ amount: 9_007_199_254_740_993 }, "json"),
+      '{"amount":"<unsupported:unsafe-integer>"}',
+    );
+  });
+});
+
+describe("protocol decode fixtures", () => {
+  for (const tc of load("protocol_decode.json")) {
+    it(tc.name, () => {
+      if (tc.valid) {
+        assert.doesNotThrow(() => decodeProtocolEvent(tc.input_line));
+      } else {
+        assert.throws(() => decodeProtocolEvent(tc.input_line));
+      }
+    });
+  }
 });
 
 it("error builder ignores reserved extension fields", () => {
@@ -436,8 +636,10 @@ describe("output format fixtures", () => {
       const gotYaml = render(input, "yaml");
       assert.equal(gotYaml, tc.expected_yaml, "yaml mismatch");
 
-      const gotPlain = render(input, "plain");
-      assert.equal(gotPlain, tc.expected_plain, "plain mismatch");
+      if (tc.expected_plain !== undefined) {
+        const gotPlain = render(input, "plain");
+        assert.equal(gotPlain, tc.expected_plain, "plain mismatch");
+      }
     });
   }
 });
@@ -523,7 +725,7 @@ describe("json safety", () => {
     const parsed = JSON.parse(out) as Record<string, unknown>;
     const parsedMeta = parsed["meta"] as Record<string, unknown>;
     assert.equal(parsedMeta["api_key_secret"], "***");
-    assert.equal(parsedMeta["amount"], "<unsupported:bigint>");
+    assert.equal(parsedMeta["amount"], 1);
     assert.equal(parsedMeta["self"], "<unsupported:circular>");
   });
 

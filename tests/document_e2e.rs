@@ -764,7 +764,10 @@ fn test_yaml_unsigned_boundary_round_trip() {
         get_path(&value, "n", &[]).unwrap().as_unsigned(),
         Some(u64::MAX)
     );
-    assert!(matches!(get_path(&value, "f", &[]).unwrap(), Value::Float(value) if value == 3.0));
+    assert_eq!(
+        get_path(&value, "f", &[]).unwrap(),
+        Value::Number("3.0".to_string())
+    );
 }
 
 #[test]
@@ -1209,6 +1212,35 @@ fn test_document_unset_is_idempotent() {
     assert!(!doc.unset("a").unwrap()); // already gone → false, no error
     assert!(!doc.unset("missing").unwrap()); // never existed → false
     assert_eq!(doc.source(), "{\n  \"b\": 2\n}\n");
+}
+
+#[test]
+fn test_document_unset_is_idempotent_at_any_depth() {
+    use agent_first_data::document::Document;
+
+    let mut doc = Document::parse("{\n  \"a\": {\n    \"b\": 1\n  }\n}\n", Format::Json).unwrap();
+
+    // "Nothing there" cannot depend on how deep the path is: `x.y.z` is absent
+    // whether or not `x.y` exists, so both answer false rather than one
+    // answering false and the other erroring.
+    assert!(!doc.unset("missing").unwrap());
+    assert!(!doc.unset("missing.nested").unwrap());
+    assert!(!doc.unset("missing.deeply.nested.key").unwrap());
+    assert!(!doc.unset("a.missing.key").unwrap());
+    // A real removal still reports true, and the surrounding source survives
+    // (the editor preserves layout rather than reformatting the parent).
+    assert!(doc.unset("a.b").unwrap());
+    assert_eq!(doc.source(), "{\n  \"a\": {\n\n  }\n}\n");
+}
+
+#[test]
+fn test_document_unset_still_rejects_an_incoherent_path() {
+    use agent_first_data::document::Document;
+
+    let mut doc = Document::parse("{\n  \"scalar\": 1\n}\n", Format::Json).unwrap();
+    // Traversing *through* a scalar is not "already absent" — it is a caller
+    // asking something that cannot be true of any document.
+    assert!(doc.unset("scalar.child").is_err());
 }
 
 #[cfg(feature = "toml")]

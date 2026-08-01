@@ -32,8 +32,8 @@ pub mod format;
 pub mod schema;
 
 pub use coerce::{
-    ScalarKind, ValueType, coerce_toward, coerce_values_toward, guard_bare_overwrite, scalar_kind,
-    value_from_type, value_matches_type,
+    BareOverwrite, ScalarKind, ValueType, coerce_toward, coerce_values_toward,
+    guard_bare_overwrite, scalar_kind, value_from_type, value_matches_type,
 };
 pub use error::{DocumentError, DocumentResult};
 pub use file::{Document, DocumentFile};

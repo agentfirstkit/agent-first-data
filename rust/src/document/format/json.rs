@@ -109,12 +109,11 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
 
 /// Compact one-line JSON rendering of a document value.
 fn compact_json(value: &Value) -> DocumentResult<String> {
-    serde_json::to_string(&serde_json::Value::from(value.clone())).map_err(|error| {
-        DocumentError::UnsupportedOperation {
-            format: "JSON".to_string(),
-            operation: "set".to_string(),
-            detail: error.to_string(),
-        }
+    let json_value = serde_json::Value::try_from(value)?;
+    serde_json::to_string(&json_value).map_err(|error| DocumentError::UnsupportedOperation {
+        format: "JSON".to_string(),
+        operation: "set".to_string(),
+        detail: error.to_string(),
     })
 }
 
@@ -147,7 +146,7 @@ fn nested_member_value(
     multiline: bool,
     base_indent: &str,
 ) -> DocumentResult<String> {
-    let mut nested = serde_json::Value::from(value.clone());
+    let mut nested = serde_json::Value::try_from(value)?;
     for segment in tail.iter().rev() {
         let mut object = serde_json::Map::new();
         object.insert(segment.clone(), nested);
@@ -275,13 +274,12 @@ pub fn append_array_item_preserving(
             detail: "target is not an array".to_string(),
         });
     };
+    let json_item = serde_json::Value::try_from(item)?;
     let fragment =
-        serde_json::to_string(&serde_json::Value::from(item.clone())).map_err(|error| {
-            DocumentError::UnsupportedOperation {
-                format: "JSON".to_string(),
-                operation: "add".to_string(),
-                detail: error.to_string(),
-            }
+        serde_json::to_string(&json_item).map_err(|error| DocumentError::UnsupportedOperation {
+            format: "JSON".to_string(),
+            operation: "add".to_string(),
+            detail: error.to_string(),
         })?;
     let close = target
         .end
@@ -483,6 +481,7 @@ impl<'a> Parser<'a> {
     fn parse_object(&mut self, position: &mut usize) -> DocumentResult<NodeKind> {
         *position += 1;
         let mut entries = Vec::new();
+        let mut keys = std::collections::HashSet::new();
         loop {
             *position = self.skip_ws(*position);
             if self.source.get(*position) == Some(&b'}') {
@@ -497,6 +496,9 @@ impl<'a> Parser<'a> {
                     detail: error.to_string(),
                 },
             )?;
+            if !keys.insert(key.clone()) {
+                return self.error(key_start, "duplicate object key");
+            }
             *position = self.skip_ws(key_end);
             if self.source.get(*position) != Some(&b':') {
                 return self.error(*position, "expected `:` after object key");
@@ -601,6 +603,7 @@ impl<'a> Parser<'a> {
 }
 
 pub fn load(content: &str) -> DocumentResult<Value> {
+    JsonDocument::parse(content)?;
     serde_json::from_str::<serde_json::Value>(content)
         .map(Value::from)
         .map_err(|e| DocumentError::ParseError {
@@ -610,9 +613,28 @@ pub fn load(content: &str) -> DocumentResult<Value> {
 }
 
 pub fn save(value: &Value) -> DocumentResult<String> {
-    let json_val: serde_json::Value = value.clone().into();
+    let json_val = serde_json::Value::try_from(value)?;
     serde_json::to_string_pretty(&json_val).map_err(|e| DocumentError::ParseError {
         format: "JSON".to_string(),
         detail: e.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{JsonDocument, load, save};
+    use crate::document::Value;
+
+    #[test]
+    fn duplicate_keys_are_rejected_by_load_and_editor_parser() {
+        let source = r#"{"same":1,"same":2}"#;
+        assert!(load(source).is_err());
+        assert!(JsonDocument::parse(source).is_err());
+    }
+
+    #[test]
+    fn save_rejects_non_finite_float() {
+        let error = save(&Value::Float(f64::INFINITY)).expect_err("infinity must fail");
+        assert!(error.to_string().contains("non-finite"));
+    }
 }

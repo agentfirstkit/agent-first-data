@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 import sys
-from typing import Any, Callable, Mapping, Iterator
+from typing import Any, Iterator
 
 from agent_first_data.format import (
     Event,
@@ -190,9 +190,9 @@ class CliEmitter:
         writer: Any,
         format: OutputFormat,
         output_options: OutputOptions | None = None,
-        log_fields: Callable[[], Mapping[str, Any]] | None = None,
         *,
         diagnostic: Any | None = None,
+        strict_protocol: bool = False,
     ) -> None:
         """Create an event-stream emitter: every event goes to ``writer``.
 
@@ -205,8 +205,13 @@ class CliEmitter:
         self._diagnostic = diagnostic
         self._format = format
         self._output_options = output_options or OutputOptions()
+        self._strict_protocol = strict_protocol
         self._terminal_emitted = False
-        self._log_fields_provider = log_fields
+
+    def with_strict_protocol(self) -> CliEmitter:
+        """Opt this emitter into the AFDATA recommended strict profile."""
+        self._strict_protocol = True
+        return self
 
     @classmethod
     def stream(
@@ -214,13 +219,12 @@ class CliEmitter:
         writer: Any,
         format: OutputFormat,
         output_options: OutputOptions | None = None,
-        log_fields: Callable[[], Mapping[str, Any]] | None = None,
     ) -> CliEmitter:
         """Create an event-stream emitter: every event, including ``error``, goes
         to the single ``writer``, preserving interleaved ordering. Pick this when
         the consumer reads one ordered stream and branches on ``kind``.
         """
-        return cls(writer, format, output_options, log_fields)
+        return cls(writer, format, output_options)
 
     @classmethod
     def finite_with(
@@ -229,26 +233,24 @@ class CliEmitter:
         diagnostic: Any,
         format: OutputFormat,
         output_options: OutputOptions | None = None,
-        log_fields: Callable[[], Mapping[str, Any]] | None = None,
     ) -> CliEmitter:
         """Create a finite one-shot emitter with explicit sinks: ``result`` goes
         to ``result_writer``, while ``error``/``progress``/``log`` go to
         ``diagnostic``.
         """
-        return cls(result_writer, format, output_options, log_fields, diagnostic=diagnostic)
+        return cls(result_writer, format, output_options, diagnostic=diagnostic)
 
     @classmethod
     def finite(
         cls,
         format: OutputFormat,
         output_options: OutputOptions | None = None,
-        log_fields: Callable[[], Mapping[str, Any]] | None = None,
     ) -> CliEmitter:
         """Create a finite one-shot emitter wired to the process streams:
         ``result`` → ``sys.stdout``, ``error``/``progress``/``log`` →
         ``sys.stderr``. The recommended default for a one-shot CLI.
         """
-        return cls.finite_with(sys.stdout, sys.stderr, format, output_options, log_fields)
+        return cls.finite_with(sys.stdout, sys.stderr, format, output_options)
 
     @classmethod
     def from_output_to(
@@ -256,7 +258,6 @@ class CliEmitter:
         selector: OutputTo,
         format: OutputFormat,
         output_options: OutputOptions | None = None,
-        log_fields: Callable[[], Mapping[str, Any]] | None = None,
     ) -> CliEmitter:
         """Build an emitter from a parsed :class:`OutputTo` selector, wired to the
         process streams: ``SPLIT`` is finite mode (``result`` → stdout,
@@ -264,21 +265,12 @@ class CliEmitter:
         onto that one stream.
         """
         if selector is OutputTo.SPLIT:
-            return cls.finite_with(sys.stdout, sys.stderr, format, output_options, log_fields)
+            return cls.finite_with(sys.stdout, sys.stderr, format, output_options)
         if selector is OutputTo.STDOUT:
-            return cls.stream(sys.stdout, format, output_options, log_fields)
+            return cls.stream(sys.stdout, format, output_options)
         if selector is OutputTo.STDERR:
-            return cls.stream(sys.stderr, format, output_options, log_fields)
+            return cls.stream(sys.stderr, format, output_options)
         raise ValueError(f"unsupported OutputTo selector: {selector!r}")
-
-    def with_log_fields(self, provider: Callable[[], Mapping[str, Any]]) -> CliEmitter:
-        """Set a provider callable for default log event fields.
-
-        Returns self for chaining. The provider is called for each log event
-        and its fields are merged (with explicit fields taking precedence).
-        """
-        self._log_fields_provider = provider
-        return self
 
     def emit(self, event: Event | dict) -> None:
         """Emit a typed Event or a dict (for compatibility)."""
@@ -287,7 +279,7 @@ class CliEmitter:
         else:
             envelope = event
 
-        validate_protocol_event(envelope, strict=False)
+        validate_protocol_event(envelope, strict=self._strict_protocol)
         kind = envelope["kind"]
         if kind in ("log", "progress"):
             if self._terminal_emitted:
@@ -297,16 +289,6 @@ class CliEmitter:
                 raise RuntimeError("cannot emit duplicate terminal event")
         else:
             raise ValueError(f"unsupported event kind {kind!r}")
-
-        # Apply log fields provider if this is a log event
-        if kind == "log" and self._log_fields_provider is not None:
-            provider_fields = self._log_fields_provider()
-            log_payload = envelope.get("log")
-            if provider_fields and isinstance(log_payload, dict):
-                # Merge provider fields, explicit fields take precedence
-                merged_log = dict(provider_fields)
-                merged_log.update(log_payload)
-                envelope["log"] = merged_log
 
         # Finite mode (a diagnostic sink is present) splits by kind: `result`
         # stays on the primary writer (stdout), while `error`/`progress`/`log`
@@ -385,23 +367,6 @@ class CliEmitter:
         return self.finish(json_result(payload).build(), 0)
 
 
-def _split_flag(arg: str) -> tuple[str | None, str | None]:
-    """Split a flag token into its long name and optional inline ``=value``.
-
-    Mirrors the Rust pre-parser: leading dashes are stripped from the name and a
-    bare ``-`` (or an empty name) yields ``(None, None)``. ``--flag`` →
-    ``("flag", None)``; ``--flag=x`` → ``("flag", "x")`` (``x`` may be ``""``).
-    """
-    if not arg.startswith("-") or arg == "-":
-        return (None, None)
-    flag, sep, value = arg.partition("=")
-    name = flag.lstrip("-")
-    if not name:
-        return (None, None)
-    if sep:
-        return (name, value)
-    return (name, None)
-
 
 def build_cli_version(
     name: str,
@@ -443,118 +408,6 @@ def cli_render_version(
     rendered = render(build_cli_version(name, display_name, version, build), format)
     return rendered.rstrip("\n") + "\n"
 
-
-def cli_handle_version_or_continue(
-    raw_args: list[str],
-    value_flags: list[str],
-    name: str,
-    display_name: str | None,
-    version: str,
-    build: str | None,
-    *,
-    default_format: OutputFormat = OutputFormat.JSON,
-) -> str | None:
-    """Render version output if --version/-V is present; otherwise return None.
-
-    ``raw_args`` is ``sys.argv[1:]`` (no program name); scanning starts at index
-    0. ``value_flags`` names the caller's own value-taking global flags (with or
-    without leading dashes) so their value is never mistaken for the subcommand
-    boundary — the Python stand-in for Rust's ``&clap::Command`` lookup.
-
-    The one blessed behavior: ``--version``/``-V`` always answers with a
-    protocol-v1 ``kind:"result"`` version event (see :func:`build_cli_version`) —
-    An explicit ``--output <json|yaml|plain>`` wins; otherwise
-    ``default_format`` should be the command's normal output default.
-
-    Only a top-level version request is recognized: scanning stops at the first
-    positional argument (the subcommand), so ``tool sub --version <value>``
-    leaves ``--version`` for the subcommand's parser rather than printing the
-    tool version.
-
-    Raises ValueError for malformed version requests, for example
-    ``--version --output xml``. The caller should convert that to a CLI error
-    with ``build_cli_error``.
-    """
-    value_flag_names = {vf.lstrip("-") for vf in value_flags}
-    version_requested = False
-    output_format: OutputFormat | None = None
-    output_error: ValueError | None = None
-
-    i = 0
-    while i < len(raw_args):
-        arg = raw_args[i]
-        if arg == "--":
-            break
-        # The first positional argument marks the subcommand boundary. Past it,
-        # --version and -V belong to the subcommand's own parser, matching
-        # git/cargo/clap: this pre-parser only owns a top-level version request.
-        if not arg.startswith("-"):
-            break
-
-        flag_name, inline_value = _split_flag(arg)
-        if arg == "--version":
-            version_requested = True
-            i += 1
-            continue
-        # `--output-to` takes a value but does not affect version output. Consume
-        # its space-separated value so it is not mistaken for the subcommand
-        # boundary (which would hide a later `--version`/`--output`).
-        if flag_name == "output-to":
-            has_space_value = (
-                inline_value is None
-                and i + 1 < len(raw_args)
-                and not raw_args[i + 1].startswith("-")
-            )
-            i += 2 if has_space_value else 1
-            continue
-        if flag_name == "output":
-            value: str | None
-            if inline_value is not None:
-                value = inline_value
-            elif i + 1 < len(raw_args) and not raw_args[i + 1].startswith("-"):
-                value = raw_args[i + 1]
-            else:
-                value = None
-            if value is None:
-                output_error = ValueError(
-                    "missing value for --output: expected json, yaml, or plain"
-                )
-            else:
-                try:
-                    parsed_output = cli_parse_output(value)
-                    if output_format is not None and output_format is not parsed_output:
-                        output_error = ValueError(
-                            f"conflicting output formats: --output {value} conflicts with previous output format"
-                        )
-                    else:
-                        output_format = parsed_output
-                except ValueError as e:
-                    output_error = e
-            i += 1 if (inline_value is not None or value is None) else 2
-            continue
-
-        # Any other flag: consume a space-separated value only if the caller
-        # listed this flag as value-taking, there is no inline `=value`, and the
-        # next arg exists and doesn't start with `-`. Otherwise it is a boolean
-        # flag and consumes only itself.
-        has_space_value = (
-            inline_value is None
-            and i + 1 < len(raw_args)
-            and not raw_args[i + 1].startswith("-")
-        )
-        i += 2 if (has_space_value and flag_name in value_flag_names) else 1
-
-    if not version_requested:
-        return None
-    if output_error is not None:
-        raise output_error
-    return cli_render_version(
-        name,
-        display_name,
-        version,
-        build,
-        output_format if output_format is not None else default_format,
-    )
 
 
 def build_cli_error(message: str, hint: str | None = None) -> dict | Event:

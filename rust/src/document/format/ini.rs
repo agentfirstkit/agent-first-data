@@ -166,6 +166,20 @@ pub fn unset_preserving(content: &str, path: &str) -> DocumentResult<String> {
     edit_entry(content, path, None)
 }
 
+/// The section name a line declares, or `None` when it is not a header.
+fn section_header(line: &str) -> Option<String> {
+    let trimmed = line.trim_end_matches(['\n', '\r']).trim();
+    (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        .then(|| trimmed[1..trimmed.len() - 1].trim().to_string())
+}
+
+/// End `output` with a line terminator so the next line starts on its own.
+fn ensure_terminated(output: &mut String, newline: &str) {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push_str(newline);
+    }
+}
+
 fn edit_entry(content: &str, path: &str, replacement: Option<&str>) -> DocumentResult<String> {
     let segments = crate::document::parse_path(path)?;
     if segments.len() != 2 {
@@ -174,69 +188,111 @@ fn edit_entry(content: &str, path: &str, replacement: Option<&str>) -> DocumentR
     let document = IniDocument::parse(content).map_err(|error| with_path(error, path))?;
     let section = &segments[0];
     let key = &segments[1];
-    let mut current = String::new();
     let found = document.has_entry(section, key);
-    let mut output = String::with_capacity(content.len());
-    for line in content.split_inclusive('\n') {
-        let body = line.strip_suffix('\n').unwrap_or(line);
-        let bare = body.strip_suffix('\r').unwrap_or(body);
-        let trimmed = bare.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            current = trimmed[1..trimmed.len() - 1].trim().to_string();
-        }
-        let matches = current == section.as_str()
-            && trimmed
-                .split_once('=')
-                .is_some_and(|(name, _)| name.trim() == key);
-        if matches {
-            if let Some(value) = replacement {
-                let eq = bare.find('=').unwrap_or(bare.len());
-                output.push_str(&bare[..eq + 1]);
-                output.push_str(
-                    &bare[eq + 1..]
-                        .chars()
-                        .take_while(|character| character.is_whitespace())
-                        .collect::<String>(),
-                );
-                output.push_str(value);
-                if body.ends_with('\r') {
-                    output.push('\r');
-                }
-                if line.ends_with('\n') {
-                    output.push('\n');
-                }
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+
+    if found {
+        let mut current = String::new();
+        let mut output = String::with_capacity(content.len());
+        for line in &lines {
+            if let Some(name) = section_header(line) {
+                current = name;
             }
-        } else {
-            output.push_str(line);
+            let body = line.strip_suffix('\n').unwrap_or(line);
+            let bare = body.strip_suffix('\r').unwrap_or(body);
+            let matches = current == section.as_str()
+                && bare
+                    .trim()
+                    .split_once('=')
+                    .is_some_and(|(name, _)| name.trim() == key);
+            if !matches {
+                output.push_str(line);
+                continue;
+            }
+            // `unset` drops the line entirely; `set` rewrites only the value,
+            // keeping the key's own spacing.
+            let Some(value) = replacement else { continue };
+            let eq = bare.find('=').unwrap_or(bare.len());
+            output.push_str(&bare[..eq + 1]);
+            output.push_str(
+                &bare[eq + 1..]
+                    .chars()
+                    .take_while(|character| character.is_whitespace())
+                    .collect::<String>(),
+            );
+            output.push_str(value);
+            if body.ends_with('\r') {
+                output.push('\r');
+            }
+            if line.ends_with('\n') {
+                output.push('\n');
+            }
         }
+        return Ok(output);
     }
-    if !found {
-        let section_header = format!("[{section}]");
-        if replacement.is_some() {
-            if current == section.as_str() && !output.ends_with('\n') {
-                output.push('\n');
-            }
-            if !output.is_empty() && !output.ends_with('\n') {
-                output.push('\n');
-            }
-            if current != section.as_str() {
-                if !output.is_empty() && !output.ends_with("\n\n") {
-                    output.push('\n');
-                }
-                output.push_str(&section_header);
-                output.push('\n');
-            }
-            output.push_str(key);
-            output.push('=');
-            output.push_str(replacement.unwrap_or_default());
-            if content.ends_with('\n') || !output.ends_with('\n') {
-                output.push('\n');
-            }
-            return Ok(output);
-        }
+
+    let Some(value) = replacement else {
         return Err(DocumentError::PathNotFound {
             path: path.to_string(),
         });
+    };
+
+    // A new key belongs at the end of its own section's block. Appending it at
+    // end of file instead re-opens a section that already closed, and the
+    // duplicate header leaves the document unparseable by the same parser that
+    // just wrote it — a successful `set` that destroys the file.
+    let mut section_seen = false;
+    let mut next_header = None;
+    for (index, line) in lines.iter().enumerate() {
+        let Some(name) = section_header(line) else {
+            continue;
+        };
+        if section_seen {
+            next_header = Some(index);
+            break;
+        }
+        if name == *section {
+            section_seen = true;
+        }
+    }
+
+    let entry = format!("{key}={value}{newline}");
+    let mut output = String::with_capacity(content.len() + entry.len());
+    match (section_seen, next_header) {
+        (true, Some(mut at)) => {
+            // Step back over the blank lines separating the two sections, so
+            // the entry lands inside its own block rather than after the gap.
+            while at > 0 && lines[at - 1].trim().is_empty() {
+                at -= 1;
+            }
+            for line in &lines[..at] {
+                output.push_str(line);
+            }
+            ensure_terminated(&mut output, newline);
+            output.push_str(&entry);
+            for line in &lines[at..] {
+                output.push_str(line);
+            }
+        }
+        (true, None) => {
+            output.push_str(content);
+            ensure_terminated(&mut output, newline);
+            output.push_str(&entry);
+        }
+        (false, _) => {
+            output.push_str(content);
+            if !output.is_empty() {
+                ensure_terminated(&mut output, newline);
+                output.push_str(newline);
+            }
+            output.push_str(&format!("[{section}]{newline}"));
+            output.push_str(&entry);
+        }
     }
     Ok(output)
 }

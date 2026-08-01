@@ -1,5 +1,4 @@
-#[cfg(any(feature = "cli", feature = "cli-help"))]
-use crate::protocol::build_cli_error;
+use crate::formatting::OutputFormat;
 use crate::protocol::{
     BuildError, Event, LogLevel, ProtocolViolation, json_error, json_log, json_progress,
     json_result, validate_protocol_event,
@@ -10,15 +9,6 @@ use serde_json::Value;
 // ═══════════════════════════════════════════
 // Public API: CLI Helpers
 // ═══════════════════════════════════════════
-
-/// Output format for CLI and pipe/MCP modes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OutputFormat {
-    Json,
-    /// Structure-preserving YAML (same semantics as [`OutputFormat::Json`]).
-    Yaml,
-    Plain,
-}
 
 /// Parsed and normalized log filters (trimmed, lowercased, deduplicated).
 ///
@@ -101,7 +91,7 @@ pub fn cli_parse_output(s: &str) -> Result<OutputFormat, String> {
 
 /// Normalize `--log` flag entries: trim, lowercase, deduplicate, remove empty.
 ///
-/// Accepts pre-split entries as produced by clap's `value_delimiter = ','`.
+/// Accepts pre-split entries produced by a caller's comma-list parser.
 ///
 /// ```
 /// use agent_first_data::{cli_parse_log_filters, LogFilters};
@@ -161,6 +151,12 @@ impl std::error::Error for CliEmitterError {
 impl From<std::io::Error> for CliEmitterError {
     fn from(err: std::io::Error) -> Self {
         Self::Write(err)
+    }
+}
+
+impl From<BuildError> for CliEmitterError {
+    fn from(err: BuildError) -> Self {
+        Self::Build(err)
     }
 }
 
@@ -231,7 +227,6 @@ pub struct CliEmitter<W: std::io::Write> {
     output_options: OutputOptions,
     strict_protocol: bool,
     terminal_emitted: bool,
-    log_fields_provider: Option<Box<dyn Fn() -> Value>>,
 }
 
 impl<W: std::io::Write> CliEmitter<W> {
@@ -252,7 +247,6 @@ impl<W: std::io::Write> CliEmitter<W> {
             output_options,
             strict_protocol: false,
             terminal_emitted: false,
-            log_fields_provider: None,
         }
     }
 
@@ -287,25 +281,12 @@ impl<W: std::io::Write> CliEmitter<W> {
             output_options,
             strict_protocol: false,
             terminal_emitted: false,
-            log_fields_provider: None,
         }
     }
 
     /// Require the AFDATA recommended strict profile for every emitted event.
     pub fn with_strict_protocol(mut self) -> Self {
         self.strict_protocol = true;
-        self
-    }
-
-    /// Set a provider for default log fields.
-    ///
-    /// The provider is called for every log event (via emit_log or emit with kind:log).
-    /// Its output is merged as extension fields; explicit call-site fields take precedence.
-    pub fn with_log_fields<F>(mut self, provider: F) -> Self
-    where
-        F: Fn() -> Value + 'static,
-    {
-        self.log_fields_provider = Some(Box::new(provider));
         self
     }
 
@@ -332,10 +313,7 @@ impl<W: std::io::Write> CliEmitter<W> {
 
     /// Convenience: build and emit an error event.
     pub fn emit_error(&mut self, code: &str, message: &str) -> Result<(), CliEmitterError> {
-        match json_error(code, message).build() {
-            Ok(event) => self.emit(event),
-            Err(err) => Err(CliEmitterError::Build(err)),
-        }
+        self.emit(json_error(code, message).build()?)
     }
 
     /// Convenience: build and emit a progress event.
@@ -343,27 +321,15 @@ impl<W: std::io::Write> CliEmitter<W> {
         self.emit(json_progress(serde_json::json!({ "message": message })).build())
     }
 
-    /// Convenience: build and emit a log event with default fields.
-    ///
-    /// Applies log_fields_provider if configured; explicit fields take precedence.
+    /// Convenience: build and emit a log event.
     pub fn emit_log(&mut self, level: LogLevel, message: &str) -> Result<(), CliEmitterError> {
-        let mut event = json_log(serde_json::json!({
+        self.emit(
+            json_log(serde_json::json!({
             "level": level.as_str(),
             "message": message,
-        }))
-        .build()
-        .into_value();
-        if let Some(provider) = &self.log_fields_provider {
-            let provider_fields = provider();
-            if let Some(log_obj) = event.get_mut("log").and_then(|v| v.as_object_mut())
-                && let Value::Object(fields) = provider_fields
-            {
-                for (k, v) in fields {
-                    log_obj.entry(k).or_insert(v);
-                }
-            }
-        }
-        self.write_event(event)
+            }))
+            .build(),
+        )
     }
 
     /// Emit `event` as the terminal event and resolve the outcome to a process
@@ -554,238 +520,4 @@ pub fn cli_render_version(
     }
     rendered.push('\n');
     rendered
-}
-
-/// Render version output from raw argv if `--version` or `-V` is present.
-///
-/// `raw_args` should be the full argv vector, including argv[0], as produced by
-/// `std::env::args()`. The helper intentionally runs before clap or another
-/// parser so explicit `--output json|yaml|plain` is honored instead of being
-/// bypassed by built-in version handling. `cmd` is the caller's own
-/// `clap::Command` (typically `Cli::command()`) — used to inherit the declared
-/// `--output` default and to look up which flags take a value, so any global
-/// flag the caller defines (`--stdout-file`, or one added later) is recognized
-/// without the pre-parser having to hardcode its name.
-///
-/// Only a *top-level* version request is recognized: scanning stops at the first
-/// positional argument (the subcommand), so `tool sub --version <value>` leaves
-/// `--version` for the subcommand's parser rather than printing the tool version.
-/// That boundary check is unconditional and runs before any flag is inspected —
-/// it is unaffected by `cmd`, which only decides how many argv slots a
-/// *recognized flag* consumes, so a flag's value is never mistaken for it.
-///
-/// The one blessed behavior: `--version` always answers with a protocol-v1
-/// `kind:"result"` version event (payload `{ "code": "version", "name", ...
-/// }`, see [`build_cli_version`]). An explicit `--output` wins;
-/// otherwise the handler inherits the command's declared `--output` default,
-/// falling back to JSON. Returns a standard [`build_cli_error`] event when the
-/// request is malformed, for example `--version --output xml`.
-#[cfg(any(feature = "cli", feature = "cli-help"))]
-pub fn cli_handle_version_or_continue(
-    raw_args: &[String],
-    cmd: &clap::Command,
-    name: &str,
-    display_name: Option<&str>,
-    version: &str,
-    build: Option<&str>,
-) -> Result<Option<String>, Event> {
-    let parsed = parse_version_request(raw_args, cmd);
-    if !parsed.version_requested {
-        return Ok(None);
-    }
-    if let Some(error) = parsed.output_error {
-        let event = build_cli_error(
-            &error,
-            Some("valid version output formats: json, yaml, plain"),
-        );
-        return Err(event);
-    }
-    Ok(Some(cli_render_version(
-        name,
-        display_name,
-        version,
-        build,
-        parsed
-            .output_format
-            .or_else(|| command_output_default(cmd))
-            .unwrap_or(OutputFormat::Json),
-    )))
-}
-
-#[cfg(any(feature = "cli", feature = "cli-help"))]
-fn command_output_default(cmd: &clap::Command) -> Option<OutputFormat> {
-    cmd.get_arguments()
-        .find(|arg| arg.get_long() == Some("output"))
-        .and_then(|arg| arg.get_default_values().first())
-        .and_then(|value| value.to_str())
-        .and_then(|value| cli_parse_output(value).ok())
-}
-
-#[cfg(any(feature = "cli", feature = "cli-help"))]
-struct ParsedVersionRequest {
-    version_requested: bool,
-    output_format: Option<OutputFormat>,
-    output_error: Option<String>,
-}
-
-/// Drop argv[0] from a raw argument vector.
-///
-/// `raw_args` is documented as the full argv, so argv[0] is the program path and
-/// never an argument. The one concession is a caller that passes bare arguments:
-/// argv[0] can never start with `-`, so a leading `-` means the vector is
-/// already stripped. Matching argv[0] against subcommand names would be a
-/// second, unsafe concession — a binary legitimately named after one of its own
-/// subcommands would have its program path parsed as that subcommand.
-#[cfg(any(feature = "cli", feature = "cli-help"))]
-pub(crate) fn strip_argv0(raw_args: &[String]) -> &[String] {
-    match raw_args.first() {
-        Some(first) if first.starts_with('-') => raw_args,
-        _ => raw_args.get(1..).unwrap_or(&[]),
-    }
-}
-
-#[cfg(any(feature = "cli", feature = "cli-help"))]
-fn parse_version_request(raw_args: &[String], cmd: &clap::Command) -> ParsedVersionRequest {
-    let args = strip_argv0(raw_args);
-    let mut version_requested = false;
-    let mut output_format = None;
-    let mut output_error = None;
-
-    let mut i = 0usize;
-    while i < args.len() {
-        let arg = args[i].as_str();
-        if arg == "--" {
-            break;
-        }
-        // The first positional argument marks the subcommand boundary. Past it,
-        // `--version` (and `-V`) belong to the subcommand's own parser, matching
-        // git/cargo/clap: the pre-parser only owns a top-level version request.
-        if !arg.starts_with('-') {
-            break;
-        }
-
-        let (flag_name, inline_value) = split_flag(arg);
-        if arg == "--version" {
-            version_requested = true;
-            i += 1;
-            continue;
-        }
-
-        // `--output-to` takes a value but does not affect version text output.
-        // Consume its space-separated value so it is not mistaken for the
-        // subcommand boundary (which would hide a later `--version`/`--output`).
-        if flag_name == Some("output-to") {
-            let has_space_value = inline_value.is_none()
-                && args
-                    .get(i + 1)
-                    .map(|next| !next.starts_with('-'))
-                    .unwrap_or(false);
-            i += if has_space_value { 2 } else { 1 };
-            continue;
-        }
-
-        if flag_name == Some("output") {
-            let value = inline_value.or_else(|| {
-                args.get(i + 1)
-                    .map(String::as_str)
-                    .filter(|next| !next.starts_with('-'))
-            });
-            if let Some(value) = value {
-                match cli_parse_output(value) {
-                    Ok(format) => set_version_output_format(
-                        &mut output_format,
-                        format,
-                        &format!("--output {value}"),
-                        &mut output_error,
-                    ),
-                    Err(err) => output_error = Some(err),
-                }
-            } else {
-                output_error =
-                    Some("missing value for --output: expected json, yaml, or plain".to_string());
-            }
-            i += if inline_value.is_some() || value.is_none() {
-                1
-            } else {
-                2
-            };
-            continue;
-        }
-
-        // Any other flag: ask the caller's real Command whether it takes a
-        // value (covers `--stdout-file`/`--stderr-file` and any other global
-        // flag the caller defines) so its value is never mistaken for the
-        // subcommand boundary above.
-        let has_space_value = inline_value.is_none()
-            && args
-                .get(i + 1)
-                .map(|next| !next.starts_with('-'))
-                .unwrap_or(false);
-        i += if has_space_value && flag_takes_value(cmd, arg) {
-            2
-        } else {
-            1
-        };
-    }
-
-    ParsedVersionRequest {
-        version_requested,
-        output_format,
-        output_error,
-    }
-}
-
-#[cfg(any(feature = "cli", feature = "cli-help"))]
-fn set_version_output_format(
-    current: &mut Option<OutputFormat>,
-    next: OutputFormat,
-    source: &str,
-    output_error: &mut Option<String>,
-) {
-    if let Some(existing) = current
-        && *existing != next
-    {
-        *output_error = Some(format!(
-            "conflicting output formats: {source} conflicts with previous output format"
-        ));
-        return;
-    }
-    *current = Some(next);
-}
-
-#[cfg(any(feature = "cli", feature = "cli-help"))]
-fn split_flag(arg: &str) -> (Option<&str>, Option<&str>) {
-    if !arg.starts_with('-') || arg == "-" {
-        return (None, None);
-    }
-    let (flag, value) = arg.split_once('=').unwrap_or((arg, ""));
-    let name = flag.trim_start_matches('-');
-    if name.is_empty() {
-        (None, None)
-    } else if arg.contains('=') {
-        (Some(name), Some(value))
-    } else {
-        (Some(name), None)
-    }
-}
-
-// A local copy, not a shared import from `help` (gated behind the stricter
-// `cli-help` alone): this parser only requires the more basic `cli` feature,
-// mirroring how `split_flag` above is already duplicated rather than shared.
-#[cfg(any(feature = "cli", feature = "cli-help"))]
-fn flag_takes_value(cmd: &clap::Command, raw_flag: &str) -> bool {
-    let Some(flag) = raw_flag.strip_prefix('-') else {
-        return false;
-    };
-    let name = flag.trim_start_matches('-');
-    cmd.get_arguments().any(|arg| {
-        let long_matches = arg.get_long().is_some_and(|long| long == name);
-        let short_matches =
-            name.len() == 1 && arg.get_short().is_some_and(|short| name.starts_with(short));
-        (long_matches || short_matches)
-            && matches!(
-                arg.get_action(),
-                clap::ArgAction::Set | clap::ArgAction::Append
-            )
-    })
 }

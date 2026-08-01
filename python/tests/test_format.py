@@ -48,6 +48,40 @@ def _load(name):
         return json.load(f)
 
 
+def test_builder_contract_fixtures():
+    for case in _load("builder_contract.json"):
+        action = case["action"]
+        builder = json_error("code", "message")
+        if action == "empty_code":
+            builder = json_error("", "message")
+        elif action == "empty_message":
+            builder = json_error("code", "")
+        elif action == "empty_hint":
+            builder.hint("")
+        elif action == "bulk_non_object":
+            builder.fields(1)
+        elif action == "reserved_field":
+            builder.field("code", "other")
+        elif action == "non_object_trace":
+            builder.trace(1)
+        elif action == "serialization_failure":
+            circular = {}
+            circular["self"] = circular
+            builder.field("bad", circular)
+        else:
+            raise AssertionError(f"unknown action {action}")
+
+        try:
+            event = builder.build()
+            built = True
+        except EventBuildError:
+            event = None
+            built = False
+        assert built is case["should_build"], f"[builder_contract/{case['name']}]"
+        if built and "hint_present" in case:
+            assert ("hint" in event.to_dict()["error"]) is case["hint_present"]
+
+
 def _redaction_options(case):
     opts = case.get("options", {})
     policy = RedactionPolicy(opts["policy"]) if "policy" in opts else None
@@ -57,11 +91,22 @@ def _redaction_options(case):
 # --- Redact fixtures ---
 
 
+def test_redact_fixtures():
+    for case in _load("redact.json"):
+        name = case["name"]
+        got = redacted_value(case["input"])
+        assert got == case["expected"], f"[redact/{name}] got {got!r}"
+
+
 def test_redact_url_fixtures():
     for case in _load("redact_url.json"):
         name = case["name"]
         options = _redaction_options(case)
-        got = redact_url_secrets(case["input"], secret_names=options.secret_names)
+        got = redact_url_secrets(
+            case["input"],
+            secret_names=options.secret_names,
+            policy=options.policy,
+        )
         assert got == case["expected"], f"[redact_url/{name}] got {got!r}"
 
 
@@ -118,6 +163,148 @@ def test_security_fixtures():
                 assert needle in output, f"[security/{name}] output missing {needle!r}: {output}"
             for needle in case["must_not_contain"]:
                 assert needle not in output, f"[security/{name}] output leaked {needle!r}: {output}"
+
+
+# --- URL fragments carry secrets too ---
+
+
+def test_url_fragment_params_redacted_like_query_params():
+    assert (
+        redact_url_secrets("https://h/p?token_secret=QUERYLEAK#token_secret=FRAGLEAK")
+        == "https://h/p?token_secret=***#token_secret=***"
+    )
+
+
+def test_url_fragment_params_redacted_without_a_query():
+    # The OAuth implicit-flow shape: the credential exists only after '#'.
+    assert (
+        redact_url_secrets("https://h/cb#access_token_secret=abc&state=xyz")
+        == "https://h/cb#access_token_secret=***&state=xyz"
+    )
+
+
+def test_url_fragment_without_params_is_preserved():
+    for url in ("https://h/p?a=1#section", "https://h/p#", "https://h/p#a/b?c"):
+        assert redact_url_secrets(url) == url, f"fragment mangled: {url}"
+
+
+def test_url_fragment_honors_secret_names():
+    assert (
+        redact_url_secrets("https://h/cb#token=abc&page=2", secret_names=["token"])
+        == "https://h/cb#token=***&page=2"
+    )
+
+
+# --- One policy meaning across value, argv, url ---
+
+
+def _scoped_value():
+    return {
+        "result": {"api_key_secret": "sk-result"},
+        "trace": {"api_key_secret": "sk-trace"},
+    }
+
+
+def _argv():
+    return ["tool", "--api-key-secret=sk-live"]
+
+
+def test_all_policy_redacts_every_path():
+    policy = RedactionPolicy.All
+    assert redacted_value(_scoped_value(), policy=policy) == {
+        "result": {"api_key_secret": "***"},
+        "trace": {"api_key_secret": "***"},
+    }
+    assert redact_argv(_argv(), policy=policy) == ["tool", "--api-key-secret=***"]
+    assert (
+        redact_url_secrets("https://u:pw@h/cb?token_secret=abc", policy=policy)
+        == "https://u:***@h/cb?token_secret=***"
+    )
+
+
+def test_trace_only_scopes_a_value_but_redacts_argv_and_url_in_full():
+    policy = RedactionPolicy.TraceOnly
+    # Scoped input: only the `trace` half is scrubbed.
+    assert redacted_value(_scoped_value(), policy=policy) == {
+        "result": {"api_key_secret": "sk-result"},
+        "trace": {"api_key_secret": "***"},
+    }
+    # Unscoped input: a command line and a bare URL have no non-`trace` half to
+    # leave alone, so they are redacted like `All`.
+    assert redact_argv(_argv(), policy=policy) == ["tool", "--api-key-secret=***"]
+    assert (
+        redact_url_secrets("https://u:pw@h/cb?token_secret=abc", policy=policy)
+        == "https://u:***@h/cb?token_secret=***"
+    )
+
+
+def test_off_policy_disables_every_path():
+    policy = RedactionPolicy.Off
+    assert redacted_value(_scoped_value(), policy=policy) == _scoped_value()
+    assert redact_argv(_argv(), policy=policy) == _argv()
+    assert (
+        redact_url_secrets("https://u:pw@h/cb?token_secret=abc", policy=policy)
+        == "https://u:pw@h/cb?token_secret=abc"
+    )
+
+
+def test_absent_url_policy_matches_the_all_policy():
+    url = "https://u:pw@h/cb?token_secret=abc#id_token_secret=xyz"
+    assert redact_url_secrets(url) == redact_url_secrets(url, policy=RedactionPolicy.All)
+
+
+# --- `_secret` stripping follows redaction ---
+
+
+def _plain(value, policy):
+    return render(value, OutputFormat.PLAIN, options=OutputOptions(policy=policy))
+
+
+def test_plain_strips_secret_suffix_once_the_value_is_redacted():
+    assert _plain({"api_key_secret": "sk-live-xxx"}, RedactionPolicy.All) == "api_key=***"
+
+
+def test_plain_keeps_secret_suffix_when_redaction_is_off():
+    # Stripping here would hand a live credential to a reader under a name that
+    # no longer says it is one.
+    assert (
+        _plain({"api_key_secret": "sk-live-xxx"}, RedactionPolicy.Off)
+        == "api_key_secret=sk-live-xxx"
+    )
+    assert (
+        _plain({"API_KEY_SECRET": "sk-live-xxx"}, RedactionPolicy.Off)
+        == "API_KEY_SECRET=sk-live-xxx"
+    )
+
+
+def test_plain_keeps_secret_suffix_outside_trace_under_trace_only():
+    assert (
+        _plain(
+            {
+                "api_key_secret": "sk-live-xxx",
+                "trace": {"request_secret": "top-secret"},
+            },
+            RedactionPolicy.TraceOnly,
+        )
+        == "api_key_secret=sk-live-xxx trace.request=***"
+    )
+
+
+def test_plain_keeps_secret_suffix_on_an_unredacted_subtree():
+    assert (
+        _plain({"db_secret": {"password": "hunter2"}}, RedactionPolicy.Off)
+        == "db_secret.password=hunter2"
+    )
+    assert _plain({"db_secret": {"password": "hunter2"}}, RedactionPolicy.All) == "db=***"
+
+
+def test_plain_unstripped_secret_key_does_not_collide_with_its_stem():
+    # Keeping the suffix also means no collision to fall back from: both fields
+    # keep their own name and value.
+    assert (
+        _plain({"api_key": "public", "api_key_secret": "sk-live-xxx"}, RedactionPolicy.Off)
+        == "api_key=public api_key_secret=sk-live-xxx"
+    )
 
 
 # --- Protocol fixtures ---
@@ -198,6 +385,48 @@ def test_protocol_strict_fixtures():
             assert not case["valid"], case["name"]
         else:
             assert case["valid"], case["name"]
+
+
+# --- LogLevel string shape ---
+#
+# LogLevel is `class LogLevel(str, Enum)`, not `enum.StrEnum`, because StrEnum
+# is 3.11-only and the package's requires-python floor is lower. The two spell
+# `str(member)`/`format(member)` differently ('info' vs 'LogLevel.INFO'), and
+# that spelling has moved between Python releases, so nothing may render a
+# LogLevel through its `__str__`. The wire form is the value in all four
+# language implementations (Go's `type LogLevel string`, TypeScript's
+# `"debug" | "info" | ...`), and these pin that for Python.
+
+
+def test_log_level_is_a_string_carrying_its_value():
+    assert LogLevel.INFO.value == "info"
+    assert LogLevel.INFO == "info"
+    assert LogLevel("info") is LogLevel.INFO
+    assert json.dumps(LogLevel.INFO) == '"info"'
+
+
+def test_log_level_renders_as_its_value_in_every_format():
+    payload = {"level": LogLevel.WARN}
+    assert render(payload, OutputFormat.JSON) == '{"level":"warn"}'
+    assert render(payload, OutputFormat.YAML) == '---\nlevel: "warn"'
+    # The plain renderer f-string-interpolates scalars, which is where a
+    # str-mixin member would otherwise leak as `level=LogLevel.WARN`.
+    assert render(payload, OutputFormat.PLAIN) == "level=warn"
+
+
+def test_log_level_renders_as_its_value_when_nested_or_used_as_a_key():
+    payload = {"levels": [LogLevel.DEBUG, LogLevel.ERROR], LogLevel.INFO: "seen"}
+    assert render(payload, OutputFormat.JSON) == '{"levels":["debug","error"],"info":"seen"}'
+    assert render(payload, OutputFormat.PLAIN) == "info=seen levels=debug,error"
+
+
+def test_redacted_value_normalizes_str_enum_members_to_plain_strings():
+    # The single normalization point every renderer depends on: a str-mixin
+    # member must leave the sanitizer as an exact str, not as an enum that
+    # happens to be a str.
+    out = redacted_value({"level": LogLevel.INFO})
+    assert out == {"level": "info"}
+    assert type(out["level"]) is str
 
 
 def test_error_builder_rejects_reserved_extension_fields():
@@ -289,8 +518,9 @@ def test_output_format_fixtures():
         got_yaml = render(inp, OutputFormat.YAML)
         assert got_yaml == case["expected_yaml"], f"[output/{name}] yaml mismatch: {got_yaml!r}"
 
-        got_plain = render(inp, OutputFormat.PLAIN)
-        assert got_plain == case["expected_plain"], f"[output/{name}] plain mismatch: {got_plain!r}"
+        if "expected_plain" in case:
+            got_plain = render(inp, OutputFormat.PLAIN)
+            assert got_plain == case["expected_plain"], f"[output/{name}] plain mismatch: {got_plain!r}"
 
 
 def test_render_yaml_raw_keeps_suffix_keys_and_structure():
@@ -517,6 +747,19 @@ def test_number_fidelity_fixtures():
         if "expected_yaml" in case:
             got_yaml = render(decoded.result, OutputFormat.YAML)
             assert got_yaml == case["expected_yaml"], f"[number_fidelity/{name}] yaml mismatch: {got_yaml!r}"
+        if "expected_plain" in case:
+            got_plain = render(decoded.result, OutputFormat.PLAIN)
+            assert got_plain == case["expected_plain"], f"[number_fidelity/{name}] plain mismatch: {got_plain!r}"
+
+
+def test_protocol_decode_fixtures():
+    for case in _load("protocol_decode.json"):
+        try:
+            decode_protocol_event(case["input_line"])
+            valid = True
+        except EventDecodeError:
+            valid = False
+        assert valid is case["valid"], f"[protocol_decode/{case['name']}]"
 
 
 def test_number_fidelity_does_not_regress_ordinary_decoded_numbers_in_plain_output():

@@ -57,28 +57,6 @@
       ]
     }
   ],
-  "argv_cases": [
-    {
-      "name": "inline and space separated secret argv",
-      "options": {
-        "secret_names": [
-          "legacy-key"
-        ]
-      },
-      "input": [
-        "--api-key-secret=sk-inline",
-        "--legacy-key",
-        "legacy-space",
-        "free text api_key_secret=visible"
-      ],
-      "expected": [
-        "--api-key-secret=***",
-        "--legacy-key",
-        "***",
-        "free text api_key_secret=visible"
-      ]
-    }
-  ],
   "help_default_cases": [
     {
       "name": "secret help default",

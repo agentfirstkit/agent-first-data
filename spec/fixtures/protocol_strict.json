@@ -3,60 +3,188 @@
     "name": "complete_recommended_stream",
     "valid": true,
     "events": [
-      {"kind":"log","log":{"message":"starting","level":"info"},"trace":{}},
-      {"kind":"progress","progress":{"message":"working","current":1,"total":2},"trace":{}},
-      {"kind":"result","result":{"ok":true},"trace":{"duration_ms":2}}
+      {
+        "kind": "log",
+        "log": {
+          "message": "starting",
+          "level": "info"
+        },
+        "trace": {}
+      },
+      {
+        "kind": "progress",
+        "progress": {
+          "message": "working",
+          "current": 1,
+          "total": 2
+        },
+        "trace": {}
+      },
+      {
+        "kind": "result",
+        "result": {
+          "ok": true
+        },
+        "trace": {
+          "duration_ms": 2
+        }
+      }
     ]
   },
   {
     "name": "log_with_timestamp_extension",
     "valid": true,
     "events": [
-      {"kind":"log","log":{"message":"request","level":"info","timestamp_epoch_ms":1710000000000},"trace":{}},
-      {"kind":"result","result":{"ok":true},"trace":{}}
+      {
+        "kind": "log",
+        "log": {
+          "message": "request",
+          "level": "info",
+          "timestamp_epoch_ms": 1710000000000
+        },
+        "trace": {}
+      },
+      {
+        "kind": "result",
+        "result": {
+          "ok": true
+        },
+        "trace": {}
+      }
     ]
   },
   {
     "name": "error_with_retryable",
     "valid": true,
     "events": [
-      {"kind":"error","error":{"code":"network_error","message":"connection failed","retryable":true},"trace":{}}
+      {
+        "kind": "error",
+        "error": {
+          "code": "network_error",
+          "message": "connection failed",
+          "retryable": true
+        },
+        "trace": {}
+      }
     ]
   },
   {
     "name": "missing_terminal_trace",
     "valid": false,
-    "events": [{"kind":"result","result":{"ok":true}}]
+    "events": [
+      {
+        "kind": "result",
+        "result": {
+          "ok": true
+        }
+      }
+    ]
   },
   {
     "name": "log_with_code_field",
     "valid": true,
     "events": [
-      {"kind":"log","log":{"code":"cache_miss","message":"starting","level":"info"},"trace":{}},
-      {"kind":"result","result":{},"trace":{}}
+      {
+        "kind": "log",
+        "log": {
+          "code": "cache_miss",
+          "message": "starting",
+          "level": "info"
+        },
+        "trace": {}
+      },
+      {
+        "kind": "result",
+        "result": {},
+        "trace": {}
+      }
     ]
   },
   {
     "name": "log_payload_is_tool_defined",
     "valid": true,
     "events": [
-      {"kind":"log","log":{"category":"startup"},"trace":{}},
-      {"kind":"result","result":{},"trace":{}}
+      {
+        "kind": "log",
+        "log": {
+          "category": "startup"
+        },
+        "trace": {}
+      },
+      {
+        "kind": "result",
+        "result": {},
+        "trace": {}
+      }
     ]
   },
   {
     "name": "progress_payload_is_tool_defined",
     "valid": true,
     "events": [
-      {"kind":"progress","progress":[1,10],"trace":{}},
-      {"kind":"error","error":{"code":"failed","message":"failed","retryable":false},"trace":{}}
+      {
+        "kind": "progress",
+        "progress": [
+          1,
+          10
+        ],
+        "trace": {}
+      },
+      {
+        "kind": "error",
+        "error": {
+          "code": "failed",
+          "message": "failed",
+          "retryable": false
+        },
+        "trace": {}
+      }
     ]
   },
   {
     "name": "error_without_retryable",
     "valid": false,
     "events": [
-      {"kind":"error","error":{"code":"failed","message":"failed"},"trace":{}}
+      {
+        "kind": "error",
+        "error": {
+          "code": "failed",
+          "message": "failed"
+        },
+        "trace": {}
+      }
+    ]
+  },
+  {
+    "name": "hand_written_cli_error_stays_generic",
+    "valid": true,
+    "events": [
+      {
+        "kind": "error",
+        "error": {
+          "code": "cli_error",
+          "message": "missing --sql",
+          "hint": "pass --sql <QUERY>",
+          "retryable": false
+        },
+        "trace": {}
+      }
+    ]
+  },
+  {
+    "name": "compiled_cli_error_names_the_failure_in_its_code",
+    "valid": true,
+    "events": [
+      {
+        "kind": "error",
+        "error": {
+          "code": "cli_unknown_argument",
+          "message": "unknown argument `--bogus`",
+          "hint": "run `afdata get --help` and choose one registered combination",
+          "retryable": false
+        },
+        "trace": {}
+      }
     ]
   }
 ]

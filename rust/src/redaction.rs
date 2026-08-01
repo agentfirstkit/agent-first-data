@@ -6,6 +6,12 @@ use std::collections::HashSet;
 // ═══════════════════════════════════════════
 
 /// Which fields a [`Redactor`] scrubs. The default is [`RedactionPolicy::All`].
+///
+/// The policy selects a *scope* inside a structured value. A command line
+/// ([`Redactor::argv`]) and a bare URL string ([`Redactor::url`]) have no
+/// `result`/`trace` split to scope to, so on those two paths `TraceOnly`
+/// redacts in full like `All`, and only [`RedactionPolicy::Off`] turns
+/// redaction off.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RedactionPolicy {
     /// Redact every secret field anywhere in the value (the default).
@@ -15,6 +21,22 @@ pub enum RedactionPolicy {
     TraceOnly,
     /// Do not redact anything.
     Off,
+}
+
+impl RedactionPolicy {
+    /// Whether this policy redacts an input that carries no scope of its own —
+    /// a command line or a single URL string, as opposed to a JSON value with a
+    /// `trace` object to narrow to.
+    ///
+    /// `TraceOnly` narrows *where* redaction applies within a value; it does not
+    /// weaken redaction. A standalone argv or URL has no non-`trace` half to
+    /// leave alone — and both are diagnostic material by construction, the very
+    /// thing `TraceOnly` scrubs — so `TraceOnly` redacts them in full, exactly
+    /// like `All`. Only `Off`, the caller explicitly asking for raw output,
+    /// disables redaction, and it does so on all three paths alike.
+    fn redacts_unscoped_input(self) -> bool {
+        !matches!(self, RedactionPolicy::Off)
+    }
 }
 
 /// Rendering style for plain (logfmt) output only. JSON and YAML are always
@@ -75,13 +97,22 @@ impl Redactor {
     /// Redact secret components of a URL string using this redactor's settings.
     ///
     /// A query parameter is redacted iff its (form-decoded) name ends in
-    /// `_secret`/`_SECRET` or matches an exact entry in `secret_names`. The
-    /// userinfo password (`scheme://user:pass@host`) is always redacted as a
-    /// structural rule. Only the secret spans are replaced with `***`; every
-    /// other byte is preserved. A string that is not a single, whitespace-free,
+    /// `_secret`/`_SECRET` or matches an exact entry in `secret_names`. A
+    /// fragment written in the same `k=v&k=v` shape — how an OAuth implicit-flow
+    /// response carries its token — is redacted by that same rule; any other
+    /// fragment passes through byte-for-byte. The userinfo password
+    /// (`scheme://user:pass@host`) is always redacted as a structural rule.
+    /// Only the secret spans are replaced with `***`; every other byte is
+    /// preserved. A string that is not a single, whitespace-free,
     /// scheme-prefixed URL (including a URL embedded in surrounding prose) is
     /// returned unchanged.
+    ///
+    /// A URL is unscoped input: `RedactionPolicy::Off` returns it unchanged,
+    /// every other policy redacts it in full.
     pub fn url(&self, url: &str) -> String {
+        if !self.policy.redacts_unscoped_input() {
+            return url.to_string();
+        }
         let context = RedactionContext::from_redactor(self);
         redact_url_in_str(url, &context).unwrap_or_else(|| url.to_string())
     }
@@ -112,8 +143,11 @@ impl Redactor {
     ///
     /// Only long (`--`) flags are recognized, matching the convention's
     /// long-flags-only rule.
+    ///
+    /// A command line is unscoped input: `RedactionPolicy::Off` returns `args`
+    /// unchanged, every other policy redacts in full.
     pub fn argv<S: AsRef<str>>(&self, args: &[S]) -> Vec<String> {
-        if matches!(self.policy, RedactionPolicy::Off) {
+        if !self.policy.redacts_unscoped_input() {
             return args.iter().map(|arg| arg.as_ref().to_string()).collect();
         }
         let context = RedactionContext::from_redactor(self);
@@ -124,14 +158,14 @@ impl Redactor {
             if redact_next {
                 redact_next = false;
                 if !arg.starts_with('-') {
-                    out.push("***".to_string());
+                    out.push(REDACTED_MARKER.to_string());
                     continue;
                 }
             }
             if let Some(rest) = arg.strip_prefix("--") {
                 if let Some((name, _)) = rest.split_once('=') {
                     if is_secret_flag_name(name, &context) {
-                        out.push(format!("--{name}=***"));
+                        out.push(format!("--{name}={REDACTED_MARKER}"));
                         continue;
                     }
                 } else if is_secret_flag_name(rest, &context) {
@@ -218,6 +252,10 @@ pub fn redact_url_secrets(url: &str) -> String {
 // Secret Redaction
 // ═══════════════════════════════════════════
 
+/// The scalar every redacted span, value, and subtree is replaced with. Also
+/// the signal plain rendering reads to tell a hidden field from a live one.
+pub(crate) const REDACTED_MARKER: &str = "***";
+
 #[derive(Default)]
 pub(crate) struct RedactionContext {
     secret_names: HashSet<String>,
@@ -245,7 +283,7 @@ fn key_has_url_suffix(key: &str) -> bool {
 /// Whether a long flag's name is secret, normalizing the kebab-case flag
 /// spelling to the snake_case field spelling the convention is defined in.
 ///
-/// Ungated: core argv redaction relies on it, not just the `cli-help` renderer.
+/// Ungated: core argv redaction relies on it.
 pub(crate) fn is_secret_flag_name(flag_name: &str, context: &RedactionContext) -> bool {
     let normalized = flag_name.replace('-', "_");
     context.is_secret_key(&normalized) || context.is_secret_key(flag_name)
@@ -268,7 +306,7 @@ fn redact_secrets_with_context_depth(value: &mut Value, context: &RedactionConte
             let keys: Vec<String> = map.keys().cloned().collect();
             for key in keys {
                 if context.is_secret_key(&key) {
-                    map.insert(key, Value::String("***".into()));
+                    map.insert(key, Value::String(REDACTED_MARKER.into()));
                 } else if key_has_url_suffix(&key) {
                     if let Some(Value::String(s)) = map.get_mut(&key) {
                         *s = redact_url_field_value(s, context);
@@ -313,21 +351,29 @@ fn redact_url_in_str(s: &str, context: &RedactionContext) -> Option<String> {
 
     let new_authority = redact_userinfo_password(authority);
 
-    // Query runs from the first '?' to the first '#' (or end).
-    let new_remainder = match remainder.find('?') {
-        Some(q) => {
-            let (path, q_onwards) = remainder.split_at(q);
-            let query_body = &q_onwards[1..];
-            let (query, fragment) = match query_body.find('#') {
-                Some(h) => (&query_body[..h], &query_body[h..]),
-                None => (query_body, ""),
-            };
-            format!("{path}?{}{fragment}", redact_query(query, context))
-        }
-        None => remainder.to_string(),
+    // `remainder` is `path[?query][#fragment]`; '#' ends the query, so split the
+    // fragment off first and the query out of what is left.
+    let (before_fragment, fragment) = match remainder.split_once('#') {
+        Some((before, fragment)) => (before, Some(fragment)),
+        None => (remainder, None),
+    };
+    let new_before_fragment = match before_fragment.split_once('?') {
+        Some((path, query)) => format!("{path}?{}", redact_query(query, context)),
+        None => before_fragment.to_string(),
+    };
+    // A fragment gets the same treatment as the query: `k=v&k=v` after the '#'
+    // is exactly how an OAuth implicit-flow response hands back a token, so a
+    // secret-named fragment parameter must not survive where the identically
+    // named query parameter would not. A fragment that is not in that shape has
+    // no '=' in its segments and passes through byte-for-byte.
+    let new_fragment = match fragment {
+        Some(fragment) => format!("#{}", redact_query(fragment, context)),
+        None => String::new(),
     };
 
-    Some(format!("{scheme}://{new_authority}{new_remainder}"))
+    Some(format!(
+        "{scheme}://{new_authority}{new_before_fragment}{new_fragment}"
+    ))
 }
 
 fn redact_url_field_value(s: &str, context: &RedactionContext) -> String {
@@ -346,7 +392,7 @@ fn redact_url_field_value(s: &str, context: &RedactionContext) -> String {
     // connection string like `user:pass@host/db` has no scheme anchor for the
     // surgical span logic above, so blanket redaction is the safe default.
     if s.chars().any(char::is_whitespace) || s.contains('@') {
-        return "***".to_string();
+        return REDACTED_MARKER.to_string();
     }
     s.to_string()
 }
@@ -359,7 +405,11 @@ fn redact_userinfo_password(authority: &str) -> String {
     };
     let userinfo = &authority[..at];
     match userinfo.find(':') {
-        Some(colon) => format!("{}:***{}", &authority[..colon], &authority[at..]),
+        Some(colon) => format!(
+            "{}:{REDACTED_MARKER}{}",
+            &authority[..colon],
+            &authority[at..]
+        ),
         None => authority.to_string(),
     }
 }
@@ -380,7 +430,7 @@ fn redact_query(query: &str, context: &RedactionContext) -> String {
                 .map(|(k, _)| k.into_owned())
                 .unwrap_or_default();
             if context.is_secret_key(&name) {
-                format!("{raw_key}=***")
+                format!("{raw_key}={REDACTED_MARKER}")
             } else {
                 segment.to_string()
             }
@@ -427,5 +477,111 @@ fn apply_redaction_policy_with_context(
             }
         }
         RedactionPolicy::Off => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── URL fragments carry secrets too ──────────
+
+    #[test]
+    fn url_fragment_params_redacted_like_query_params() {
+        assert_eq!(
+            redact_url_secrets("https://h/p?token_secret=QUERYLEAK#token_secret=FRAGLEAK"),
+            "https://h/p?token_secret=***#token_secret=***"
+        );
+    }
+
+    #[test]
+    fn url_fragment_params_redacted_without_a_query() {
+        // The OAuth implicit-flow shape: the credential exists only after '#'.
+        assert_eq!(
+            redact_url_secrets("https://h/cb#access_token_secret=abc&state=xyz"),
+            "https://h/cb#access_token_secret=***&state=xyz"
+        );
+    }
+
+    #[test]
+    fn url_fragment_without_params_is_preserved() {
+        for url in [
+            "https://h/p?a=1#section",
+            "https://h/p#",
+            "https://h/p#a/b?c",
+        ] {
+            assert_eq!(redact_url_secrets(url), url);
+        }
+    }
+
+    #[test]
+    fn url_fragment_honors_secret_names() {
+        let redactor = Redactor::new().secret_names(vec!["token".to_string()]);
+        assert_eq!(
+            redactor.url("https://h/cb#token=abc&page=2"),
+            "https://h/cb#token=***&page=2"
+        );
+    }
+
+    // ── One policy meaning across value, argv, url ──────────
+
+    fn scoped_value() -> Value {
+        json!({
+            "result": {"api_key_secret": "sk-result"},
+            "trace": {"api_key_secret": "sk-trace"}
+        })
+    }
+
+    fn argv() -> Vec<String> {
+        vec!["tool".to_string(), "--api-key-secret=sk-live".to_string()]
+    }
+
+    #[test]
+    fn all_policy_redacts_every_path() {
+        let redactor = Redactor::new().policy(RedactionPolicy::All);
+        assert_eq!(
+            redactor.value(&scoped_value()),
+            json!({
+                "result": {"api_key_secret": "***"},
+                "trace": {"api_key_secret": "***"}
+            })
+        );
+        assert_eq!(redactor.argv(&argv()), vec!["tool", "--api-key-secret=***"]);
+        assert_eq!(
+            redactor.url("https://u:pw@h/cb?token_secret=abc"),
+            "https://u:***@h/cb?token_secret=***"
+        );
+    }
+
+    #[test]
+    fn trace_only_scopes_a_value_but_redacts_argv_and_url_in_full() {
+        let redactor = Redactor::new().policy(RedactionPolicy::TraceOnly);
+        // Scoped input: only the `trace` half is scrubbed.
+        assert_eq!(
+            redactor.value(&scoped_value()),
+            json!({
+                "result": {"api_key_secret": "sk-result"},
+                "trace": {"api_key_secret": "***"}
+            })
+        );
+        // Unscoped input: a command line and a bare URL have no non-`trace`
+        // half to leave alone, so they are redacted like `All`.
+        assert_eq!(redactor.argv(&argv()), vec!["tool", "--api-key-secret=***"]);
+        assert_eq!(
+            redactor.url("https://u:pw@h/cb?token_secret=abc"),
+            "https://u:***@h/cb?token_secret=***"
+        );
+    }
+
+    #[test]
+    fn off_policy_disables_every_path() {
+        let redactor = Redactor::new().policy(RedactionPolicy::Off);
+        assert_eq!(redactor.value(&scoped_value()), scoped_value());
+        assert_eq!(redactor.argv(&argv()), argv());
+        assert_eq!(
+            redactor.url("https://u:pw@h/cb?token_secret=abc"),
+            "https://u:pw@h/cb?token_secret=abc"
+        );
     }
 }

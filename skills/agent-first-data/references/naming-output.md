@@ -87,6 +87,11 @@ report) must pass argv through `redact_argv` first, or a `--*-secret` flag's
 value lands in the log verbatim. It redacts by flag name, not by value shape:
 free text and positionals are left alone.
 
+This is a structured-output guarantee, not process-boundary protection.
+`_secret` cannot scrub shell history, process argv, `/proc`, a parent process,
+or third-party logs. Keep live secrets out of argv whenever a non-argv source
+is available.
+
 ## Rendering contract
 
 Use one `render(value, format, options)` boundary:

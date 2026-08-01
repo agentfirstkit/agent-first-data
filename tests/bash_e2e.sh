@@ -116,6 +116,21 @@ propagated_output="$(
 [ "$propagated_output" = plain:stdout ] \
   || fail "argument output routing was not exported to child commands"
 
+if AFDATA_BIN="$AFDATA_BIN" AFDATA_OUTPUT=json AFDATA_OUTPUT_TO=split bash -c '
+  set -euo pipefail
+  source "$1"
+  afdata_args_begin "demo.sh [OPTIONS]"
+  afdata_args_parse --help --output plain
+' bash "$ROOTPATH/bash/afdata.sh" > "$TEST_TMP/help-output.stdout" 2> "$TEST_TMP/help-output.stderr"; then
+  fail "--help with --output returned success"
+else
+  help_output_status=$?
+fi
+[ "$help_output_status" -eq 2 ] || fail "--help with --output did not return status 2"
+[ ! -s "$TEST_TMP/help-output.stdout" ] || fail "--help with --output wrote raw help to stdout"
+[ "$(afdata_cli value --input-format json "$TEST_TMP/help-output.stderr" error.code)" = cli_error ] \
+  || fail "--help with --output did not emit a structured error"
+
 # An AFDATA Bash child contributes logs to its parent's stream, but only the
 # outermost script owns the unique terminal result.
 AFDATA_OUTPUT=json

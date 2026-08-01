@@ -50,5 +50,4 @@ export {
   buildCliError,
   buildCliVersion,
   cliRenderVersion,
-  cliHandleVersionOrContinue,
 } from "./cli.js";

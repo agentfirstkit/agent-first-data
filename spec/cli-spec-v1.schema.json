@@ -1,0 +1,334 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentfirstkit.org/schemas/agent-first-data/cli-spec-v1.schema.json",
+  "title": "AFDATA closed-world CLI spec v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "name",
+    "version",
+    "lifecycle_output",
+    "commands"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "cli-spec-v1"
+    },
+    "name": {
+      "$ref": "#/$defs/nonEmpty"
+    },
+    "version": {
+      "$ref": "#/$defs/nonEmpty"
+    },
+    "display_name": {
+      "$ref": "#/$defs/nonEmpty",
+      "description": "Human-facing product name, distinct from the binary identity in `name`."
+    },
+    "build": {
+      "$ref": "#/$defs/nonEmpty",
+      "description": "Opaque build identifier, such as a git commit SHA. Its meaning is the host's."
+    },
+    "about": {
+      "$ref": "#/$defs/nonEmpty"
+    },
+    "lifecycle_output": {
+      "$ref": "#/$defs/output"
+    },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/command"
+      }
+    }
+  },
+  "$defs": {
+    "nonEmpty": {
+      "type": "string",
+      "minLength": 1
+    },
+    "argumentId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "command": {
+      "type": "object",
+      "required": [
+        "command_path",
+        "arguments",
+        "combinations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "command_path": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "about": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "arguments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/argument"
+          }
+        },
+        "combinations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/combination"
+          }
+        }
+      }
+    },
+    "argument": {
+      "type": "object",
+      "required": [
+        "argument_id",
+        "syntax",
+        "value_type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "argument_id": {
+          "$ref": "#/$defs/argumentId"
+        },
+        "syntax": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "name"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "long"
+                },
+                "name": {
+                  "type": "string",
+                  "pattern": "^--[a-z0-9][a-z0-9-]*$"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "index"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "const": "positional"
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          ]
+        },
+        "value_type": {
+          "enum": [
+            "flag",
+            "string",
+            "i64",
+            "finite_f64",
+            "enum",
+            "json"
+          ]
+        },
+        "value_name": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "enum_values": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "default": true,
+        "repeatable": {
+          "const": true
+        },
+        "sensitive": {
+          "type": "boolean",
+          "description": "This argument's value must never be echoed back in help, errors, or logs."
+        },
+        "about": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "combination": {
+      "type": "object",
+      "required": [
+        "combination_id",
+        "action_id",
+        "output"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "combination_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "action_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "about": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "fixed": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/nonEmpty"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "one_of"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "one_of": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {
+                      "$ref": "#/$defs/nonEmpty"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "required": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/argumentId"
+          }
+        },
+        "optional": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/argumentId"
+          }
+        },
+        "output": {
+          "$ref": "#/$defs/output"
+        }
+      }
+    },
+    "fileSinks": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "stdout",
+          "stderr"
+        ]
+      }
+    },
+    "output": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "file_sinks"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "raw"
+            },
+            "file_sinks": {
+              "$ref": "#/$defs/fileSinks"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "lifecycle",
+            "formats",
+            "destinations",
+            "default_format",
+            "default_destination",
+            "file_sinks"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "protocol"
+            },
+            "lifecycle": {
+              "enum": [
+                "finite",
+                "stream"
+              ]
+            },
+            "formats": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "json",
+                  "yaml",
+                  "plain"
+                ]
+              }
+            },
+            "destinations": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "split",
+                  "stdout",
+                  "stderr"
+                ]
+              }
+            },
+            "default_format": {
+              "enum": [
+                "json",
+                "yaml",
+                "plain"
+              ]
+            },
+            "default_destination": {
+              "enum": [
+                "split",
+                "stdout",
+                "stderr"
+              ]
+            },
+            "file_sinks": {
+              "$ref": "#/$defs/fileSinks"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

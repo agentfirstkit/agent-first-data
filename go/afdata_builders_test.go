@@ -24,6 +24,45 @@ func TestBuildJSONResult(t *testing.T) {
 	}
 }
 
+func TestBuilderContractFixtures(t *testing.T) {
+	for _, tc := range loadFixture("builder_contract.json") {
+		name := tc["name"].(string)
+		t.Run(name, func(t *testing.T) {
+			action := tc["action"].(string)
+			builder := NewJSONError("code", "message")
+			switch action {
+			case "empty_code":
+				builder = NewJSONError("", "message")
+			case "empty_message":
+				builder = NewJSONError("code", "")
+			case "empty_hint":
+				builder.Hint("")
+			case "bulk_non_object":
+				builder.Extend(1)
+			case "reserved_field":
+				builder.Field("code", "other")
+			case "non_object_trace":
+				builder.Trace(1)
+			case "serialization_failure":
+				builder.Field("bad", func() {})
+			default:
+				t.Fatalf("unknown action %q", action)
+			}
+			event, err := builder.Build()
+			shouldBuild := tc["should_build"].(bool)
+			if (err == nil) != shouldBuild {
+				t.Fatalf("should_build=%v, error=%v", shouldBuild, err)
+			}
+			if expected, ok := tc["hint_present"].(bool); ok && err == nil {
+				_, present := event.Value()["error"].(map[string]any)["hint"]
+				if present != expected {
+					t.Fatalf("hint present=%v, want %v", present, expected)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildJSONResultWithTrace(t *testing.T) {
 	result := map[string]any{"hash": "abc"}
 	traceData := map[string]any{"duration_ms": float64(12)}
@@ -180,10 +219,7 @@ func TestBuildJSONLogFreePayload(t *testing.T) {
 }
 
 func TestBuildCLIError(t *testing.T) {
-	event, err := BuildCLIError("missing flag", "try --help")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	event := BuildCLIError("missing flag", "try --help")
 	envelope := event.Value()
 	errPayload := envelope["error"].(map[string]any)
 	if errPayload["code"] != "cli_error" {

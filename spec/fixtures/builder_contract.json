@@ -1,0 +1,38 @@
+[
+  {
+    "name": "empty_code_is_rejected",
+    "action": "empty_code",
+    "should_build": false
+  },
+  {
+    "name": "empty_message_is_rejected",
+    "action": "empty_message",
+    "should_build": false
+  },
+  {
+    "name": "empty_hint_is_ignored",
+    "action": "empty_hint",
+    "should_build": true,
+    "hint_present": false
+  },
+  {
+    "name": "bulk_non_object_is_rejected",
+    "action": "bulk_non_object",
+    "should_build": false
+  },
+  {
+    "name": "reserved_extension_field_is_rejected",
+    "action": "reserved_field",
+    "should_build": false
+  },
+  {
+    "name": "non_object_trace_is_rejected",
+    "action": "non_object_trace",
+    "should_build": false
+  },
+  {
+    "name": "serialization_failure_is_reported_at_build",
+    "action": "serialization_failure",
+    "should_build": false
+  }
+]

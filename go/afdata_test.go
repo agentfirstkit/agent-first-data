@@ -3,6 +3,7 @@ package afdata
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -118,6 +119,108 @@ func toStringSlice(value any) []string {
 		out = append(out, item.(string))
 	}
 	return out
+}
+
+// --- URL fragments carry secrets too ---
+
+func TestRedactURLFragmentParamsRedactedLikeQueryParams(t *testing.T) {
+	assertEqual(t,
+		RedactURLSecrets("https://h/p?token_secret=QUERYLEAK#token_secret=FRAGLEAK"),
+		"https://h/p?token_secret=***#token_secret=***")
+}
+
+func TestRedactURLFragmentParamsRedactedWithoutAQuery(t *testing.T) {
+	// The OAuth implicit-flow shape: the credential exists only after '#'.
+	assertEqual(t,
+		RedactURLSecrets("https://h/cb#access_token_secret=abc&state=xyz"),
+		"https://h/cb#access_token_secret=***&state=xyz")
+}
+
+func TestRedactURLFragmentWithoutParamsIsPreserved(t *testing.T) {
+	for _, rawURL := range []string{
+		"https://h/p?a=1#section",
+		"https://h/p#",
+		"https://h/p#a/b?c",
+	} {
+		assertEqual(t, RedactURLSecrets(rawURL), rawURL)
+	}
+}
+
+func TestRedactURLFragmentHonorsSecretNames(t *testing.T) {
+	redactor := Redactor{SecretNames: []string{"token"}}
+	assertEqual(t,
+		redactor.URL("https://h/cb#token=abc&page=2"),
+		"https://h/cb#token=***&page=2")
+}
+
+// --- One policy meaning across value, argv, url ---
+
+func scopedSecretValue() map[string]any {
+	return map[string]any{
+		"result": map[string]any{"api_key_secret": "sk-result"},
+		"trace":  map[string]any{"api_key_secret": "sk-trace"},
+	}
+}
+
+func secretArgv() []string {
+	return []string{"tool", "--api-key-secret=sk-live"}
+}
+
+func assertValueEqual(t *testing.T, got any, want map[string]any) {
+	t.Helper()
+	gotJSON, _ := json.Marshal(got)
+	wantJSON, _ := json.Marshal(want)
+	if string(gotJSON) != string(wantJSON) {
+		t.Errorf("value got %s, want %s", gotJSON, wantJSON)
+	}
+}
+
+func assertArgvEqual(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("argv got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("argv[%d] = %q, want %q (full: %q)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestAllPolicyRedactsEveryPath(t *testing.T) {
+	redactor := Redactor{Policy: RedactionAll}
+	assertValueEqual(t, redactor.Value(scopedSecretValue()), map[string]any{
+		"result": map[string]any{"api_key_secret": "***"},
+		"trace":  map[string]any{"api_key_secret": "***"},
+	})
+	assertArgvEqual(t, redactor.Argv(secretArgv()), []string{"tool", "--api-key-secret=***"})
+	assertEqual(t,
+		redactor.URL("https://u:pw@h/cb?token_secret=abc"),
+		"https://u:***@h/cb?token_secret=***")
+}
+
+func TestTraceOnlyScopesAValueButRedactsArgvAndURLInFull(t *testing.T) {
+	redactor := Redactor{Policy: RedactionTraceOnly}
+	// Scoped input: only the trace half is scrubbed.
+	assertValueEqual(t, redactor.Value(scopedSecretValue()), map[string]any{
+		"result": map[string]any{"api_key_secret": "sk-result"},
+		"trace":  map[string]any{"api_key_secret": "***"},
+	})
+	// Unscoped input: a command line and a bare URL have no non-trace half to
+	// leave alone, so they are redacted like All.
+	assertArgvEqual(t, redactor.Argv(secretArgv()), []string{"tool", "--api-key-secret=***"})
+	assertEqual(t,
+		redactor.URL("https://u:pw@h/cb?token_secret=abc"),
+		"https://u:***@h/cb?token_secret=***")
+}
+
+func TestOffPolicyDisablesEveryPath(t *testing.T) {
+	redactor := Redactor{Policy: RedactionOff}
+	assertValueEqual(t, redactor.Value(scopedSecretValue()), scopedSecretValue())
+	assertArgvEqual(t, redactor.Argv(secretArgv()), secretArgv())
+	assertEqual(t,
+		redactor.URL("https://u:pw@h/cb?token_secret=abc"),
+		"https://u:pw@h/cb?token_secret=abc")
 }
 
 func TestRedactFixtures(t *testing.T) {
@@ -502,7 +605,6 @@ func TestOutputFormatFixtures(t *testing.T) {
 			input := tc["input"]
 			expectedJSON := tc["expected_json"]
 			expectedYAML := tc["expected_yaml"].(string)
-			expectedPlain := tc["expected_plain"].(string)
 
 			jsonLine := Render(input, OutputFormatJson, OutputOptions{})
 			var gotJSON any
@@ -518,8 +620,10 @@ func TestOutputFormatFixtures(t *testing.T) {
 			if got := Render(input, OutputFormatYaml, OutputOptions{}); got != expectedYAML {
 				t.Errorf("yaml mismatch: got %q, want %q", got, expectedYAML)
 			}
-			if got := Render(input, OutputFormatPlain, OutputOptions{}); got != expectedPlain {
-				t.Errorf("plain mismatch: got %q, want %q", got, expectedPlain)
+			if expectedPlain, ok := tc["expected_plain"].(string); ok {
+				if got := Render(input, OutputFormatPlain, OutputOptions{}); got != expectedPlain {
+					t.Errorf("plain mismatch: got %q, want %q", got, expectedPlain)
+				}
 			}
 		})
 	}
@@ -1078,7 +1182,7 @@ func TestOutputPlainSecretsRedacted(t *testing.T) {
 
 func TestOutputPlainEmptyObject(t *testing.T) {
 	got := Render(map[string]any{}, OutputFormatPlain, OutputOptions{})
-	assertEqual(t, got, "")
+	assertEqual(t, got, "{}")
 }
 
 func TestOutputPlainBoolUnquoted(t *testing.T) {
@@ -1092,6 +1196,53 @@ func TestOutputPlainNestedSecrets(t *testing.T) {
 	}, OutputFormatPlain, OutputOptions{})
 	assertContains(t, got, "trace.api_key=***")
 	assertNotContains(t, got, "sk-123")
+}
+
+// --- `_secret` stripping follows redaction ---
+
+func plainWithPolicy(value any, policy RedactionPolicy) string {
+	return Render(value, OutputFormatPlain, OutputOptionsForPolicy(policy))
+}
+
+func TestOutputPlainStripsSecretSuffixOnceTheValueIsRedacted(t *testing.T) {
+	assertEqual(t,
+		plainWithPolicy(map[string]any{"api_key_secret": "sk-live-xxx"}, RedactionAll),
+		"api_key=***")
+}
+
+func TestOutputPlainKeepsSecretSuffixWhenRedactionIsOff(t *testing.T) {
+	// Stripping here would hand a live credential to a reader under a name that
+	// no longer says it is one.
+	assertEqual(t,
+		plainWithPolicy(map[string]any{"api_key_secret": "sk-live-xxx"}, RedactionOff),
+		"api_key_secret=sk-live-xxx")
+	assertEqual(t,
+		plainWithPolicy(map[string]any{"API_KEY_SECRET": "sk-live-xxx"}, RedactionOff),
+		"API_KEY_SECRET=sk-live-xxx")
+}
+
+func TestOutputPlainKeepsSecretSuffixOutsideTraceUnderTraceOnly(t *testing.T) {
+	assertEqual(t, plainWithPolicy(map[string]any{
+		"api_key_secret": "sk-live-xxx",
+		"trace":          map[string]any{"request_secret": "top-secret"},
+	}, RedactionTraceOnly), "api_key_secret=sk-live-xxx trace.request=***")
+}
+
+func TestOutputPlainKeepsSecretSuffixOnAnUnredactedSubtree(t *testing.T) {
+	subtree := func() map[string]any {
+		return map[string]any{"db_secret": map[string]any{"password": "hunter2"}}
+	}
+	assertEqual(t, plainWithPolicy(subtree(), RedactionOff), "db_secret.password=hunter2")
+	assertEqual(t, plainWithPolicy(subtree(), RedactionAll), "db=***")
+}
+
+func TestOutputPlainUnstrippedSecretKeyDoesNotCollideWithItsStem(t *testing.T) {
+	// Keeping the suffix also means no collision to fall back from: both fields
+	// keep their own name and value.
+	assertEqual(t, plainWithPolicy(map[string]any{
+		"api_key":        "public",
+		"api_key_secret": "sk-live-xxx",
+	}, RedactionOff), "api_key=public api_key_secret=sk-live-xxx")
 }
 
 // --- Test helpers ---
@@ -1138,4 +1289,35 @@ func deepEqualIgnoringTrace(a, b any) bool {
 	aJSON, _ := json.Marshal(a)
 	bJSON, _ := json.Marshal(b)
 	return string(aJSON) == string(bJSON)
+}
+
+// A float64 outside int64's range used to convert with a saturated result, so
+// an `_jpy` amount of 1e21 rendered as ¥9,223,372,036,854,775,807 — a wrong
+// number presented as a real one. Out of range must fall through to the raw
+// value, the way Rust does, rather than invent a plausible amount.
+func TestOutOfRangeFloatsFallThroughInsteadOfSaturating(t *testing.T) {
+	for _, key := range []string{"amount_jpy", "size_bytes", "price_usd_cents"} {
+		for _, value := range []float64{1e21, -1e21, 9223372036854775808.0, -9223372036854777856.0} {
+			got := Render(map[string]any{key: value}, OutputFormatPlain, OutputOptions{})
+			if !strings.HasPrefix(got, key+"=") {
+				t.Errorf("%s=%v: formatted an out-of-range value as %q; expected the raw fallback", key, value, got)
+			}
+			if strings.Contains(got, "9,223,372,036,854,775,807") {
+				t.Errorf("%s=%v: saturated to MaxInt64: %q", key, value, got)
+			}
+		}
+	}
+}
+
+// The boundary itself still formats: 2^63-1 is in range, 2^63 is not.
+func TestInt64BoundaryStillFormats(t *testing.T) {
+	got := Render(map[string]any{"amount_jpy": int64(math.MaxInt64)}, OutputFormatPlain, OutputOptions{})
+	if got != "amount=¥9,223,372,036,854,775,807" {
+		t.Errorf("MaxInt64 should format: got %q", got)
+	}
+	// The nearest float64 at or above 2^63 is 2^63 exactly, which is out of range.
+	got = Render(map[string]any{"amount_jpy": 9223372036854775808.0}, OutputFormatPlain, OutputOptions{})
+	if !strings.HasPrefix(got, "amount_jpy=") {
+		t.Errorf("2^63 should fall through: got %q", got)
+	}
 }

@@ -1,18 +1,18 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use agent_first_data::document::{
-    Document, DocumentError, DocumentFile, Format as DocumentFormat, Value as DocumentValue,
-    ValueType, get_path, guard_bare_overwrite, join_path, parse_path, value_from_type,
+    BareOverwrite, Document, DocumentError, DocumentFile, Format as DocumentFormat,
+    Value as DocumentValue, ValueType, get_path, guard_bare_overwrite, join_path, parse_path,
+    value_from_type,
 };
 use agent_first_data::{
-    ErrorBuilder, Event, OutputFormat, OutputOptions, OutputTo, PlainStyle, Redactor,
-    build_cli_error, cli_parse_output, is_valid_bcp47, is_valid_rfc3339, is_valid_rfc3339_date,
+    ArgSpec, CliOutcome, CliSpec, Combination, CommandSpec, ErrorBuilder, Event, OutputFormat,
+    OutputOptions, OutputPlan, OutputSpec, OutputTo, PlainStyle, Redactor, ResolvedInvocation,
+    build_afdata_cli, build_cli_error, cli_error_event, cli_help_event, cli_parse_output,
+    cli_version_event, is_valid_bcp47, is_valid_rfc3339, is_valid_rfc3339_date,
     is_valid_rfc3339_time, json_error, json_log, json_result, normalize_utc_offset, render,
-    validate_protocol_event, validate_protocol_stream,
+    render_cli_reference, validate_protocol_event, validate_protocol_stream,
 };
-#[cfg(any(feature = "cli", feature = "cli-help"))]
-use clap::CommandFactory;
-use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -20,313 +20,6 @@ use std::process::ExitCode;
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-#[derive(Parser)]
-#[command(
-    name = "afdata",
-    version,
-    // Bare `about` (no `= "..."`) is clap derive's own documented way to
-    // pull the short about from `CARGO_PKG_DESCRIPTION` — the crate
-    // `description`, itself synced from README.md's first paragraph by
-    // scripts/meta/sync-spore.py — instead of a second hand-written string
-    // that only `--help` would ever see and that would drift from it.
-    about,
-    //
-    // Deliberately never spells the word "skill": that command is
-    // feature-gated (`#[cfg(feature = "skill")]`) and a minimal build's
-    // help must not mention it at all (verified by `tests/cli_e2e.py`).
-    long_about = "Commands are grouped into two families: protocol tools \
-        that operate on AFDATA protocol-v1 JSON (lint, validate, render, emit), \
-        and document tools that read and edit JSON/TOML/YAML/dotenv/INI \
-        documents by dot-path (get, value, paths, keys, set, unset, add, \
-        remove). `shell bash` exports the sourceable Bash authoring kit. Every \
-        data command's first positional is its input; `-` reads stdin. Mutation \
-        commands (set/unset/add/remove) never read stdin.",
-    disable_help_subcommand = true
-)]
-struct Cli {
-    /// Output format: json, yaml, or plain (help also accepts markdown)
-    #[arg(long, global = true, default_value = "json")]
-    output: String,
-
-    /// Where protocol events go: split (default), stdout, or stderr.
-    ///
-    /// `split` (default, finite one-shot mode) sends `result` to stdout and
-    /// `error`/`progress`/`log` to stderr, so a shell capture or pipe never
-    /// mistakes a failure for data. `stdout`/`stderr` (event-stream mode)
-    /// collapse every event, including `error`, onto that one stream for a
-    /// consumer that reads it in order and branches on `kind`. Orthogonal to
-    /// `--output` (which selects format, not destination). A file sink is
-    /// `--output-to stdout` plus `--stdout-file <PATH>`.
-    #[arg(long = "output-to", global = true, default_value = "split")]
-    output_to: String,
-
-    /// Redirect stdout to this file
-    #[cfg(feature = "stream-redirect")]
-    #[arg(long, value_name = "PATH", global = true)]
-    stdout_file: Option<std::path::PathBuf>,
-
-    /// Redirect stderr to this file
-    #[cfg(feature = "stream-redirect")]
-    #[arg(long, value_name = "PATH", global = true)]
-    stderr_file: Option<std::path::PathBuf>,
-
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Lint a JSON/JSONL stream, a JSON Schema, or a document for deterministic AFDATA issues
-    ///
-    /// JSON/JSONL input (the default when no document format is detected)
-    /// keeps its existing dual-mode behavior: a single JSON value, or one
-    /// value per line. `--input-format toml|yaml|yml|dotenv|env|ini` (or a
-    /// recognized file extension) lints a document as a single value
-    /// instead — the AFDATA naming/suffix rules apply equally there.
-    /// `toml-frontmatter`/`yaml-frontmatter` address only the `+++`/`---`
-    /// metadata block of a Markdown file, leaving its body untouched (never
-    /// auto-detected — the format must be named explicitly).
-    #[command(display_order = 1)]
-    Lint {
-        /// Input file, or `-` for stdin
-        input: PathBuf,
-        /// Document format override; unset means JSON/JSONL unless the file
-        /// extension names a document format
-        #[arg(long = "input-format", value_name = "FORMAT")]
-        input_format: Option<String>,
-    },
-    /// Validate one protocol event or a finite protocol event stream (JSON only)
-    #[command(display_order = 2)]
-    Validate {
-        /// Input file, or `-` for stdin
-        input: PathBuf,
-        /// Enforce the recommended strict protocol profile
-        #[arg(long)]
-        strict: bool,
-        /// Validate each input value as an independent event, without stream lifecycle rules
-        #[arg(long = "per-event")]
-        per_event: bool,
-    },
-    /// Render JSON or JSONL through AFDATA output formatting and redaction (JSON only)
-    #[command(display_order = 3)]
-    Render {
-        /// Input file, or `-` for stdin
-        input: PathBuf,
-        /// Extra field name to redact (beyond the `_secret` suffix convention). Repeatable.
-        #[arg(long = "secret-name", value_name = "FIELD")]
-        secret_names: Vec<String>,
-    },
-    /// Emit one AFDATA event from shell-safe scalar arguments
-    #[command(display_order = 4, subcommand)]
-    Emit(EmitCommand),
-
-    /// Export a sourceable shell authoring kit
-    #[command(display_order = 5, subcommand)]
-    Shell(ShellCommand),
-
-    /// Validate an Agent Skill, or manage the bundled Agent Skill
-    #[cfg(feature = "skill")]
-    #[command(display_order = 6, subcommand)]
-    Skill(SkillCommand),
-
-    /// Read a document as a whole, or the value at a dot-path
-    ///
-    /// With no KEY, emits `{"code":"document","format":...,"value":...}` —
-    /// the whole document. With KEY, adds `"key"` and narrows `"value"` to
-    /// that dot-path. `_secret`-suffixed fields (and any `--secret-name`)
-    /// are redacted to `"***"` anywhere in the output, including a
-    /// directly-targeted secret leaf — use `value --reveal-secret` to read
-    /// a secret's real value.
-    #[command(display_order = 10)]
-    Get {
-        /// Document file, or `-` for stdin
-        file: PathBuf,
-        /// Dot-separated key path (`\.` escapes a literal dot, `\\` a backslash); omit for the whole document
-        key: Option<String>,
-        /// Document format override; unset means extension detection
-        #[arg(long = "input-format", value_name = "FORMAT")]
-        input_format: Option<String>,
-        /// Extra field name to redact (beyond the `_secret` suffix convention). Repeatable.
-        #[arg(long = "secret-name", value_name = "FIELD")]
-        secret_names: Vec<String>,
-    },
-    /// Read the scalar at a dot-path as raw bytes on stdout — no AFDATA envelope
-    ///
-    /// Only scalars (string/bool/integer/float/null) are supported; arrays
-    /// and objects are rejected, as are non-finite floats. A secret-named
-    /// leaf is rejected unless `--reveal-secret` is passed. On failure,
-    /// stdout is always empty — the error envelope goes to stderr instead
-    /// (so `x=$(afdata value f k)` never captures a JSON error as data).
-    #[command(display_order = 11, name = "value")]
-    ValueGet {
-        /// Document file, or `-` for stdin
-        file: PathBuf,
-        /// Dot-separated key path
-        key: String,
-        /// Print a secret-named scalar instead of erroring
-        #[arg(long = "reveal-secret")]
-        reveal_secret: bool,
-        /// Print this instead of erroring when KEY's path does not exist or its value is null
-        /// (an empty string is a real value and does not trigger the default)
-        #[arg(long, value_name = "VALUE")]
-        default: Option<String>,
-        /// Document format override; unset means extension detection
-        #[arg(long = "input-format", value_name = "FORMAT")]
-        input_format: Option<String>,
-        /// Extra field name to redact (beyond the `_secret` suffix convention). Repeatable.
-        #[arg(long = "secret-name", value_name = "FIELD")]
-        secret_names: Vec<String>,
-    },
-    /// List a container's child dot-paths, one per line — feeds back into afdata
-    ///
-    /// With no KEY, enumerates the document's top-level children. Each line
-    /// is a full dot-path from the root (grammar-escaped), so it can be
-    /// piped straight back into `get`/`value`/`unset`/… or extended with
-    /// `"$p.field"`. A scalar leaf (nothing to enumerate) is an error, the
-    /// dual of `value`. On failure, stdout is always empty (same contract
-    /// as `value`). Rejects `--output json` — read a container's structured
-    /// JSON via `get` instead.
-    #[command(display_order = 12)]
-    Paths {
-        /// Document file, or `-` for stdin
-        file: PathBuf,
-        /// Dot-separated key path to the container; omit for the top level
-        key: Option<String>,
-        /// Document format override; unset means extension detection
-        #[arg(long = "input-format", value_name = "FORMAT")]
-        input_format: Option<String>,
-        /// Empty output + exit 0 when KEY's path does not exist (other errors still fail)
-        #[arg(long = "missing-ok")]
-        missing_ok: bool,
-        /// Separate lines with NUL instead of newline (for `xargs -0`/`read -d ''`)
-        #[arg(long = "null")]
-        null: bool,
-    },
-    /// List a container's child key names or array indices, one per line — for external tools
-    ///
-    /// The dual of `paths`: raw, unescaped, unprefixed key names/indices —
-    /// exactly what a package manager or another tool expects (`lodash.merge`,
-    /// not `dependencies.lodash\.merge`). Never feed this back into afdata's
-    /// own dot-path arguments; use `paths` for that. Otherwise identical
-    /// contract to `paths` (KEY, `--input-format`, `--missing-ok`, `-0`/`--null`,
-    /// scalar-leaf error, empty stdout on failure, rejects `--output json`).
-    #[command(display_order = 13)]
-    Keys {
-        /// Document file, or `-` for stdin
-        file: PathBuf,
-        /// Dot-separated key path to the container; omit for the top level
-        key: Option<String>,
-        /// Document format override; unset means extension detection
-        #[arg(long = "input-format", value_name = "FORMAT")]
-        input_format: Option<String>,
-        /// Empty output + exit 0 when KEY's path does not exist (other errors still fail)
-        #[arg(long = "missing-ok")]
-        missing_ok: bool,
-        /// Separate lines with NUL instead of newline (for `xargs -0`/`read -d ''`)
-        #[arg(long = "null")]
-        null: bool,
-    },
-    /// Set a value at a dot-path, preserving the document's source formatting
-    ///
-    /// A bare VALUE is always a string — zero coercion, so `007` or a
-    /// leading-zero-bearing ID is never silently reinterpreted. Overwriting
-    /// an *existing* scalar of a different type with a bare VALUE is an
-    /// argument error (pass `--value-type` to keep the type, or
-    /// `--value-type string` to convert explicitly); a brand-new key never
-    /// needs `--value-type`. `--value-type json` is the only entry point
-    /// for arrays, objects, and an exact-type scalar. Idempotency: setting
-    /// an already-current value is not special-cased — it just writes the
-    /// same value again.
-    #[command(display_order = 14)]
-    Set {
-        /// Document file to mutate in place (never reads stdin; rejects `-`)
-        file: PathBuf,
-        /// Dot-separated key path
-        key: String,
-        /// Value to write; interpreted per `--value-type` (default: string, zero coercion)
-        value: Option<String>,
-        /// Exact type for VALUE: string (default), number, bool, null, or json
-        #[arg(
-            long = "value-type",
-            value_name = "TYPE",
-            conflicts_with = "secret_from"
-        )]
-        value_type: Option<String>,
-        /// Read a secret string VALUE from stdin, the controlling terminal, an inherited
-        /// file descriptor, or an environment variable: stdin|prompt|fd:<N>|env:<VAR>
-        #[arg(
-            long = "secret-from",
-            value_name = "SRC",
-            conflicts_with_all = ["value", "value_type"]
-        )]
-        secret_from: Option<String>,
-        /// Document format override; unset means extension detection
-        #[arg(long = "input-format", value_name = "FORMAT")]
-        input_format: Option<String>,
-    },
-    /// Remove one entry from a document entirely
-    ///
-    /// Idempotency: removing an absent KEY is an error
-    /// (`document_path_not_found`), not a no-op — script around it with
-    /// `afdata unset ... || true` if absence should be silent.
-    #[command(display_order = 15)]
-    Unset {
-        /// Document file to mutate in place (never reads stdin; rejects `-`)
-        file: PathBuf,
-        /// Dot-path to the entry to remove
-        key: String,
-        /// Document format override; unset means extension detection
-        #[arg(long = "input-format", value_name = "FORMAT")]
-        input_format: Option<String>,
-    },
-    /// Add an element to a keyed list (an array of objects addressed by a slug field)
-    ///
-    /// Extra `FIELD=VALUE` pairs are always strings (the same zero-coercion
-    /// rule as `set`'s bare VALUE — `add` does not invent its own type
-    /// syntax; write an exact type afterwards with `set --value-type`).
-    /// Idempotency: adding a SLUG that already exists is an error
-    /// (`document_slug_exists`), not a no-op or overwrite.
-    #[command(display_order = 16)]
-    Add {
-        /// Document file to mutate in place (never reads stdin; rejects `-`)
-        file: PathBuf,
-        /// Dot-path to the keyed list
-        key: String,
-        /// Slug/ID for the new element
-        slug: String,
-        /// Field name that identifies each element (the slug field)
-        #[arg(long = "slug-field")]
-        slug_field: String,
-        /// Additional `FIELD=VALUE` pairs to set on the new element (always strings)
-        #[arg(value_name = "FIELD=VALUE")]
-        fields: Vec<String>,
-        /// Document format override; unset means extension detection
-        #[arg(long = "input-format", value_name = "FORMAT")]
-        input_format: Option<String>,
-    },
-    /// Remove an element from a keyed list by slug
-    ///
-    /// Idempotency: removing a SLUG that does not exist is an error
-    /// (`document_slug_not_found`), not a no-op.
-    #[command(display_order = 17)]
-    Remove {
-        /// Document file to mutate in place (never reads stdin; rejects `-`)
-        file: PathBuf,
-        /// Dot-path to the keyed list
-        key: String,
-        /// Slug/ID of the element to remove
-        slug: String,
-        /// Field name that identifies each element (the slug field)
-        #[arg(long = "slug-field")]
-        slug_field: String,
-        /// Document format override; unset means extension detection
-        #[arg(long = "input-format", value_name = "FORMAT")]
-        input_format: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-#[command(disable_help_subcommand = true)]
 enum EmitCommand {
     /// Emit a diagnostic log event (stderr under the default split)
     Log {
@@ -347,24 +40,18 @@ enum EmitCommand {
         /// Human-readable error message
         message: String,
         /// Suggested corrective action
-        #[arg(long)]
         hint: Option<String>,
         /// Mark the failure as safe to retry
-        #[arg(long)]
         retryable: bool,
     },
 }
 
-#[derive(Subcommand)]
-#[command(disable_help_subcommand = true)]
 enum ShellCommand {
     /// Print the sourceable Bash authoring kit as raw Bash on stdout
     Bash,
 }
 
 #[cfg(feature = "skill")]
-#[derive(Subcommand)]
-#[command(disable_help_subcommand = true)]
 enum SkillCommand {
     /// Validate a SKILL.md file or skill directory against the Agent Skills spec
     Validate {
@@ -375,45 +62,34 @@ enum SkillCommand {
     #[cfg(feature = "skill-admin")]
     Status {
         /// Agent target: all, codex, claude-code, opencode, or hermes
-        #[arg(long, default_value = "all")]
         agent: String,
         /// Skill scope: personal or workspace
-        #[arg(long, default_value = "personal")]
         scope: String,
         /// Explicit skills directory; requires a single concrete --agent
-        #[arg(long)]
         skills_dir: Option<String>,
     },
     /// Install the bundled Agent Skill for each target agent
     #[cfg(feature = "skill-admin")]
     Install {
         /// Agent target: all, codex, claude-code, opencode, or hermes
-        #[arg(long, default_value = "all")]
         agent: String,
         /// Skill scope: personal or workspace
-        #[arg(long, default_value = "personal")]
         scope: String,
         /// Explicit skills directory; requires a single concrete --agent
-        #[arg(long)]
         skills_dir: Option<String>,
         /// Overwrite a skill this tool did not manage
-        #[arg(long)]
         force: bool,
     },
     /// Uninstall the bundled Agent Skill for each target agent
     #[cfg(feature = "skill-admin")]
     Uninstall {
         /// Agent target: all, codex, claude-code, opencode, or hermes
-        #[arg(long, default_value = "all")]
         agent: String,
         /// Skill scope: personal or workspace
-        #[arg(long, default_value = "personal")]
         scope: String,
         /// Explicit skills directory; requires a single concrete --agent
-        #[arg(long)]
         skills_dir: Option<String>,
         /// Remove a skill this tool did not manage
-        #[arg(long)]
         force: bool,
     },
 }
@@ -431,6 +107,20 @@ impl Finding {
         Self {
             rule_id,
             severity: "error",
+            pointer,
+            message,
+        }
+    }
+
+    /// A finding the tool is not certain about. Convention-adoption checks are
+    /// heuristic — they read intent from a field's name — so they must not fail
+    /// a document the way a violated suffix rule does. They still have to be
+    /// said: staying silent about them is what let `lint` pass a file made
+    /// entirely of the ambiguities this convention exists to remove.
+    fn warning(rule_id: &'static str, pointer: String, message: String) -> Self {
+        Self {
+            rule_id,
+            severity: "warning",
             pointer,
             message,
         }
@@ -458,326 +148,955 @@ struct ParseError {
     line: Option<usize>,
 }
 
-fn main() -> ExitCode {
-    let raw: Vec<String> = std::env::args().collect();
+fn protocol_output() -> OutputSpec {
+    OutputSpec::protocol_finite(
+        ["json", "yaml", "plain"],
+        ["split", "stdout", "stderr"],
+        "json",
+        "split",
+    )
+    .file_sinks(stream_file_sinks())
+}
 
-    // Redirect stdout/stderr before any output, per --stdout-file/--stderr-file.
+fn raw_output() -> OutputSpec {
+    OutputSpec::raw().file_sinks(stream_file_sinks())
+}
+
+fn stream_file_sinks() -> Vec<&'static str> {
     #[cfg(feature = "stream-redirect")]
-    let _stream_redirect =
-        match agent_first_data::stream_redirect::install_from_raw_args(raw.clone()) {
-            Ok(installed) => installed,
-            Err(err) => {
-                let event = build_cli_error(&err.to_string(), None);
-                return emit_event(event, OutputFormat::Json, 2);
-            }
-        };
-
-    let build = match env!("GIT_SHA") {
-        "unknown" => None,
-        sha => Some(sha),
-    };
-    #[cfg(feature = "cli-help")]
-    match agent_first_data::cli_handle_version_or_help_or_continue(
-        &raw,
-        &Cli::command(),
-        &agent_first_data::HelpConfig::output_aware(),
-        "afdata",
-        Some(env!("DISPLAY_NAME")),
-        env!("CARGO_PKG_VERSION"),
-        build,
-    ) {
-        Ok(Some(output)) => return write_text_exit(&output, 0),
-        Ok(None) => {}
-        Err(err) => return emit_event(err, OutputFormat::Json, 2),
-    }
-
-    // Without cli-help, still intercept version before clap's plain-text exit.
-    #[cfg(not(feature = "cli-help"))]
-    match agent_first_data::cli_handle_version_or_continue(
-        &raw,
-        &Cli::command(),
-        "afdata",
-        Some(env!("DISPLAY_NAME")),
-        env!("CARGO_PKG_VERSION"),
-        build,
-    ) {
-        Ok(Some(version)) => return write_text_exit(&version, 0),
-        Ok(None) => {}
-        Err(err) => return emit_event(err, OutputFormat::Json, 2),
-    }
-
-    let cli = match Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(err) => {
-            // With `cli-help`, `--help`/`--version` never reach clap — the AFDATA
-            // pre-parser answers both. So anything clap still wants to display
-            // help for is a spelling AFDATA deliberately does not accept (`-h`,
-            // `-V`), and clap's renderer would answer in plain text at exit 0,
-            // bypassing the output contract. Report it as a structured error.
-            #[cfg(feature = "cli-help")]
-            if err.kind() == clap::error::ErrorKind::DisplayHelp
-                || err.kind() == clap::error::ErrorKind::DisplayVersion
-            {
-                let event = build_cli_error(
-                    "unsupported flag: afdata spells these out in full",
-                    Some("try: afdata --help (add --output plain for text), or afdata --version"),
-                );
-                return emit_event(event, OutputFormat::Json, 2);
-            }
-            // Without `cli-help` there is no help pre-parser, so clap is the
-            // legitimate renderer for `--help` and its plain text is the answer.
-            #[cfg(not(feature = "cli-help"))]
-            if err.kind() == clap::error::ErrorKind::DisplayHelp
-                || err.kind() == clap::error::ErrorKind::DisplayVersion
-            {
-                return write_text_exit(&err.render().to_string(), 0);
-            }
-            if err.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
-                let event = build_cli_error("a command is required", Some("try: afdata --help"));
-                return emit_event(event, OutputFormat::Json, 2);
-            }
-            let event = build_cli_error(&err.to_string(), Some("try: afdata --help"));
-            return emit_event(event, OutputFormat::Json, 2);
-        }
-    };
-
-    // Redirection is installed from raw args above; these fields exist for
-    // clap's --help listing only.
-    #[cfg(feature = "stream-redirect")]
-    let _ = (&cli.stdout_file, &cli.stderr_file);
-
-    let format = match cli_parse_output(&cli.output) {
-        Ok(format) => format,
-        Err(message) => {
-            let event = build_cli_error(&message, Some("valid values: json, yaml, plain"));
-            return emit_event(event, OutputFormat::Json, 2);
-        }
-    };
-
-    // §1: `paths`/`keys` are inherently raw line output (D6 "not applicable
-    // is a parameter error") — reject only an *explicit* `--output json`
-    // (the default parse of an omitted `--output` is indistinguishable from
-    // it at the `OutputFormat` level, so this scans the raw argv instead of
-    // `cli.output`). Structured enumeration already exists via `get`.
-    if matches!(cli.command, Command::Paths { .. } | Command::Keys { .. })
-        && explicit_output_json(&raw)
     {
-        let event = build_cli_error(
-            "--output json is not supported by paths/keys; they always print raw lines",
-            Some("read a container as structured JSON with `get` instead"),
-        );
-        return emit_event(event, OutputFormat::Json, 2);
+        vec!["stdout", "stderr"]
     }
+    #[cfg(not(feature = "stream-redirect"))]
+    {
+        Vec::new()
+    }
+}
 
-    let output_to = match OutputTo::parse(&cli.output_to) {
-        Ok(selector) => selector,
-        Err(message) => {
-            let event = build_cli_error(&message, Some("valid values: split, stdout, stderr"));
-            return emit_event(event, OutputFormat::Json, 2);
-        }
-    };
-    // Raw-scalar reader commands (value/paths/keys) are intrinsically split:
-    // raw data on stdout, error envelope on stderr. Collapsing their output
-    // onto one stream is meaningless (their success is not an envelope), so a
-    // non-default --output-to is a usage error that names the envelope path.
-    if output_to != OutputTo::Split
-        && matches!(
-            cli.command,
-            Command::ValueGet { .. }
-                | Command::Paths { .. }
-                | Command::Keys { .. }
-                | Command::Shell(_)
+fn positional(id: &str, index: usize, value_name: &str, about: &str) -> ArgSpec {
+    ArgSpec::positional(id, index, value_name).about(about)
+}
+
+fn input_format_arg() -> ArgSpec {
+    ArgSpec::option_enum(
+        "--input-format",
+        [
+            "json",
+            "toml",
+            "yaml",
+            "yml",
+            "dotenv",
+            "env",
+            "ini",
+            "toml-frontmatter",
+            "yaml-frontmatter",
+        ],
+    )
+    .value_name("FORMAT")
+    .about("Document format override")
+}
+
+fn secret_name_arg() -> ArgSpec {
+    ArgSpec::option("--secret-name", "FIELD")
+        .repeatable()
+        .about("Extra exact field name to redact")
+}
+
+fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data::CliSpecError> {
+    let protocol = protocol_output();
+    let raw = raw_output();
+    let mut spec = CliSpec::new("afdata", env!("CARGO_PKG_VERSION"))
+        .about(env!("CARGO_PKG_DESCRIPTION"))
+        .display_name(env!("DISPLAY_NAME"))
+        // build.rs writes "unknown" when no git tree is reachable (a crates.io
+        // tarball); an unknown build is no build.
+        .build_id(match env!("GIT_SHA") {
+            "unknown" => "",
+            sha => sha,
+        })
+        .lifecycle_output(protocol.clone())
+        .command(CommandSpec::root())
+        .command(
+            CommandSpec::new(["lint"])
+                .about("Lint structured data for deterministic AFDATA issues")
+                .arg(positional(
+                    "input",
+                    0,
+                    "INPUT",
+                    "Input file, or - for stdin",
+                ))
+                .arg(input_format_arg())
+                .arg(
+                    ArgSpec::option_enum("--min-severity", ["warning", "error"])
+                        .value_name("SEVERITY")
+                        .default("warning")
+                        .about("Lowest severity to report; `error` drops the heuristic checks"),
+                )
+                .combination(
+                    Combination::new("lint")
+                        .action("lint")
+                        .required(["input"])
+                        .optional(["input_format", "min_severity"])
+                        .output(protocol.clone()),
+                ),
         )
-    {
-        let event = build_cli_error(
-            "--output-to stdout/stderr is not supported by raw-output commands (value/paths/keys/shell bash)",
-            Some("redirect their raw stdout with the shell or --stdout-file instead"),
+        .command(
+            CommandSpec::new(["validate"])
+                .about("Validate protocol-v1 events or a finite event stream")
+                .arg(positional(
+                    "input",
+                    0,
+                    "INPUT",
+                    "Input file, or - for stdin",
+                ))
+                .arg(ArgSpec::flag("--strict").about("Enforce the strict protocol profile"))
+                .arg(
+                    ArgSpec::flag("--per-event")
+                        .about("Validate values independently without stream lifecycle rules"),
+                )
+                .combination(
+                    Combination::new("validate")
+                        .action("validate")
+                        .required(["input"])
+                        .optional(["strict", "per_event"])
+                        .output(protocol.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["render"])
+                .about("Render JSON or JSONL through AFDATA redaction and formatting")
+                .arg(positional(
+                    "input",
+                    0,
+                    "INPUT",
+                    "Input file, or - for stdin",
+                ))
+                .arg(secret_name_arg())
+                .combination(
+                    Combination::new("render")
+                        .action("render")
+                        .required(["input"])
+                        .optional(["secret_name"])
+                        .output(protocol.clone()),
+                ),
+        )
+        .command(CommandSpec::new(["emit"]).about("Emit one AFDATA event"))
+        .command(
+            CommandSpec::new(["emit", "log"])
+                .about("Emit a diagnostic log event")
+                .arg(
+                    ArgSpec::positional_enum(
+                        "level",
+                        0,
+                        "LEVEL",
+                        ["debug", "info", "warn", "error"],
+                    )
+                    .about("debug, info, warn, or error"),
+                )
+                .arg(positional(
+                    "message",
+                    1,
+                    "MESSAGE",
+                    "Human-readable message",
+                ))
+                .combination(
+                    Combination::new("emit-log")
+                        .action("emit_log")
+                        .required(["level", "message"])
+                        .output(protocol.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["emit", "result"])
+                .about("Emit a terminal result event")
+                .arg(positional("message", 0, "MESSAGE", "Result message"))
+                .combination(
+                    Combination::new("emit-result")
+                        .action("emit_result")
+                        .required(["message"])
+                        .output(protocol.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["emit", "error"])
+                .about("Emit a terminal error event")
+                .arg(positional("code", 0, "CODE", "Stable error code"))
+                .arg(positional("message", 1, "MESSAGE", "Error message"))
+                .arg(ArgSpec::option("--hint", "HINT").about("Suggested corrective action"))
+                .arg(ArgSpec::flag("--retryable").about("Mark the failure safe to retry"))
+                .combination(
+                    Combination::new("emit-error")
+                        .action("emit_error")
+                        .required(["code", "message"])
+                        .optional(["hint", "retryable"])
+                        .output(protocol.clone()),
+                ),
+        )
+        .command(CommandSpec::new(["shell"]).about("Export a shell authoring kit"))
+        .command(
+            CommandSpec::new(["shell", "bash"])
+                .about("Print the sourceable Bash authoring kit")
+                .combination(
+                    Combination::new("shell-bash")
+                        .action("shell_bash")
+                        .output(raw.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["get"])
+                .about("Read a document or one value as an AFDATA result")
+                .arg(positional(
+                    "file",
+                    0,
+                    "FILE",
+                    "Document file, or - for stdin",
+                ))
+                .arg(positional("key", 1, "KEY", "Optional dot-path"))
+                .arg(input_format_arg())
+                .arg(secret_name_arg())
+                .combination(
+                    Combination::new("get")
+                        .action("get")
+                        .required(["file"])
+                        .optional(["key", "input_format", "secret_name"])
+                        .output(protocol.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["value"])
+                .about("Read one scalar as raw stdout bytes")
+                .arg(positional(
+                    "file",
+                    0,
+                    "FILE",
+                    "Document file, or - for stdin",
+                ))
+                .arg(positional("key", 1, "KEY", "Dot-path to one scalar"))
+                .arg(ArgSpec::flag("--reveal-secret").about("Allow a secret-named leaf"))
+                .arg(ArgSpec::option("--default", "VALUE").about("Fallback for missing or null"))
+                .arg(input_format_arg())
+                .arg(secret_name_arg())
+                .combination(
+                    Combination::new("value")
+                        .action("value")
+                        .required(["file", "key"])
+                        .optional(["reveal_secret", "default", "input_format", "secret_name"])
+                        .output(raw.clone()),
+                ),
+        )
+        .command(enumerate_command(
+            "paths",
+            "paths",
+            "List each child's full dot-path as raw lines",
+            &raw,
+        ))
+        .command(enumerate_command(
+            "keys",
+            "keys",
+            "List child names as raw lines, without their parent path",
+            &raw,
+        ))
+        .command(
+            CommandSpec::new(["set"])
+                .about("Set a value at a dot-path, creating missing object parents")
+                .arg(positional("file", 0, "FILE", "Document file to mutate"))
+                .arg(positional("key", 1, "KEY", "Dot-path to set"))
+                .arg(positional("value", 2, "VALUE", "Value to write"))
+                .arg(
+                    ArgSpec::option_enum(
+                        "--value-type",
+                        ["string", "number", "bool", "null", "json"],
+                    )
+                    .value_name("TYPE")
+                    .default("string")
+                    .about("Exact VALUE type"),
+                )
+                .arg(
+                    ArgSpec::option("--secret-from", "SOURCE")
+                        .about("Read a secret string from stdin, prompt, fd:N, or env:VAR"),
+                )
+                .arg(input_format_arg())
+                .combination(
+                    Combination::new("set-value")
+                        .action("set")
+                        .about("Set one typed scalar or JSON value")
+                        .fixed_one_of("value_type", ["string", "number", "bool", "json"])
+                        .required(["file", "key", "value"])
+                        .optional(["input_format"])
+                        .output(protocol.clone()),
+                )
+                .combination(
+                    Combination::new("set-null")
+                        .action("set")
+                        .about("Set the key to null; takes no VALUE")
+                        .fixed("value_type", "null")
+                        .required(["file", "key"])
+                        .optional(["input_format"])
+                        .output(protocol.clone()),
+                )
+                .combination(
+                    Combination::new("set-secret")
+                        .action("set")
+                        .about("Set the key from a secret source, never from argv")
+                        .required(["file", "key", "secret_from"])
+                        .optional(["input_format"])
+                        .output(protocol.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["unset"])
+                .about("Remove one document entry")
+                .arg(positional("file", 0, "FILE", "Document file to mutate"))
+                .arg(positional("key", 1, "KEY", "Dot-path to remove"))
+                .arg(input_format_arg())
+                .combination(
+                    Combination::new("unset")
+                        .action("unset")
+                        .required(["file", "key"])
+                        .optional(["input_format"])
+                        .output(protocol.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["add"])
+                .about("Add an element to a keyed list")
+                .arg(positional("file", 0, "FILE", "Document file to mutate"))
+                .arg(positional("key", 1, "KEY", "Dot-path to the keyed list"))
+                .arg(positional("slug", 2, "SLUG", "New element slug"))
+                .arg(
+                    ArgSpec::positional("fields", 3, "FIELD=VALUE")
+                        .repeatable()
+                        .about("Additional string fields"),
+                )
+                .arg(
+                    ArgSpec::option("--slug-field", "FIELD")
+                        .about("Field that identifies each list element"),
+                )
+                .arg(input_format_arg())
+                .combination(
+                    Combination::new("add")
+                        .action("add")
+                        .required(["file", "key", "slug", "slug_field"])
+                        .optional(["fields", "input_format"])
+                        .output(protocol.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["remove"])
+                .about("Remove a keyed-list element by slug")
+                .arg(positional("file", 0, "FILE", "Document file to mutate"))
+                .arg(positional("key", 1, "KEY", "Dot-path to the keyed list"))
+                .arg(positional("slug", 2, "SLUG", "Element slug"))
+                .arg(
+                    ArgSpec::option("--slug-field", "FIELD")
+                        .about("Field that identifies each list element"),
+                )
+                .arg(input_format_arg())
+                .combination(
+                    Combination::new("remove")
+                        .action("remove")
+                        .required(["file", "key", "slug", "slug_field"])
+                        .optional(["input_format"])
+                        .output(protocol.clone()),
+                ),
         );
-        return emit_event(event, OutputFormat::Json, 2);
-    }
-    let _ = OUTPUT_TO.set(output_to);
 
-    match cli.command {
-        Command::Lint {
-            input,
-            input_format,
-        } => run_lint(&input, input_format.as_deref(), format),
-        Command::Validate {
-            input,
-            strict,
-            per_event,
-        } => run_validate(&input, format, strict, per_event),
-        Command::Render {
-            input,
-            secret_names,
-        } => run_render(&input, &secret_names, format),
-        Command::Emit(action) => run_emit(action, format),
-        Command::Shell(action) => run_shell(action),
+    #[cfg(feature = "skill")]
+    {
+        spec = spec
+            .command(CommandSpec::new(["skill"]).about("Validate or manage the bundled skill"))
+            .command(
+                CommandSpec::new(["skill", "validate"])
+                    .about("Validate an Agent Skill")
+                    .arg(positional(
+                        "input",
+                        0,
+                        "INPUT",
+                        "SKILL.md file, directory, or - for stdin",
+                    ))
+                    .combination(
+                        Combination::new("skill-validate")
+                            .action("skill_validate")
+                            .required(["input"])
+                            .output(protocol.clone()),
+                    ),
+            );
+    }
+
+    #[cfg(feature = "skill-admin")]
+    {
+        spec = spec
+            .command(skill_admin_command(
+                "status",
+                "skill_status",
+                false,
+                &protocol,
+            ))
+            .command(skill_admin_command(
+                "install",
+                "skill_install",
+                true,
+                &protocol,
+            ))
+            .command(skill_admin_command(
+                "uninstall",
+                "skill_uninstall",
+                true,
+                &protocol,
+            ));
+    }
+
+    build_afdata_cli(spec)
+}
+
+fn enumerate_command(name: &str, action: &str, about: &str, output: &OutputSpec) -> CommandSpec {
+    CommandSpec::new([name])
+        .about(about)
+        .arg(positional(
+            "file",
+            0,
+            "FILE",
+            "Document file, or - for stdin",
+        ))
+        .arg(positional("key", 1, "KEY", "Optional container dot-path"))
+        .arg(input_format_arg())
+        .arg(ArgSpec::flag("--missing-ok").about("Succeed with no output when KEY is absent"))
+        .arg(ArgSpec::flag("--null").about("Use NUL separators"))
+        .combination(
+            Combination::new(name)
+                .action(action)
+                .required(["file"])
+                .optional(["key", "input_format", "missing_ok", "null"])
+                .output(output.clone()),
+        )
+}
+
+#[cfg(feature = "skill-admin")]
+fn skill_admin_command(
+    command: &str,
+    action: &str,
+    force: bool,
+    output: &OutputSpec,
+) -> CommandSpec {
+    let mut spec = CommandSpec::new(["skill", command])
+        .about(match action {
+            "skill_status" => "Report whether the bundled Agent Skill is installed and current",
+            "skill_install" => "Install the bundled Agent Skill",
+            _ => "Remove an afdata-managed Agent Skill",
+        })
+        .arg(
+            ArgSpec::option_enum(
+                "--agent",
+                ["all", "codex", "claude-code", "opencode", "hermes"],
+            )
+            .value_name("AGENT")
+            .default("all")
+            .about("Target agent"),
+        )
+        .arg(
+            ArgSpec::option_enum("--scope", ["personal", "workspace"])
+                .value_name("SCOPE")
+                .default("personal")
+                .about("Skill scope"),
+        )
+        .arg(
+            ArgSpec::option("--skills-dir", "PATH")
+                .about("Explicit directory; only valid with one concrete agent"),
+        );
+    if force {
+        spec = spec.arg(ArgSpec::flag("--force").about("Overwrite or remove an unmanaged skill"));
+    }
+    // The two shapes differ only in which agents they target, so each must say
+    // so: the command's own description cannot distinguish them.
+    let verb = match action {
+        "skill_status" => "Report on",
+        "skill_install" => "Install into",
+        _ => "Remove from",
+    };
+    let mut common_optional = vec!["scope"];
+    let mut concrete_optional = vec!["scope", "skills_dir"];
+    if force {
+        common_optional.push("force");
+        concrete_optional.push("force");
+    }
+    spec.combination(
+        Combination::new(format!("skill-{command}-all"))
+            .action(action)
+            .about(format!("{verb} every agent that supports the scope"))
+            .fixed("agent", "all")
+            .optional(common_optional)
+            .output(output.clone()),
+    )
+    .combination(
+        Combination::new(format!("skill-{command}-agent"))
+            .action(action)
+            .about(format!(
+                "{verb} one named agent; only this shape accepts --skills-dir"
+            ))
+            .fixed_one_of("agent", ["codex", "claude-code", "opencode", "hermes"])
+            .optional(concrete_optional)
+            .output(output.clone()),
+    )
+}
+
+fn main() -> ExitCode {
+    closed_world_main()
+}
+
+type AfdataActionHandler = fn(&ResolvedInvocation) -> ExitCode;
+
+fn closed_world_main() -> ExitCode {
+    let cli = match afdata_cli_spec() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let event = build_error_event(
+                json_error("cli_spec_invalid", &error.to_string())
+                    .hint("fix the built-in afdata cli-spec-v1 registry"),
+            );
+            return emit_event(event, OutputFormat::Json, 1);
+        }
+    };
+    let mut handlers: Vec<(&str, AfdataActionHandler)> = vec![
+        ("lint", dispatch_invocation),
+        ("validate", dispatch_invocation),
+        ("render", dispatch_invocation),
+        ("emit_log", dispatch_invocation),
+        ("emit_result", dispatch_invocation),
+        ("emit_error", dispatch_invocation),
+        ("shell_bash", dispatch_invocation),
+        ("get", dispatch_invocation),
+        ("value", dispatch_invocation),
+        ("paths", dispatch_invocation),
+        ("keys", dispatch_invocation),
+        ("set", dispatch_invocation),
+        ("unset", dispatch_invocation),
+        ("add", dispatch_invocation),
+        ("remove", dispatch_invocation),
+    ];
+    #[cfg(feature = "skill")]
+    handlers.push(("skill_validate", dispatch_invocation));
+    #[cfg(feature = "skill-admin")]
+    {
+        handlers.push(("skill_status", dispatch_invocation));
+        handlers.push(("skill_install", dispatch_invocation));
+        handlers.push(("skill_uninstall", dispatch_invocation));
+    }
+    let app = match cli.bind_actions(handlers) {
+        Ok(app) => app,
+        Err(error) => {
+            let event = build_error_event(
+                json_error("cli_actions_invalid", &error.to_string())
+                    .hint("make action handler coverage exactly match cli-spec-v1"),
+            );
+            return emit_event(event, OutputFormat::Json, 1);
+        }
+    };
+    let outcome = match app.resolve_from(std::env::args_os()) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let code = error.exit_code();
+            return emit_event(cli_error_event(&error), OutputFormat::Json, code);
+        }
+    };
+    match outcome {
+        CliOutcome::Run(invocation) => {
+            let _stream_redirect = match install_output_redirect(invocation.output_plan()) {
+                Ok(guard) => guard,
+                Err(message) => return emit_output_setup_error(&message),
+            };
+            if let Err(message) = activate_output_plan(invocation.output_plan()) {
+                return emit_output_setup_error(&message);
+            }
+            app.execute(&invocation)
+        }
+        // Injected for every registry, so a spore gets an offline reference
+        // without registering anything — and without spending a line of the
+        // agent's discovery surface on a command no agent calls.
+        CliOutcome::Docs(docs) => {
+            let _stream_redirect = match install_output_redirect(docs.output_plan()) {
+                Ok(guard) => guard,
+                Err(message) => return emit_output_setup_error(&message),
+            };
+            write_text_exit(&render_cli_reference(&cli), 0)
+        }
+        CliOutcome::Help(help) => {
+            let _stream_redirect = match install_output_redirect(help.output_plan()) {
+                Ok(guard) => guard,
+                Err(message) => return emit_output_setup_error(&message),
+            };
+            let format = match activate_output_plan(help.output_plan()) {
+                Ok(format) => format,
+                Err(message) => return emit_output_setup_error(&message),
+            };
+            if format == OutputFormat::Plain {
+                write_text_exit_to(&help.plain(), 0, result_stream(output_to()))
+            } else {
+                emit_event(cli_help_event(&help), format, 0)
+            }
+        }
+        CliOutcome::Version(version) => {
+            let _stream_redirect = match install_output_redirect(version.output_plan()) {
+                Ok(guard) => guard,
+                Err(message) => return emit_output_setup_error(&message),
+            };
+            let format = match activate_output_plan(version.output_plan()) {
+                Ok(format) => format,
+                Err(message) => return emit_output_setup_error(&message),
+            };
+            emit_event(cli_version_event(&version), format, 0)
+        }
+    }
+}
+
+#[cfg(feature = "stream-redirect")]
+type OutputRedirectGuard = agent_first_data::stream_redirect::InstalledStreamRedirect;
+
+#[cfg(not(feature = "stream-redirect"))]
+struct OutputRedirectGuard;
+
+fn install_output_redirect(plan: &OutputPlan) -> Result<Option<OutputRedirectGuard>, String> {
+    #[cfg(feature = "stream-redirect")]
+    {
+        let config = agent_first_data::stream_redirect::StreamRedirectConfig::new(
+            plan.stdout_file().map(Path::to_path_buf),
+            plan.stderr_file().map(Path::to_path_buf),
+        )
+        .map_err(|error| error.to_string())?;
+        config
+            .as_ref()
+            .map(agent_first_data::stream_redirect::install)
+            .transpose()
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "stream-redirect"))]
+    {
+        if plan.stdout_file().is_some() || plan.stderr_file().is_some() {
+            return Err("file sinks are unavailable in this build".to_string());
+        }
+        Ok(None)
+    }
+}
+
+fn activate_output_plan(plan: &OutputPlan) -> Result<OutputFormat, String> {
+    match plan {
+        OutputPlan::Raw { .. } => {
+            OUTPUT_TO
+                .set(OutputTo::Split)
+                .map_err(|_| "output plan was activated more than once".to_string())?;
+            Ok(OutputFormat::Json)
+        }
+        OutputPlan::Protocol {
+            format,
+            destination,
+            ..
+        } => {
+            let format = cli_parse_output(format)?;
+            let destination = OutputTo::parse(destination)?;
+            OUTPUT_TO
+                .set(destination)
+                .map_err(|_| "output plan was activated more than once".to_string())?;
+            Ok(format)
+        }
+    }
+}
+
+fn emit_output_setup_error(message: &str) -> ExitCode {
+    let event = build_error_event(json_error("output_setup_failed", message));
+    emit_event_to(
+        event,
+        OutputFormat::Json,
+        &OutputOptions::default(),
+        1,
+        Stream::Stderr,
+    )
+}
+
+fn invocation_string(invocation: &ResolvedInvocation, id: &str) -> String {
+    invocation
+        .required(id)
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn invocation_optional_string(invocation: &ResolvedInvocation, id: &str) -> Option<String> {
+    invocation
+        .optional(id)
+        .and_then(agent_first_data::CliValue::as_str)
+        .map(str::to_string)
+}
+
+fn invocation_strings(invocation: &ResolvedInvocation, id: &str) -> Vec<String> {
+    invocation
+        .repeated(id)
+        .iter()
+        .filter_map(agent_first_data::CliValue::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn invocation_flag(invocation: &ResolvedInvocation, id: &str) -> bool {
+    invocation
+        .optional(id)
+        .and_then(agent_first_data::CliValue::as_bool)
+        .unwrap_or(false)
+}
+
+fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
+    let format = invocation
+        .output_plan()
+        .format()
+        .and_then(|format| cli_parse_output(format).ok())
+        .unwrap_or(OutputFormat::Json);
+    match invocation.action_id() {
+        "lint" => {
+            let input = invocation_string(invocation, "input");
+            let input_format = invocation_optional_string(invocation, "input_format");
+            let min_severity = invocation_string(invocation, "min_severity");
+            run_lint(
+                Path::new(&input),
+                input_format.as_deref(),
+                &min_severity,
+                format,
+            )
+        }
+        "validate" => {
+            let input = invocation_string(invocation, "input");
+            run_validate(
+                Path::new(&input),
+                format,
+                invocation_flag(invocation, "strict"),
+                invocation_flag(invocation, "per_event"),
+            )
+        }
+        "render" => {
+            let input = invocation_string(invocation, "input");
+            run_render(
+                Path::new(&input),
+                &invocation_strings(invocation, "secret_name"),
+                format,
+            )
+        }
+        "emit_log" => run_emit(
+            EmitCommand::Log {
+                level: invocation_string(invocation, "level"),
+                message: invocation_string(invocation, "message"),
+            },
+            format,
+        ),
+        "emit_result" => run_emit(
+            EmitCommand::Result {
+                message: invocation_string(invocation, "message"),
+            },
+            format,
+        ),
+        "emit_error" => run_emit(
+            EmitCommand::Error {
+                code: invocation_string(invocation, "code"),
+                message: invocation_string(invocation, "message"),
+                hint: invocation_optional_string(invocation, "hint"),
+                retryable: invocation_flag(invocation, "retryable"),
+            },
+            format,
+        ),
+        "shell_bash" => run_shell(ShellCommand::Bash),
         #[cfg(feature = "skill")]
-        Command::Skill(action) => run_skill(action, format),
-        Command::Get {
-            file,
-            key,
-            input_format,
-            secret_names,
-        } => run_get(
-            &file,
-            key.as_deref(),
-            &DocumentContext {
-                input_format: input_format.as_deref(),
-                secret_names: &secret_names,
-                format,
+        "skill_validate" => run_skill(
+            SkillCommand::Validate {
+                input: PathBuf::from(invocation_string(invocation, "input")),
             },
-        ),
-        Command::ValueGet {
-            file,
-            key,
-            reveal_secret,
-            default,
-            input_format,
-            secret_names,
-        } => run_value_get(
-            &file,
-            &key,
-            reveal_secret,
-            default.as_deref(),
-            &DocumentContext {
-                input_format: input_format.as_deref(),
-                secret_names: &secret_names,
-                format,
-            },
-        ),
-        Command::Paths {
-            file,
-            key,
-            input_format,
-            missing_ok,
-            null,
-        } => run_enumerate(
-            &file,
-            key.as_deref(),
-            input_format.as_deref(),
-            missing_ok,
-            null,
             format,
-            EnumerateMode::Paths,
         ),
-        Command::Keys {
-            file,
-            key,
-            input_format,
-            missing_ok,
-            null,
-        } => run_enumerate(
-            &file,
-            key.as_deref(),
-            input_format.as_deref(),
-            missing_ok,
-            null,
+        #[cfg(feature = "skill-admin")]
+        "skill_status" => run_skill(
+            SkillCommand::Status {
+                agent: invocation_string(invocation, "agent"),
+                scope: invocation_string(invocation, "scope"),
+                skills_dir: invocation_optional_string(invocation, "skills_dir"),
+            },
             format,
-            EnumerateMode::Keys,
         ),
-        Command::Set {
-            file,
-            key,
-            value,
-            value_type,
-            secret_from,
-            input_format,
-        } => run_set(
-            &file,
-            &key,
-            value,
-            value_type.as_deref(),
-            secret_from.as_deref(),
-            &DocumentContext {
-                input_format: input_format.as_deref(),
-                secret_names: &[],
-                format,
+        #[cfg(feature = "skill-admin")]
+        "skill_install" => run_skill(
+            SkillCommand::Install {
+                agent: invocation_string(invocation, "agent"),
+                scope: invocation_string(invocation, "scope"),
+                skills_dir: invocation_optional_string(invocation, "skills_dir"),
+                force: invocation_flag(invocation, "force"),
             },
+            format,
         ),
-        Command::Add {
-            file,
-            key,
-            slug,
-            slug_field,
-            fields,
-            input_format,
-        } => run_add(
-            &file,
-            &key,
-            &slug,
-            &slug_field,
-            &fields,
-            &DocumentContext {
-                input_format: input_format.as_deref(),
-                secret_names: &[],
-                format,
+        #[cfg(feature = "skill-admin")]
+        "skill_uninstall" => run_skill(
+            SkillCommand::Uninstall {
+                agent: invocation_string(invocation, "agent"),
+                scope: invocation_string(invocation, "scope"),
+                skills_dir: invocation_optional_string(invocation, "skills_dir"),
+                force: invocation_flag(invocation, "force"),
             },
+            format,
         ),
-        Command::Remove {
-            file,
-            key,
-            slug,
-            slug_field,
-            input_format,
-        } => run_remove(
-            &file,
-            &key,
-            &slug,
-            &slug_field,
-            &DocumentContext {
-                input_format: input_format.as_deref(),
-                secret_names: &[],
-                format,
-            },
-        ),
-        Command::Unset {
-            file,
-            key,
-            input_format,
-        } => run_unset(
-            &file,
-            &key,
-            &DocumentContext {
-                input_format: input_format.as_deref(),
-                secret_names: &[],
-                format,
-            },
+        "get" => dispatch_get(invocation, format),
+        "value" => dispatch_value(invocation, format),
+        "paths" | "keys" => dispatch_enumerate(invocation, format),
+        "set" => dispatch_set(invocation, format),
+        "unset" => dispatch_unset(invocation, format),
+        "add" => dispatch_add(invocation, format),
+        "remove" => dispatch_remove(invocation, format),
+        _ => emit_event(
+            build_error_event(json_error(
+                "cli_action_unreachable",
+                "resolved action has no implementation",
+            )),
+            OutputFormat::Json,
+            1,
         ),
     }
 }
 
-/// Whether `raw` (the full argv) contains an explicit `--output json` or
-/// `--output=json`. `--output` is a global flag that clap accepts anywhere
-/// in argv (before or after the subcommand), so this scans the whole
-/// vector rather than stopping at the first positional. The top-level version
-/// pre-scanner stops at that boundary; the help walker separately resolves the
-/// selected command subtree.
-fn explicit_output_json(raw: &[String]) -> bool {
-    let mut i = 1; // skip argv[0]
-    while i < raw.len() {
-        let arg = raw[i].as_str();
-        if arg == "--" {
-            break;
-        }
-        if let Some(value) = arg.strip_prefix("--output=") {
-            if value == "json" {
-                return true;
-            }
-        } else if arg == "--output" && raw.get(i + 1).map(String::as_str) == Some("json") {
-            return true;
-        }
-        i += 1;
-    }
-    false
+fn dispatch_get(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let file = invocation_string(invocation, "file");
+    let key = invocation_optional_string(invocation, "key");
+    let input_format = invocation_optional_string(invocation, "input_format");
+    let secret_names = invocation_strings(invocation, "secret_name");
+    run_get(
+        Path::new(&file),
+        key.as_deref(),
+        &DocumentContext {
+            input_format: input_format.as_deref(),
+            secret_names: &secret_names,
+            format,
+        },
+    )
+}
+
+fn dispatch_value(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let file = invocation_string(invocation, "file");
+    let key = invocation_string(invocation, "key");
+    let default = invocation_optional_string(invocation, "default");
+    let input_format = invocation_optional_string(invocation, "input_format");
+    let secret_names = invocation_strings(invocation, "secret_name");
+    run_value_get(
+        Path::new(&file),
+        &key,
+        invocation_flag(invocation, "reveal_secret"),
+        default.as_deref(),
+        &DocumentContext {
+            input_format: input_format.as_deref(),
+            secret_names: &secret_names,
+            format,
+        },
+    )
+}
+
+fn dispatch_enumerate(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let file = invocation_string(invocation, "file");
+    let key = invocation_optional_string(invocation, "key");
+    let input_format = invocation_optional_string(invocation, "input_format");
+    run_enumerate(
+        Path::new(&file),
+        key.as_deref(),
+        input_format.as_deref(),
+        invocation_flag(invocation, "missing_ok"),
+        invocation_flag(invocation, "null"),
+        format,
+        if invocation.action_id() == "paths" {
+            EnumerateMode::Paths
+        } else {
+            EnumerateMode::Keys
+        },
+    )
+}
+
+fn dispatch_set(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let file = invocation_string(invocation, "file");
+    let key = invocation_string(invocation, "key");
+    let value = invocation_optional_string(invocation, "value");
+    let value_type = invocation
+        .was_explicit("value_type")
+        .then(|| invocation_optional_string(invocation, "value_type"))
+        .flatten();
+    let secret_from = invocation_optional_string(invocation, "secret_from");
+    let input_format = invocation_optional_string(invocation, "input_format");
+    run_set(
+        Path::new(&file),
+        &key,
+        value,
+        value_type.as_deref(),
+        secret_from.as_deref(),
+        &DocumentContext {
+            input_format: input_format.as_deref(),
+            secret_names: &[],
+            format,
+        },
+    )
+}
+
+fn dispatch_unset(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let file = invocation_string(invocation, "file");
+    let key = invocation_string(invocation, "key");
+    let input_format = invocation_optional_string(invocation, "input_format");
+    run_unset(
+        Path::new(&file),
+        &key,
+        &DocumentContext {
+            input_format: input_format.as_deref(),
+            secret_names: &[],
+            format,
+        },
+    )
+}
+
+fn dispatch_add(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let file = invocation_string(invocation, "file");
+    let key = invocation_string(invocation, "key");
+    let slug = invocation_string(invocation, "slug");
+    let slug_field = invocation_string(invocation, "slug_field");
+    let fields = invocation_strings(invocation, "fields");
+    let input_format = invocation_optional_string(invocation, "input_format");
+    run_add(
+        Path::new(&file),
+        &key,
+        &slug,
+        &slug_field,
+        &fields,
+        &DocumentContext {
+            input_format: input_format.as_deref(),
+            secret_names: &[],
+            format,
+        },
+    )
+}
+
+fn dispatch_remove(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let file = invocation_string(invocation, "file");
+    let key = invocation_string(invocation, "key");
+    let slug = invocation_string(invocation, "slug");
+    let slug_field = invocation_string(invocation, "slug_field");
+    let input_format = invocation_optional_string(invocation, "input_format");
+    run_remove(
+        Path::new(&file),
+        &key,
+        &slug,
+        &slug_field,
+        &DocumentContext {
+            input_format: input_format.as_deref(),
+            secret_names: &[],
+            format,
+        },
+    )
 }
 
 // ═══════════════════════════════════════════
 // Protocol tools: lint, validate, render, skill
 // ═══════════════════════════════════════════
 
-fn run_lint(input: &Path, input_format: Option<&str>, format: OutputFormat) -> ExitCode {
+fn run_lint(
+    input: &Path,
+    input_format: Option<&str>,
+    min_severity: &str,
+    format: OutputFormat,
+) -> ExitCode {
     let resolved = match resolve_input_format(input_format) {
         Ok(resolved) => resolved,
         Err(message) => return emit_usage_error(&message, format),
@@ -823,12 +1142,21 @@ fn run_lint(input: &Path, input_format: Option<&str>, format: OutputFormat) -> E
         let (value, _doc_format) = match read_document_input(input, Some(effective)) {
             Ok(pair) => pair,
             Err(err) => {
-                let event = build_error_event(json_error(err.code(), &err.to_string()));
+                let event = build_error_event(json_error(err.code(), &err.redacted_message()));
                 return emit_event(event, format, 1);
             }
         };
-        let json_value: Value = value.into();
+        let json_value = match Value::try_from(value) {
+            Ok(value) => value,
+            Err(error) => {
+                let event = build_error_event(json_error(error.code(), &error.redacted_message()));
+                return emit_event(event, format, 1);
+            }
+        };
         lint_value(&json_value, "", &mut findings);
+    }
+    if min_severity == "error" {
+        findings.retain(|finding| finding.severity == "error");
     }
     emit_findings("lint_failed", "lint failed", findings, format)
 }
@@ -944,14 +1272,7 @@ fn run_emit(action: EmitCommand, format: OutputFormat) -> ExitCode {
             if message.is_empty() {
                 return emit_cli_usage_error(
                     "log MESSAGE must not be empty",
-                    Some("usage: afdata emit log <LEVEL> <MESSAGE>"),
-                    format,
-                );
-            }
-            if !matches!(level.as_str(), "debug" | "info" | "warn" | "error") {
-                return emit_cli_usage_error(
-                    &format!("invalid log level '{level}'"),
-                    Some("valid levels: debug, info, warn, error"),
+                    "run `afdata emit log --help` and choose one registered combination",
                     format,
                 );
             }
@@ -966,7 +1287,7 @@ fn run_emit(action: EmitCommand, format: OutputFormat) -> ExitCode {
             if message.is_empty() {
                 return emit_cli_usage_error(
                     "result MESSAGE must not be empty",
-                    Some("usage: afdata emit result <MESSAGE>"),
+                    "run `afdata emit result --help` and choose one registered combination",
                     format,
                 );
             }
@@ -982,7 +1303,7 @@ fn run_emit(action: EmitCommand, format: OutputFormat) -> ExitCode {
             if code.is_empty() || message.is_empty() {
                 return emit_cli_usage_error(
                     "error CODE and MESSAGE must not be empty",
-                    Some("usage: afdata emit error <CODE> <MESSAGE> [--hint <HINT>] [--retryable]"),
+                    "run `afdata emit error --help` and choose one registered combination",
                     format,
                 );
             }
@@ -1206,9 +1527,15 @@ fn run_skill_admin_action(
             ),
         },
         SkillAsset {
-            path: "references/cli-help-v1.schema.json",
+            path: "references/cli-help-v2.schema.json",
             contents: include_str!(
-                "../../skills/agent-first-data/references/cli-help-v1.schema.json"
+                "../../skills/agent-first-data/references/cli-help-v2.schema.json"
+            ),
+        },
+        SkillAsset {
+            path: "references/cli-spec-v1.schema.json",
+            contents: include_str!(
+                "../../skills/agent-first-data/references/cli-spec-v1.schema.json"
             ),
         },
     ];
@@ -1389,15 +1716,17 @@ fn emit_findings(
     format: OutputFormat,
 ) -> ExitCode {
     let findings_json = Value::Array(findings.iter().map(Finding::to_json).collect());
-    if findings.is_empty() {
-        let event = json_result(json!({"ok": true, "findings": findings_json})).build();
-        emit_event(event, format, 0)
-    } else {
+    if findings.iter().any(|finding| finding.severity == "error") {
         let event = build_error_event(
             json_error(error_code, error_message).fields(json!({"findings": findings_json})),
         );
-        emit_event(event, format, 1)
+        return emit_event(event, format, 1);
     }
+    // Warnings are reported but do not fail: they are heuristic. `ok` still
+    // turns false, so a caller reading one field learns there is something to
+    // read, and exit 0 keeps a heuristic from breaking a pipeline.
+    let event = json_result(json!({"ok": findings.is_empty(), "findings": findings_json})).build();
+    emit_event(event, format, 0)
 }
 
 /// A usage-class error (R2): the CLI invocation's own shape was wrong
@@ -1411,8 +1740,16 @@ fn emit_usage_error(message: &str, format: OutputFormat) -> ExitCode {
     emit_event(event, format, 2)
 }
 
-fn emit_cli_usage_error(message: &str, hint: Option<&str>, format: OutputFormat) -> ExitCode {
-    emit_event(build_cli_error(message, hint), format, 2)
+/// A value the registry accepted but this command cannot use.
+///
+/// `cli-spec-v1` has no "non-empty string" type, so emptiness is checked here —
+/// one layer after the parser, but it is the same verdict the parser would have
+/// reached, so it carries the parser's own code rather than a second spelling
+/// for it. `build_cli_error`'s generic `cli_error` stays for CLIs that have no
+/// registry to name a rule; this one has.
+fn emit_cli_usage_error(message: &str, hint: &str, format: OutputFormat) -> ExitCode {
+    let event = build_error_event(json_error("cli_invalid_argument_value", message).hint(hint));
+    emit_event(event, format, 2)
 }
 
 /// The resolved `--output-to` selector. Read through [`output_to`], which
@@ -1591,8 +1928,11 @@ fn document_error_event(err: &CliDocError) -> (Event, u8) {
             build_error_event(json_error("document_usage_error", message)),
             2,
         ),
+        // `redacted_message`, never `Display`: an error event is the thing an
+        // agent routinely writes to a log, and `Display` quotes the offending
+        // document text — which is how a `_secret` leaf reached stderr verbatim.
         CliDocError::Document(doc_err) => (
-            build_error_event(json_error(doc_err.code(), &doc_err.to_string())),
+            build_error_event(json_error(doc_err.code(), &doc_err.redacted_message())),
             1,
         ),
         CliDocError::Runtime { code, message } => (build_error_event(json_error(code, message)), 1),
@@ -1696,8 +2036,8 @@ fn read_document_input(
 }
 
 /// Extract `key`'s scalar as raw bytes for `value`: a string's bytes are
-/// copied verbatim; other scalars render their display form; `Null` renders
-/// `"null"`; a non-finite float, array, or object is rejected.
+/// copied verbatim; other scalars render their display form; a null,
+/// non-finite float, array, or object is rejected.
 ///
 /// §4 digit fidelity: [`DocumentValue::Number`] is emitted byte for byte
 /// from its stored literal — never routed through `f64::to_string()`, which
@@ -1717,7 +2057,7 @@ fn document_scalar_bytes(value: &DocumentValue, key: &str) -> Result<Vec<u8>, St
             value.to_string()
         }
         DocumentValue::Number(text) => return Ok(text.clone().into_bytes()),
-        DocumentValue::Null => "null".to_string(),
+        DocumentValue::Null => return Err(format!("path `{key}` is null")),
         DocumentValue::Array(_) | DocumentValue::Object(_) => {
             return Err(format!("path `{key}` is not a scalar"));
         }
@@ -1725,16 +2065,23 @@ fn document_scalar_bytes(value: &DocumentValue, key: &str) -> Result<Vec<u8>, St
     Ok(text.into_bytes())
 }
 
-/// Whether `key`'s leaf (final) path segment would be redacted by afdata's
-/// secret-naming convention: an exact `_secret`/`_SECRET` suffix, or an exact
-/// match against `secret_names` (the `--secret-name` list).
-fn document_leaf_is_secret(key: &str, secret_names: &[String]) -> Result<bool, DocumentError> {
+/// Whether `key` addresses anything afdata's secret-naming convention covers:
+/// **any** segment on the path carrying an exact `_secret`/`_SECRET` suffix, or
+/// matching `secret_names` (the `--secret-name` list) exactly.
+///
+/// The whole path, not just its leaf. A name marks the subtree beneath it, so
+/// `credentials_secret.password` is exactly as secret as `credentials_secret`.
+/// Judging the leaf alone let a caller step past the marked node and read the
+/// subtree out in the clear.
+fn document_path_is_secret(key: &str, secret_names: &[String]) -> Result<bool, DocumentError> {
     let segments = parse_path(key)?;
-    let Some(leaf) = segments.last() else {
+    if segments.is_empty() {
         return Err(DocumentError::EmptyPath);
-    };
+    }
     let redactor = Redactor::new().secret_names(secret_names.iter().cloned());
-    Ok(redactor.is_secret_name(leaf))
+    Ok(segments
+        .iter()
+        .any(|segment| redactor.is_secret_name(segment)))
 }
 
 /// Reject a literal `-` FILE for a mutation command (D1): unlike read
@@ -1783,12 +2130,12 @@ fn compute_get(
     let (root, doc_format) = read_document_input(file, input_format)?;
     let mut payload = serde_json::Map::new();
     payload.insert("code".to_string(), json!("document"));
-    payload.insert("format".to_string(), json!(doc_format.name()));
+    payload.insert("format".to_string(), json!(doc_format.cli_name()));
     let json_value: Value = match key {
-        None => root.into(),
+        None => Value::try_from(root)?,
         Some(key) => {
             let target = get_path(&root, key, &[])?;
-            let is_secret = document_leaf_is_secret(key, ctx.secret_names)?;
+            let is_secret = document_path_is_secret(key, ctx.secret_names)?;
             payload.insert("key".to_string(), json!(key));
             // A generic whole-document redact walk (applied via the
             // `--secret-name` output options below) only rewrites object
@@ -1798,7 +2145,7 @@ fn compute_get(
             if is_secret {
                 json!("***")
             } else {
-                target.into()
+                Value::try_from(target)?
             }
         }
     };
@@ -1832,7 +2179,7 @@ fn compute_value(
 ) -> Result<Vec<u8>, CliDocError> {
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
     let (root, _doc_format) = read_document_input(file, input_format)?;
-    if !reveal_secret && document_leaf_is_secret(key, ctx.secret_names)? {
+    if !reveal_secret && document_path_is_secret(key, ctx.secret_names)? {
         return Err(CliDocError::runtime(
             "document_secret_redacted",
             format!("path `{key}` names a secret; pass --reveal-secret"),
@@ -1852,6 +2199,12 @@ fn compute_value(
         && let Some(default) = default
     {
         return Ok(default.as_bytes().to_vec());
+    }
+    if target.is_null() {
+        return Err(CliDocError::runtime(
+            "document_null_value",
+            format!("path `{key}` is null; pass --default to choose replacement output"),
+        ));
     }
     document_scalar_bytes(&target, key)
         .map_err(|message| CliDocError::runtime("document_not_scalar", message))
@@ -1995,17 +2348,26 @@ fn compute_set(
                 "set requires VALUE, --value-type null, or --secret-from".to_string(),
             )
         })?;
-        // §3 异型覆盖守卫: a bare VALUE is always a string, so overwriting an
-        // *existing* scalar of a different kind would silently change its
-        // type — that is an argument error, not a coercion decision. A
-        // brand-new key, an existing string, or a container are unguarded.
+        // Heterogeneous-overwrite guard: a bare VALUE is always a string, so writing one over
+        // anything that is not already a string rewrites what is there — an
+        // argument error, not a coercion decision. Only a brand-new key or an
+        // existing string is unguarded. Containers are included: replacing an
+        // array with a string used to exit 0 and discard every element.
         let existing = get_path(doc.value(), key, &[]).ok();
-        if let Err(kind) = guard_bare_overwrite(existing.as_ref()) {
+        if let Err(overwrite) = guard_bare_overwrite(existing.as_ref()) {
+            let verb = match overwrite {
+                BareOverwrite::Container(_) => "discard",
+                BareOverwrite::Scalar(_) => "change",
+            };
+            let keep_instruction = if overwrite.found() == "null" {
+                "pass --value-type null without VALUE to keep it".to_string()
+            } else {
+                format!("pass --value-type {} to keep it", overwrite.keeps())
+            };
             return Err(CliDocError::Usage(format!(
-                "bare VALUE would silently change `{key}` from {kind} to string; pass \
-                 --value-type {kind} to keep its type, or --value-type string to convert it \
-                 explicitly",
-                kind = kind.value_type_name()
+                "bare VALUE would silently {verb} the {found} at `{key}`; \
+                 {keep_instruction}, or pass --value-type string to replace it explicitly",
+                found = overwrite.found(),
             )));
         }
         DocumentValue::String(raw)
@@ -2015,7 +2377,7 @@ fn compute_set(
     doc.save()?;
     Ok(json!({
         "code": "document_set",
-        "format": doc.format().name(),
+        "format": doc.format().cli_name(),
         "key": key,
         "path": doc.path().display().to_string(),
     }))
@@ -2057,7 +2419,7 @@ fn compute_add(
                 "field name must not be empty".to_string(),
             ));
         }
-        // §3 "堵侧门": add's FIELD=VALUE is always a string, the same
+        // Close the side door: add's FIELD=VALUE is always a string, the same
         // zero-coercion rule as set's bare VALUE — no separate type syntax.
         field_pairs.push((name.to_string(), DocumentValue::String(value.to_string())));
     }
@@ -2066,7 +2428,7 @@ fn compute_add(
     doc.save()?;
     Ok(json!({
         "code": "document_added",
-        "format": doc.format().name(),
+        "format": doc.format().cli_name(),
         "key": key,
         "slug": slug,
         "path": doc.path().display().to_string(),
@@ -2101,7 +2463,7 @@ fn compute_remove(
     doc.save()?;
     Ok(json!({
         "code": "document_removed",
-        "format": doc.format().name(),
+        "format": doc.format().cli_name(),
         "key": key,
         "slug": slug,
         "path": doc.path().display().to_string(),
@@ -2131,7 +2493,7 @@ fn compute_unset(file: &Path, key: &str, ctx: &DocumentContext<'_>) -> Result<Va
     doc.save()?;
     Ok(json!({
         "code": "document_unset",
-        "format": doc.format().name(),
+        "format": doc.format().cli_name(),
         "key": key,
         "path": doc.path().display().to_string(),
     }))
@@ -2351,6 +2713,7 @@ fn lint_value(value: &Value, pointer: &str, findings: &mut Vec<Finding>) {
                     continue;
                 }
                 lint_suffix_type(key, child, &join_pointer(pointer, key), findings);
+                lint_missing_suffix(key, child, &join_pointer(pointer, key), findings);
                 lint_value(child, &join_pointer(pointer, key), findings);
             }
         }
@@ -2370,6 +2733,7 @@ fn lint_schema_property(
     findings: &mut Vec<Finding>,
 ) {
     let property_pointer = join_pointer(properties_pointer, name);
+    let normalized_name = name.to_ascii_lowercase();
     // A JSON Schema is always an object or a boolean. A scalar or array here
     // means the enclosing `properties` object is runtime data that happens to
     // use `properties` as a field name, not a property map, so the value keeps
@@ -2379,7 +2743,7 @@ fn lint_schema_property(
         lint_value(schema, &property_pointer, findings);
         return;
     }
-    if name.ends_with("_secret")
+    if normalized_name.ends_with("_secret")
         && let Some(obj) = schema.as_object()
     {
         for field in ["default", "example"] {
@@ -2413,27 +2777,28 @@ fn lint_schema_property(
 }
 
 fn lint_schema_suffix_type(name: &str, schema: &Value, pointer: &str, findings: &mut Vec<Finding>) {
-    let (expected, description): (&[&str], &str) = if name.ends_with("_bytes") {
+    let normalized = name.to_ascii_lowercase();
+    let (expected, description): (&[&str], &str) = if normalized.ends_with("_bytes") {
         (&["integer"], "an integer byte count")
-    } else if name.ends_with("_epoch_s") || name.ends_with("_epoch_ms") {
+    } else if normalized.ends_with("_epoch_s") || normalized.ends_with("_epoch_ms") {
         (&["integer"], "an integer epoch timestamp")
-    } else if name.ends_with("_epoch_ns") {
+    } else if normalized.ends_with("_epoch_ns") {
         (&["string"], "a decimal integer string")
-    } else if name.ends_with("_sats") || name.ends_with("_msats") {
+    } else if normalized.ends_with("_sats") || normalized.ends_with("_msats") {
         (
             &["integer", "string"],
             "an integer or decimal integer string",
         )
-    } else if name.ends_with("_percent") || is_duration_suffix(name) {
+    } else if normalized.ends_with("_percent") || is_duration_suffix(&normalized) {
         (&["integer", "number"], "a numeric value")
-    } else if is_currency_minor_unit_suffix(name) {
+    } else if is_currency_minor_unit_suffix(&normalized) {
         (&["integer"], "an integer currency amount")
-    } else if name.ends_with("_rfc3339")
-        || name.ends_with("_url")
-        || name.ends_with("_bcp47")
-        || name.ends_with("_rfc3339_date")
-        || name.ends_with("_rfc3339_time")
-        || name.ends_with("_utc_offset")
+    } else if normalized.ends_with("_rfc3339")
+        || normalized.ends_with("_url")
+        || normalized.ends_with("_bcp47")
+        || normalized.ends_with("_rfc3339_date")
+        || normalized.ends_with("_rfc3339_time")
+        || normalized.ends_with("_utc_offset")
     {
         (&["string"], "a string")
     } else {
@@ -2490,6 +2855,151 @@ fn is_redacted_secret_literal(value: &Value) -> bool {
     matches!(value, Value::Null) || matches!(value, Value::String(s) if s == "***")
 }
 
+/// Every suffix `spec/registry.json` defines, by category.
+///
+/// Kept in step with the registry by `registry_suffixes_match_the_table`
+/// rather than by hand — a suffix added there and missed here would silently
+/// turn correctly-named fields into warnings.
+const REGISTERED_SUFFIXES: &[(&str, &[&str])] = &[
+    (
+        "duration",
+        &["_ns", "_us", "_ms", "_s", "_minutes", "_hours", "_days"],
+    ),
+    (
+        "timestamp",
+        &["_epoch_s", "_epoch_ms", "_epoch_ns", "_rfc3339"],
+    ),
+    (
+        "strict_string",
+        &["_rfc3339_date", "_rfc3339_time", "_bcp47", "_utc_offset"],
+    ),
+    ("size", &["_bytes"]),
+    ("percentage", &["_percent"]),
+    (
+        "currency",
+        &[
+            "_msats",
+            "_sats",
+            "_usd_cents",
+            "_eur_cents",
+            "_jpy",
+            "_{code}_cents",
+            "_{code}_micro",
+        ],
+    ),
+    ("sensitive", &["_secret", "_url"]),
+];
+
+/// Field-name stems that name a dimension the convention has a suffix for.
+///
+/// Matched against the whole key or its trailing `_`-separated tail, so
+/// `request_timeout` counts and `timeout_ms` does not (it already carries one).
+const UNSUFFIXED_STEMS: &[(&str, &str)] = &[
+    ("timeout", "duration"),
+    ("elapsed", "duration"),
+    ("duration", "duration"),
+    ("ttl", "duration"),
+    ("interval", "duration"),
+    ("latency", "duration"),
+    ("delay", "duration"),
+    ("uptime", "duration"),
+    ("price", "currency"),
+    ("amount", "currency"),
+    ("cost", "currency"),
+    ("fee", "currency"),
+    ("balance", "currency"),
+    ("subtotal", "currency"),
+    ("revenue", "currency"),
+    ("created", "timestamp"),
+    ("updated", "timestamp"),
+    ("modified", "timestamp"),
+    ("expires", "timestamp"),
+    ("issued", "timestamp"),
+    ("timestamp", "timestamp"),
+    ("apikey", "sensitive"),
+    ("api_key", "sensitive"),
+    ("token", "sensitive"),
+    ("password", "sensitive"),
+    ("passwd", "sensitive"),
+    ("secret", "sensitive"),
+    ("credential", "sensitive"),
+    ("credentials", "sensitive"),
+];
+
+fn has_registered_suffix(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    REGISTERED_SUFFIXES
+        .iter()
+        .flat_map(|(_, suffixes)| suffixes.iter())
+        .any(|suffix| match suffix.strip_prefix("_{code}") {
+            // `_{code}_cents` / `_{code}_micro` are templated on a currency
+            // code, so match the shape rather than the literal.
+            Some(tail) => lower
+                .strip_suffix(tail)
+                .and_then(|rest| rest.rsplit_once('_'))
+                .is_some_and(|(_, code)| {
+                    code.len() == 3 && code.chars().all(|c| c.is_ascii_alphabetic())
+                }),
+            None => lower.ends_with(suffix),
+        })
+}
+
+/// Flag a field whose name announces a dimension but carries no unit.
+///
+/// This is the question the convention exists to answer — is `timeout` seconds
+/// or milliseconds, is `price` dollars or cents, is `created` an id or a date,
+/// does `api_key` get redacted — and until now `lint` only checked fields that
+/// had already answered it, so a document made entirely of these passed clean.
+fn lint_missing_suffix(key: &str, value: &Value, pointer: &str, findings: &mut Vec<Finding>) {
+    if value.is_null() || has_registered_suffix(key) {
+        return;
+    }
+    let lower = key.to_ascii_lowercase();
+    // `_at` is the common spelling for "this is a time", and it names no unit.
+    let category = if lower.ends_with("_at") {
+        Some("timestamp")
+    } else {
+        UNSUFFIXED_STEMS
+            .iter()
+            .find(|(stem, _)| lower == *stem || lower.ends_with(&format!("_{stem}")))
+            .map(|(_, category)| *category)
+    };
+    let Some(category) = category else {
+        return;
+    };
+    // Only complain where the value could actually carry the dimension: a
+    // `timeout` object is a config block, not an unlabelled number.
+    let plausible = match category {
+        "duration" | "currency" | "size" | "percentage" => value.is_number(),
+        "timestamp" => value.is_number() || value.is_string(),
+        _ => value.is_string(),
+    };
+    if !plausible {
+        return;
+    }
+    let suffixes = REGISTERED_SUFFIXES
+        .iter()
+        .find(|(name, _)| *name == category)
+        .map(|(_, suffixes)| suffixes.join(", "))
+        .unwrap_or_default();
+    let message = if category == "sensitive" {
+        format!(
+            "`{key}` looks like a credential but is not marked, so it is printed and logged in \
+             the clear. Rename it with one of: {suffixes}"
+        )
+    } else {
+        format!(
+            "`{key}` names a {category} but carries no unit, so a reader cannot tell what it \
+             means without asking. Rename it with one of: {suffixes}"
+        )
+    };
+    findings.push(Finding::warning(
+        "missing_suffix",
+        pointer.to_string(),
+        message,
+    ));
+}
+
 fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<Finding>) {
     // `null` means the field is absent/unset, not present-with-the-wrong-type:
     // the suffix type constraint below applies only to present, non-null
@@ -2500,25 +3010,26 @@ fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<
     if value.is_null() {
         return;
     }
-    let message = if key.ends_with("_bytes") {
+    let normalized = key.to_ascii_lowercase();
+    let message = if normalized.ends_with("_bytes") {
         if is_non_negative_integer(value) {
             None
         } else {
             Some(format!("{key:?} must be a non-negative integer byte count"))
         }
-    } else if key.ends_with("_epoch_s") || key.ends_with("_epoch_ms") {
+    } else if normalized.ends_with("_epoch_s") || normalized.ends_with("_epoch_ms") {
         if is_integer(value) {
             None
         } else {
             Some(format!("{key:?} must be an integer epoch timestamp"))
         }
-    } else if key.ends_with("_epoch_ns") {
+    } else if normalized.ends_with("_epoch_ns") {
         if is_decimal_integer_string(value) {
             None
         } else {
             Some(format!("{key:?} must be a decimal integer string"))
         }
-    } else if key.ends_with("_sats") || key.ends_with("_msats") {
+    } else if normalized.ends_with("_sats") || normalized.ends_with("_msats") {
         if is_integer(value) || is_decimal_integer_string(value) {
             None
         } else {
@@ -2526,25 +3037,25 @@ fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<
                 "{key:?} must be an integer or decimal integer string"
             ))
         }
-    } else if key.ends_with("_percent") {
+    } else if normalized.ends_with("_percent") {
         if value.is_number() {
             None
         } else {
             Some(format!("{key:?} must be numeric"))
         }
-    } else if is_duration_suffix(key) {
+    } else if is_duration_suffix(&normalized) {
         if value.is_number() {
             None
         } else {
             Some(format!("{key:?} must be a numeric duration"))
         }
-    } else if is_currency_minor_unit_suffix(key) {
+    } else if is_currency_minor_unit_suffix(&normalized) {
         if is_integer(value) {
             None
         } else {
             Some(format!("{key:?} must be an integer currency amount"))
         }
-    } else if key.ends_with("_rfc3339") {
+    } else if normalized.ends_with("_rfc3339") {
         if value.as_str().is_some_and(is_valid_rfc3339) {
             None
         } else if value.is_string() {
@@ -2554,7 +3065,7 @@ fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<
         } else {
             Some(format!("{key:?} must be a string"))
         }
-    } else if key.ends_with("_url") {
+    } else if normalized.ends_with("_url") {
         if value.as_str().is_some_and(is_wellformed_url_field) {
             None
         } else if value.is_string() {
@@ -2564,7 +3075,7 @@ fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<
         } else {
             Some(format!("{key:?} must be a string"))
         }
-    } else if key.ends_with("_bcp47") {
+    } else if normalized.ends_with("_bcp47") {
         if value.as_str().is_some_and(is_valid_bcp47) {
             None
         } else if value.is_string() {
@@ -2572,7 +3083,7 @@ fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<
         } else {
             Some(format!("{key:?} must be a string"))
         }
-    } else if key.ends_with("_rfc3339_date") {
+    } else if normalized.ends_with("_rfc3339_date") {
         if value.as_str().is_some_and(is_valid_rfc3339_date) {
             None
         } else if value.is_string() {
@@ -2582,7 +3093,7 @@ fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<
         } else {
             Some(format!("{key:?} must be a string"))
         }
-    } else if key.ends_with("_rfc3339_time") {
+    } else if normalized.ends_with("_rfc3339_time") {
         if value.as_str().is_some_and(is_valid_rfc3339_time) {
             None
         } else if value.is_string() {
@@ -2592,7 +3103,7 @@ fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<
         } else {
             Some(format!("{key:?} must be a string"))
         }
-    } else if key.ends_with("_utc_offset") {
+    } else if normalized.ends_with("_utc_offset") {
         if value.as_str().and_then(normalize_utc_offset).is_some() {
             None
         } else if value.is_string() {
@@ -2723,21 +3234,145 @@ fn join_pointer(base: &str, token: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod cli_registry_tests {
+    use super::*;
+
+    /// The missing-suffix heuristic decides a field is unlabelled by *not*
+    /// finding a registered suffix on it. A suffix added to the registry and
+    /// missed here would start warning about correctly-named fields, so the two
+    /// are compared rather than trusted.
+    #[test]
+    fn registry_suffixes_match_the_table() {
+        const REGISTRY: &str =
+            include_str!("../../skills/agent-first-data/references/registry.json");
+        let registry: Value = serde_json::from_str(REGISTRY).unwrap();
+        let mut from_registry: Vec<(String, String)> = registry["suffixes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["category"].as_str().unwrap().to_string(),
+                    entry["suffix"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let mut from_table: Vec<(String, String)> = REGISTERED_SUFFIXES
+            .iter()
+            .flat_map(|(category, suffixes)| {
+                suffixes
+                    .iter()
+                    .map(move |suffix| ((*category).to_string(), (*suffix).to_string()))
+            })
+            .collect();
+        from_registry.sort();
+        from_table.sort();
+        assert_eq!(from_table, from_registry);
+    }
+
+    #[test]
+    fn missing_suffix_reads_intent_from_the_name() {
+        let mut findings = Vec::new();
+        lint_missing_suffix("timeout", &json!(5000), "/timeout", &mut findings);
+        lint_missing_suffix(
+            "request_timeout",
+            &json!(1),
+            "/request_timeout",
+            &mut findings,
+        );
+        lint_missing_suffix("expires_at", &json!(1), "/expires_at", &mut findings);
+        assert_eq!(findings.len(), 3);
+        assert!(findings.iter().all(|finding| finding.severity == "warning"));
+
+        // Already labelled, so there is nothing to ask about.
+        let mut clean = Vec::new();
+        lint_missing_suffix("timeout_ms", &json!(5000), "/timeout_ms", &mut clean);
+        lint_missing_suffix("price_gbp_cents", &json!(1), "/price_gbp_cents", &mut clean);
+        lint_missing_suffix(
+            "api_key_secret",
+            &json!("sk"),
+            "/api_key_secret",
+            &mut clean,
+        );
+        // A dimension name over a container is a config block, not a bare number.
+        lint_missing_suffix("timeout", &json!({"connect": 1}), "/timeout", &mut clean);
+        // An unrelated name says nothing about a dimension.
+        lint_missing_suffix("name", &json!("demo"), "/name", &mut clean);
+        assert!(clean.is_empty(), "{clean:?}");
+    }
+
+    #[test]
+    fn every_registered_afdata_shape_round_trips() {
+        let cli = afdata_cli_spec().unwrap();
+        let fixtures = cli.synthetic_invocations();
+        assert!(!fixtures.is_empty());
+        for fixture in fixtures {
+            let outcome = cli.resolve_from(fixture.argv).unwrap();
+            let CliOutcome::Run(invocation) = outcome else {
+                panic!("synthetic afdata fixture did not resolve to Run");
+            };
+            assert_eq!(invocation.combination_id(), fixture.combination_id);
+        }
+    }
+
+    #[test]
+    fn set_conflicts_are_closed_world_errors() {
+        let cli = afdata_cli_spec().unwrap();
+        let error = cli
+            .resolve_from([
+                "afdata",
+                "set",
+                "data.json",
+                "key",
+                "visible",
+                "--secret-from",
+                "env:VALUE_SECRET",
+            ])
+            .unwrap_err();
+        assert_eq!(
+            error.rule,
+            agent_first_data::CliErrorRule::UnregisteredCombination
+        );
+        assert!(!error.message.contains("VALUE_SECRET"));
+    }
+
+    #[test]
+    fn raw_commands_reject_protocol_output_arguments() {
+        let cli = afdata_cli_spec().unwrap();
+        for command in ["value", "paths", "keys"] {
+            let mut argv = vec!["afdata", command, "data.json"];
+            if command == "value" {
+                argv.push("key");
+            }
+            argv.extend(["--output", "json"]);
+            let error = cli.resolve_from(argv).unwrap_err();
+            assert_eq!(
+                error.rule,
+                agent_first_data::CliErrorRule::UnregisteredCombination
+            );
+        }
+    }
+}
+
 #[cfg(all(test, feature = "skill"))]
 mod skill_tests {
     use super::*;
 
     #[test]
     fn parses_and_validates_skill_directory() {
-        let parsed =
-            Cli::try_parse_from(["afdata", "skill", "validate", "skills/agent-first-data"]);
-        assert!(matches!(
-            parsed,
-            Ok(Cli {
-                command: Command::Skill(SkillCommand::Validate { input }),
-                ..
-            }) if input == Path::new("skills/agent-first-data")
-        ));
+        let cli = afdata_cli_spec().unwrap();
+        let parsed = cli
+            .resolve_from(["afdata", "skill", "validate", "skills/agent-first-data"])
+            .unwrap();
+        let CliOutcome::Run(invocation) = parsed else {
+            panic!("expected a resolved skill validation");
+        };
+        assert_eq!(invocation.action_id(), "skill_validate");
+        assert_eq!(
+            invocation.required("input").as_str(),
+            Some("skills/agent-first-data")
+        );
 
         let loaded = read_skill_input(Path::new("skills/agent-first-data"));
         assert!(matches!(
@@ -2750,32 +3385,32 @@ mod skill_tests {
 
     #[cfg(feature = "skill-admin")]
     #[test]
-    fn keeps_existing_skill_admin_command_shape() {
-        let parsed = Cli::try_parse_from([
-            "afdata",
-            "skill",
-            "status",
-            "--agent",
-            "opencode",
-            "--scope",
-            "workspace",
-        ]);
-        assert!(matches!(
-            parsed,
-            Ok(Cli {
-                command: Command::Skill(SkillCommand::Status { agent, scope, .. }),
-                ..
-            }) if agent == "opencode" && scope == "workspace"
-        ));
+    fn resolves_registered_skill_admin_combination() {
+        let cli = afdata_cli_spec().unwrap();
+        let parsed = cli
+            .resolve_from([
+                "afdata",
+                "skill",
+                "status",
+                "--agent",
+                "opencode",
+                "--scope",
+                "workspace",
+            ])
+            .unwrap();
+        let CliOutcome::Run(invocation) = parsed else {
+            panic!("expected a resolved skill status");
+        };
+        assert_eq!(invocation.combination_id(), "skill-status-agent");
+        assert_eq!(invocation.required("agent").as_str(), Some("opencode"));
+        assert_eq!(invocation.required("scope").as_str(), Some("workspace"));
     }
 
     #[cfg(feature = "skill-admin")]
     #[test]
     fn admin_subcommands_reject_a_validate_only_input_path() {
-        // Nested clap subcommands (D5) mean `status`/`install`/`uninstall`
-        // simply have no positional INPUT argument at all — an extra
-        // positional is a clap parse error, not a runtime branch.
-        let parsed = Cli::try_parse_from(["afdata", "skill", "status", "some/path"]);
+        let cli = afdata_cli_spec().unwrap();
+        let parsed = cli.resolve_from(["afdata", "skill", "status", "some/path"]);
         assert!(parsed.is_err());
     }
 }

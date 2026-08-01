@@ -39,7 +39,7 @@ pub fn load(content: &str) -> DocumentResult<Value> {
 fn parse_semantic(content: &str) -> DocumentResult<Value> {
     let mut values = BTreeMap::new();
 
-    for (line_number, raw_line) in logical_lines(content) {
+    for (line_number, raw_line) in logical_lines(content)? {
         let line = raw_line
             .strip_suffix('\r')
             .unwrap_or(&raw_line)
@@ -73,26 +73,53 @@ fn parse_semantic(content: &str) -> DocumentResult<Value> {
     Ok(Value::Object(values))
 }
 
-fn logical_lines(content: &str) -> Vec<(usize, String)> {
+/// Split `content` into logical lines, joining the physical lines a quoted
+/// value spans.
+///
+/// A quote only opens a value where a value can start: after the `=`, before
+/// any other non-whitespace character, and never inside a comment. Tracking
+/// less than that made an ordinary English comment — `# set KEY=value if it
+/// isn't already there` — open a quote at the apostrophe that no later line
+/// closed, swallowing the rest of the file into one unparseable line and
+/// yielding zero keys with no error at all.
+fn logical_lines(content: &str) -> DocumentResult<Vec<(usize, String)>> {
     let mut lines = Vec::new();
     let mut buffer = String::new();
     let mut first_line = 1;
     let mut line_number = 1;
     let mut quote = None;
+    let mut quote_opened_at = 0;
     let mut escaped = false;
-    let mut after_equals = false;
+    let mut value_may_open = false;
+    let mut in_comment = false;
+    let mut at_line_start = true;
 
     for character in content.chars() {
         if quote.is_none() {
-            if after_equals && character.is_whitespace() && character != '\n' && character != '\r' {
-                buffer.push(character);
-                continue;
+            if at_line_start && !character.is_whitespace() {
+                at_line_start = false;
+                in_comment = character == '#';
             }
-            if after_equals && (character == '\'' || character == '"') {
-                quote = Some(character);
-                after_equals = false;
-            } else if character == '=' {
-                after_equals = true;
+            if !in_comment {
+                if value_may_open
+                    && character.is_whitespace()
+                    && character != '\n'
+                    && character != '\r'
+                {
+                    buffer.push(character);
+                    continue;
+                }
+                if value_may_open && (character == '\'' || character == '"') {
+                    quote = Some(character);
+                    quote_opened_at = line_number;
+                    value_may_open = false;
+                } else if character == '=' {
+                    value_may_open = true;
+                } else if !character.is_whitespace() {
+                    // The value has already started unquoted, so a quote from
+                    // here on is an ordinary character, not a delimiter.
+                    value_may_open = false;
+                }
             }
         } else if escaped {
             escaped = false;
@@ -113,12 +140,23 @@ fn logical_lines(content: &str) -> Vec<(usize, String)> {
         }
         if character == '\n' {
             line_number += 1;
+            if quote.is_none() {
+                value_may_open = false;
+                in_comment = false;
+                at_line_start = true;
+            }
         }
+    }
+    if quote.is_some() {
+        // Reaching end of input inside a quote means the file is malformed.
+        // Reporting zero keys instead let `value --default` hand a caller its
+        // fallback while the real value sat in the file, unread and unmentioned.
+        return Err(parse_error(quote_opened_at, "unterminated quoted value"));
     }
     if !buffer.is_empty() || content.is_empty() {
         lines.push((first_line, buffer));
     }
-    lines
+    Ok(lines)
 }
 
 /// dotenv is intentionally read-only because the generic IR loses source formatting.
@@ -333,5 +371,59 @@ fn with_path(error: DocumentError, path: &str) -> DocumentError {
             detail: format!("path `{path}`: {detail}"),
         },
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_comment_does_not_swallow_the_file() {
+        // The apostrophe in "isn't" follows an `=` earlier on the same comment
+        // line. Treating it as an opening quote consumed every later line, so
+        // the file parsed to zero keys and reported success — a caller using
+        // `--default` got its fallback while the real value sat in the file.
+        let source =
+            "# set KEY=value if it isn't already there\nAPI_HOST=example.com\nAPI_PORT=8080\n";
+        let Value::Object(values) = load(source).unwrap() else {
+            panic!("expected an object");
+        };
+        assert_eq!(values.len(), 2);
+        assert_eq!(
+            values.get("API_HOST"),
+            Some(&Value::String("example.com".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_quote_after_the_value_started_is_literal() {
+        let Value::Object(values) = load("MESSAGE=it isn't quoted\n").unwrap() else {
+            panic!("expected an object");
+        };
+        assert_eq!(
+            values.get("MESSAGE"),
+            Some(&Value::String("it isn't quoted".to_string()))
+        );
+    }
+
+    #[test]
+    fn quoted_values_still_span_lines() {
+        let Value::Object(values) = load("A=\"line1\nline2\"\nB=after\n").unwrap() else {
+            panic!("expected an object");
+        };
+        assert_eq!(
+            values.get("A"),
+            Some(&Value::String("line1\nline2".to_string()))
+        );
+        assert_eq!(values.get("B"), Some(&Value::String("after".to_string())));
+    }
+
+    #[test]
+    fn an_unterminated_quote_is_a_parse_error() {
+        // Silence was the unacceptable answer here: an unreadable file has to
+        // say so rather than present itself as an empty one.
+        let error = load("A=\"unterminated\nB=after\n").unwrap_err();
+        assert_eq!(error.code(), "document_parse_failed");
     }
 }

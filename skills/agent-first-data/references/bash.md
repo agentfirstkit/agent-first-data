@@ -40,7 +40,7 @@ afdata_args_parse "$@"
 
 Use `afdata_args_option`, `afdata_args_flag`, `afdata_args_positional`, and
 `afdata_args_rest`. The kit owns help, usage errors, AFDATA output flags, and
-secret-default redaction — never redeclare `--output`, `--output-to`, or
+structured output routing — never redeclare `--output`, `--output-to`, or
 `--help`. `afdata_args_rest` takes only a display name and a description;
 trailing arguments always land in `AFDATA_ARGS_REST`, never a variable you name.
 

@@ -14,25 +14,26 @@ import (
 )
 
 func main() {
-    event, _ := afdata.NewJSONResult(map[string]any{
+    event := afdata.NewJSONResult(map[string]any{
         "api_key_secret": "sk-123",
         "latency_ms": 1280,
         "db_url": "postgres://user:p@ss@db/app?token_secret=abc",
     }).Build()
     value := event.Value()
 
-    fmt.Println(afdata.OutputJson(value))
-    fmt.Println(afdata.OutputPlain(value))
+    options := afdata.OutputOptions{}
+    fmt.Println(afdata.Render(value, afdata.OutputFormatJson, options))
+    fmt.Println(afdata.Render(value, afdata.OutputFormatPlain, options))
 }
 ```
 
-Useful names use Go casing: `OutputJson`, `OutputYaml`, `OutputPlain`, `OutputJsonWithOptions`, `OutputOptionsForPolicy`, `RedactedValue`, `RedactURLSecrets`, `RedactArgv`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `IsValidRFC3339`, `IsValidBCP47`, `CliParseOutput`, `CliOutput`, `BuildCliError`, `BuildCliVersion`, `CliHandleVersionOrContinue`, and `DecodeProtocolEvent`.
+Useful names use Go casing: `Render` (the single `value × format × options → string` entry point), `OutputFormat`, `OutputTo`, `OutputOptions`, `OutputOptionsForPolicy`, `RedactedValue`, `RedactURLSecrets`, `RedactArgv`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `IsValidRFC3339`, `IsValidBCP47`, `CliParseOutput`, `CliParseLogFilters`, `ParseOutputTo`, `CliEmitter`, `BuildCliError`, `BuildCliVersion`, `CliRenderVersion`, `ValidateProtocolEvent`, and `DecodeProtocolEvent`.
 
 Scoped redaction and extra secret names use the `Redactor` struct:
 
 ```go
 r := afdata.Redactor{SecretNames: []string{"authorization"}}
-fmt.Println(afdata.OutputJson(r.Value(value)))
+fmt.Println(afdata.Render(r.Value(value), afdata.OutputFormatJson, afdata.OutputOptions{}))
 fmt.Println(r.URL("https://api.example.com/?authorization=abc"))
 ```
 
@@ -43,7 +44,7 @@ fmt.Println(r.URL("https://api.example.com/?authorization=abc"))
 - YAML keeps original keys and values (structure-preserving, like JSON), sorting keys by UTF-16 code unit order and quoting/escaping unsafe keys and string scalars. Plain strips formatting suffixes, formats values, sorts the same way, and renders nested objects/arrays as canonical JSON.
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - `build_cli_error(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
-- Use `CliHandleVersionOrContinue()` before argument parsing so `--version` always answers with a structured protocol-v1 `kind:"result"` version event. An explicit `--output` wins; pass the command's normal output as the optional final argument (JSON when omitted), plus its value-taking global flag names.
+- Do not add a raw version/help pre-parser. Until the Go `CliSpec` compiler lands, applications should keep lifecycle parsing in their own parser rather than claim AFDATA closed-world help compatibility.
 
 ## Reference
 

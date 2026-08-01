@@ -95,7 +95,7 @@ use std::os::fd::AsRawFd;
 
 /// Resolve raw CLI argv into a config (the single blessed entry).
 ///
-/// This parser intentionally has no `clap` dependency so callers can install
+/// This parser intentionally has no CLI-parser dependency so callers can install
 /// redirection before help/version handling emits early output. It recognizes
 /// `--stdout-file VALUE`, `--stdout-file=VALUE`, `--stderr-file VALUE`, and
 /// `--stderr-file=VALUE`. Pair it with [`install`] when you need the config

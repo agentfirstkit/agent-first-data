@@ -2,19 +2,6 @@
 
 # CLI, protocol, help, and logging
 
-Read this reference for protocol envelopes, output routing, CLI helpers,
-structured help, version output, and logging.
-
-## Contents
-
-- [Protocol v1](#protocol-v1)
-- [Channel policy](#channel-policy)
-- [CLI implementation](#cli-implementation)
-- [Version is on demand](#version-is-on-demand)
-- [Help v1 and progressive discovery](#help-v1-and-progressive-discovery)
-- [Logging](#logging)
-- [Review checklist](#review-checklist)
-
 ## Protocol v1
 
 Every event uses `kind`, one same-named payload, and top-level `trace`:
@@ -27,144 +14,130 @@ Every event uses `kind`, one same-named payload, and top-level `trace`:
 ```
 
 - `result` and `error` are terminal.
-- `error.code` and `error.message` are non-empty. Strict events also include
-  `error.retryable`.
-- Log and progress payload fields are tool-defined.
-- Strict validation requires object-valued `trace` on every event.
-- Keep this envelope across CLI, HTTP JSON, MCP, SSE, and JSONL streams when
-  claiming protocol compatibility.
-
-Validate exact envelope rules with `protocol-v1.schema.json` or
-`afdata validate --strict`.
+- Strict events have object-valued `trace`; strict errors also have non-empty
+  `code`/`message` and boolean `retryable`.
+- Keep the same envelope across CLI, HTTP, MCP, SSE, and logs.
+- Validate exact rules with `protocol-v1.schema.json` or
+  `afdata validate --strict`.
 
 ## Channel policy
 
-Choose routing by how output is consumed:
+- Finite command: result to stdout; error/progress/log to stderr.
+- Ordered stream: keep every event on one destination.
+- `--output json|yaml|plain` chooses serialization.
+- `--output-to split|stdout|stderr` chooses destination.
+- Raw actions have raw success output and a strict JSON domain-error emitter;
+  they do not accept protocol format or destination options.
 
-- Finite one-shot command: `result` goes to stdout; `error`, `progress`, and
-  `log` go to stderr.
-- Ordered event stream: every event, including terminal error, stays on one
-  destination so ordering survives.
-- `--output json|yaml|plain` selects serialization.
-- `--output-to split|stdout|stderr` selects destination policy. `stdout` and
-  `stderr` collapse the whole event stream onto one destination.
-- Raw-scalar document readers are intrinsically split and reject a non-default
-  `--output-to`.
+Resolved output plans, emitters, and raw sinks come from AFDATA. Do not write
+diagnostics ad hoc or reparse output flags in the application.
 
-Do not write diagnostics to stderr ad hoc. Route them through the emitter so
-redaction, framing, and stream selection remain correct. Native panic or
-traceback bytes may remain raw stderr.
+## Closed-world CLI implementation
 
-Use emitter `finish`/`finish_result` helpers for terminal output. They preserve
-the requested exit code, map a broken pipe to success, and map other write
-failures to the runtime's output-failure code.
+Build one `CliSpec` and register:
 
-## CLI implementation
+- one explicit `CommandSpec` for root and each command path;
+- command-local `ArgSpec`s with canonical long names or positional indexes;
+- named `Combination`s containing fixed enum values, required arguments,
+  optional arguments, an `action_id`, and an `OutputSpec`.
 
-Use the shared runtime helpers instead of custom output parsing or envelopes:
+Every application argument must appear in at least one combination. Fixed,
+required, and optional sets are disjoint. A combination's optional arguments
+may appear in any subset; conditional optional relationships require separate
+combinations. `CliSpec::build()` rejects overlap, invalid defaults, uncovered
+arguments, invalid output contracts, and duplicate identities.
 
-- `cli_parse_output`
-- `cli_parse_log_filters`
-- `build_cli_error`
-- `build_cli_version`
-- `cli_handle_version_or_continue`
-- `CliEmitter`
+An invocation must match exactly one combination. Known arguments in an
+unregistered mixture return:
 
-Rust adds output-aware Clap help through
-`cli_handle_version_or_help_or_continue`. Call it once before `try_parse`, pass
-the caller's own `clap::Command`, and use `HelpConfig::output_aware()`.
-Separate version/help helpers remain lifecycle escape hatches.
+```json
+{"kind":"error","error":{"code":"cli_unregistered_combination","message":"arguments do not match a registered CLI combination","retryable":false,"hint":"run `tool sync --help` and choose one registered combination"},"trace":{}}
+```
 
-Use `try_parse`, not a parser that exits with raw usage text. Convert usage
-failures into `kind:"error"` with `code:"cli_error"`, a useful hint,
-`retryable:false`, and `trace:{}`.
+All CLI errors use exit 2 and raw JSON on stderr before domain I/O. The `code`
+names the failure, so the same rule covers CLI and document errors alike:
+branch on `error.code`, never on message text.
 
-## Version is on demand
+`cli_unknown_command`, `cli_unknown_argument`, `cli_missing_argument_value`,
+`cli_invalid_argument_value`, `cli_duplicate_argument`,
+`cli_unexpected_positional`, `cli_unregistered_combination`,
+`cli_invalid_utf8`. A CLI not compiled from a registry reports the generic
+`cli_error`.
 
-Handle top-level `--version` before the parser's built-in text exit.
-Return a protocol result:
+`message` names the offending argument and `hint` gives the command to run
+next; neither ever carries a raw value.
+
+The full command path comes first. There are no application globals, shorts,
+abbreviations, optional-value options, compatibility no-ops, rule priorities,
+or post-parse combination callbacks. Reserved built-ins are `--help`,
+`--docs`, `--version`, `--output`, `--output-to`, `--stdout-file`, and
+`--stderr-file`.
+
+Output tokens do not select or distinguish business combinations. Select one
+application shape first, then validate output against only that combination.
+Parse/match errors do not trust unresolved output tokens.
+
+## Version
+
+Version is a root-only lifecycle combination generated from `CliSpec`:
 
 ```json
 {"kind":"result","result":{"code":"version","name":"tool","version":"1.2.3"},"trace":{}}
 ```
 
-Optional fields are `display_name` and opaque `build`. An explicit `--output`
-wins; otherwise inherit the command's declared output default. `--output` is the
-only format selector AFDATA recognizes — never claim a `--json` alias, which
-belongs to the application.
+It uses `CliSpec.lifecycle_output`. A subcommand `--version` is recognized but
+rejected as an unregistered combination.
 
-Only recognize version before the first positional/subcommand. A malformed
-request such as `--version --output xml` returns a structured CLI error.
+## Help v2
 
-Help advertises `--version` when supported but never embeds version or
-library values. Agents request them only when needed.
-
-## Help v1 and progressive discovery
-
-Scope and format are independent:
-
-- `--help` describes the selected command and one subcommand level.
-- `--help --recursive` emits a compact selected-subtree index.
-- `--output plain|json|yaml|markdown` chooses the representation.
-- Omitted output inherits the selected command's declared `--output` default,
-  with the nearest selected/ancestor declaration winning.
-- A fixed-format CLI without `--output` passes its normal format through
-  `HelpConfig::output_aware_with_fallback(...)`; a JSON-only CLI uses
-  `HelpFormat::Json`.
-- A bare `--recursive` falls through to the application parser.
-
-Plain is conventional terminal help. Markdown is the complete documentation
-export. JSON/YAML is one protocol-v1 result whose `result.code` is `help` and
-whose model is under `result.help`:
+`tool [command] --help` answers in one round trip, with every legal shape of
+that command, each complete:
 
 ```json
-{"kind":"result","result":{"code":"help","help":{"scope":"one_level","command_path":"tool sync","name":"sync","about":"Synchronize records","usage":"[OPTIONS]","arguments":[{"name":"--limit","value":"COUNT","help":"Maximum records"}]}},"trace":{}}
+{"kind":"result","result":{"code":"help","help":{"schema":"cli-help-v2","command_path":"tool sync","about":"Copy records between stores","shapes":[{"id":"sync","usage":"tool sync --source <SOURCE> [--dry-run] [--output <json|yaml|plain>]"}],"notes":{"--source":"Store to read from","--dry-run":"Report what would change"},"defaults":{"--output":"json"}}},"trace":{}}
 ```
 
-The exact schema is `cli-help-v1.schema.json`. The help model permits:
+- JSON is the default; `--output plain` is the human catalog.
+- Each `shapes[]` entry is generated from the registry and carries a complete
+  `usage`: fixed, required, optional, and output arguments, with placeholders
+  rather than secret values. A shape whose fixed argument is already satisfied
+  by that argument's default is shown bracketed, because it may be omitted.
+- An argument with a closed value set names those values inline
+  (`--output <json|yaml|plain>`), so no error is needed to discover them.
+- `notes` and `defaults` are keyed by the spelling `usage` uses, so a caller
+  looks up the token it just read.
+- There is no second help level: what it could omit — the optional arguments —
+  would be registered but undiscoverable to a caller that stopped at the first.
+- There is no recursive argument catalog in v2. `--docs` renders the whole
+  registry as Markdown.
+- Full-spec consumers use `cli-spec-v1`, not lossy help.
+- Help describes invocation shapes and arguments. Domain idempotency, runtime
+  errors, side effects, and recovery behavior belong in the owning tool's
+  focused documentation and tests, not in `CliSpec` or help-v2.
 
-- root-only `scope`, `command_path`, and `inherited_arguments_from`;
-- command fields `name`, `about`, `usage`, `arguments`, `subcommands`;
-- argument fields `name`, `short`, `help`, `required:true`, `global:true`,
-  `repeatable:true`, `value`/`values`, and `default`/`defaults`.
+Validate with `cli-help-v2.schema.json`.
 
-Copy `command_path` when invoking the tool. Root `name` is a label and may be
-the CLI's branded display name rather than its binary name.
-
-Omit empty arrays, empty strings, false booleans, and absent defaults. A
-positional's `name` is already its placeholder, so do not duplicate it in
-`value`. Redact secret defaults to `***`.
-
-Do not add nested `help.code`, `versions`, raw formatted help, repeated command
-paths on descendants, or generic `description`. Keep long-form Markdown out of
-compact structured output; a future explicit full mode must call the field
-`description_markdown`.
-
-Recursive output includes each command and argument once. Do not repeat global
-arguments on every descendant. Scoped structured help lists their defining
-ancestor command paths in `inherited_arguments_from`; query those paths only
-when the shared options are relevant. Scoped plain help includes inherited
-globals as conventional terminal help does. One-level child entries are
-summaries; recursive child entries may include their own usage, arguments, and
-children.
+A `CliEmitter` owns one logical finite invocation or ordered event stream. A
+multiplex transport owns one emitter/lifecycle state per request; AFDATA does
+not provide a global keyed-emitter registry.
 
 ## Logging
 
 One-shot programs emit `kind:"log"` through the same emitter. Long-running
-Rust services using `tracing` initialize once with
-`afdata_tracing::try_init`; other runtimes emit log events explicitly or
-integrate their structured logger.
+Rust services use `afdata_tracing::try_init`; other runtimes emit events
+explicitly or integrate their structured logger.
 
 Redaction depends on field names. Log `api_key_secret` as a structured field;
-do not hide it inside Debug output or interpolated prose. Tool-defined log
-payloads commonly include `message`, `level`, `event`, and span fields, but
-protocol v1 does not reserve them.
+do not hide it inside Debug output or interpolated prose.
 
 ## Review checklist
 
-1. Validate representative terminal and non-terminal events in strict mode.
-2. Confirm finite versus ordered-stream routing matches the consumer.
-3. Confirm usage failures and early version/help failures stay structured.
-4. Confirm help-v1 uses the exact schema and command path.
-5. Confirm version values appear only in version output.
-6. Confirm logs expose secret-bearing values only under redacted field names.
+1. Every application argument belongs to at least one combination.
+2. The build rejects overlap, including fixed values satisfied by defaults.
+3. Usage failures happen before config, secret-source, network, or domain I/O.
+4. Every CLI error names its failure in `code`, exits 2, leaves stdout empty,
+   writes strict JSON to stderr, and carries no secret values.
+5. Output contracts are selected after the business combination.
+6. Help examples and detail usage are generated from the registry and validate
+   against help-v2.
+7. Version values appear only in version output.

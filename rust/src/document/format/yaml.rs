@@ -5,15 +5,17 @@
 use crate::document::{DocumentError, DocumentResult, Value};
 use noyalib::{
     DuplicateKeyPolicy, Mapping as YamlMapping, ParserConfig, Value as YamlValue,
-    cst::parse_document, from_str_with_config, to_string,
+    cst::{GreenChild, GreenNode, SyntaxKind, parse_document},
+    from_str_with_config, to_string,
 };
 
 pub fn load(content: &str) -> DocumentResult<Value> {
+    let (protected, literals) = protect_exact_numbers(content)?;
     let parser_config = ParserConfig::new()
         .duplicate_key_policy(DuplicateKeyPolicy::Error)
         .lossless_u64_integers(true);
-    from_str_with_config::<YamlValue>(content, &parser_config)
-        .map(value_to_our_value)
+    from_str_with_config::<YamlValue>(&protected, &parser_config)
+        .map(|value| value_to_our_value(value, &literals))
         .map_err(|e| DocumentError::ParseError {
             format: "YAML".to_string(),
             detail: e.to_string(),
@@ -26,6 +28,7 @@ pub fn load(content: &str) -> DocumentResult<Value> {
 pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
     let segments = crate::document::parse_path(path)?;
     let yaml_path = cst_path(&segments, "set")?;
+    guard_cst_segments(content, &segments, "set", true)?;
     if !matches!(
         value,
         Value::Null
@@ -52,13 +55,16 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
         .ok()
         .is_some_and(|loaded| crate::document::get_path_ref(&loaded, path, &[]).is_ok());
     if exists {
-        document
-            .set_value(&yaml_path, &to_noyalib_value(value)?)
-            .map_err(|error| DocumentError::UnsupportedOperation {
-                format: "YAML".to_string(),
-                operation: "set".to_string(),
-                detail: error.to_string(),
-            })?;
+        let result = if let Value::Number(text) = value {
+            document.set(&yaml_path, text)
+        } else {
+            document.set_value(&yaml_path, &to_noyalib_value(value)?)
+        };
+        result.map_err(|error| DocumentError::UnsupportedOperation {
+            format: "YAML".to_string(),
+            operation: "set".to_string(),
+            detail: error.to_string(),
+        })?;
     } else {
         let (last, parents) = segments.split_last().ok_or(DocumentError::EmptyPath)?;
         if last.parse::<usize>().is_ok() {
@@ -74,13 +80,7 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
         } else {
             cst_path(parents, "set")?
         };
-        let fragment = to_string(&to_noyalib_value(value)?).map_err(|error| {
-            DocumentError::UnsupportedOperation {
-                format: "YAML".to_string(),
-                operation: "set".to_string(),
-                detail: error.to_string(),
-            }
-        })?;
+        let fragment = yaml_fragment(value, "set")?;
         document
             .insert_entry(&parent_path, last, fragment.trim_end())
             .map_err(|error| DocumentError::UnsupportedOperation {
@@ -102,6 +102,7 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
 pub fn unset_preserving(content: &str, path: &str) -> DocumentResult<String> {
     let segments = crate::document::parse_path(path)?;
     let yaml_path = cst_path(&segments, "unset")?;
+    guard_cst_segments(content, &segments, "unset", false)?;
     let mut document = parse_document(content).map_err(|error| DocumentError::ParseError {
         format: "YAML".to_string(),
         detail: error.to_string(),
@@ -133,13 +134,7 @@ pub fn append_array_item_preserving(
         format: "YAML".to_string(),
         detail: error.to_string(),
     })?;
-    let fragment = to_string(&to_noyalib_value(item)?).map_err(|error| {
-        DocumentError::UnsupportedOperation {
-            format: "YAML".to_string(),
-            operation: "add".to_string(),
-            detail: error.to_string(),
-        }
-    })?;
+    let fragment = yaml_fragment(item, "add")?;
     let yaml_path = cst_path(&crate::document::parse_path(path)?, "add")?;
     document
         .push_back(&yaml_path, fragment.trim_end())
@@ -194,12 +189,13 @@ fn cst_path(segments: &[String], operation: &str) -> DocumentResult<String> {
     }
     let mut path = String::new();
     for segment in segments {
-        if segment.contains(['.', '\\']) {
+        if segment.contains(['.', '\\', '[', ']']) {
             return Err(DocumentError::UnsupportedOperation {
                 format: "YAML".to_string(),
                 operation: operation.to_string(),
-                detail: "escaped YAML keys require a quoted-key CST span and are not supported"
-                    .to_string(),
+                detail:
+                    "escaped or bracketed YAML keys require a quoted-key CST span and are not supported"
+                        .to_string(),
             });
         }
         if let Ok(index) = segment.parse::<usize>() {
@@ -212,6 +208,76 @@ fn cst_path(segments: &[String], operation: &str) -> DocumentResult<String> {
         }
     }
     Ok(path)
+}
+
+fn guard_cst_segments(
+    content: &str,
+    segments: &[String],
+    operation: &str,
+    allow_missing: bool,
+) -> DocumentResult<()> {
+    let root = load(content)?;
+    let mut current = &root;
+    for (index, segment) in segments.iter().enumerate() {
+        match current {
+            Value::Object(object) => {
+                if segment.parse::<usize>().is_ok() || segment.contains(['[', ']']) {
+                    return Err(DocumentError::UnsupportedOperation {
+                        format: "YAML".to_string(),
+                        operation: operation.to_string(),
+                        detail: format!(
+                            "mapping key `{segment}` is ambiguous in the CST path grammar"
+                        ),
+                    });
+                }
+                match object.get(segment) {
+                    Some(next) => current = next,
+                    None if allow_missing => {
+                        if segments[index..]
+                            .iter()
+                            .any(|part| part.parse::<usize>().is_ok() || part.contains(['[', ']']))
+                        {
+                            return Err(DocumentError::UnsupportedOperation {
+                                format: "YAML".to_string(),
+                                operation: operation.to_string(),
+                                detail: "a missing mapping chain contains a CST-ambiguous key"
+                                    .to_string(),
+                            });
+                        }
+                        return Ok(());
+                    }
+                    None => {
+                        return Err(DocumentError::PathNotFound {
+                            path: crate::document::join_path(&segments[..=index]),
+                        });
+                    }
+                }
+            }
+            Value::Array(values) => {
+                let array_index =
+                    segment
+                        .parse::<usize>()
+                        .map_err(|_| DocumentError::UnregisteredArray {
+                            path: crate::document::join_path(&segments[..index]),
+                        })?;
+                current =
+                    values
+                        .get(array_index)
+                        .ok_or_else(|| DocumentError::IndexOutOfBounds {
+                            path: crate::document::join_path(&segments[..index]),
+                            index: array_index,
+                            len: values.len(),
+                        })?;
+            }
+            value => {
+                return Err(DocumentError::NotTraversable {
+                    path: crate::document::join_path(&segments[..index]),
+                    got: value.kind_name().to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn to_noyalib_value(value: &Value) -> DocumentResult<YamlValue> {
@@ -264,14 +330,23 @@ fn to_noyalib_value(value: &Value) -> DocumentResult<YamlValue> {
 }
 
 pub fn save(value: &Value) -> DocumentResult<String> {
-    let yaml_val = our_value_to_yaml_value(value)?;
-    to_string(&yaml_val).map_err(|e| DocumentError::ParseError {
+    let mut prefix = "__AFDATA_EXACT_NUMBER_".to_string();
+    while value_contains_text(value, &prefix) {
+        prefix.push('_');
+    }
+    let mut literals = Vec::new();
+    let yaml_val = our_value_to_yaml_value(value, &prefix, &mut literals)?;
+    let mut output = to_string(&yaml_val).map_err(|e| DocumentError::ParseError {
         format: "YAML".to_string(),
         detail: e.to_string(),
-    })
+    })?;
+    for (sentinel, literal) in literals {
+        output = output.replace(&sentinel, &literal);
+    }
+    Ok(output)
 }
 
-fn value_to_our_value(v: YamlValue) -> Value {
+fn value_to_our_value(v: YamlValue, literals: &std::collections::HashMap<String, String>) -> Value {
     match v {
         YamlValue::Null => Value::Null,
         YamlValue::Bool(b) => Value::Bool(b),
@@ -284,62 +359,221 @@ fn value_to_our_value(v: YamlValue) -> Value {
                 Value::Float(n.as_f64())
             }
         }
-        YamlValue::String(s) => Value::String(s),
-        YamlValue::Sequence(seq) => Value::Array(seq.into_iter().map(value_to_our_value).collect()),
+        YamlValue::String(s) => literals
+            .get(&s)
+            .cloned()
+            .map(Value::Number)
+            .unwrap_or(Value::String(s)),
+        YamlValue::Sequence(seq) => Value::Array(
+            seq.into_iter()
+                .map(|value| value_to_our_value(value, literals))
+                .collect(),
+        ),
         YamlValue::Mapping(map) => {
             let mut obj = std::collections::BTreeMap::new();
             for (key, value) in map {
-                obj.insert(key, value_to_our_value(value));
+                let key = literals.get(&key).cloned().unwrap_or(key);
+                obj.insert(key, value_to_our_value(value, literals));
             }
             Value::Object(obj)
         }
         YamlValue::Tagged(t) => {
             // Tagged values: recurse on inner value
             let (_, value) = t.into_parts();
-            value_to_our_value(value)
+            value_to_our_value(value, literals)
         }
     }
 }
 
-fn our_value_to_yaml_value(v: &Value) -> DocumentResult<YamlValue> {
+fn our_value_to_yaml_value(
+    v: &Value,
+    prefix: &str,
+    literals: &mut Vec<(String, String)>,
+) -> DocumentResult<YamlValue> {
     match v {
         Value::Null => Ok(YamlValue::Null),
         Value::Bool(b) => Ok(YamlValue::Bool(*b)),
         Value::Integer(i) => Ok(YamlValue::Number((*i).into())),
         Value::Unsigned(i) => Ok(YamlValue::Number((*i).into())),
-        Value::Float(f) => {
-            // Keep the existing config representation: floats serialize as scalars.
-            Ok(YamlValue::Number((*f).into()))
-        }
-        Value::Number(text) if v.is_float() => text
-            .parse::<f64>()
-            .ok()
-            .filter(|value| value.is_finite())
-            .map(|value| YamlValue::Number(value.into()))
-            .ok_or_else(|| DocumentError::UnsupportedOperation {
-                format: "YAML".to_string(),
-                operation: "save".to_string(),
-                detail: format!("float literal `{text}` is not representable in YAML"),
-            }),
-        Value::Number(text) => Err(DocumentError::UnsupportedOperation {
+        Value::Float(f) if f.is_finite() => Ok(YamlValue::Number((*f).into())),
+        Value::Float(_) => Err(DocumentError::UnsupportedOperation {
             format: "YAML".to_string(),
             operation: "save".to_string(),
-            detail: format!("integer literal `{text}` exceeds YAML's 64-bit integer range"),
+            detail: "non-finite float is not representable in YAML".to_string(),
         }),
+        Value::Number(text) => {
+            if !is_json_number(text) {
+                return Err(DocumentError::UnsupportedOperation {
+                    format: "YAML".to_string(),
+                    operation: "save".to_string(),
+                    detail: format!("invalid number literal `{text}`"),
+                });
+            }
+            let sentinel = format!("{prefix}{}__", literals.len());
+            literals.push((sentinel.clone(), text.clone()));
+            Ok(YamlValue::String(sentinel))
+        }
         Value::String(s) => Ok(YamlValue::String(s.clone())),
         Value::Array(a) => {
             let seq = a
                 .iter()
-                .map(our_value_to_yaml_value)
+                .map(|value| our_value_to_yaml_value(value, prefix, literals))
                 .collect::<DocumentResult<Vec<_>>>()?;
             Ok(YamlValue::Sequence(seq))
         }
         Value::Object(o) => {
             let mut mapping = YamlMapping::new();
             for (k, v) in o {
-                mapping.insert(k.clone(), our_value_to_yaml_value(v)?);
+                mapping.insert(k.clone(), our_value_to_yaml_value(v, prefix, literals)?);
             }
             Ok(YamlValue::Mapping(mapping))
         }
+    }
+}
+
+fn yaml_fragment(value: &Value, operation: &str) -> DocumentResult<String> {
+    if let Value::Number(text) = value
+        && is_json_number(text)
+    {
+        return Ok(text.clone());
+    }
+    if matches!(value, Value::Array(_) | Value::Object(_)) {
+        return save(value);
+    }
+    to_string(&to_noyalib_value(value)?).map_err(|error| DocumentError::UnsupportedOperation {
+        format: "YAML".to_string(),
+        operation: operation.to_string(),
+        detail: error.to_string(),
+    })
+}
+
+fn protect_exact_numbers(
+    content: &str,
+) -> DocumentResult<(String, std::collections::HashMap<String, String>)> {
+    let document = parse_document(content).map_err(|error| DocumentError::ParseError {
+        format: "YAML".to_string(),
+        detail: error.to_string(),
+    })?;
+    let mut spans = Vec::new();
+    collect_exact_number_spans(document.syntax(), content, 0, &mut spans);
+    let mut prefix = "__AFDATA_EXACT_NUMBER_".to_string();
+    while content.contains(&prefix) {
+        prefix.push('_');
+    }
+    let mut protected = content.to_string();
+    let mut literals = std::collections::HashMap::new();
+    for (index, (start, end)) in spans.into_iter().enumerate().rev() {
+        let literal = content[start..end].to_string();
+        let sentinel = format!("{prefix}{index}__");
+        let quoted =
+            serde_json::to_string(&sentinel).map_err(|error| DocumentError::ParseError {
+                format: "YAML".to_string(),
+                detail: error.to_string(),
+            })?;
+        protected.replace_range(start..end, &quoted);
+        literals.insert(sentinel, literal);
+    }
+    Ok((protected, literals))
+}
+
+fn collect_exact_number_spans(
+    node: &GreenNode,
+    source: &str,
+    base: usize,
+    spans: &mut Vec<(usize, usize)>,
+) {
+    let mut offset = base;
+    for child in node.children() {
+        match child {
+            GreenChild::Node(node) => collect_exact_number_spans(node, source, offset, spans),
+            GreenChild::Token {
+                kind: SyntaxKind::PlainScalar,
+                len,
+            } => {
+                let token_end = offset + *len as usize;
+                let text = source[offset..token_end].trim_end_matches([' ', '\t', '\r', '\n']);
+                let end = offset + text.len();
+                if should_preserve_number(text) {
+                    spans.push((offset, end));
+                }
+            }
+            GreenChild::Token { .. } => {}
+        }
+        offset += child.text_len();
+    }
+}
+
+fn should_preserve_number(text: &str) -> bool {
+    if !is_json_number(text) {
+        return false;
+    }
+    text.contains(['.', 'e', 'E']) || (text.parse::<i64>().is_err() && text.parse::<u64>().is_err())
+}
+
+fn is_json_number(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text).is_ok_and(|value| value.is_number())
+}
+
+fn value_contains_text(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::Number(text) | Value::String(text) => text.contains(needle),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_text(value, needle)),
+        Value::Object(values) => values
+            .iter()
+            .any(|(key, value)| key.contains(needle) || value_contains_text(value, needle)),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load, save, set_preserving};
+    use crate::document::Value;
+
+    #[test]
+    fn preserves_large_integer_and_high_precision_float_literals() {
+        let source = concat!(
+            "huge: 123456789012345678901234567890\n",
+            "precise: 0.1000000000000000055511151231257827\n",
+        );
+        let value = load(source).expect("load");
+        assert_eq!(
+            value.get("huge"),
+            Some(&Value::Number("123456789012345678901234567890".to_string()))
+        );
+        assert_eq!(
+            value.get("precise"),
+            Some(&Value::Number(
+                "0.1000000000000000055511151231257827".to_string()
+            ))
+        );
+
+        let rendered = save(&value).expect("save");
+        assert!(rendered.contains("123456789012345678901234567890"));
+        assert!(rendered.contains("0.1000000000000000055511151231257827"));
+        assert_eq!(load(&rendered).expect("reload"), value);
+    }
+
+    #[test]
+    fn exact_number_set_keeps_the_literal() {
+        let edited = set_preserving(
+            "price: 1.0\n",
+            "price",
+            &Value::Number("12345678901234567890.123456789".to_string()),
+        )
+        .expect("set");
+        assert_eq!(edited, "price: 12345678901234567890.123456789\n");
+        assert_eq!(
+            load(&edited).expect("reload").get("price"),
+            Some(&Value::Number("12345678901234567890.123456789".to_string()))
+        );
+    }
+
+    #[test]
+    fn save_rejects_non_finite_float() {
+        let error = save(&Value::Float(f64::NAN)).expect_err("NaN must fail");
+        assert!(error.to_string().contains("non-finite"));
     }
 }

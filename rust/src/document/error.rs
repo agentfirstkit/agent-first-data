@@ -42,9 +42,28 @@ pub enum DocumentError {
         index: usize,
         len: usize,
     },
+    /// A parser rejected the source. `detail` is the parser's own text, which
+    /// quotes the offending line — see [`Self::redacted_message`].
     ParseError {
         format: String,
         detail: String,
+    },
+    /// A staged edit rendered source this format's own parser rejects, caught
+    /// by the read-back in `save_atomic` before any bytes reached disk.
+    ///
+    /// `detail` is already redacted: it comes from
+    /// [`Self::redacted_message`] of the rejection, not from its `Display`.
+    WriteWouldCorrupt {
+        format: String,
+        detail: String,
+    },
+    /// No format could be inferred for `path`, so nothing was parsed at all.
+    ///
+    /// Distinct from [`Self::ParseError`] because it is about the file's name,
+    /// never its contents: it carries no document text, and dropping its detail
+    /// as a precaution would throw away the only actionable thing it says.
+    FormatUnknown {
+        path: String,
     },
     IoError {
         detail: String,
@@ -105,6 +124,20 @@ impl fmt::Display for DocumentError {
             DocumentError::ParseError { format, detail } => {
                 write!(f, "failed to parse {}: {}", format, detail)
             }
+            DocumentError::WriteWouldCorrupt { format, detail } => {
+                write!(
+                    f,
+                    "refusing to write: the edit produced {} this parser rejects ({}); the file is unchanged",
+                    format, detail
+                )
+            }
+            DocumentError::FormatUnknown { path } => {
+                write!(
+                    f,
+                    "cannot detect format from file extension `{}`; pass an explicit format",
+                    path
+                )
+            }
             DocumentError::IoError { detail } => {
                 write!(f, "io error: {}", detail)
             }
@@ -129,6 +162,8 @@ impl DocumentError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::ParseError { .. } => "document_parse_failed",
+            Self::FormatUnknown { .. } => "document_format_unknown",
+            Self::WriteWouldCorrupt { .. } => "document_write_would_corrupt",
             Self::PathNotFound { .. }
             | Self::UnknownSegment { .. }
             | Self::IndexOutOfBounds { .. }
@@ -178,11 +213,20 @@ impl DocumentError {
     /// A display message with any potentially content-bearing detail removed —
     /// safe to surface when the document may hold secrets.
     ///
-    /// A [`DocumentError::ParseError`] renders as `failed to parse {format}`
-    /// (with the [`location`](Self::location) appended when known) and drops
-    /// the raw parser detail, which can echo a snippet of the source. Every
-    /// other variant renders the same as its [`Display`], since those carry
-    /// only structural context (paths, type and format names), not content.
+    /// Two variants quote material that originates in the document and are
+    /// rewritten here:
+    ///
+    /// - [`DocumentError::ParseError`] renders as `failed to parse {format}`
+    ///   (with the [`location`](Self::location) appended when known), dropping
+    ///   the parser detail, which echoes a snippet of the source.
+    /// - [`DocumentError::TypeMismatch`] drops `got` and `hint`. When built by
+    ///   [`Self::from_serde`] those carry serde's rendering of the offending
+    ///   value, which is document content.
+    ///
+    /// Every other variant renders the same as its [`Display`], carrying only
+    /// structural context: paths, slugs, indices, and type or format names.
+    /// [`DocumentError::NotTraversable`] belongs to that group because `got` is
+    /// a [`Value::kind_name`](crate::document::Value::kind_name), not a value.
     #[must_use]
     pub fn redacted_message(&self) -> String {
         match self {
@@ -190,6 +234,13 @@ impl DocumentError {
                 Some(location) => format!("failed to parse {format} at {location}"),
                 None => format!("failed to parse {format}"),
             },
+            Self::TypeMismatch { path, expected, .. } => {
+                if expected.is_empty() {
+                    format!("field `{path}` has the wrong type")
+                } else {
+                    format!("field `{path}` expects {expected}")
+                }
+            }
             other => other.to_string(),
         }
     }
@@ -365,5 +416,36 @@ mod tests {
             path: "database.url".to_string(),
         };
         assert_eq!(path_err.redacted_message(), path_err.to_string());
+    }
+
+    #[test]
+    fn redacted_message_drops_the_offending_value() {
+        // `from_serde` keeps serde's rendering, which quotes the value that
+        // failed the type check — document content, and a secret as often as not.
+        let err = DocumentError::from_serde(
+            "credentials.token",
+            "invalid type: string \"sk-live-TOPSECRET\", expected u16",
+        );
+        assert!(err.to_string().contains("sk-live-TOPSECRET"));
+        let redacted = err.redacted_message();
+        assert!(!redacted.contains("sk-live-TOPSECRET"), "{redacted}");
+        assert!(redacted.contains("credentials.token"), "{redacted}");
+    }
+
+    #[test]
+    fn not_traversable_names_the_type_not_the_value() {
+        // This one is safe by construction rather than by redaction: `got` is a
+        // kind name, so even `Display` cannot echo the leaf.
+        let err = DocumentError::NotTraversable {
+            path: "token_secret.inner".to_string(),
+            got: crate::document::Value::String("sk-live-TOPSECRET".to_string())
+                .kind_name()
+                .to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "path `token_secret.inner` is string, cannot traverse further"
+        );
+        assert_eq!(err.redacted_message(), err.to_string());
     }
 }

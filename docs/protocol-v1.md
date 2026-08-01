@@ -55,6 +55,23 @@ a tool may use `error.code: "cancelled"`, but AFDATA does not reserve that code.
 If stdout or the transport is already closed and the terminal event cannot be
 written, the outcome is a transport interruption with unknown business result.
 
+A CLI resolution failure names itself in `code`, the same way a document
+failure does: `cli_unknown_argument`, `cli_unknown_command`,
+`cli_missing_argument_value`, `cli_invalid_argument_value`,
+`cli_duplicate_argument`, `cli_unexpected_positional`,
+`cli_unregistered_combination`, `cli_invalid_utf8`. A CLI that is not compiled
+from a registry — anything built with `build_cli_error` — reports the generic
+`cli_error`.
+
+There is one place to look. An earlier draft put the classification in a
+separate `rule` field beside a generic `cli_error`, alongside `command_path`
+and `argument_names`; that asked an agent to learn a second branching key for
+one family of errors while `document_*` already spelled its classification into
+the code, and it cost a closed enum kept in step across four files and four
+mirrored schemas. `message` names the offending argument, `hint` gives the
+command to run next, and neither ever quotes a raw value. Every such error is
+`retryable: false` and exits 2.
+
 The machine-readable event schema is:
 
 - `spec/protocol-v1.schema.json`

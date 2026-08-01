@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
+use super::error::DocumentError;
+
 /// Custom Value IR independent of any format crate.
 /// Supports all formats: JSON, TOML, YAML, dotenv, and INI.
 #[derive(Debug, Clone, PartialEq)]
@@ -225,21 +227,20 @@ impl Serialize for Value {
             Value::Bool(value) => serializer.serialize_bool(*value),
             Value::Integer(value) => serializer.serialize_i64(*value),
             Value::Unsigned(value) => serializer.serialize_u64(*value),
-            Value::Float(value) => serializer.serialize_f64(*value),
-            // Generic serde data model has no arbitrary-precision number
-            // primitive, so this is a best-effort numeric fallback (used only
-            // by callers serializing a `Value` through some *other* serde
-            // format directly — the crate's own JSON path goes through
-            // `From<Value> for serde_json::Value` below, which preserves the
-            // literal exactly via serde_json's `arbitrary_precision`).
+            Value::Float(value) if value.is_finite() => serializer.serialize_f64(*value),
+            Value::Float(_) => Err(serde::ser::Error::custom(
+                "non-finite float is not representable as structured data",
+            )),
             Value::Number(text) => {
-                if let Ok(i) = text.parse::<i64>() {
-                    serializer.serialize_i64(i)
-                } else if let Ok(u) = text.parse::<u64>() {
-                    serializer.serialize_u64(u)
-                } else {
-                    serializer.serialize_f64(text.parse::<f64>().unwrap_or(0.0))
-                }
+                let number = serde_json::from_str::<serde_json::Value>(text)
+                    .ok()
+                    .filter(serde_json::Value::is_number)
+                    .ok_or_else(|| {
+                        serde::ser::Error::custom(format!(
+                            "invalid preserved number literal `{text}`"
+                        ))
+                    })?;
+                number.serialize(serializer)
             }
             Value::String(value) => serializer.serialize_str(value),
             Value::Array(values) => values.serialize(serializer),
@@ -320,7 +321,6 @@ impl<'de> Deserialize<'de> for Value {
 
 mod json_convert {
     use super::*;
-    use serde_json::json;
 
     impl From<serde_json::Value> for Value {
         fn from(v: serde_json::Value) -> Self {
@@ -357,42 +357,51 @@ mod json_convert {
         }
     }
 
-    impl From<Value> for serde_json::Value {
-        fn from(v: Value) -> Self {
-            match v {
-                Value::Null => serde_json::Value::Null,
-                Value::Bool(b) => json!(b),
-                Value::Integer(i) => json!(i),
-                Value::Unsigned(u) => json!(u),
-                Value::Float(f) => {
-                    json!(f)
-                }
-                // Re-parse the exact literal text as a JSON number so
-                // `serde_json`'s `arbitrary_precision` `Number` retains it
-                // verbatim (`Number::as_str()` round-trips exactly — see the
-                // stdlib doctest on that method). Our own writers only ever
-                // construct `Value::Number` from text that already passed
-                // JSON-number syntax validation (the JSON reader below, or
-                // `set --value-type number`'s literal check), so the
-                // fallback is unreachable in practice; it stays total rather
-                // than panicking on a hypothetically malformed literal.
-                Value::Number(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-                    Ok(number @ serde_json::Value::Number(_)) => number,
-                    _ => json!(text.parse::<f64>().unwrap_or(0.0)),
-                },
-                Value::String(s) => json!(s),
-                Value::Array(a) => {
-                    let arr: Vec<serde_json::Value> = a.into_iter().map(|v| v.into()).collect();
-                    serde_json::Value::Array(arr)
-                }
-                Value::Object(o) => {
-                    let mut map = serde_json::Map::new();
-                    for (k, v) in o {
-                        map.insert(k, serde_json::Value::from(v));
+    impl TryFrom<&Value> for serde_json::Value {
+        type Error = DocumentError;
+
+        fn try_from(value: &Value) -> Result<Self, Self::Error> {
+            let unsupported = |detail: String| DocumentError::UnsupportedOperation {
+                format: "JSON".to_string(),
+                operation: "serialize".to_string(),
+                detail,
+            };
+            match value {
+                Value::Null => Ok(Self::Null),
+                Value::Bool(value) => Ok(Self::Bool(*value)),
+                Value::Integer(value) => Ok(Self::Number((*value).into())),
+                Value::Unsigned(value) => Ok(Self::Number((*value).into())),
+                Value::Float(value) => serde_json::Number::from_f64(*value)
+                    .map(Self::Number)
+                    .ok_or_else(|| {
+                        unsupported("non-finite float is not representable in JSON".to_string())
+                    }),
+                Value::Number(text) => serde_json::from_str::<Self>(text)
+                    .ok()
+                    .filter(Self::is_number)
+                    .ok_or_else(|| unsupported(format!("invalid number literal `{text}`"))),
+                Value::String(value) => Ok(Self::String(value.clone())),
+                Value::Array(values) => values
+                    .iter()
+                    .map(Self::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Self::Array),
+                Value::Object(values) => {
+                    let mut object = serde_json::Map::new();
+                    for (key, value) in values {
+                        object.insert(key.clone(), Self::try_from(value)?);
                     }
-                    serde_json::Value::Object(map)
+                    Ok(Self::Object(object))
                 }
             }
+        }
+    }
+
+    impl TryFrom<Value> for serde_json::Value {
+        type Error = DocumentError;
+
+        fn try_from(value: Value) -> Result<Self, Self::Error> {
+            Self::try_from(&value)
         }
     }
 }
@@ -419,5 +428,22 @@ mod tests {
         for (value, expected) in cases {
             assert_eq!(value.kind_name(), expected);
         }
+    }
+
+    #[test]
+    fn json_conversion_rejects_non_finite_float() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let error = serde_json::Value::try_from(Value::Float(value))
+                .expect_err("non-finite float must fail");
+            assert_eq!(error.code(), "document_unsupported_operation");
+            assert!(error.to_string().contains("non-finite"));
+        }
+    }
+
+    #[test]
+    fn serde_rejects_non_finite_float_instead_of_emitting_null() {
+        let error =
+            serde_json::to_string(&Value::Float(f64::NAN)).expect_err("non-finite float must fail");
+        assert!(error.to_string().contains("non-finite"));
     }
 }

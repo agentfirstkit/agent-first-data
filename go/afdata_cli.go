@@ -167,8 +167,8 @@ type CliEmitter struct {
 	diagnostic      io.Writer
 	format          OutputFormat
 	outputOptions   OutputOptions
+	strictProtocol  bool
 	terminalEmitted bool
-	logFieldsFunc   func() map[string]any
 }
 
 // NewCliEmitter creates an event-stream (unified) emitter: every event,
@@ -227,11 +227,10 @@ func NewCliEmitterFromOutputToWithOptions(selector OutputTo, format OutputFormat
 	}
 }
 
-// WithLogFields sets a provider function that returns default fields for every log event.
-// The provider is called for each log emission. Explicit fields in the log take precedence
-// over provider fields.
-func (e *CliEmitter) WithLogFields(provider func() map[string]any) *CliEmitter {
-	e.logFieldsFunc = provider
+// WithStrictProtocol opts this emitter into the AFDATA recommended strict
+// profile. Emitters otherwise enforce the protocol base schema.
+func (e *CliEmitter) WithStrictProtocol() *CliEmitter {
+	e.strictProtocol = true
 	return e
 }
 
@@ -256,6 +255,9 @@ func (e *CliEmitter) EmitValidatedValue(value any) error {
 // routed to the diagnostic writer; in event-stream mode (no diagnostic writer)
 // every event goes to the single writer. Routing follows kind, not exit code.
 func (e *CliEmitter) writeEvent(envelope map[string]any) error {
+	if err := ValidateProtocolEvent(envelope, e.strictProtocol); err != nil {
+		return err
+	}
 	kind, _ := envelope["kind"].(string)
 	switch kind {
 	case "log", "progress":
@@ -305,22 +307,8 @@ func (e *CliEmitter) EmitProgress(message string) error {
 }
 
 // EmitLog emits a log event with the given level and message.
-// Default log fields (if configured via WithLogFields) are merged, with explicit
-// fields taking precedence.
 func (e *CliEmitter) EmitLog(level LogLevel, message string) error {
 	payload := map[string]any{"level": string(level), "message": message}
-
-	// Merge log fields provider if configured
-	if e.logFieldsFunc != nil {
-		providerFields := e.logFieldsFunc()
-		for k, v := range providerFields {
-			// Don't overwrite if already set; provider fields have lower precedence
-			if _, alreadySet := payload[k]; !alreadySet {
-				payload[k] = v
-			}
-		}
-	}
-
 	event := NewJSONLog(payload).Build()
 	return e.Emit(event)
 }
@@ -391,138 +379,4 @@ func BuildCliVersion(name, displayName, version, build string) map[string]any {
 func CliRenderVersion(name, displayName, version, build string, format OutputFormat) string {
 	rendered := Render(BuildCliVersion(name, displayName, version, build), format, OutputOptions{})
 	return strings.TrimRight(rendered, "\n") + "\n"
-}
-
-// splitVersionFlag splits a flag arg into its long name (leading dashes and any
-// "=inline" suffix stripped) and the inline value. hasInline reports whether an
-// "=" was present. A non-flag arg (or a bare "-") yields an empty name.
-func splitVersionFlag(arg string) (name string, value string, hasInline bool) {
-	if !strings.HasPrefix(arg, "-") || arg == "-" {
-		return "", "", false
-	}
-	body := arg
-	if idx := strings.IndexByte(arg, '='); idx >= 0 {
-		body = arg[:idx]
-		value = arg[idx+1:]
-		hasInline = true
-	}
-	return strings.TrimLeft(body, "-"), value, hasInline
-}
-
-// CliHandleVersionOrContinue renders version output if --version/-V is present.
-// It returns handled=false when no version flag was present. --version always
-// answers with a structured protocol-v1 version event. An explicit
-// --output wins; otherwise the optional defaultFormats entry should be
-// the command's normal output default (JSON when omitted).
-//
-// valueFlags is the caller's own value-taking global long flags (with or without
-// leading dashes; each is normalized by stripping leading '-'). The pre-parser
-// consumes a recognized value flag's space-separated value so it is never
-// mistaken for the subcommand boundary — afdata's own --output/--output-to are
-// handled here without needing to be listed.
-//
-// Only a top-level version request is recognized: scanning stops at the first
-// positional argument (the subcommand), so "tool sub --version <value>" leaves
-// --version for the subcommand's parser rather than printing the tool version.
-func CliHandleVersionOrContinue(args []string, valueFlags []string, name, displayName, version, build string, defaultFormats ...OutputFormat) (out string, handled bool, err error) {
-	valueFlagSet := make(map[string]struct{}, len(valueFlags))
-	for _, flag := range valueFlags {
-		valueFlagSet[strings.TrimLeft(flag, "-")] = struct{}{}
-	}
-
-	versionRequested := false
-	outputFormat := OutputFormat("")
-	outputExplicit := false
-
-	for i := 0; i < len(args); {
-		arg := args[i]
-		if arg == "--" {
-			break
-		}
-		// The first positional argument marks the subcommand boundary. Past it,
-		// --version and -V belong to the subcommand's own parser, matching
-		// git/cargo/clap: this pre-parser only owns a top-level version request.
-		if !strings.HasPrefix(arg, "-") {
-			break
-		}
-		if arg == "--version" {
-			versionRequested = true
-			i++
-			continue
-		}
-
-		flagName, inlineValue, hasInline := splitVersionFlag(arg)
-
-		// --output-to takes a value but does not affect version output. Consume
-		// its space-separated value so it is not mistaken for the subcommand
-		// boundary (which would hide a later --version/--output).
-		if flagName == "output-to" {
-			if !hasInline && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i += 2
-			} else {
-				i++
-			}
-			continue
-		}
-
-		if flagName == "output" {
-			var value string
-			haveValue := false
-			switch {
-			case hasInline:
-				value = inlineValue
-				haveValue = true
-				i++
-			case i+1 < len(args) && !strings.HasPrefix(args[i+1], "-"):
-				value = args[i+1]
-				haveValue = true
-				i += 2
-			default:
-				i++
-			}
-			if !haveValue {
-				err = fmt.Errorf("missing value for --output: expected json, yaml, or plain")
-				continue
-			}
-			parsed, parseErr := CliParseOutput(value)
-			if parseErr != nil {
-				err = parseErr
-			} else if outputExplicit && outputFormat != parsed {
-				err = fmt.Errorf("conflicting output formats: --output %s conflicts with previous output format", value)
-			} else {
-				outputFormat = parsed
-				outputExplicit = true
-			}
-			continue
-		}
-
-		// Any other flag: consume a space-separated value only when the caller
-		// declared this long flag as value-taking, so its value is never mistaken
-		// for the subcommand boundary above.
-		_, isValueFlag := valueFlagSet[flagName]
-		if isValueFlag && !hasInline && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-			i += 2
-		} else {
-			i++
-		}
-	}
-
-	if !versionRequested {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", true, err
-	}
-	format := outputFormat
-	if !outputExplicit {
-		switch len(defaultFormats) {
-		case 0:
-			format = OutputFormatJson
-		case 1:
-			format = defaultFormats[0]
-		default:
-			return "", true, fmt.Errorf("expected at most one default version output format")
-		}
-	}
-	return CliRenderVersion(name, displayName, version, build, format), true, nil
 }

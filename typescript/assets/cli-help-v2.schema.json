@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentfirstkit.org/schemas/agent-first-data/cli-help-v2.schema.json",
+  "title": "AFDATA CLI help v2 event",
+  "description": "One command's complete invocation help, carried by an AFDATA result event. Domain outcomes, side effects, and runtime error catalogs remain in the owning tool's documentation.",
+  "type": "object",
+  "required": [
+    "kind",
+    "result",
+    "trace"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "kind": {
+      "const": "result"
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "code",
+        "help"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "help"
+        },
+        "help": {
+          "$ref": "#/$defs/help"
+        }
+      }
+    },
+    "trace": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "oneLine": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\n\\r]+$"
+    },
+    "nonEmptyStringMap": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "help": {
+      "type": "object",
+      "required": [
+        "schema",
+        "command_path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "const": "cli-help-v2"
+        },
+        "command_path": {
+          "$ref": "#/$defs/oneLine"
+        },
+        "about": {
+          "$ref": "#/$defs/oneLine"
+        },
+        "shapes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/shape"
+          },
+          "description": "Every legal shape of this command, each complete. Help answers in one round trip; a second level could only pay off by omitting the optional arguments, which would then be undiscoverable."
+        },
+        "subcommands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/oneLine"
+          }
+        },
+        "notes": {
+          "$ref": "#/$defs/nonEmptyStringMap",
+          "description": "Argument meanings. Arguments belong to the command rather than to one shape, so they are stated once."
+        },
+        "defaults": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": true
+        }
+      }
+    },
+    "shape": {
+      "type": "object",
+      "required": [
+        "id",
+        "usage"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/oneLine"
+        },
+        "about": {
+          "$ref": "#/$defs/oneLine",
+          "description": "How this shape differs from its siblings. Absent when the command has only one shape, because its own description already covers it."
+        },
+        "usage": {
+          "$ref": "#/$defs/oneLine"
+        }
+      }
+    }
+  }
+}

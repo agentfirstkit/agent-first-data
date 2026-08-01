@@ -463,20 +463,6 @@ fn visit_number_literal<'de, V: de::Visitor<'de>>(
 
 struct ValueDeserializer<'a>(&'a Value);
 
-macro_rules! string_number {
-    ($method:ident, $type:ty, $visit:ident) => {
-        fn $method<V: serde::de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
-            match self.0 {
-                Value::String(value) => value
-                    .parse::<$type>()
-                    .map_err(|_| de::Error::custom("invalid numeric string"))
-                    .and_then(|value| visitor.$visit(value)),
-                _ => self.deserialize_any(visitor),
-            }
-        }
-    };
-}
-
 impl<'de, 'a> serde::Deserializer<'de> for ValueDeserializer<'a>
 where
     'a: 'de,
@@ -552,34 +538,8 @@ where
         }
     }
 
-    fn deserialize_bool<V: serde::de::Visitor<'de>>(
-        self,
-        visitor: V,
-    ) -> Result<V::Value, Self::Error> {
-        match self.0 {
-            Value::String(value) => match value.to_ascii_lowercase().as_str() {
-                "true" | "yes" | "on" | "1" => visitor.visit_bool(true),
-                "false" | "no" | "off" | "0" => visitor.visit_bool(false),
-                _ => Err(de::Error::custom("invalid boolean string")),
-            },
-            _ => self.deserialize_any(visitor),
-        }
-    }
-
-    string_number!(deserialize_i8, i8, visit_i8);
-    string_number!(deserialize_i16, i16, visit_i16);
-    string_number!(deserialize_i32, i32, visit_i32);
-    string_number!(deserialize_i64, i64, visit_i64);
-    string_number!(deserialize_i128, i128, visit_i128);
-    string_number!(deserialize_u8, u8, visit_u8);
-    string_number!(deserialize_u16, u16, visit_u16);
-    string_number!(deserialize_u32, u32, visit_u32);
-    string_number!(deserialize_u64, u64, visit_u64);
-    string_number!(deserialize_u128, u128, visit_u128);
-    string_number!(deserialize_f32, f32, visit_f32);
-    string_number!(deserialize_f64, f64, visit_f64);
-
     serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64
         char str string bytes byte_buf
         unit unit_struct newtype_struct seq tuple tuple_struct map struct identifier ignored_any
     }
@@ -727,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn directs_string_leaves_into_typed_scalars() {
+    fn string_leaves_do_not_guess_typed_scalars() {
         let value = Value::Object(std::collections::BTreeMap::from([
             ("enabled".to_string(), Value::String("yes".to_string())),
             ("count".to_string(), Value::String("42".to_string())),
@@ -737,13 +697,12 @@ mod tests {
             enabled: bool,
             count: u64,
         }
-        assert_eq!(
-            from_value::<StringBacked>(&value, "env").unwrap_or_else(|error| panic!("{error}")),
-            StringBacked {
-                enabled: true,
-                count: 42
-            }
-        );
+        let error = from_value::<StringBacked>(&value, "env")
+            .expect_err("string-to-bool/number guessing must fail");
+        assert!(error.to_string().contains("env"));
+
+        let leading_zero = Value::String("007".to_string());
+        assert!(from_value::<u64>(&leading_zero, "code").is_err());
     }
 }
 impl<'de, 'a> serde::de::VariantAccess<'de> for VariantAccess<'a>

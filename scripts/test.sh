@@ -6,8 +6,8 @@ set -euo pipefail
 # output decode as UTF-8 regardless of OS locale. Windows defaults to cp1252 and
 # chokes on non-ASCII bytes (e.g. em dashes in Go/Rust doc comments).
 export PYTHONUTF8=1
-# E2E imports the help validator from scripts/. Keep test runs from leaving an
-# untracked scripts/__pycache__ directory in the checkout.
+# Test runs import helpers from scripts/. Keep them from leaving an untracked
+# scripts/__pycache__ directory in the checkout.
 export PYTHONDONTWRITEBYTECODE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOTPATH="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -62,6 +62,12 @@ run_static() {
   echo "[1/6] Rust (fmt + clippy)"
   (cd "$ROOTPATH" && cargo fmt --all --check)
   (cd "$ROOTPATH" && cargo clippy --all-targets --all-features -- -D warnings)
+  # Half of the CLI core's dependency direction, proved by the compiler rather
+  # than by convention: with `cli` off, neither the compiler nor its adapter is
+  # linked, so this only builds while the rest of the crate depends on neither.
+  # The other half — the core not reaching back into AFDATA — is
+  # validate_cli_core_boundary.py.
+  (cd "$ROOTPATH" && cargo clippy --quiet --no-default-features -- -D warnings)
 
   echo ""
   echo "[2/6] Bash (syntax + optional ShellCheck)"
@@ -74,8 +80,11 @@ run_static() {
   echo "[3/6] Spec registry"
   (cd "$ROOTPATH" && python3 scripts/validate_registry.py)
   (cd "$ROOTPATH" && python3 scripts/validate_protocol_docs.py)
-  (cd "$ROOTPATH" && python3 scripts/validate_cli_help.py)
+  (cd "$ROOTPATH" && python3 scripts/validate_protocol_schema.py)
   (cd "$ROOTPATH" && python3 scripts/validate_api_surface.py)
+  (cd "$ROOTPATH" && python3 scripts/validate_cli_core_boundary.py)
+  (cd "$ROOTPATH" && python3 scripts/validate_cli_spec_schema.py)
+  (cd "$ROOTPATH" && python3 scripts/validate_versions.py)
   (cd "$ROOTPATH" && python3 scripts/sync_offline_assets.py --check)
   (cd "$ROOTPATH" && python3 scripts/validate_no_binaries.py)
 
@@ -94,7 +103,7 @@ run_static() {
 
   echo ""
   echo "[5/6] Python (syntax)"
-  (cd "$ROOTPATH/python" && python3 -m compileall agent_first_data examples tests >/dev/null)
+  (cd "$ROOTPATH/python" && python3 -m compileall agent_first_data tests >/dev/null)
 
   echo ""
   echo "[6/6] TypeScript (typecheck)"
@@ -107,8 +116,7 @@ run_unit() {
   (cd "$ROOTPATH" && cargo test --lib --tests)
   (cd "$ROOTPATH" && cargo test --lib --tests --features tracing)
   (cd "$ROOTPATH" && cargo test --all-features)
-  (cd "$ROOTPATH" && cargo test --examples --features cli-help,cli-help-markdown)
-  (cd "$ROOTPATH" && cargo test --examples --features cli-help,cli-help-markdown,skill-admin)
+  (cd "$ROOTPATH" && cargo test --example agent_cli --features cli)
 
   echo ""
   echo "[2/4] Go"
@@ -116,13 +124,12 @@ run_unit() {
 
   echo ""
   echo "[3/4] Python"
-  (cd "$ROOTPATH/python" && PYTHONPATH=. "$PYTOOL" -m pytest tests/ examples/agent_cli.py -v)
+  (cd "$ROOTPATH/python" && PYTHONPATH=. "$PYTOOL" -m pytest tests/ -v)
 
   echo ""
   echo "[4/4] TypeScript"
   ensure_typescript_deps
   (cd "$ROOTPATH/typescript" && npx tsx --test src/*.test.ts)
-  (cd "$ROOTPATH/typescript" && npx tsx --test examples/agent_cli.ts)
 }
 
 run_package() {
@@ -133,7 +140,8 @@ run_package() {
     bash/afdata.sh \
     spec/registry.json \
     spec/protocol-v1.schema.json \
-    spec/cli-help-v1.schema.json \
+    spec/cli-help-v2.schema.json \
+    spec/cli-spec-v1.schema.json \
     skills/agent-first-data/SKILL.md \
     skills/agent-first-data/references/bash.md \
     skills/agent-first-data/references/cli-protocol.md \
@@ -141,7 +149,8 @@ run_package() {
     skills/agent-first-data/references/naming-output.md \
     skills/agent-first-data/references/registry.json \
     skills/agent-first-data/references/protocol-v1.schema.json \
-    skills/agent-first-data/references/cli-help-v1.schema.json
+    skills/agent-first-data/references/cli-help-v2.schema.json \
+    skills/agent-first-data/references/cli-spec-v1.schema.json
   do
     if ! grep -qx "$asset" <<<"$rust_package_list"; then
       echo "Rust package missing offline asset: $asset" >&2
@@ -158,6 +167,10 @@ run_package() {
   "$afdata_bin" --version >/dev/null
   "$afdata_bin" shell bash > "$rust_smoke/afdata.sh"
   cmp "$ROOTPATH/bash/afdata.sh" "$rust_smoke/afdata.sh"
+  # docs/cli.md is generated from the same registry that parses argv, so it
+  # cannot describe a command the binary does not have.
+  "$afdata_bin" --docs > "$rust_smoke/cli.md"
+  cmp "$ROOTPATH/docs/cli.md" "$rust_smoke/cli.md"
   "$afdata_bin" skill validate "$ROOTPATH/skills/agent-first-data"
   # `skill install` must bundle every file in the skill directory (SKILL.md and
   # the whole references/ tree), not just SKILL.md. Install to a scratch dir and
@@ -214,7 +227,8 @@ wheel = next(Path(sys.argv[1]).glob("*.whl"))
 required = {
     "agent_first_data/assets/registry.json",
     "agent_first_data/assets/protocol-v1.schema.json",
-    "agent_first_data/assets/cli-help-v1.schema.json",
+    "agent_first_data/assets/cli-help-v2.schema.json",
+    "agent_first_data/assets/cli-spec-v1.schema.json",
 }
 with zipfile.ZipFile(wheel) as archive:
     names = set(archive.namelist())
@@ -237,7 +251,8 @@ assert event["kind"] == "error"
 assets = files("agent_first_data") / "assets"
 assert (assets / "registry.json").is_file()
 assert (assets / "protocol-v1.schema.json").is_file()
-assert (assets / "cli-help-v1.schema.json").is_file()
+assert (assets / "cli-help-v2.schema.json").is_file()
+assert (assets / "cli-spec-v1.schema.json").is_file()
 PY
   rm -rf "$py_out"
   [ "$had_py_build" -eq 0 ] && rm -rf "$ROOTPATH/python/build"
@@ -257,7 +272,8 @@ const files = new Set(pack.files.map((file) => file.path));
 const required = [
   "assets/registry.json",
   "assets/protocol-v1.schema.json",
-  "assets/cli-help-v1.schema.json",
+  "assets/cli-help-v2.schema.json",
+  "assets/cli-spec-v1.schema.json",
 ];
 const missing = required.filter((file) => !files.has(file));
 if (missing.length) {
@@ -283,7 +299,8 @@ const root = dirname(dirname(distIndex));
 for (const file of [
   "assets/registry.json",
   "assets/protocol-v1.schema.json",
-  "assets/cli-help-v1.schema.json",
+  "assets/cli-help-v2.schema.json",
+  "assets/cli-spec-v1.schema.json",
 ]) {
   if (!existsSync(join(root, file))) throw new Error(`missing ${file}`);
 }
@@ -309,10 +326,7 @@ import (
 )
 
 func TestSmoke(t *testing.T) {
-	event, err := afdata.BuildCLIError("smoke", "")
-	if err != nil {
-		t.Fatalf("BuildCLIError failed: %v", err)
-	}
+	event := afdata.BuildCLIError("smoke", "")
 	if event.Value()["kind"] != "error" {
 		t.Fatalf("unexpected event: %#v", event.Value())
 	}
@@ -321,14 +335,15 @@ GO
   (cd "$go_smoke" && go test ./...)
   test -f "$ROOTPATH/go/assets/registry.json"
   test -f "$ROOTPATH/go/assets/protocol-v1.schema.json"
-  test -f "$ROOTPATH/go/assets/cli-help-v1.schema.json"
+  test -f "$ROOTPATH/go/assets/cli-help-v2.schema.json"
+  test -f "$ROOTPATH/go/assets/cli-spec-v1.schema.json"
   rm -rf "$go_smoke"
   return 0
 }
 
 run_e2e() {
   local afdata_bin
-  echo "[e2e] Four-language canonical CLI"
+  echo "[e2e] Closed-world afdata CLI"
   ensure_typescript_deps
   (cd "$ROOTPATH" && AFDATA_PYTOOL="$PYTOOL" "$PYTOOL" tests/cli_e2e.py)
 

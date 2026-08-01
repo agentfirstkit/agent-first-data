@@ -16,15 +16,16 @@ None of this is carelessness. The data never says what it means, so the meaning 
 
 ## What it does: put the meaning into the field name
 
-Agent-First Data puts the meaning into the field name itself. Call the field `timeout_ms` and there is nothing left to guess — the name says milliseconds. Call it `api_key_secret` and any tool that follows the convention hides it automatically.
+Agent-First Data puts the meaning into the field name itself. Call the field `timeout_ms` and there is nothing left to guess — the name says milliseconds. Call it `api_key_secret` and any AFDATA output boundary that follows the convention hides it automatically.
 
 It is a convention, not a framework — a small set of name endings, plus a tiny library in four languages that reads and formats them.
 
 - **Names carry meaning.** Endings like `_ms`, `_bytes`, `_secret`, `_usd_cents`, and `_percent` put units and intent directly into the field name.
 - **One set of data, three ways to show it.** The same fields render as JSON or YAML — both keep original keys and types, for machines — or as a single human log line with units formatted for scanning. Secrets are removed in every form.
-- **Secrets stay secret.** Anything ending in `_secret` is hidden automatically, in output and in logs. A `_url` field keeps its address but scrubs the userinfo password and secret-named query parameters. Legacy names like `api_key` can be protected by passing an explicit secret-name list.
+- **Structured secrets are redacted.** Anything ending in `_secret` is hidden when a structured value passes through an AFDATA redactor or renderer. A `_url` field keeps its address but scrubs the userinfo password and secret-named query parameters. Legacy names like `api_key` can be protected by passing an explicit secret-name list.
 - **Logging agents can read.** Structured logs that follow the same rules, with request-scoped fields.
-- **The same in four languages.** One identical API across Rust, Go, Python, and TypeScript.
+- **One contract in four languages.** Rust, Go, Python, and TypeScript share
+  wire behavior and fixtures while keeping idiomatic native API shapes.
 
 ## A quick look
 
@@ -52,7 +53,7 @@ trace:
 **Plain** is the one human renderer — it strips unit suffixes and formats values for scanning:
 
 ```text
-kind=log log.args.api_key=*** log.args.timeout=30s log.db_url=postgres://user:***@db/app?token_secret=*** log.event=startup trace.duration=1.28s
+kind=log log.args.api_key=*** log.args.timeout=30s log.db_url="postgres://user:***@db/app?token_secret=***" log.event=startup trace.duration=1.28s
 ```
 
 ## Supported suffixes
@@ -77,6 +78,12 @@ AFDATA redaction is intentionally field-name based:
 - `_url` fields scrub the userinfo password and query parameters whose names end in `_secret` or appear in `secret_names`; broad names such as `api_key`, `token`, or `password` are not hidden by default.
 - Free-form strings are not scanned for arbitrary secrets. If a secret URL is embedded in prose, redact the URL first with `redact_url_secrets`.
 
+The suffix protects structured fields only after they pass through an AFDATA
+redactor or renderer. It cannot remove a live secret from process argv, shell
+history, `/proc`, a parent process, or third-party logs. Avoid putting secrets
+in argv; if a tool records its invocation, pass argv through `redact_argv`
+before logging it.
+
 There are no named redaction profiles. Use the default policy (`All`), an explicit `secret_names` list, or the documented scoped policies (`TraceOnly`, `Off`) for deliberate exceptions.
 
 ## Reading and editing config documents
@@ -89,18 +96,38 @@ host=$(afdata value config.toml server.host)          # raw scalar, for shell su
 afdata set config.toml server.port 8080 --value-type number
 ```
 
-Edits are **source-preserving and atomic** — comments, key order, and formatting survive; a failed write leaves the original untouched, and the CLI refuses to write through a symlink. A bare value is always a string (`007` never becomes `7`); `--value-type string|number|bool|null|json` writes an exact type. `_secret` fields stay redacted even on a directly targeted `get` — `value --reveal-secret` is the auditable opt-in. Every command's first positional is the FILE (`-` reads stdin for reads only); errors carry stable `error.code`s (`document_path_not_found`, `document_type_mismatch`, …). `paths` and `keys` print one entry per line, so pass `--null` when a program consumes the output — a JSON key may contain a newline, and a line-based loop would split it silently. The Rust library is `agent_first_data::document` (`Document` / `DocumentFile`); TOML/YAML/dotenv/INI are feature-gated, JSON is core.
+Use `get` when the next step must preserve JSON types and structure; `value`
+deliberately turns one scalar into raw shell bytes. `set` creates missing object
+parents along the requested dot-path, but refuses to traverse an existing
+scalar or incompatible container.
+
+Edits are **source-preserving and atomic**: comments, key order, and formatting
+survive; a write is read back before it lands, so an edit that would leave a
+file its own parser rejects fails instead of succeeding; and a failed write
+leaves the original untouched. Values are **never guessed** — a bare value is
+always a string, and an exact type is asked for, not inferred. A name marks its
+whole subtree, so a `_secret` node stays redacted however you address it, and
+revealing it is an auditable opt-in. Errors carry stable codes and never quote
+the document, because an error event is the thing an agent logs.
+
+Flags, error codes, and exit codes are in [`docs/cli.md`](docs/cli.md); the
+Rust library is `agent_first_data::document` (`Document` / `DocumentFile`).
 
 ## Token-efficient CLI discovery
 
-Help is a normal result, not an exception to the output contract. `afdata --help`
-answers in the same format as every other command — a protocol-v1 result
-envelope — so an agent discovering an unfamiliar CLI parses the surface instead
-of scraping 80-column prose. `--output plain` is the conventional terminal text;
-`--recursive` is a compact whole-surface index; `--output markdown` is the
-documentation export. The model is deliberately small: no long-form prose, no
-repeated inherited globals, no eagerly embedded version values. The exact
-contract is [`spec/cli-help-v1.schema.json`](spec/cli-help-v1.schema.json).
+Help is a normal result, not an exception to the output contract, and it answers
+in one round trip. `afdata --help` returns a protocol-v1 result whose help-v2
+payload carries every legal shape of the command, each complete. `afdata set
+--help`, for example, shows the distinct `set-value`, `set-null`, and
+`set-secret` shapes instead of an argument catalog that leaves an agent to solve
+conflicts. There is no second level to ask for: what it could omit — the
+optional arguments — would be registered but undiscoverable to a caller that
+stopped at the first. `--output plain` renders the same catalog for humans, and
+`--docs` renders the whole registry as Markdown. One `cli-spec-v1` registry
+generates argv parsing, typed invocations, combination validation, output plans,
+help, and that reference. Contracts:
+[`cli-spec-v1`](spec/cli-spec-v1.schema.json) and
+[`cli-help-v2`](spec/cli-help-v2.schema.json).
 
 ## Writing AFDATA-style Bash scripts
 
@@ -151,9 +178,15 @@ The shared core surface ships in Rust, Go, Python, and TypeScript (each in its o
 - **Protocol builders** `json_result` / `json_error` / `json_progress` / `json_log` → `.build()` → an event; **reader** `decode_protocol_event(text)` → a typed decoded event.
 - **Output** `render(value, format, options)` — the single value × format × options → string entry point.
 - **Redaction** `redacted_value` / `redact_url_secrets` for paths that bypass `render`.
-- **CLI helpers** `cli_parse_output`, `cli_parse_log_filters`, `build_cli_error`, `build_cli_version`, `cli_handle_version_or_continue`, and the `CliEmitter`.
+- **CLI primitives** `cli_parse_output`, `cli_parse_log_filters`, `build_cli_error`, `build_cli_version`, and the `CliEmitter`.
 
-Four capabilities are **Rust-only** and deliberately outside the cross-language contract: output-aware Clap help (`cli_handle_version_or_help_or_continue` and the help renderers), skill admin (`SKILL.md` validation plus install/uninstall/status), stream redirection (`--stdout-file` / `--stderr-file`), and tracing/logging init (`afdata_tracing::try_init`). The exact shared surface is enumerated in [`spec/api-surface.json`](spec/api-surface.json).
+The Rust crate is the reference implementation of `CliSpec`, closed-world
+combination resolution, version, and help-v2; the whole CLI surface sits behind
+the default-on `cli` feature. Argv is only ever parsed through a registry —
+there is no raw pre-parser. Skill admin, stream redirection, and tracing
+initialization are also Rust-only. The shared surface is
+enumerated in [`spec/api-surface.json`](spec/api-surface.json); other SDK
+compilers consume the same serialized CLI spec and fixtures as they migrate.
 
 ## Adopt it: hand the convention to your coding agent
 
@@ -201,8 +234,8 @@ afdata skill validate skills/agent-first-data
 ## Docs
 
 - [Specification](spec/agent-first-data.md) — the full convention: every suffix, output formats, protocol, and logging
-- [CLI reference](docs/cli.md) — every command and flag, generated from the binary
-- [CLI help v1 schema](spec/cli-help-v1.schema.json) — the exact compact structured-help contract
+- [CLI reference](docs/cli.md) — discovery and registered-combination examples
+- [CLI spec v1](spec/cli-spec-v1.schema.json) and [help v2](spec/cli-help-v2.schema.json) — the closed invocation registry and token-efficient help contracts
 - [Protocol v1](docs/protocol-v1.md) and [transport mappings](docs/transport-mappings.md) — the event envelope across CLI, HTTP, MCP, and SSE
 - [Bash authoring kit](docs/bash.md) — arguments, config reads, events, and transparent child processes
 - [Agent Skill](skills/agent-first-data/SKILL.md) — for AI-assisted development

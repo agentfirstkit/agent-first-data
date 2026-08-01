@@ -1,0 +1,22 @@
+[
+  {
+    "name": "single_event",
+    "input_line": "{\"kind\":\"result\",\"result\":{},\"trace\":{}}",
+    "valid": true
+  },
+  {
+    "name": "single_event_with_surrounding_whitespace",
+    "input_line": " \t{\"kind\":\"result\",\"result\":{},\"trace\":{}}\r\n",
+    "valid": true
+  },
+  {
+    "name": "second_json_value_is_trailing_data",
+    "input_line": "{\"kind\":\"result\",\"result\":{},\"trace\":{}} {\"extra\":true}",
+    "valid": false
+  },
+  {
+    "name": "non_json_trailer_is_trailing_data",
+    "input_line": "{\"kind\":\"result\",\"result\":{},\"trace\":{}} garbage",
+    "valid": false
+  }
+]

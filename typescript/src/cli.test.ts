@@ -11,7 +11,6 @@ import {
   buildCliError,
   buildCliVersion,
   cliRenderVersion,
-  cliHandleVersionOrContinue,
   jsonLog,
   jsonProgress,
   jsonResult,
@@ -434,105 +433,4 @@ describe("version helpers", () => {
     assert.ok(!("build" in parsed.result));
   });
 
-  it("bare --version inherits a JSON command default", () => {
-    // `--version` answers with a protocol-v1 event and follows the command's
-    // declared output default.
-    const out = cliHandleVersionOrContinue(["--version"], [], "agent-cli", "Agent CLI Example", "1.2.3", undefined);
-    assert.ok(out !== undefined);
-    const parsed = JSON.parse(out!.trim());
-    assert.equal(parsed.kind, "result");
-    assert.equal(parsed.result.code, "version");
-    assert.equal(parsed.result.name, "agent-cli");
-    assert.equal(parsed.result.display_name, "Agent CLI Example");
-    assert.equal(parsed.result.version, "1.2.3");
-  });
-
-  it("bare --version inherits a plain command default", () => {
-    const out = cliHandleVersionOrContinue(
-      ["--version"],
-      [],
-      "agent-cli",
-      undefined,
-      "1.2.3",
-      undefined,
-      "plain",
-    );
-    assert.ok(out?.includes("result.code=version"));
-    assert.ok(out?.includes("result.version=1.2.3"));
-  });
-
-  it("honors explicit output flags", () => {
-    const out = cliHandleVersionOrContinue(["--version", "--output", "plain"], [], "agent-cli", undefined, "1.2.3", undefined);
-    assert.ok(out?.includes("kind=result"));
-    assert.ok(out?.includes("result.version=1.2.3"));
-  });
-
-  it("ignores --json, which belongs to the application", () => {
-    // It must not select a format and must not conflict with one.
-    const out = cliHandleVersionOrContinue(
-      ["--version", "--json", "--output", "yaml"], [], "agent-cli", undefined, "1.2.3", undefined,
-    );
-    assert.ok(out?.includes('kind: "result"'), `--output yaml must still win: ${out}`);
-  });
-
-  it("rejects conflicting --output values", () => {
-    assert.throws(
-      () => cliHandleVersionOrContinue(["--version", "--output", "json", "--output", "yaml"], [], "agent-cli", undefined, "1.2.3", undefined),
-      /conflicting output formats/
-    );
-  });
-
-  it("returns undefined without a version flag", () => {
-    assert.equal(cliHandleVersionOrContinue(["ping"], [], "agent-cli", undefined, "1.2.3", undefined), undefined);
-  });
-
-  it("rejects invalid output values", () => {
-    assert.throws(
-      () => cliHandleVersionOrContinue(["--version", "--output", "xml"], [], "agent-cli", undefined, "1.2.3", undefined),
-      /xml/
-    );
-  });
-
-  it("ignores a --version flag after a subcommand", () => {
-    // A subcommand that takes its own --version <value> must not be hijacked
-    // by the top-level pre-parser.
-    assert.equal(cliHandleVersionOrContinue(["hatch", "--version", "1.3.0"], [], "agent-cli", undefined, "1.2.3", undefined), undefined);
-    assert.equal(cliHandleVersionOrContinue(["hatch", "-V", "1.3.0"], [], "agent-cli", undefined, "1.2.3", undefined), undefined);
-  });
-
-  it("still honors a top-level --version after a value-consuming output flag", () => {
-    const out = cliHandleVersionOrContinue(["--output", "json", "--version"], [], "agent-cli", undefined, "1.2.3", undefined);
-    assert.ok(out?.includes('"version":"1.2.3"'));
-  });
-
-  it("recognizes --version after a caller-defined value flag", () => {
-    // A consumer's own value-taking global flag (here a comma-list `--log`)
-    // must have its space-separated value recognized via `valueFlags`, not a
-    // hardcoded flag list; otherwise `a,b` would be mistaken for the subcommand
-    // boundary and `--version` would be dropped.
-    const out = cliHandleVersionOrContinue(["--log", "a,b", "--version"], ["--log"], "hypha", undefined, "1.2.3", undefined);
-    assert.ok(out !== undefined);
-    const parsed = JSON.parse(out!.trim());
-    assert.equal(parsed.result.name, "hypha");
-    assert.equal(parsed.result.version, "1.2.3");
-  });
-
-  it("does not over-consume an unlisted flag's following positional", () => {
-    // A caller flag NOT in `valueFlags` takes no value, so the following
-    // positional is the subcommand boundary; a later `--version` belongs to it.
-    assert.equal(
-      cliHandleVersionOrContinue(["--verbose", "sense", "--version"], ["--log"], "hypha", undefined, "1.2.3", undefined),
-      undefined,
-    );
-  });
-
-  it("skips an --output-to space value before --version", () => {
-    // `--output-to <value>` takes a value that must not be mistaken for the
-    // subcommand boundary; the later `--version` must still be detected.
-    const out = cliHandleVersionOrContinue(["--output-to", "stdout", "--version"], [], "agent-cli", undefined, "1.2.3", undefined);
-    assert.ok(out !== undefined);
-    const parsed = JSON.parse(out!.trim());
-    assert.equal(parsed.result.name, "agent-cli");
-    assert.equal(parsed.result.version, "1.2.3");
-  });
 });

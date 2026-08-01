@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_FILES = (
     Path("spec/registry.json"),
     Path("spec/protocol-v1.schema.json"),
-    Path("spec/cli-help-v1.schema.json"),
+    Path("spec/cli-help-v2.schema.json"),
+    Path("spec/cli-spec-v1.schema.json"),
 )
 
 PACKAGE_ASSET_ROOTS = (
@@ -51,7 +52,30 @@ def sync(check: bool) -> list[str]:
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
+    failures.extend(orphans())
     return failures
+
+
+def orphans() -> list[str]:
+    """Contracts an asset root still carries after they left `spec/`.
+
+    Syncing only ever writes the canonical list, so a deleted contract lingers
+    in all four package trees, and `typescript/package.json` (`files: assets`)
+    and `python/pyproject.toml` (`assets/*.json`) would ship it. Checking for
+    missing files alone cannot see that.
+    """
+    expected = {package_relative_path(canonical).name for canonical in CANONICAL_FILES}
+    stale: list[str] = []
+    for asset_root in PACKAGE_ASSET_ROOTS:
+        directory = ROOT / asset_root
+        if not directory.is_dir():
+            continue
+        for found in sorted(directory.glob("*.json")):
+            if found.name not in expected:
+                stale.append(
+                    f"orphan {found.relative_to(ROOT)}; it is no longer a canonical contract"
+                )
+    return stale
 
 
 def main() -> int:

@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Assert that `--output` selects a help *format*, never a different surface.
-
-Scope and format are orthogonal in the spec, so the same `--help --recursive`
-request must describe the same commands and the same arguments no matter which
-renderer produced it. When Markdown was rendered by Clap's own help writer
-instead of the shared model it silently disagreed twice: it advertised `-h`
-after that flag was removed, and it repeated `--help` on all 23 commands where
-JSON listed it only on the root.
-
-Prose may differ — Markdown is the documentation export and keeps long-form
-sections the compact model drops. The *surface* may not.
+"""Assert that CLI help-v2 JSON and plain render the same registered shapes.
 
 Usage: validate_help_formats_agree.py [PATH_TO_AFDATA]
 """
@@ -17,12 +7,12 @@ Usage: validate_help_formats_agree.py [PATH_TO_AFDATA]
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+TOOL_PREFIX = ""
 
 
 def run(binary: str, args: list[str]) -> str:
@@ -32,89 +22,112 @@ def run(binary: str, args: list[str]) -> str:
     return result.stdout
 
 
-def json_surface(binary: str) -> dict[str, list[str]]:
-    event = json.loads(run(binary, ["--help", "--recursive"]))
-    surface: dict[str, list[str]] = {}
-
-    def walk(command: dict, prefix: str) -> None:
-        path = f"{prefix} {command['name']}".strip() if prefix else command["name"]
-        surface[path] = [arg["name"] for arg in command.get("arguments", [])]
-        for sub in command.get("subcommands", []):
-            walk(sub, path)
-
-    walk(event["result"]["help"], "")
-    return surface
+def help_model(binary: str, command_path: list[str]) -> dict:
+    event = json.loads(run(binary, [*command_path, "--help", "--output", "json"]))
+    assert event["kind"] == "result"
+    assert event["result"]["code"] == "help"
+    model = event["result"]["help"]
+    assert model["schema"] == "cli-help-v2"
+    return model
 
 
-def markdown_surface(binary: str) -> dict[str, list[str]]:
-    surface: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in run(binary, ["--help", "--recursive", "--output", "markdown"]).splitlines():
-        if line.startswith("#"):
-            current = line.lstrip("# ").split(" - ")[0].strip()
-            surface.setdefault(current, [])
-        elif current and line.startswith("| `") and "Command | Summary" not in line:
-            signature = line.split("|")[1].strip().strip("`")
-            name = signature.split(",")[0].split(" <")[0].strip().rstrip(".")
-            # Subcommand tables list invocable paths; argument tables do not.
-            if not name.startswith(current.split()[0]):
-                surface[current].append(name)
-    return surface
+def plain_usages(text: str) -> list[str]:
+    """The syntax lines a plain reader sees, in order."""
+    # A syntax line is exactly a line that starts with the invocation itself.
+    # The command's description, a shape's id/description, and the subcommand
+    # pointers never do.
+    return [line for line in text.splitlines() if line.startswith(TOOL_PREFIX)]
 
 
-def plain_surface(binary: str) -> dict[str, list[str]]:
-    surface: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in run(binary, ["--help", "--recursive", "--output", "plain"]).splitlines():
-        if not line.startswith(" ") and line.strip():
-            current = re.split(r" [—\[<]", line)[0].strip()
-            surface.setdefault(current, [])
-        elif current and line.startswith("  "):
-            # A positional's placeholder may itself contain `=` (FIELD=VALUE),
-            # and a repeatable one is suffixed with `...` before the `: help`.
-            match = re.match(r"\s+(-{1,2}[\w-]+|[A-Z][A-Z0-9_=]*)", line)
-            if match:
-                surface[current].append(match.group(1))
-    return surface
+def subcommand_path(command: str) -> list[str]:
+    prefix = "afdata "
+    suffix = " --help"
+    if not command.startswith(prefix) or not command.endswith(suffix):
+        raise ValueError(f"non-canonical subcommand help template: {command!r}")
+    return command[len(prefix) : -len(suffix)].split()
 
 
 def main(argv: list[str]) -> int:
     binary = argv[1] if len(argv) > 1 else str(ROOT / "target" / "debug" / "afdata")
+    global TOOL_PREFIX
+    TOOL_PREFIX = Path(binary).stem + " "
     if not Path(binary).exists():
         print(f"binary not found: {binary}", file=sys.stderr)
         return 1
 
-    reference = json_surface(binary)
-    failures = []
-    for label, surface in (
-        ("markdown", markdown_surface(binary)),
-        ("plain", plain_surface(binary)),
-    ):
-        missing = sorted(set(reference) - set(surface))
-        extra = sorted(set(surface) - set(reference))
-        if missing or extra:
-            failures.append(f"{label}: command set differs (missing {missing}, extra {extra})")
-        for command in sorted(set(reference) & set(surface)):
-            if reference[command] != surface[command]:
-                failures.append(
-                    f"{label}: {command}\n"
-                    f"      json: {reference[command]}\n"
-                    f"  {label:>8}: {surface[command]}"
+    pending: list[list[str]] = [[]]
+    visited: set[tuple[str, ...]] = set()
+    shapes_count = 0
+    while pending:
+        command_path = pending.pop()
+        key = tuple(command_path)
+        if key in visited:
+            continue
+        visited.add(key)
+        model = help_model(binary, command_path)
+        plain = run(binary, [*command_path, "--help", "--output", "plain"])
+        shapes = model.get("shapes", [])
+        shapes_count += len(shapes)
+
+        # One round trip, so JSON and plain must carry the same complete
+        # syntax for every shape — there is no second level to defer to.
+        expected = [shape["usage"] for shape in shapes]
+        actual = plain_usages(plain)
+        if expected != actual:
+            raise ValueError(
+                f"help syntax differs for {model['command_path']}: "
+                f"json={expected!r}, plain={actual!r}"
+            )
+        # Every argument meaning and default the structured form carries has to
+        # reach the plain reader too. Comparing only the syntax lines let plain
+        # drop `notes` and `defaults` entirely while this check stayed green —
+        # the "human catalog" was strictly weaker than the JSON.
+        missing_notes = [
+            f"{name}: {note}"
+            for name, note in model.get("notes", {}).items()
+            if name not in plain or note not in plain
+        ]
+        if missing_notes:
+            raise ValueError(
+                f"plain help for {model['command_path']} omits argument notes "
+                f"the JSON carries: {missing_notes!r}"
+            )
+        missing_defaults = [
+            name for name in model.get("defaults", {}) if name not in plain
+        ]
+        if missing_defaults:
+            raise ValueError(
+                f"plain help for {model['command_path']} omits defaults "
+                f"the JSON carries: {missing_defaults!r}"
+            )
+
+        if len(shapes) > 1:
+            undescribed = [shape["id"] for shape in shapes if not shape.get("about")]
+            if undescribed:
+                raise ValueError(
+                    f"{model['command_path']} has sibling shapes without a description: "
+                    f"{undescribed!r}"
                 )
+        elif shapes and shapes[0].get("about"):
+            raise ValueError(
+                f"{model['command_path']} has one shape that repeats a description"
+            )
 
-    if failures:
-        print("Help formats disagree about the command surface:", file=sys.stderr)
-        for failure in failures:
-            print(f"  {failure}", file=sys.stderr)
-        print(
-            "`--output` selects a format, not a different set of commands or arguments.",
-            file=sys.stderr,
+        pending.extend(
+            subcommand_path(command)
+            for command in model.get("subcommands", [])
         )
-        return 1
 
-    print(f"help formats agree: {len(reference)} commands across json, plain, markdown")
+    print(
+        f"help formats agree: {len(visited)} commands, "
+        f"{shapes_count} registered shapes"
+    )
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except (AssertionError, KeyError, ValueError) as error:
+        print(f"Help formats disagree: {error}", file=sys.stderr)
+        sys.exit(1)

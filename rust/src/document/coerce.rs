@@ -1,11 +1,10 @@
-//! CLI-facing value construction for `set`/`add` (`cli-shell-config-todo.md`
-//! §3, which supersedes the earlier `cli-design-review-todo.md` D3): a bare
-//! VALUE/FIELD=VALUE is always [`Value::String`] with zero coercion — no
-//! shape-guessing, no type prefixes. An exact type is requested explicitly
-//! via [`ValueType`] (`set`'s `--value-type` flag); [`guard_bare_overwrite`]
-//! implements the "异型覆盖守卫" (heterogeneous-overwrite guard) that turns a
-//! bare VALUE silently changing an existing scalar's type into an argument
-//! error instead.
+//! CLI-facing value construction for `set`/`add`: a bare VALUE/FIELD=VALUE is
+//! always [`Value::String`] with zero coercion — no shape-guessing, no type
+//! prefixes. An exact type is requested explicitly via [`ValueType`] (`set`'s
+//! `--value-type` flag); [`guard_bare_overwrite`] is the heterogeneous-overwrite
+//! guard that turns a bare VALUE silently rewriting what is already at the path
+//! — a scalar of another type, or a whole container — into an argument error
+//! instead.
 
 use crate::document::{DocumentError, DocumentResult, Value};
 
@@ -58,8 +57,7 @@ impl ValueType {
 /// arrays, objects, and an "exact-type scalar" (`--value-type json` value
 /// `"8080"` writes the *string* `"8080"`, not the number). `number` is
 /// literal-faithful: an oversized integer or high-precision float is
-/// preserved digit for digit via [`Value::Number`] — see
-/// `cli-shell-config-todo.md` §4.
+/// preserved digit for digit via [`Value::Number`].
 pub fn value_from_type(value_type: ValueType, raw: Option<&str>) -> DocumentResult<Value> {
     match value_type {
         ValueType::Null => match raw {
@@ -170,8 +168,10 @@ pub fn value_matches_type(value: &Value, expected: ValueType) -> bool {
     }
 }
 
-/// The scalar kind of `value`, or `None` for an array/object (the guard
-/// does not apply to containers — see `cli-shell-config-todo.md` §3).
+/// The scalar kind of `value`, or `None` for an array/object.
+///
+/// Containers have no scalar kind; [`guard_bare_overwrite`] reports them
+/// separately as [`BareOverwrite::Container`] rather than exempting them.
 pub fn scalar_kind(value: &Value) -> Option<ScalarKind> {
     match value {
         Value::Null => Some(ScalarKind::Null),
@@ -184,22 +184,64 @@ pub fn scalar_kind(value: &Value) -> Option<ScalarKind> {
     }
 }
 
-/// The §3 "异型覆盖守卫" (heterogeneous-overwrite guard, closing design rule
-/// 4 — "no silent type rewrites"): a bare VALUE (implicit `--value-type
-/// string`) is always a string, so overwriting an *existing scalar of a
-/// different kind* would silently change its type. That is an argument
-/// error, not a coercion decision. Returns the existing kind so the caller
-/// can build a message with the two escape hatches (`--value-type <kind>`
-/// to keep the type, or `--value-type string` to convert explicitly).
+/// What a bare VALUE would overwrite, and the `--value-type` that would keep
+/// it — see [`guard_bare_overwrite`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BareOverwrite {
+    /// A scalar of a different kind: the type changes.
+    Scalar(ScalarKind),
+    /// A whole array or object: the container is discarded.
+    Container(&'static str),
+}
+
+impl BareOverwrite {
+    /// The kind name to show the caller.
+    pub fn found(self) -> &'static str {
+        match self {
+            Self::Scalar(kind) => kind.value_type_name(),
+            Self::Container(name) => name,
+        }
+    }
+
+    /// The `--value-type` spelling that preserves what is already there.
+    ///
+    /// A container has no scalar type to keep, so preserving it means writing
+    /// it back as a JSON literal.
+    pub fn keeps(self) -> &'static str {
+        match self {
+            Self::Scalar(kind) => kind.value_type_name(),
+            Self::Container(_) => "json",
+        }
+    }
+}
+
+/// The heterogeneous-overwrite guard, which closes the "no silent type
+/// rewrites" rule: a bare VALUE (implicit `--value-type
+/// string`) is always a string, so writing one over anything that is not
+/// already a string rewrites what is there. That is an argument error, not a
+/// coercion decision. Returns what would be overwritten so the caller can name
+/// both escape hatches (`--value-type <kind>` to keep it, `--value-type
+/// string` to convert deliberately).
 ///
-/// `Ok(())` when there is nothing to guard: the target is absent (a new
-/// key), already a string (no type change), or a container (out of this
-/// guard's scope). Never called when `--value-type` was passed explicitly —
-/// an explicit type is a deliberate declaration, not a silent rewrite.
-pub fn guard_bare_overwrite(existing: Option<&Value>) -> Result<(), ScalarKind> {
-    match existing.and_then(scalar_kind) {
-        Some(ScalarKind::String) | None => Ok(()),
-        Some(other) => Err(other),
+/// Containers are guarded too, and are the reason this returns more than a
+/// [`ScalarKind`]: `set config.json deps hello` over a three-element array
+/// used to exit 0 and leave `"deps": "hello"` behind. A type change at least
+/// keeps one value; discarding a container loses everything under it, with no
+/// signal at all.
+///
+/// `Ok(())` only when there is nothing to guard: the target is absent (a new
+/// key) or already a string. Never called when `--value-type` was passed
+/// explicitly — an explicit type is a deliberate declaration, not a silent
+/// rewrite.
+pub fn guard_bare_overwrite(existing: Option<&Value>) -> Result<(), BareOverwrite> {
+    match existing {
+        None | Some(Value::String(_)) => Ok(()),
+        Some(Value::Array(_)) => Err(BareOverwrite::Container("array")),
+        Some(Value::Object(_)) => Err(BareOverwrite::Container("object")),
+        Some(other) => match scalar_kind(other) {
+            Some(kind) => Err(BareOverwrite::Scalar(kind)),
+            None => Ok(()),
+        },
     }
 }
 
@@ -337,24 +379,29 @@ mod tests {
     }
 
     #[test]
-    fn guard_fires_only_for_bare_overwrite_of_a_differently_kinded_scalar() {
+    fn guard_fires_for_any_bare_overwrite_that_is_not_string_to_string() {
         assert_eq!(guard_bare_overwrite(None), Ok(()));
         assert_eq!(
             guard_bare_overwrite(Some(&Value::String("x".to_string()))),
             Ok(())
         );
-        assert_eq!(guard_bare_overwrite(Some(&Value::Array(vec![]))), Ok(()));
+        // A container is no longer exempt: it used to pass here, which is how
+        // `set config.json deps hello` discarded a whole array at exit 0.
+        assert_eq!(
+            guard_bare_overwrite(Some(&Value::Array(vec![]))),
+            Err(BareOverwrite::Container("array"))
+        );
         assert_eq!(
             guard_bare_overwrite(Some(&Value::Integer(8080))),
-            Err(ScalarKind::Number)
+            Err(BareOverwrite::Scalar(ScalarKind::Number))
         );
         assert_eq!(
             guard_bare_overwrite(Some(&Value::Bool(true))),
-            Err(ScalarKind::Bool)
+            Err(BareOverwrite::Scalar(ScalarKind::Bool))
         );
         assert_eq!(
             guard_bare_overwrite(Some(&Value::Null)),
-            Err(ScalarKind::Null)
+            Err(BareOverwrite::Scalar(ScalarKind::Null))
         );
     }
 
@@ -413,5 +460,36 @@ mod tests {
                 .unwrap(),
             Value::Array(vec![Value::Bool(false), Value::Bool(true)])
         );
+    }
+}
+
+#[cfg(test)]
+mod bare_overwrite_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn containers_are_guarded_and_ask_for_json() {
+        let array = Value::Array(vec![Value::String("a".to_string())]);
+        let object = Value::Object(BTreeMap::new());
+        for (value, name) in [(&array, "array"), (&object, "object")] {
+            let overwrite = guard_bare_overwrite(Some(value)).unwrap_err();
+            assert_eq!(overwrite.found(), name);
+            // A container has no scalar type to keep; JSON is how it survives.
+            assert_eq!(overwrite.keeps(), "json");
+        }
+    }
+
+    #[test]
+    fn scalars_keep_naming_their_own_type() {
+        let overwrite = guard_bare_overwrite(Some(&Value::Integer(8080))).unwrap_err();
+        assert_eq!(overwrite, BareOverwrite::Scalar(ScalarKind::Number));
+        assert_eq!(overwrite.keeps(), "number");
+    }
+
+    #[test]
+    fn a_new_key_or_an_existing_string_is_not_a_rewrite() {
+        assert!(guard_bare_overwrite(None).is_ok());
+        assert!(guard_bare_overwrite(Some(&Value::String("old".to_string()))).is_ok());
     }
 }

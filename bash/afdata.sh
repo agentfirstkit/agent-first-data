@@ -36,9 +36,9 @@ afdata_cli() {
 
 _afdata_emit() {
   afdata_cli \
+    emit "$@" \
     --output "${AFDATA_OUTPUT:-json}" \
-    --output-to "${AFDATA_OUTPUT_TO:-split}" \
-    emit "$@"
+    --output-to "${AFDATA_OUTPUT_TO:-split}"
 }
 
 afdata_log() {
@@ -398,7 +398,7 @@ afdata_args_help() {
   done
   printf '  %-24s %s\n' '--output FORMAT' 'Output format: json, yaml, or plain'
   printf '  %-24s %s\n' '--output-to DEST' 'Event destination: split, stdout, or stderr'
-  printf '  %-24s %s\n' '-h, --help' 'Print help'
+  printf '  %-24s %s\n' '--help' 'Print help'
 }
 
 _afdata_args_abort() {
@@ -438,6 +438,26 @@ afdata_args_parse() {
   local _afdata_internal_matched
   local _afdata_internal_index
   local _afdata_internal_variable
+  local _afdata_internal_scan
+  local _afdata_internal_saw_help=false
+  local _afdata_internal_saw_output=false
+
+  # Help is raw human text, while output selection promises structured data.
+  # Reject the contradictory request before either branch can win by argv
+  # order. Tokens after `--` are application positionals and do not count.
+  for _afdata_internal_scan in "$@"; do
+    case "$_afdata_internal_scan" in
+      --) break ;;
+      --help) _afdata_internal_saw_help=true ;;
+      --output|--output=*|--output-to|--output-to=*)
+        _afdata_internal_saw_output=true
+        ;;
+    esac
+  done
+  if [ "$_afdata_internal_saw_help" = true ] \
+    && [ "$_afdata_internal_saw_output" = true ]; then
+    _afdata_args_abort "help cannot be combined with --output or --output-to"
+  fi
 
   while [ "$#" -gt 0 ]; do
     _afdata_internal_arg="$1"

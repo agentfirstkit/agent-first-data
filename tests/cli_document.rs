@@ -87,12 +87,7 @@ fn test_shell_bash_rejects_output_to_override() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let response = json_stderr(&output);
-    assert_eq!(response["error"]["code"], "cli_error");
-    assert!(
-        response["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("raw-output commands"))
-    );
+    assert_eq!(response["error"]["code"], "cli_unregistered_combination");
 }
 
 #[test]
@@ -144,12 +139,7 @@ fn test_emit_rejects_unknown_log_level_as_usage_error() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let response = json_stderr(&output);
-    assert_eq!(response["error"]["code"], "cli_error");
-    assert!(
-        response["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("invalid log level"))
-    );
+    assert_eq!(response["error"]["code"], "cli_invalid_argument_value");
 }
 
 #[test]
@@ -173,18 +163,21 @@ fn test_emit_honors_unified_destination_and_output_format() {
 }
 
 #[test]
-fn test_emit_usage_error_honors_unified_destination() {
+fn test_cli_parse_error_does_not_trust_unresolved_destination() {
     let output = run(&[
-        "--output-to",
-        "stdout",
         "emit",
         "log",
         "notice",
         "building project",
+        "--output-to",
+        "stdout",
     ]);
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stderr.is_empty());
-    assert_eq!(json_stdout(&output)["error"]["code"], "cli_error");
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "cli_invalid_argument_value"
+    );
 }
 
 // ═══════════════════════════════════════════
@@ -196,12 +189,12 @@ fn test_stdin_dash_defaults_to_json() {
     let output = run_with_stdin(&["get", "-"], br#"{"a":1}"#);
     assert!(output.status.success(), "{:?}", output);
     let response = json_stdout(&output);
-    assert_eq!(response["result"]["format"], "JSON");
+    assert_eq!(response["result"]["format"], "json");
     assert_eq!(response["result"]["value"]["a"], 1);
 }
 
 #[test]
-fn test_omitted_input_is_a_clap_parse_error_not_implicit_stdin() {
+fn test_omitted_input_is_a_cli_parse_error_not_implicit_stdin() {
     // D1 killed the old implicit-stdin-when-omitted fallback: FILE is a
     // required positional now, so omitting it is a parse error (exit 2),
     // not a silent attempt to read stdin.
@@ -215,7 +208,7 @@ fn test_input_format_override_applies_to_stdin() {
     let output = run_with_stdin(&["get", "--input-format", "yaml", "-"], b"a: 1\nb: 2\n");
     assert!(output.status.success(), "{:?}", output);
     let response = json_stdout(&output);
-    assert_eq!(response["result"]["format"], "YAML");
+    assert_eq!(response["result"]["format"], "yaml");
     assert_eq!(response["result"]["value"]["a"], 1);
     assert_eq!(response["result"]["value"]["b"], 2);
 }
@@ -387,6 +380,68 @@ fn test_value_secret_gate_requires_reveal_flag() {
 }
 
 #[test]
+fn test_secret_marks_the_whole_subtree_not_just_the_leaf() {
+    // A `_secret` name marks everything beneath it. Judging the leaf alone let
+    // a caller step past the marked node and read the subtree in the clear —
+    // every test here had only ever put `_secret` on a leaf.
+    const DOC: &[u8] = br#"{"credentials_secret":{"password":"hunter2"}}"#;
+
+    let output = run_with_stdin(&["get", "-", "credentials_secret.password"], DOC);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(json_stdout(&output)["result"]["value"], "***");
+
+    let output = run_with_stdin(&["value", "-", "credentials_secret.password"], DOC);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "document_secret_redacted"
+    );
+
+    // Explicit consent still reaches it.
+    let output = run_with_stdin(
+        &[
+            "value",
+            "-",
+            "credentials_secret.password",
+            "--reveal-secret",
+        ],
+        DOC,
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"hunter2");
+}
+
+#[test]
+fn test_document_errors_never_echo_document_content() {
+    // An error event is what an agent routinely writes to a log, so a message
+    // that quotes the document is a leak on the most-travelled path.
+    let output = run_with_stdin(
+        &["get", "-", "next"],
+        b"api_key_secret = \"sk-live-SUPERSECRET\nnext = 1\n",
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let message = json_stderr(&output)["error"]["message"]
+        .as_str()
+        .expect("message")
+        .to_string();
+    assert!(!message.contains("sk-live-SUPERSECRET"), "{message}");
+    // The location survives — it is what makes the error actionable.
+    assert!(message.contains("line 1"), "{message}");
+
+    let output = run_with_stdin(
+        &["get", "-", "token_secret.inner"],
+        br#"{"token_secret":"sk-live-LEAKME"}"#,
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let response = json_stderr(&output);
+    assert_eq!(response["error"]["code"], "document_type_mismatch");
+    let message = response["error"]["message"].as_str().expect("message");
+    assert!(!message.contains("sk-live-LEAKME"), "{message}");
+    assert!(message.contains("string"), "{message}");
+}
+
+#[test]
 fn test_value_secret_name_gate_and_reveal() {
     let output = run_with_stdin(
         &["value", "-", "PASSWORD", "--secret-name", "PASSWORD"],
@@ -526,7 +581,7 @@ fn test_paths_and_keys_missing_ok_and_null_separator() {
 
 #[test]
 fn test_paths_and_keys_reject_explicit_output_json() {
-    let output = run_with_stdin(&["--output", "json", "paths", "-"], br#"{"a":1}"#);
+    let output = run_with_stdin(&["paths", "-", "--output", "json"], br#"{"a":1}"#);
     assert_eq!(output.status.code(), Some(2));
     // The implicit default (no --output at all) is fine.
     let default_output = run_with_stdin(&["paths", "-"], br#"{"a":1}"#);
@@ -606,7 +661,21 @@ fn test_value_type_null_bool_number_and_json() {
     let null = run(&["set", &config_path, "a", "--value-type", "null"]);
     assert!(null.status.success(), "{:?}", null);
     let value = run(&["value", &config_path, "a"]);
-    assert_eq!(value.stdout, b"null");
+    assert_eq!(value.status.code(), Some(1));
+    assert!(value.stdout.is_empty());
+    assert_eq!(json_stderr(&value)["error"]["code"], "document_null_value");
+    let defaulted = run(&["value", &config_path, "a", "--default", "fallback"]);
+    assert!(defaulted.status.success(), "{:?}", defaulted);
+    assert_eq!(defaulted.stdout, b"fallback");
+
+    // A bare string over null gets an actionable null-specific hint.
+    let guarded = run(&["set", &config_path, "a", "replacement"]);
+    assert_eq!(guarded.status.code(), Some(2));
+    assert!(
+        json_stderr(&guarded)["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("--value-type null without VALUE"))
+    );
 
     // --value-type null rejects an accompanying VALUE.
     let extra = run(&["set", &config_path, "a", "x", "--value-type", "null"]);
@@ -804,7 +873,7 @@ fn test_bad_input_format_is_usage_error_exit_2() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         json_stderr(&output)["error"]["code"],
-        "document_usage_error"
+        "cli_invalid_argument_value"
     );
 }
 
@@ -852,7 +921,7 @@ fn test_output_to_stdout_unifies_error_onto_stdout() {
     // Unified stdout mode: even the error envelope lands on stdout, and stderr
     // stays empty.
     let output = run_with_stdin(
-        &["--output-to", "stdout", "get", "-", "nope"],
+        &["get", "-", "nope", "--output-to", "stdout"],
         br#"{"a":1}"#,
     );
     assert!(!output.status.success());
@@ -865,7 +934,7 @@ fn test_output_to_stdout_unifies_error_onto_stdout() {
     // Same for a mutation usage error.
     let temp_dir = TempDir::new().unwrap();
     let config_path = write_temp(&temp_dir, "config.json", r#"{"port":8080}"#);
-    let set = run(&["--output-to", "stdout", "set", &config_path, "port", "9090"]);
+    let set = run(&["set", &config_path, "port", "9090", "--output-to", "stdout"]);
     assert_eq!(set.status.code(), Some(2));
     assert!(set.stderr.is_empty(), "{:?}", set.stderr);
     assert_eq!(json_stdout(&set)["error"]["code"], "document_usage_error");
@@ -875,7 +944,7 @@ fn test_output_to_stdout_unifies_error_onto_stdout() {
 fn test_output_to_stderr_unifies_result_onto_stderr() {
     // Unified stderr mode: a successful result envelope goes to stderr; stdout
     // stays empty.
-    let output = run_with_stdin(&["--output-to", "stderr", "get", "-", "a"], br#"{"a":1}"#);
+    let output = run_with_stdin(&["get", "-", "a", "--output-to", "stderr"], br#"{"a":1}"#);
     assert!(output.status.success(), "{:?}", output);
     assert!(output.stdout.is_empty(), "{:?}", output.stdout);
     let response = json_stderr(&output);
@@ -921,11 +990,10 @@ fn test_raw_scalar_commands_reject_non_default_output_to() {
             );
             assert!(output.stdout.is_empty());
             let response = json_stderr(&output);
-            assert_eq!(response["error"]["code"], "cli_error");
             assert!(
-                response["error"]["message"]
+                response["error"]["code"]
                     .as_str()
-                    .is_some_and(|m| m.contains("value/paths/keys")),
+                    .is_some_and(|code| code.starts_with("cli_")),
                 "{command} --output-to {mode}: {response}"
             );
         }
@@ -934,13 +1002,13 @@ fn test_raw_scalar_commands_reject_non_default_output_to() {
 
 #[test]
 fn test_output_to_unknown_value_is_usage_error() {
-    let output = run_with_stdin(&["--output-to", "bogus", "get", "-", "a"], br#"{"a":1}"#);
+    let output = run_with_stdin(&["get", "-", "a", "--output-to", "bogus"], br#"{"a":1}"#);
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(
         json_stderr(&output)["error"]["message"]
             .as_str()
-            .is_some_and(|m| m.contains("expected split, stdout, or stderr")),
+            .is_some_and(|m| m.contains("expected one of split, stdout, stderr")),
         "{:?}",
         output.stderr
     );
@@ -952,7 +1020,7 @@ fn test_output_to_unknown_value_is_usage_error() {
 
 #[test]
 fn test_render_parse_error_honors_output_format() {
-    let output = run_with_stdin(&["--output", "yaml", "render", "-"], b"not-json");
+    let output = run_with_stdin(&["render", "-", "--output", "yaml"], b"not-json");
     assert!(!output.status.success());
     // Under the default split routing, the error envelope goes to stderr and
     // stdout stays empty.
@@ -1069,7 +1137,7 @@ fn test_set_preserves_toml_formatting() {
     assert!(output.status.success(), "{:?}", output);
     let response = json_stdout(&output);
     assert_eq!(response["result"]["code"], "document_set");
-    assert_eq!(response["result"]["format"], "TOML");
+    assert_eq!(response["result"]["format"], "toml");
 
     let after = std::fs::read_to_string(&config_path).unwrap();
     assert!(after.contains("# leading comment"));
@@ -1478,7 +1546,7 @@ fn test_output_formats_and_conflicting_secret_source() {
     let config_path = write_temp(&temp_dir, "config.json", "{\"name\":\"demo\"}\n");
 
     for output_format in ["yaml", "plain"] {
-        let output = run(&["--output", output_format, "get", &config_path, "name"]);
+        let output = run(&["get", &config_path, "name", "--output", output_format]);
         assert!(output.status.success());
         assert!(!output.stdout.is_empty());
         assert!(output.stderr.is_empty());
@@ -1535,7 +1603,7 @@ fn test_frontmatter_toml_read_and_body_frozen_on_set() {
         "toml-frontmatter",
     ]);
     assert!(set.status.success(), "{:?}", set);
-    assert_eq!(json_stdout(&set)["result"]["format"], "TOML frontmatter");
+    assert_eq!(json_stdout(&set)["result"]["format"], "toml-frontmatter");
 
     let after = std::fs::read_to_string(&page).unwrap();
     assert_eq!(
@@ -1620,7 +1688,7 @@ fn test_frontmatter_yaml_read_and_edit() {
         "yaml-frontmatter",
     ]);
     assert!(set.status.success(), "{:?}", set);
-    assert_eq!(json_stdout(&set)["result"]["format"], "YAML frontmatter");
+    assert_eq!(json_stdout(&set)["result"]["format"], "yaml-frontmatter");
 
     let after = std::fs::read_to_string(&page).unwrap();
     assert!(after.contains("title: New"));
@@ -1666,4 +1734,77 @@ fn test_frontmatter_secret_field_still_redacts_on_get() {
     ]);
     assert!(got.status.success(), "{:?}", got);
     assert_eq!(json_stdout(&got)["result"]["value"], "***");
+}
+
+#[test]
+fn test_lint_reports_unlabelled_fields_without_failing() {
+    // The four questions the README opens with. Before this, `lint` answered
+    // every one of them with `{"findings":[],"ok":true}`.
+    let output = run_with_stdin(
+        &["lint", "-"],
+        br#"{"timeout":5000,"price":1200,"created":1738886400,"api_key":"sk-live-abc123"}"#,
+    );
+    assert!(output.status.success(), "{output:?}");
+    let result = &json_stdout(&output)["result"];
+    assert_eq!(result["ok"], false);
+    let findings = result["findings"].as_array().expect("findings");
+    assert_eq!(findings.len(), 4);
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding["severity"] == "warning"
+                && finding["rule_id"] == "missing_suffix")
+    );
+
+    // Heuristics are opt-out: `error` leaves only what the tool is sure of.
+    let output = run_with_stdin(
+        &["lint", "-", "--min-severity", "error"],
+        br#"{"timeout":5000,"price":1200,"created":1738886400,"api_key":"sk-live-abc123"}"#,
+    );
+    assert!(output.status.success(), "{output:?}");
+    let result = &json_stdout(&output)["result"];
+    assert_eq!(result["ok"], true);
+    assert!(result["findings"].as_array().expect("findings").is_empty());
+}
+
+#[test]
+fn test_bare_value_overwriting_a_container_is_guarded() {
+    // The guard used to cover scalar→scalar only, so it caught `8080 → "hello"`
+    // (one value changes type) while letting `["a","b","c"] → "hello"` through
+    // at exit 0 — the larger loss, with nothing left to notice it by.
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = write_temp(
+        &temp_dir,
+        "config.json",
+        r#"{"deps":["a","b","c"],"cfg":{"x":1}}"#,
+    );
+
+    for (key, kind) in [("deps", "array"), ("cfg", "object")] {
+        let guarded = run(&["set", &config_path, key, "hello"]);
+        assert_eq!(guarded.status.code(), Some(2), "{guarded:?}");
+        assert!(guarded.stdout.is_empty());
+        let response = json_stderr(&guarded);
+        assert_eq!(response["error"]["code"], "document_usage_error");
+        let message = response["error"]["message"].as_str().expect("message");
+        assert!(message.contains(kind), "{message}");
+        // Keeping a container means writing it back as JSON, not as a scalar type.
+        assert!(message.contains("--value-type json"), "{message}");
+    }
+
+    // Untouched.
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        r#"{"deps":["a","b","c"],"cfg":{"x":1}}"#
+    );
+
+    // Escape hatch: replace it deliberately.
+    let replaced = run(&[
+        "set",
+        &config_path,
+        "deps",
+        r#"["x"]"#,
+        "--value-type",
+        "json",
+    ]);
+    assert!(replaced.status.success(), "{replaced:?}");
 }

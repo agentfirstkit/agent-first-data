@@ -1,67 +1,178 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentfirstkit.org/schemas/agent-first-data/protocol-v1.schema.json",
-  "title": "Agent-First Data Protocol v1 Event",
-  "type": "object",
-  "oneOf": [
-    {"$ref": "#/$defs/resultEvent"},
-    {"$ref": "#/$defs/errorEvent"},
-    {"$ref": "#/$defs/progressEvent"},
-    {"$ref": "#/$defs/logEvent"}
-  ],
+  "title": "Agent-First Data Protocol v1 Event (base profile)",
+  "description": "One protocol v1 event. The document root is the BASE profile: the mandatory MUST rules only — envelope shape and error payload requirements. Validate against the root unless you are claiming strict conformance; rejecting a base-conformant event is a false negative. The STRICT profile is `#/$defs/strictEvent`: it additionally requires the two recommendations (an object `trace` on every event, a boolean `error.retryable`). Stream lifecycle — (log | progress)* then exactly one result | error — is not expressible per event; validate a whole stream with `afdata validate` or `validate_protocol_stream`.",
+  "$ref": "#/$defs/event",
   "$defs": {
+    "event": {
+      "title": "Protocol v1 event, base profile",
+      "description": "Top-level fields are closed: `kind`, the payload field whose name equals `kind`, and an optional `trace`.",
+      "type": "object",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/resultEvent"
+        },
+        {
+          "$ref": "#/$defs/errorEvent"
+        },
+        {
+          "$ref": "#/$defs/progressEvent"
+        },
+        {
+          "$ref": "#/$defs/logEvent"
+        }
+      ]
+    },
+    "strictEvent": {
+      "title": "Protocol v1 event, strict profile",
+      "description": "The base profile plus the recommendations of the spec's `Validation profiles` section. Equivalent to `validate_protocol_event(event, strict = true)`.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/event"
+        },
+        {
+          "$ref": "#/$defs/strictRecommendations"
+        }
+      ]
+    },
+    "strictRecommendations": {
+      "description": "What the strict profile adds on top of the base profile, and nothing else.",
+      "type": "object",
+      "required": [
+        "trace"
+      ],
+      "properties": {
+        "trace": {
+          "$ref": "#/$defs/trace"
+        }
+      },
+      "if": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "error"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "retryable"
+            ],
+            "properties": {
+              "retryable": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
     "trace": {
+      "description": "Execution context. Recommended on every event, required by the strict profile. Its fields are owned by the emitting tool.",
       "type": "object"
     },
     "resultEvent": {
       "type": "object",
       "properties": {
-        "kind": {"const": "result"},
+        "kind": {
+          "const": "result"
+        },
         "result": true,
-        "trace": {"$ref": "#/$defs/trace"}
+        "trace": {
+          "$ref": "#/$defs/trace"
+        }
       },
-      "required": ["kind", "result"],
+      "required": [
+        "kind",
+        "result"
+      ],
       "additionalProperties": false
     },
     "errorEvent": {
       "type": "object",
       "properties": {
-        "kind": {"const": "error"},
-        "error": {
-          "type": "object",
-          "properties": {
-            "code": {"type": "string", "minLength": 1},
-            "message": {"type": "string", "minLength": 1},
-            "retryable": {"type": "boolean"},
-            "hint": {"type": "string"}
-          },
-          "required": ["code", "message", "retryable"],
-          "additionalProperties": true
+        "kind": {
+          "const": "error"
         },
-        "trace": {"$ref": "#/$defs/trace"}
+        "error": {
+          "$ref": "#/$defs/errorPayload"
+        },
+        "trace": {
+          "$ref": "#/$defs/trace"
+        }
       },
-      "required": ["kind", "error"],
+      "required": [
+        "kind",
+        "error"
+      ],
       "additionalProperties": false
     },
     "progressEvent": {
       "type": "object",
       "properties": {
-        "kind": {"const": "progress"},
+        "kind": {
+          "const": "progress"
+        },
         "progress": true,
-        "trace": {"$ref": "#/$defs/trace"}
+        "trace": {
+          "$ref": "#/$defs/trace"
+        }
       },
-      "required": ["kind", "progress"],
+      "required": [
+        "kind",
+        "progress"
+      ],
       "additionalProperties": false
     },
     "logEvent": {
       "type": "object",
       "properties": {
-        "kind": {"const": "log"},
+        "kind": {
+          "const": "log"
+        },
         "log": true,
-        "trace": {"$ref": "#/$defs/trace"}
+        "trace": {
+          "$ref": "#/$defs/trace"
+        }
       },
-      "required": ["kind", "log"],
+      "required": [
+        "kind",
+        "log"
+      ],
       "additionalProperties": false
+    },
+    "errorPayload": {
+      "description": "Extension fields go directly on this object; there is no `details` wrapper.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hint": {
+          "description": "Actionable remediation. Omit it when there is none.",
+          "type": "string"
+        },
+        "retryable": {
+          "description": "Whether retrying the same call can succeed. Recommended, and left unconstrained by the base profile — the strict profile (`#/$defs/strictEvent`) requires it and requires a boolean."
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": true
     }
   }
 }

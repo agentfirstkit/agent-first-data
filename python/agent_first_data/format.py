@@ -17,7 +17,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from enum import Enum, StrEnum
+from enum import Enum
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import unquote_plus
 
@@ -27,8 +27,18 @@ from urllib.parse import unquote_plus
 # ═══════════════════════════════════════════
 
 
-class LogLevel(StrEnum):
-    """Log level enum for structured logging."""
+class LogLevel(str, Enum):
+    """Log level enum for structured logging.
+
+    A ``str`` mix-in rather than :class:`enum.StrEnum`, which only exists from
+    Python 3.11 and would silently break the floor this package declares in
+    ``pyproject.toml``. The two differ in ``str()``/``format()`` shape (a
+    ``str``-mix-in member renders as ``LogLevel.INFO``, a ``StrEnum`` member as
+    ``info``), and that shape has itself moved between releases — so the wire
+    form is never taken from ``str()``: it is ``.value``, which every renderer
+    reaches through the exact-``str`` normalization in
+    :func:`_sanitize_for_json`.
+    """
     DEBUG = "debug"
     INFO = "info"
     WARN = "warn"
@@ -177,6 +187,10 @@ class ErrorBuilder:
             "error": error,
             "trace": self._trace,
         }
+        try:
+            json.dumps(envelope, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise EventBuildError(f"event is not JSON serializable: {exc}") from exc
         return Event(envelope)
 
 
@@ -479,10 +493,32 @@ def decode_protocol_event(
 # ═══════════════════════════════════════════
 
 class RedactionPolicy(str, Enum):
-    """Which fields a redaction pass scrubs. Default (absent policy) is All."""
+    """Which fields a redaction pass scrubs. Default (absent policy) is All.
+
+    The policy selects a *scope* inside a structured value. A command line
+    (:func:`redact_argv`) and a bare URL string (:func:`redact_url_secrets`)
+    have no ``result``/``trace`` split to scope to, so on those two paths
+    ``TraceOnly`` redacts in full like ``All``, and only ``Off`` turns
+    redaction off.
+    """
     All = "All"
     TraceOnly = "TraceOnly"
     Off = "Off"
+
+
+def _redacts_unscoped_input(policy: RedactionPolicy | None) -> bool:
+    """Whether ``policy`` redacts an input that carries no scope of its own — a
+    command line or a single URL string, as opposed to a JSON value with a
+    ``trace`` object to narrow to.
+
+    ``TraceOnly`` narrows *where* redaction applies within a value; it does not
+    weaken redaction. A standalone argv or URL has no non-``trace`` half to
+    leave alone — and both are diagnostic material by construction, the very
+    thing ``TraceOnly`` scrubs — so ``TraceOnly`` redacts them in full, exactly
+    like ``All``. Only ``Off``, the caller explicitly asking for raw output,
+    disables redaction, and it does so on all three paths alike.
+    """
+    return policy != RedactionPolicy.Off
 
 
 class PlainStyle(str, Enum):
@@ -567,11 +603,15 @@ def _format_plain(value: Any, *, options: OutputOptions | None = None) -> str:
     """
     output_options = options or OutputOptions()
     value = redacted_value(value, secret_names=output_options.secret_names, policy=output_options.policy)
+    if not isinstance(value, dict):
+        return _plain_scalar(value)
     pairs: list[tuple[str, str]] = []
     if output_options.style is PlainStyle.Raw:
         _collect_plain_pairs_raw(value, "", pairs)
     else:
         _collect_plain_pairs(value, "", pairs)
+    if not pairs:
+        return "{}"
     pairs.sort(key=lambda p: _utf16_sort_key(p[0]))
     parts = []
     for k, v in pairs:
@@ -595,19 +635,31 @@ def redacted_value(value: Any, *, secret_names: Sequence[str] = (), policy: Reda
     return v
 
 
-def redact_url_secrets(url: str, *, secret_names: Sequence[str] = ()) -> str:
+def redact_url_secrets(
+    url: str,
+    *,
+    secret_names: Sequence[str] = (),
+    policy: RedactionPolicy | None = None,
+) -> str:
     """Redact secret components of a single URL string.
 
     Returns ``url`` with its userinfo password and any ``_secret``-suffixed
     query-parameter values replaced by ``***``. A query parameter is redacted
     iff its (form-decoded) name ends in ``_secret``/``_SECRET`` or matches an
-    exact entry in ``secret_names``. The userinfo password
-    (``scheme://user:pass@host``) is always redacted as a structural rule.
-    Only the secret spans are replaced with ``***``; every other byte is
-    preserved. A string that is not a single, whitespace-free,
+    exact entry in ``secret_names``. A fragment written in the same ``k=v&k=v``
+    shape — how an OAuth implicit-flow response carries its token — is redacted
+    by that same rule; any other fragment passes through byte-for-byte. The
+    userinfo password (``scheme://user:pass@host``) is always redacted as a
+    structural rule. Only the secret spans are replaced with ``***``; every
+    other byte is preserved. A string that is not a single, whitespace-free,
     scheme-prefixed URL (including a URL embedded in surrounding prose) is
     returned unchanged.
+
+    A URL is unscoped input: ``RedactionPolicy.Off`` returns it unchanged,
+    every other policy redacts it in full.
     """
+    if not _redacts_unscoped_input(policy):
+        return url
     context = _RedactionContext.from_names(secret_names)
     redacted = _redact_url_in_str(url, context)
     return redacted if redacted is not None else url
@@ -639,8 +691,11 @@ def redact_argv(
     Intended for CLIs that record their own invocation — startup diagnostics,
     audit trails, crash reports — where writing argv verbatim would put a
     credential in the log.
+
+    A command line is unscoped input: ``RedactionPolicy.Off`` returns ``args``
+    unchanged, every other policy redacts in full.
     """
-    if policy is RedactionPolicy.Off:
+    if not _redacts_unscoped_input(policy):
         return list(args)
     context = _RedactionContext.from_names(secret_names)
     out: list[str] = []
@@ -649,14 +704,14 @@ def redact_argv(
         if redact_next:
             redact_next = False
             if not arg.startswith("-"):
-                out.append("***")
+                out.append(REDACTED_MARKER)
                 continue
         if arg.startswith("--"):
             rest = arg[2:]
             name, sep, _value = rest.partition("=")
             if sep:
                 if _is_secret_flag_name(name, context):
-                    out.append(f"--{name}=***")
+                    out.append(f"--{name}={REDACTED_MARKER}")
                     continue
             elif _is_secret_flag_name(rest, context):
                 redact_next = True
@@ -741,7 +796,13 @@ def is_valid_rfc3339_time(value: str) -> bool:
         return False
     if len(value) == 8:
         return True
-    return value[8] == "." and len(value) > 9 and value[9:].isdigit()
+    fraction = value[9:]
+    return (
+        value[8] == "."
+        and bool(fraction)
+        and fraction.isascii()
+        and fraction.isdigit()
+    )
 
 
 def is_valid_rfc3339(value: str) -> bool:
@@ -851,8 +912,32 @@ def _is_leap_year(year: int) -> bool:
 
 MAX_DEPTH = 256
 MAX_DEPTH_MARKER = "<afdata:max-depth>"
+# The scalar every redacted span, value, and subtree is replaced with. Also the
+# signal plain rendering reads to tell a hidden field from a live one.
+REDACTED_MARKER = "***"
 MIN_RFC3339_MS = -62135596800000
 MAX_RFC3339_MS = 253402300799999
+
+
+def _exact_scalar(value: Any) -> Any:
+    """Normalize a str/int instance to the exact builtin type.
+
+    An enum with a ``str``/``int`` mix-in (``class LogLevel(str, Enum)``) *is* a
+    ``str``/``int``, so it flows through this module untouched — but its
+    ``__str__``/``__format__`` render the member (``LogLevel.INFO``), not the
+    value (``info``). JSON serialization reads the underlying value, so the same
+    member would come out as ``"info"`` in JSON and ``LogLevel.INFO`` in plain
+    logfmt, which f-string-interpolates it. Reading the raw payload through the
+    *unbound* ``str.__str__``/``int`` (never the member's own override) settles
+    that here, once, for every renderer downstream — and keeps the answer stable
+    across Python versions, which have moved mix-in enum ``str()`` more than
+    once.
+    """
+    if type(value) is str or type(value) is int:
+        return value
+    if isinstance(value, str):
+        return str.__str__(value)
+    return int(value)
 
 
 def _sanitize_for_json(value: Any, stack: set[int] | None = None, depth: int = 0) -> Any:
@@ -861,8 +946,12 @@ def _sanitize_for_json(value: Any, stack: set[int] | None = None, depth: int = 0
     if stack is None:
         stack = set()
 
-    if value is None or isinstance(value, (str, bool, int)):
+    # bool first: it is an int subclass, and must stay a bool rather than be
+    # normalized to 1/0 by _exact_scalar.
+    if value is None or isinstance(value, bool):
         return value
+    if isinstance(value, (str, int)):
+        return _exact_scalar(value)
     if isinstance(value, float):
         if math.isfinite(value):
             return value
@@ -879,7 +968,7 @@ def _sanitize_for_json(value: Any, stack: set[int] | None = None, depth: int = 0
         stack.add(obj_id)
         out: dict[str, Any] = {}
         for k, v in value.items():
-            key = k if isinstance(k, str) else str(k)
+            key = _exact_scalar(k) if isinstance(k, str) else str(k)
             out[key] = _sanitize_for_json(v, stack, depth + 1)
         stack.remove(obj_id)
         return out
@@ -918,11 +1007,6 @@ def _key_has_url_suffix(key: str) -> bool:
     return key.endswith("_url") or key.endswith("_URL")
 
 
-def _is_secret_flag_name(flag_name: str, context: _RedactionContext) -> bool:
-    normalized = flag_name.replace("-", "_")
-    return context.is_secret_key(normalized) or context.is_secret_key(flag_name)
-
-
 def _redact_secrets(value: Any, context: _RedactionContext = _RedactionContext(), depth: int = 0) -> None:
     if depth >= MAX_DEPTH:
         return
@@ -930,7 +1014,7 @@ def _redact_secrets(value: Any, context: _RedactionContext = _RedactionContext()
         for k in list(value.keys()):
             v = value[k]
             if context.is_secret_key(k):
-                value[k] = "***"
+                value[k] = REDACTED_MARKER
             elif _key_has_url_suffix(k):
                 if isinstance(v, str):
                     value[k] = _redact_url_field_value(v, context)
@@ -980,21 +1064,22 @@ def _redact_url_in_str(s: str, context: _RedactionContext) -> str | None:
 
     new_authority = _redact_userinfo_password(authority)
 
-    # Query runs from the first '?' to the first '#' (or end).
-    q = remainder.find("?")
-    if q == -1:
-        new_remainder = remainder
+    # `remainder` is `path[?query][#fragment]`; '#' ends the query, so split the
+    # fragment off first and the query out of what is left.
+    before_fragment, hash_sep, fragment = remainder.partition("#")
+    path, question_sep, query = before_fragment.partition("?")
+    if question_sep:
+        new_before_fragment = f"{path}?{_redact_query(query, context)}"
     else:
-        path = remainder[:q]
-        query_body = remainder[q + 1 :]
-        h = query_body.find("#")
-        if h == -1:
-            query, fragment = query_body, ""
-        else:
-            query, fragment = query_body[:h], query_body[h:]
-        new_remainder = f"{path}?{_redact_query(query, context)}{fragment}"
+        new_before_fragment = before_fragment
+    # A fragment gets the same treatment as the query: `k=v&k=v` after the '#'
+    # is exactly how an OAuth implicit-flow response hands back a token, so a
+    # secret-named fragment parameter must not survive where the identically
+    # named query parameter would not. A fragment that is not in that shape has
+    # no '=' in its segments and passes through byte-for-byte.
+    new_fragment = f"#{_redact_query(fragment, context)}" if hash_sep else ""
 
-    return f"{scheme}://{new_authority}{new_remainder}"
+    return f"{scheme}://{new_authority}{new_before_fragment}{new_fragment}"
 
 
 def _redact_url_field_value(s: str, context: _RedactionContext) -> str:
@@ -1012,7 +1097,7 @@ def _redact_url_field_value(s: str, context: _RedactionContext) -> str:
     # connection string like user:pass@host/db has no scheme anchor for the
     # surgical span logic above, so blanket redaction is the safe default.
     if any(c.isspace() for c in s) or "@" in s:
-        return "***"
+        return REDACTED_MARKER
     return s
 
 
@@ -1029,14 +1114,15 @@ def _redact_userinfo_password(authority: str) -> str:
     colon = userinfo.find(":")
     if colon == -1:
         return authority
-    return f"{authority[:colon]}:***{authority[at:]}"
+    return f"{authority[:colon]}:{REDACTED_MARKER}{authority[at:]}"
 
 
 def _redact_query(query: str, context: _RedactionContext) -> str:
     """Redact the values of secret-named query parameters.
 
     Preserves the raw bytes of every other segment (keys, benign values,
-    encoding, ordering, separators).
+    encoding, ordering, separators). Also drives fragment bodies, which carry
+    the same ``k=v&k=v`` shape.
     """
     segments = []
     for segment in query.split("&"):
@@ -1048,7 +1134,7 @@ def _redact_query(query: str, context: _RedactionContext) -> str:
         # Form-decode the name ('+' -> space, percent-decode) for the check.
         name = unquote_plus(raw_key)
         if context.is_secret_key(name):
-            segments.append(f"{raw_key}=***")
+            segments.append(f"{raw_key}={REDACTED_MARKER}")
         else:
             segments.append(segment)
     return "&".join(segments)
@@ -1157,6 +1243,18 @@ def _as_non_neg_int(value: Any) -> int | None:
     return None
 
 
+def _as_non_neg_i64(value: Any) -> int | None:
+    if isinstance(value, _RawNumber):
+        if not re.fullmatch(r"-?\d+", value.literal):
+            return None
+        n = int(value.literal)
+    else:
+        n = _as_int(value)
+    if n is not None and 0 <= n <= 9_223_372_036_854_775_807:
+        return n
+    return None
+
+
 def _as_decimal_int(value: Any) -> int | None:
     if isinstance(value, str) and re.fullmatch(r"-?\d+", value):
         return int(value)
@@ -1214,27 +1312,27 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
     # Group 2: compound currency suffixes
     stripped = _strip_suffix_ci(key, "_usd_cents")
     if stripped is not None:
-        n = _as_non_neg_int(numeric)
+        n = _as_non_neg_i64(value)
         if n is not None:
             return stripped, f"${n // 100}.{n % 100:02d}"
         return None
     stripped = _strip_suffix_ci(key, "_eur_cents")
     if stripped is not None:
-        n = _as_non_neg_int(numeric)
+        n = _as_non_neg_i64(value)
         if n is not None:
             return stripped, f"\u20ac{n // 100}.{n % 100:02d}"
         return None
     gc = _try_strip_generic_cents(key)
     if gc is not None:
         stripped, code = gc
-        n = _as_non_neg_int(numeric)
+        n = _as_non_neg_i64(value)
         if n is not None:
             return stripped, f"{n // 100}.{n % 100:02d} {code.upper()}"
         return None
     gm = _try_strip_generic_micro(key)
     if gm is not None:
         stripped, code = gm
-        n = _as_non_neg_int(numeric)
+        n = _as_non_neg_i64(value)
         if n is not None:
             return stripped, f"{n // 1_000_000}.{n % 1_000_000:06d} {code.upper()}"
         return None
@@ -1288,7 +1386,7 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
     # Group 5: short suffixes (last to avoid false positives)
     stripped = _strip_suffix_ci(key, "_jpy")
     if stripped is not None:
-        n = _as_non_neg_int(numeric)
+        n = _as_non_neg_i64(value)
         if n is not None:
             return stripped, f"\u00a5{_format_with_commas(n)}"
         return None
@@ -1317,6 +1415,12 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
     return None
 
 
+def _is_redacted(value: Any) -> bool:
+    """True when a field already carries the redaction marker, i.e. redaction
+    ran over it and hid the value."""
+    return isinstance(value, str) and value == REDACTED_MARKER
+
+
 def _process_object_fields(d: dict) -> list[tuple[str, Any, str | None]]:
     """Process fields: strip keys, format values, detect collisions.
 
@@ -1326,7 +1430,14 @@ def _process_object_fields(d: dict) -> list[tuple[str, Any, str | None]]:
     for k, v in d.items():
         stripped_secret = _strip_suffix_ci(k, "_secret")
         if stripped_secret is not None:
-            entries.append((stripped_secret, k, v, None))
+            # Dropping `_secret` is the readable half of an actual redaction:
+            # the marker has done its job once the value reads `***`. When the
+            # value was *not* redacted — policy `Off`, or a field outside
+            # `trace` under `TraceOnly` — the suffix is the only thing telling a
+            # downstream reader that `api_key_secret=sk-live-xxx` is a
+            # credential, so it stays.
+            display_key = stripped_secret if _is_redacted(v) else k
+            entries.append((display_key, k, v, None))
             continue
         result = _try_process_field(k, v)
         if result is not None:
@@ -1496,21 +1607,42 @@ def _render_yaml_array_raw(arr: list[Any], indent: int, lines: list[str]) -> Non
 
 
 def _escape_yaml_str(s: str) -> str:
-    return (
-        s.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-        .replace("\f", "\\f")
-        .replace("\v", "\\v")
-    )
+    escaped = []
+    short = {
+        "\\": "\\\\",
+        '"': '\\"',
+        "\n": "\\n",
+        "\r": "\\r",
+        "\t": "\\t",
+        "\b": "\\b",
+        "\f": "\\f",
+        "\v": "\\v",
+        "\0": "\\0",
+    }
+    for character in s:
+        if character in short:
+            escaped.append(short[character])
+        elif ord(character) <= 0x1F:
+            escaped.append(f"\\u{ord(character):04x}")
+        else:
+            escaped.append(character)
+    return "".join(escaped)
 
 
 def _yaml_key(key: str) -> str:
-    if re.fullmatch(r"[A-Za-z0-9_.-]+", key):
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", key) and not _is_ambiguous_yaml_key(key):
         return key
     return f'"{_escape_yaml_str(key)}"'
+
+
+def _is_ambiguous_yaml_key(key: str) -> bool:
+    if key.lower() in {"true", "false", "null", "~", ".nan", ".inf", "+.inf", "-.inf"}:
+        return True
+    try:
+        float(key)
+        return True
+    except ValueError:
+        return False
 
 
 def _yaml_scalar(value: Any) -> str:
@@ -1544,10 +1676,16 @@ def _collect_plain_pairs(value: Any, prefix: str, pairs: list[tuple[str, str]]) 
         if formatted is not None:
             pairs.append((full_key, formatted))
         elif isinstance(v, dict):
-            _collect_plain_pairs(v, full_key, pairs)
+            if v:
+                _collect_plain_pairs(v, full_key, pairs)
+            else:
+                pairs.append((full_key, "{}"))
         elif isinstance(v, list):
-            joined = ",".join(_plain_scalar(item) for item in v)
-            pairs.append((full_key, joined))
+            if v:
+                joined = ",".join(_plain_scalar(item) for item in v)
+                pairs.append((full_key, joined))
+            else:
+                pairs.append((full_key, "[]"))
         elif v is None:
             pairs.append((full_key, ""))
         else:
@@ -1561,10 +1699,16 @@ def _collect_plain_pairs_raw(value: Any, prefix: str, pairs: list[tuple[str, str
         v = value[key]
         full_key = f"{prefix}.{key}" if prefix else key
         if isinstance(v, dict):
-            _collect_plain_pairs_raw(v, full_key, pairs)
+            if v:
+                _collect_plain_pairs_raw(v, full_key, pairs)
+            else:
+                pairs.append((full_key, "{}"))
         elif isinstance(v, list):
-            joined = ",".join(_plain_scalar_raw(item) for item in v)
-            pairs.append((full_key, joined))
+            if v:
+                joined = ",".join(_plain_scalar_raw(item) for item in v)
+                pairs.append((full_key, joined))
+            else:
+                pairs.append((full_key, "[]"))
         elif v is None:
             pairs.append((full_key, ""))
         else:

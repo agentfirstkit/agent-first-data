@@ -73,6 +73,10 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
+    /// Only the CLI emitter renders a level as text, so without `cli` this is
+    /// dead code — and the `--no-default-features` build is held to
+    /// `-D warnings` like every other.
+    #[cfg(feature = "cli")]
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Debug => "debug",
@@ -151,13 +155,15 @@ impl ErrorBuilder {
 
     /// Set the hint.
     pub fn hint(mut self, hint: &str) -> Self {
-        self.hint = Some(hint.to_string());
+        if !hint.is_empty() {
+            self.hint = Some(hint.to_string());
+        }
         self
     }
 
     /// Set the hint if present.
     pub fn hint_if_some(mut self, hint: Option<&str>) -> Self {
-        if let Some(h) = hint {
+        if let Some(h) = hint.filter(|hint| !hint.is_empty()) {
             self.hint = Some(h.to_string());
         }
         self
@@ -253,6 +259,11 @@ impl ErrorBuilder {
     pub fn build(self) -> Result<Event, BuildError> {
         if let Some(err) = self.build_error {
             return Err(err);
+        }
+        if self.trace.as_ref().is_some_and(|trace| !trace.is_object()) {
+            return Err(BuildError::NonObjectField(
+                "trace() argument must be a JSON object".to_string(),
+            ));
         }
 
         let mut error_obj = self.fields;

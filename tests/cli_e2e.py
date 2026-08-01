@@ -1,87 +1,16 @@
 #!/usr/bin/env python3
-"""End-to-end checks for the four canonical agent-first-data CLI examples."""
+"""End-to-end checks for the closed-world afdata CLI."""
 
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
-import sys
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from scripts.validate_cli_help import validate_help_event
-
-
-@dataclass(frozen=True)
-class CliCase:
-    name: str
-    cwd: Path
-    command_prefix: tuple[str, ...]
-    success_args: tuple[str, ...]
-
-
-def cli_cases() -> list[CliCase]:
-    pytool = os.environ.get("AFDATA_PYTOOL", sys.executable)
-    npx = shutil.which("npx") or "npx"
-    return [
-        CliCase(
-            name="rust",
-            cwd=ROOT,
-            command_prefix=(
-                "cargo",
-                "run",
-                "--quiet",
-                "--example",
-                "agent_cli",
-                "--features",
-                "cli-help,cli-help-markdown",
-                "--",
-            ),
-            success_args=("ping", "--host", "example.com"),
-        ),
-        CliCase(
-            name="go",
-            cwd=ROOT / "go",
-            command_prefix=("go", "run", "./examples/agent_cli"),
-            success_args=("echo",),
-        ),
-        CliCase(
-            name="python",
-            cwd=ROOT / "python",
-            command_prefix=(pytool, "examples/agent_cli.py"),
-            success_args=("echo",),
-        ),
-        CliCase(
-            name="typescript",
-            cwd=ROOT / "typescript",
-            command_prefix=(npx, "tsx", "examples/agent_cli.ts"),
-            success_args=("echo",),
-        ),
-    ]
-
-
-def run_cli(case: CliCase, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
-    if case.name == "python":
-        env["PYTHONPATH"] = "."
-    return subprocess.run(
-        [*case.command_prefix, *args],
-        cwd=case.cwd,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=60,
-        check=False,
-    )
 
 
 def run_afdata(args: Sequence[str], stdin: str) -> subprocess.CompletedProcess[str]:
@@ -90,6 +19,18 @@ def run_afdata(args: Sequence[str], stdin: str) -> subprocess.CompletedProcess[s
         cwd=ROOT,
         text=True,
         input=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+
+
+def run_rust_example(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["cargo", "run", "--quiet", "--example", "agent_cli", "--", *args],
+        cwd=ROOT,
+        text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=60,
@@ -147,176 +88,55 @@ def terminal_events(proc: subprocess.CompletedProcess[str]) -> list[dict[str, ob
     return parse_events(proc.stdout if proc.returncode == 0 else proc.stderr)
 
 
-def assert_single_terminal(case: CliCase) -> None:
-    proc = run_cli(case, case.success_args)
-    assert proc.returncode == 0, f"{case.name}: success returned {proc.returncode}, stderr={proc.stderr!r}"
-    events = terminal_events(proc)
-    assert len(events) == 1, f"{case.name}: expected one event, got {events!r}"
-    assert events[0]["kind"] == "result", f"{case.name}: expected result, got {events[0]!r}"
 
-
-def assert_startup_log(case: CliCase) -> None:
-    proc = run_cli(case, ("--log", "startup", *case.success_args))
-    assert proc.returncode == 0, f"{case.name}: startup log returned {proc.returncode}, stderr={proc.stderr!r}"
-    # Under the finite split, the terminal `result` is on stdout while the
-    # startup `log` (a diagnostic) is on stderr.
-    results = parse_events(proc.stdout)
-    assert len(results) == 1 and results[0]["kind"] == "result", (
-        f"{case.name}: expected one result on stdout, got {results!r}"
-    )
-    logs = parse_events(proc.stderr)
-    assert any(
-        e["kind"] == "log"
-        and isinstance(e.get("log"), dict)
-        and e["log"].get("category") == "startup"
-        for e in logs
-    ), f"{case.name}: startup log missing from stderr: {logs!r}"
-
-
-def assert_unknown_arg(case: CliCase) -> None:
-    proc = run_cli(case, ("--unknown", *case.success_args))
-    assert proc.returncode != 0, f"{case.name}: unknown arg unexpectedly succeeded"
-    events = terminal_events(proc)
-    assert len(events) == 1, f"{case.name}: expected one fallback error, got {events!r}"
-    assert events[0]["kind"] == "error", f"{case.name}: expected error, got {events[0]!r}"
-
-
-def assert_invalid_output_fallback(case: CliCase) -> None:
-    proc = run_cli(case, ("--output", "xml", *case.success_args))
-    assert proc.returncode != 0, f"{case.name}: invalid output unexpectedly succeeded"
-    events = terminal_events(proc)
-    assert len(events) == 1, f"{case.name}: expected one JSON fallback error, got {events!r}"
-    assert events[0]["kind"] == "error", f"{case.name}: expected error fallback, got {events[0]!r}"
-
-
-def assert_json_flag_is_not_afdata_s(case: CliCase) -> None:
-    # `--json` is a plain application flag now. These examples do not declare
-    # one, so it must surface as an unknown argument rather than being silently
-    # consumed as a second spelling of `--output json`.
-    proc = run_cli(case, ("--json", *case.success_args))
-    assert proc.returncode != 0, (
-        f"{case.name}: --json was consumed by AFDATA instead of reaching the app"
-    )
-    events = terminal_events(proc)
-    assert len(events) == 1, f"{case.name}: expected one error, got {events!r}"
-    assert events[0]["kind"] == "error", f"{case.name}: expected error, got {events[0]!r}"
-
-
-def assert_cancelled(case: CliCase) -> None:
-    proc = run_cli(case, ("cancel",))
-    assert proc.returncode != 0, f"{case.name}: cancellation unexpectedly succeeded"
-    events = terminal_events(proc)
-    assert len(events) == 1, f"{case.name}: expected one cancellation event, got {events!r}"
-    event = events[0]
-    assert event["kind"] == "error", f"{case.name}: cancellation did not emit error: {event!r}"
-    error = event["error"]
-    assert isinstance(error, dict), f"{case.name}: error payload not object: {event!r}"
-    assert error.get("code") == "cancelled", f"{case.name}: wrong cancellation code: {event!r}"
-
-
-def assert_broken_pipe_no_traceback(case: CliCase) -> None:
-    env = os.environ.copy()
-    if case.name == "python":
-        env["PYTHONPATH"] = "."
-    proc = subprocess.Popen(
-        [*case.command_prefix, "--log", "startup", *case.success_args],
-        cwd=case.cwd,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert proc.stdout is not None
-    assert proc.stderr is not None
-    proc.stdout.close()
-    stderr = proc.stderr.read()
-    proc.wait(timeout=60)
-    lowered = stderr.lower()
-    forbidden = ("panic", "traceback", "stack backtrace", "brokenpipeerror", "epipe")
-    assert not any(token in lowered for token in forbidden), (
-        f"{case.name}: broken pipe leaked panic/traceback diagnostics: {stderr!r}"
-    )
-
-
-def assert_version(case: CliCase) -> None:
-    # Parity check: across all four SDKs `--version` is always a structured
-    # protocol-v1 version event. These examples all declare JSON as their normal
-    # output default; an explicit `--output` still wins.
-    proc = run_cli(case, ("--version",))
-    assert proc.returncode == 0, f"{case.name}: --version returned {proc.returncode}, stderr={proc.stderr!r}"
-    events = terminal_events(proc)
-    assert len(events) == 1, f"{case.name}: expected one version event, got {events!r}"
-    event = events[0]
-    assert event["kind"] == "result", f"{case.name}: --version did not emit a result: {event!r}"
+def validate_help_v2_event(event: dict[str, object]) -> dict[str, object]:
+    assert set(event) == {"kind", "result", "trace"}, event
+    assert event["kind"] == "result", event
+    assert event["trace"] == {}, event
     result = event["result"]
-    assert result["code"] == "version", f"{case.name}: --version result code is not 'version': {event!r}"
-    assert result["name"], f"{case.name}: --version missing result.name: {event!r}"
-    assert result["version"], f"{case.name}: --version missing result.version: {event!r}"
-    plain = run_cli(case, ("--version", "--output", "plain"))
-    assert plain.returncode == 0, f"{case.name}: --version --output plain failed: {plain.stderr!r}"
-    assert "result.code=version" in plain.stdout, (
-        f"{case.name}: --version --output plain is not the structured event: {plain.stdout!r}"
-    )
+    assert isinstance(result, dict) and set(result) == {"code", "help"}, event
+    assert result["code"] == "help", event
+    help_model = result["help"]
+    assert isinstance(help_model, dict), event
+    assert help_model.get("schema") == "cli-help-v2", event
+    assert isinstance(help_model.get("command_path"), str), event
+    about = help_model.get("about")
+    assert about is None or (
+        isinstance(about, str) and about and "\n" not in about and "\r" not in about
+    ), event
+    shapes = help_model.get("shapes", [])
+    assert isinstance(shapes, list), event
+    for shape in shapes:
+        assert set(shape) <= {"id", "about", "usage"}, event
+        assert isinstance(shape.get("id"), str) and shape["id"], event
+        usage = shape.get("usage")
+        assert isinstance(usage, str) and usage and "\n" not in usage, event
+    # Help answers in one round trip, so every shape is complete: there is no
+    # second level that could have carried the optional arguments.
+    if len(shapes) > 1:
+        assert all(shape.get("about") for shape in shapes), event
+    elif shapes:
+        assert "about" not in shapes[0], event
+    return help_model
 
 
-def assert_help_output_contract(case: CliCase) -> None:
-    proc = run_cli(case, ("--help",))
-    assert proc.returncode == 0, f"{case.name}: --help failed: {proc.stderr!r}"
-    event = json.loads(proc.stdout)
-    validate_help_event(event)
-    help_model = event["result"]["help"]
-    assert help_model["scope"] == "one_level", (
-        f"{case.name}: default help is not one-level: {event!r}"
-    )
-    assert help_model["command_path"], f"{case.name}: help omitted command_path"
-    serialized_help = json.dumps(help_model)
-    assert '"description"' not in serialized_help, (
-        f"{case.name}: default JSON help embeds a long description"
-    )
-    assert '"description_markdown"' not in serialized_help, (
-        f"{case.name}: default JSON help unexpectedly exposes full Markdown"
-    )
-    assert "code" not in help_model, f"{case.name}: help duplicated result.code"
-    assert "versions" not in help_model, f"{case.name}: help eagerly disclosed versions"
-    assert "--version" in json.dumps(help_model), f"{case.name}: help omitted --version"
-    plain = run_cli(case, ("--help", "--output", "plain"))
-    assert plain.returncode == 0, f"{case.name}: plain help failed: {plain.stderr!r}"
-    assert "usage:" in plain.stdout.lower(), (
-        f"{case.name}: explicit plain help is not text: {plain.stdout!r}"
-    )
-    assert "AFDATA:" not in plain.stdout and "Version:" not in plain.stdout, (
-        f"{case.name}: plain help eagerly disclosed version metadata"
-    )
-    recursive = run_cli(case, ("--help", "--recursive"))
-    assert recursive.returncode == 0, f"{case.name}: recursive help failed: {recursive.stderr!r}"
-    recursive_event = json.loads(recursive.stdout)
-    validate_help_event(recursive_event)
-    recursive_help = recursive_event["result"]["help"]
-    assert recursive_help["scope"] == "recursive", (
-        f"{case.name}: recursive help has wrong scope: {recursive_event!r}"
-    )
-    serialized_recursive_help = json.dumps(recursive_help)
-    assert '"description"' not in serialized_recursive_help, (
-        f"{case.name}: recursive JSON help embeds a long description"
-    )
-    assert '"description_markdown"' not in serialized_recursive_help, (
-        f"{case.name}: recursive JSON help unexpectedly exposes full Markdown"
-    )
+def assert_rust_example_uses_help_v2() -> None:
+    help_proc = run_rust_example(("echo", "--help"))
+    assert help_proc.returncode == 0, help_proc.stderr
+    help_model = validate_help_v2_event(json.loads(help_proc.stdout))
+    assert [shape["id"] for shape in help_model["shapes"]] == ["echo"]
+    assert help_model["shapes"][0]["usage"].startswith("agent-cli echo <MESSAGE>")
 
+    version_proc = run_rust_example(("--version",))
+    assert version_proc.returncode == 0, version_proc.stderr
+    version = json.loads(version_proc.stdout)
+    assert version["result"]["code"] == "version", version
 
-def help_surface_counts(help_model: dict) -> tuple[int, int]:
-    commands_count = 0
-    arguments_count = 0
-
-    def visit(command: dict) -> None:
-        nonlocal commands_count, arguments_count
-        commands_count += 1
-        arguments_count += len(command.get("arguments", []))
-        for child in command.get("subcommands", []):
-            visit(child)
-
-    visit(help_model)
-    return commands_count, arguments_count
+    conflict = run_rust_example(("ping", "--host", "example.com", "--dry-run"))
+    assert conflict.returncode == 2, conflict
+    assert not conflict.stdout, conflict.stdout
+    error = json.loads(conflict.stderr)
+    assert error["error"]["code"] == "cli_unknown_argument", error
 
 
 def assert_afdata_validate() -> None:
@@ -535,27 +355,47 @@ def assert_afdata_lint_suffix_type_regressions() -> None:
     )
     assert ok.returncode == 0, f"afdata lint rejected valid present suffix-typed values: {ok.stdout!r}"
 
+    # Naming suffixes are ASCII case-insensitive. Uppercase spellings must
+    # enforce the same contracts as their lowercase equivalents.
+    uppercase_bad = run_afdata(
+        ("lint", "-"),
+        '{"CACHED_EPOCH_S":"abc","SIZE_BYTES":-1,"CALLBACK_URL":7}\n',
+    )
+    assert uppercase_bad.returncode != 0, (
+        f"afdata lint accepted invalid uppercase suffix-typed fields: "
+        f"{uppercase_bad.stdout!r}"
+    )
+    uppercase_findings = terminal_events(uppercase_bad)[0]["error"]["findings"]
+    assert len(uppercase_findings) == 3, uppercase_findings
+    assert all(
+        finding["rule_id"] == "suffix_type_mismatch"
+        for finding in uppercase_findings
+    ), uppercase_findings
+
+    uppercase_ok = run_afdata(
+        ("lint", "-"),
+        '{"CACHED_EPOCH_S":1707868800,"CALLBACK_URL":"https://example.com"}\n',
+    )
+    assert uppercase_ok.returncode == 0, (
+        f"afdata lint rejected valid uppercase suffix-typed fields: "
+        f"{uppercase_ok.stdout!r}"
+    )
+
 
 def assert_afdata_cli_capabilities() -> None:
-    # The default binary is full-featured, so every capability is present.
     ver = run_afdata(("--version", "--output", "json"), "")
     assert ver.returncode == 0, f"afdata --version --output json failed: {ver.stderr!r}"
     payload = json.loads(ver.stdout)
     assert payload["result"]["version"], f"no version in {ver.stdout!r}"
+
     default_help = run_afdata(("--help",), "")
     assert default_help.returncode == 0, f"afdata --help failed: {default_help.stderr!r}"
     help_event = json.loads(default_help.stdout)
-    validate_help_event(help_event)
-    help_model = help_event["result"]["help"]
+    help_model = validate_help_v2_event(help_event)
     assert help_model["command_path"] == "afdata", help_model
-    assert "code" not in help_model and "versions" not in help_model, help_model
-    assert all(
-        argument.get("global") is True
-        for argument in help_model["arguments"]
-        if argument["name"] in {"--output", "--output-to", "--stdout-file", "--stderr-file"}
-    ), f"root global arguments are not marked global: {help_model['arguments']!r}"
-    assert any(argument["name"] == "--version" for argument in help_model["arguments"]), (
-        f"help omitted clap's version flag: {help_model['arguments']!r}"
+    assert "arguments" not in help_model, help_model
+    assert len(default_help.stdout.encode()) < 2000, (
+        f"root discovery help is too large: {len(default_help.stdout.encode())} bytes"
     )
     validated_help = run_afdata(
         ("validate", "-", "--strict", "--per-event"),
@@ -566,69 +406,52 @@ def assert_afdata_cli_capabilities() -> None:
     )
     plain = run_afdata(("--help", "--output", "plain"), "")
     assert plain.returncode == 0, f"afdata --help --output plain failed: {plain.stderr!r}"
-    assert "Usage: afdata" in plain.stdout, f"plain help is not conventional text: {plain.stdout[:80]!r}"
-    recursive_json = run_afdata(("--help", "--recursive", "--output", "json"), "")
-    assert recursive_json.returncode == 0, f"recursive JSON help failed: {recursive_json.stderr!r}"
-    recursive_event = json.loads(recursive_json.stdout)
-    validate_help_event(recursive_event)
-    recursive_model = recursive_event["result"]["help"]
-    commands_count, arguments_count = help_surface_counts(recursive_model)
-    json_budget_bytes = 512 + commands_count * 160 + arguments_count * 120
-    assert len(recursive_json.stdout.encode()) < json_budget_bytes, (
-        "recursive JSON help exceeded its structural payload budget: "
-        f"{len(recursive_json.stdout.encode())} >= {json_budget_bytes} bytes "
-        f"for {commands_count} commands and {arguments_count} arguments"
-    )
-    linted_help = run_afdata(("lint", "-"), recursive_json.stdout)
-    assert linted_help.returncode == 0, (
-        f"recursive JSON help is not valid AFDATA: {linted_help.stderr!r}"
-    )
-    recursive_plain = run_afdata(("--help", "--recursive", "--output", "plain"), "")
-    assert recursive_plain.returncode == 0, f"recursive plain help failed: {recursive_plain.stderr!r}"
-    plain_budget_bytes = 400 + commands_count * 160 + arguments_count * 70
-    assert len(recursive_plain.stdout.encode()) < plain_budget_bytes, (
-        "recursive plain help exceeded its structural payload budget: "
-        f"{len(recursive_plain.stdout.encode())} >= {plain_budget_bytes} bytes "
-        f"for {commands_count} commands and {arguments_count} arguments"
-    )
+    assert "more:" in plain.stdout, plain.stdout[:160]
+
+    recursive_json = run_afdata(("--help", "--recursive"), "")
+    assert recursive_json.returncode == 2, "--recursive must not survive help-v2"
+    assert json.loads(recursive_json.stderr)["error"]["code"] == "cli_unknown_argument"
+
     md = run_afdata(("--help", "--output", "markdown"), "")
-    assert md.returncode == 0, f"afdata --help --output markdown failed: {md.stderr!r}"
-    assert md.stdout.lstrip().startswith("# afdata"), f"help is not markdown: {md.stdout[:80]!r}"
-    assert "--stdout-file" in md.stdout, f"stream-redirect flag missing from help: {md.stdout[:200]!r}"
-    assert "skill" in md.stdout, f"skill command missing from help: {md.stdout[:200]!r}"
+    assert md.returncode == 2, "help-v2 must not retain Markdown export"
+    assert json.loads(md.stderr)["error"]["code"] == "cli_invalid_argument_value"
 
     scoped = run_afdata(("set", "--help"), "")
     assert scoped.returncode == 0, f"afdata set --help failed: {scoped.stderr!r}"
     scoped_event = json.loads(scoped.stdout)
-    validate_help_event(scoped_event)
-    scoped_help = scoped_event["result"]["help"]
+    scoped_help = validate_help_v2_event(scoped_event)
     assert scoped_help["command_path"] == "afdata set", scoped_help
-    assert scoped_help["inherited_arguments_from"] == ["afdata"], scoped_help
-    scoped_names = {argument["name"] for argument in scoped_help["arguments"]}
-    assert {"FILE", "KEY", "--value-type"} <= scoped_names, scoped_help
-    assert "--output" not in scoped_names, (
-        f"scoped structured help repeated inherited globals: {scoped_help!r}"
+    assert [shape["id"] for shape in scoped_help["shapes"]] == [
+        "set-value",
+        "set-null",
+        "set-secret",
+    ], scoped_help
+    for shape in scoped_help["shapes"]:
+        assert "--output <json|yaml|plain>" in shape["usage"], shape
+    # One complete answer costs more than the old first level did, and less than
+    # that level plus a follow-up for the shape the caller actually wanted.
+    assert len(scoped.stdout.encode()) < 2200, (
+        f"set help is too large: {len(scoped.stdout.encode())} bytes"
     )
-    scoped_plain = run_afdata(("set", "--help", "--output", "plain"), "")
-    assert scoped_plain.returncode == 0, f"afdata set plain help failed: {scoped_plain.stderr!r}"
-    assert "Usage: afdata set" in scoped_plain.stdout, scoped_plain.stdout[:160]
-    assert "--output" in scoped_plain.stdout, (
-        f"scoped conventional help omitted inherited globals: {scoped_plain.stdout[:300]!r}"
-    )
+
+    combination_help = run_afdata(("set", "--help-combination", "set-null"), "")
+    assert combination_help.returncode == 2, "the second help level must not survive"
+    assert (
+        json.loads(combination_help.stderr)["error"]["code"] == "cli_unknown_argument"
+    ), combination_help.stderr
 
     missing = run_afdata((), "")
     assert missing.returncode == 2, f"afdata without a command returned {missing.returncode}"
     assert not missing.stdout, f"split output leaked an error to stdout: {missing.stdout!r}"
     missing_event = json.loads(missing.stderr)
-    assert missing_event["error"]["message"] == "a command is required", missing_event
-    assert missing_event["error"]["hint"] == "try: afdata --help", missing_event
-    assert len(missing.stderr.encode()) < 256, (
+    assert missing_event["error"]["code"] == "cli_unregistered_combination", missing_event
+    assert "`afdata --help`" in missing_event["error"]["hint"], missing_event
+    assert len(missing.stderr.encode()) < 512, (
         f"missing-command error embedded eager help: {len(missing.stderr.encode())} bytes"
     )
 
     # `-h`/`-V` are deliberately unsupported: AFDATA spells both out in full, and
-    # letting them reach Clap would answer in plain text at exit 0, bypassing the
-    # output contract entirely.
+    # Short aliases are deliberately unsupported by the registered grammar.
     for short_flag in ("-h", "-V"):
         short = run_afdata((short_flag,), "")
         assert short.returncode == 2, (
@@ -636,7 +459,7 @@ def assert_afdata_cli_capabilities() -> None:
         )
         assert not short.stdout, f"split output leaked an error to stdout: {short.stdout!r}"
         short_event = json.loads(short.stderr)
-        assert short_event["error"]["code"] == "cli_error", short_event
+        assert short_event["error"]["code"] == "cli_unknown_argument", short_event
         assert "--help" in short_event["error"]["hint"], short_event
     scoped_short = run_afdata(("get", "-h"), "")
     assert scoped_short.returncode == 2, (
@@ -647,7 +470,38 @@ def assert_afdata_cli_capabilities() -> None:
     assert pseudo.returncode == 2, f"afdata help pseudo-command returned {pseudo.returncode}"
     assert not pseudo.stdout, f"split output leaked an error to stdout: {pseudo.stdout!r}"
     pseudo_event = json.loads(pseudo.stderr)
-    assert pseudo_event["error"]["code"] == "cli_error", pseudo_event
+    assert pseudo_event["error"]["code"] == "cli_unknown_command", pseudo_event
+
+    conflict = run_afdata(
+        ("set", "data.json", "key", "visible", "--secret-from", "env:VALUE_SECRET"),
+        "",
+    )
+    assert conflict.returncode == 2
+    assert not conflict.stdout
+    assert "VALUE_SECRET" not in conflict.stderr
+    assert json.loads(conflict.stderr)["error"]["code"] == "cli_unregistered_combination"
+
+    raw_conflict = run_afdata(("value", "data.json", "key", "--output", "json"), "")
+    assert raw_conflict.returncode == 2
+    assert json.loads(raw_conflict.stderr)["error"]["code"] == "cli_unregistered_combination"
+
+    # A value the registry accepted but the command cannot use is still an
+    # invalid argument value. `cli-spec-v1` has no "non-empty string" type, so
+    # this one is decided a layer later — but a caller branches on `error.code`,
+    # and the layer that noticed is not something it should have to know. The
+    # generic `cli_error` stays available to CLIs with no registry to name a
+    # rule; a registry-compiled one must never fall back to it.
+    for argv in (
+        ("emit", "result", ""),
+        ("emit", "log", "info", ""),
+        ("emit", "error", "", "boom"),
+    ):
+        empty = run_afdata(argv, "")
+        assert empty.returncode == 2, f"{argv} returned {empty.returncode}"
+        assert not empty.stdout, f"split output leaked an error to stdout: {empty.stdout!r}"
+        empty_event = json.loads(empty.stderr)
+        assert empty_event["error"]["code"] == "cli_invalid_argument_value", empty_event
+        assert "--help" in empty_event["error"]["hint"], empty_event
 
 
 def assert_afdata_render_redacts() -> None:
@@ -710,21 +564,8 @@ def assert_afdata_skill_help_is_feature_gated() -> None:
 
 
 def main() -> None:
-    checks = (
-        assert_single_terminal,
-        assert_startup_log,
-        assert_unknown_arg,
-        assert_invalid_output_fallback,
-        assert_json_flag_is_not_afdata_s,
-        assert_cancelled,
-        assert_broken_pipe_no_traceback,
-        assert_version,
-        assert_help_output_contract,
-    )
-    for case in cli_cases():
-        for check in checks:
-            check(case)
-        print(f"[e2e] {case.name}: ok")
+    assert_rust_example_uses_help_v2()
+    print("[e2e] Rust CliSpec example: ok")
     for check in (
         assert_afdata_validate,
         assert_afdata_validate_strict_event,

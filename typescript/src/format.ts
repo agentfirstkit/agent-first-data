@@ -12,8 +12,9 @@
  * precision integers, high-precision floats, exponent forms, "-0") survives
  * decode. Parsed numbers become LosslessNumber internally; every JSON/YAML
  * rendering path here treats it as an opaque scalar leaf (never destructured
- * as a plain object) and re-emits its exact literal text. This is internal —
- * LosslessNumber is never part of the public JsonValue type or exports.
+ * as a plain object) and re-emits its exact literal text. Native bigint values
+ * are also supported so callers can render integers beyond Number's safe
+ * range without first corrupting them.
  */
 
 import { parse as losslessParse, stringify as losslessStringify, isLosslessNumber } from "lossless-json";
@@ -21,6 +22,7 @@ import { parse as losslessParse, stringify as losslessStringify, isLosslessNumbe
 export type JsonValue =
   | string
   | number
+  | bigint
   | boolean
   | null
   | JsonValue[]
@@ -117,9 +119,7 @@ export class JsonErrorBuilder {
   }
 
   hint(value: string): this {
-    if (!value || value === "") {
-      this.issues.push("hint must be a non-empty string");
-    } else {
+    if (value && value !== "") {
       this.hintValue = value;
     }
     return this;
@@ -196,6 +196,12 @@ export class JsonErrorBuilder {
     error.retryable = this.retryableValue;
     if (this.hintValue !== undefined) error.hint = this.hintValue;
     const m: Record<string, JsonValue> = { kind: "error", error, trace: this.traceValue };
+    try {
+      losslessStringify(m);
+    } catch (error) {
+      const issue = `event is not JSON serializable: ${error instanceof Error ? error.message : String(error)}`;
+      throw new EventBuildError(`Failed to build error event: ${issue}`, [issue]);
+    }
     return new Event(m);
   }
 }
@@ -440,11 +446,34 @@ export function decodeProtocolEvent(text: string): DecodedEvent {
 // Internal: Output Formatters (called by render() in cli.ts)
 // ═══════════════════════════════════════════
 
-/** Which fields a redaction pass scrubs. The default is `All`. */
+/**
+ * Which fields a redaction pass scrubs. The default is `All`.
+ *
+ * The policy selects a *scope* inside a structured value. A command line
+ * (`redactArgv`) and a bare URL string (`redactUrlSecrets`) have no
+ * result/trace split to scope to, so on those two paths `TraceOnly` redacts in
+ * full like `All`, and only `Off` turns redaction off.
+ */
 export enum RedactionPolicy {
   All = "All",
   TraceOnly = "TraceOnly",
   Off = "Off",
+}
+
+/**
+ * Whether a policy redacts an input that carries no scope of its own — a
+ * command line or a single URL string, as opposed to a JSON value with a
+ * `trace` object to narrow to.
+ *
+ * `TraceOnly` narrows *where* redaction applies within a value; it does not
+ * weaken redaction. A standalone argv or URL has no non-`trace` half to leave
+ * alone — and both are diagnostic material by construction, the very thing
+ * `TraceOnly` scrubs — so `TraceOnly` redacts them in full, exactly like `All`.
+ * Only `Off`, the caller explicitly asking for raw output, disables redaction,
+ * and it does so on all three paths alike.
+ */
+function redactsUnscopedInput(policy: RedactionPolicy | undefined): boolean {
+  return policy !== RedactionPolicy.Off;
 }
 
 export enum PlainStyle {
@@ -521,11 +550,17 @@ export function formatYamlValue(value: JsonValue | Event, options: OutputOptions
 export function formatPlainValue(value: JsonValue | Event, options: OutputOptions = {}): string {
   const unwrapped = value instanceof Event ? (value.toJSON() as JsonValue) : value;
   const redacted = redactedValue(unwrapped, options.redaction ?? {});
+  if (!isObject(redacted)) {
+    return plainScalar(redacted);
+  }
   const pairs: [string, string][] = [];
   if (options.style === PlainStyle.Raw) {
     collectPlainPairsRaw(redacted, "", pairs);
   } else {
     collectPlainPairs(redacted, "", pairs);
+  }
+  if (pairs.length === 0) {
+    return "{}";
   }
   pairs.sort(([a], [b]) => jcsCompare(a, b));
   return pairs
@@ -548,13 +583,23 @@ export function redactedValue(value: unknown, options?: { policy?: RedactionPoli
  * Redact secret components of a single URL string.
  *
  * A query parameter is redacted iff its (form-decoded) name ends in
- * _secret/_SECRET or matches an exact entry in secretNames. The userinfo
- * password (scheme://user:pass@host) is always redacted as a structural rule.
- * Only the secret spans are replaced with "***"; every other byte is preserved.
- * A string that is not a single, whitespace-free, scheme-prefixed URL
- * (including a URL embedded in surrounding prose) is returned unchanged.
+ * _secret/_SECRET or matches an exact entry in secretNames. A fragment written
+ * in the same `k=v&k=v` shape — how an OAuth implicit-flow response carries its
+ * token — is redacted by that same rule; any other fragment passes through
+ * byte-for-byte. The userinfo password (scheme://user:pass@host) is always
+ * redacted as a structural rule. Only the secret spans are replaced with "***";
+ * every other byte is preserved. A string that is not a single,
+ * whitespace-free, scheme-prefixed URL (including a URL embedded in surrounding
+ * prose) is returned unchanged.
+ *
+ * A URL is unscoped input: `RedactionPolicy.Off` returns it unchanged, every
+ * other policy redacts it in full.
  */
-export function redactUrlSecrets(url: string, options?: { secretNames?: readonly string[] }): string {
+export function redactUrlSecrets(
+  url: string,
+  options?: { secretNames?: readonly string[]; policy?: RedactionPolicy },
+): string {
+  if (!redactsUnscopedInput(options?.policy)) return url;
   const redacted = redactUrlInStr(url, secretNameSet(options ?? {}));
   return redacted ?? url;
 }
@@ -579,12 +624,15 @@ export function redactUrlSecrets(url: string, options?: { secretNames?: readonly
  * Intended for CLIs that record their own invocation — startup diagnostics,
  * audit trails, crash reports — where writing argv verbatim would put a
  * credential in the log.
+ *
+ * A command line is unscoped input: `RedactionPolicy.Off` returns `args`
+ * unchanged, every other policy redacts in full.
  */
 export function redactArgv(
   args: readonly string[],
   options?: { secretNames?: readonly string[]; policy?: RedactionPolicy },
 ): string[] {
-  if (options?.policy === RedactionPolicy.Off) return [...args];
+  if (!redactsUnscopedInput(options?.policy)) return [...args];
   const secretNames = secretNameSet(options ?? {});
   const out: string[] = [];
   let redactNext = false;
@@ -592,7 +640,7 @@ export function redactArgv(
     if (redactNext) {
       redactNext = false;
       if (!arg.startsWith("-")) {
-        out.push("***");
+        out.push(REDACTED_MARKER);
         continue;
       }
     }
@@ -602,7 +650,7 @@ export function redactArgv(
       if (equals >= 0) {
         const name = rest.slice(0, equals);
         if (isSecretFlagName(name, secretNames)) {
-          out.push(`--${name}=***`);
+          out.push(`--${name}=${REDACTED_MARKER}`);
           continue;
         }
       } else if (isSecretFlagName(rest, secretNames)) {
@@ -758,6 +806,20 @@ function isLeapYear(year: number): boolean {
 // Secret Redaction
 // ═══════════════════════════════════════════
 
+/**
+ * The scalar every redacted span, value, and subtree is replaced with. Also the
+ * signal plain rendering reads to tell a hidden field from a live one.
+ */
+const REDACTED_MARKER = "***";
+
+/**
+ * True when a field already carries the redaction marker, i.e. redaction ran
+ * over it and hid the value.
+ */
+function isRedacted(value: JsonValue): boolean {
+  return value === REDACTED_MARKER;
+}
+
 /** Internal shape shared by the inlined redaction option parameters. */
 type RedactionOpts = {
   policy?: RedactionPolicy;
@@ -801,7 +863,7 @@ function redactSecrets(value: JsonValue, context: RedactionContext = DEFAULT_CON
     for (const k of Object.keys(value)) {
       const v = value[k];
       if (isSecretKey(k, context.secretNames)) {
-        value[k] = "***";
+        value[k] = REDACTED_MARKER;
       } else if (keyHasUrlSuffix(k)) {
         if (typeof v === "string") {
           value[k] = redactUrlFieldValue(v, context.secretNames);
@@ -881,28 +943,25 @@ function redactUrlInStr(s: string, secretNames: ReadonlySet<string>): string | n
 
   const newAuthority = redactUserinfoPassword(authority);
 
-  // Query runs from the first '?' to the first '#' (or end).
-  let newRemainder: string;
-  const q = remainder.indexOf("?");
-  if (q >= 0) {
-    const path = remainder.slice(0, q);
-    const qOnwards = remainder.slice(q + 1);
-    const hash = qOnwards.indexOf("#");
-    let query: string;
-    let fragment: string;
-    if (hash >= 0) {
-      query = qOnwards.slice(0, hash);
-      fragment = qOnwards.slice(hash);
-    } else {
-      query = qOnwards;
-      fragment = "";
-    }
-    newRemainder = `${path}?${redactQuery(query, secretNames)}${fragment}`;
-  } else {
-    newRemainder = remainder;
-  }
+  // `remainder` is `path[?query][#fragment]`; '#' ends the query, so split the
+  // fragment off first and the query out of what is left.
+  const hash = remainder.indexOf("#");
+  const beforeFragment = hash >= 0 ? remainder.slice(0, hash) : remainder;
+  const fragment = hash >= 0 ? remainder.slice(hash + 1) : null;
 
-  return `${scheme}://${newAuthority}${newRemainder}`;
+  const q = beforeFragment.indexOf("?");
+  const newBeforeFragment =
+    q >= 0
+      ? `${beforeFragment.slice(0, q)}?${redactQuery(beforeFragment.slice(q + 1), secretNames)}`
+      : beforeFragment;
+  // A fragment gets the same treatment as the query: `k=v&k=v` after the '#' is
+  // exactly how an OAuth implicit-flow response hands back a token, so a
+  // secret-named fragment parameter must not survive where the identically
+  // named query parameter would not. A fragment that is not in that shape has
+  // no '=' in its segments and passes through byte-for-byte.
+  const newFragment = fragment === null ? "" : `#${redactQuery(fragment, secretNames)}`;
+
+  return `${scheme}://${newAuthority}${newBeforeFragment}${newFragment}`;
 }
 
 function redactUrlFieldValue(s: string, secretNames: ReadonlySet<string>): string {
@@ -918,7 +977,7 @@ function redactUrlFieldValue(s: string, secretNames: ReadonlySet<string>): strin
   // whitespace, is redacted wholesale rather than passed through. A schemeless
   // connection string like user:pass@host/db has no scheme anchor for the
   // surgical span logic above, so blanket redaction is the safe default.
-  if (/\s/.test(s) || s.includes("@")) return "***";
+  if (/\s/.test(s) || s.includes("@")) return REDACTED_MARKER;
   return s;
 }
 
@@ -932,7 +991,7 @@ function redactUserinfoPassword(authority: string): string {
   const userinfo = authority.slice(0, at);
   const colon = userinfo.indexOf(":");
   if (colon < 0) return authority;
-  return `${authority.slice(0, colon)}:***${authority.slice(at)}`;
+  return `${authority.slice(0, colon)}:${REDACTED_MARKER}${authority.slice(at)}`;
 }
 
 /**
@@ -948,7 +1007,7 @@ function redactQuery(query: string, secretNames: ReadonlySet<string>): string {
       const rawKey = segment.slice(0, eq);
       const name = formDecode(rawKey);
       if (isSecretKey(name, secretNames)) {
-        return `${rawKey}=***`;
+        return `${rawKey}=${REDACTED_MARKER}`;
       }
       return segment;
     })
@@ -1036,12 +1095,38 @@ function isInt(value: JsonValue): value is number {
 
 function decimalIntText(value: JsonValue): string | null {
   if (typeof value === "string" && /^-?\d+$/.test(value)) return value;
-  if (isInt(value)) return String(value);
+  if (typeof value === "bigint") return value.toString();
+  if (isInt(value) && Number.isSafeInteger(value)) return String(value);
   if (isLosslessNumber(value)) {
     const text = value.toString();
     return /^-?\d+$/.test(text) ? text : null;
   }
   return null;
+}
+
+const MAX_I64 = 9_223_372_036_854_775_807n;
+
+function nonNegativeI64(value: JsonValue): bigint | null {
+  let text: string | null = null;
+  if (typeof value === "bigint") {
+    text = value.toString();
+  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
+    text = String(value);
+  } else if (isLosslessNumber(value)) {
+    const literal = value.toString();
+    if (/^-?\d+$/.test(literal)) text = literal;
+  }
+  if (text === null) return null;
+  try {
+    const integer = BigInt(text);
+    return integer >= 0n && integer <= MAX_I64 ? integer : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatCents(value: bigint, symbol: string): string {
+  return `${symbol}${value / 100n}.${String(value % 100n).padStart(2, "0")}`;
 }
 
 function epochNsToMs(value: JsonValue): number | null {
@@ -1102,24 +1187,32 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   // Group 2: compound currency suffixes
   stripped = stripSuffixCI(key, "_usd_cents");
   if (stripped !== null) {
-    if (isInt(numeric) && numeric >= 0) return [stripped, `$${Math.floor(numeric / 100)}.${String(numeric % 100).padStart(2, "0")}`];
+    const integer = nonNegativeI64(value);
+    if (integer !== null) return [stripped, formatCents(integer, "$")];
     return null;
   }
   stripped = stripSuffixCI(key, "_eur_cents");
   if (stripped !== null) {
-    if (isInt(numeric) && numeric >= 0) return [stripped, `\u20ac${Math.floor(numeric / 100)}.${String(numeric % 100).padStart(2, "0")}`];
+    const integer = nonNegativeI64(value);
+    if (integer !== null) return [stripped, formatCents(integer, "\u20ac")];
     return null;
   }
   const gc = tryStripGenericCents(key);
   if (gc !== null) {
     const [gcStripped, code] = gc;
-    if (isInt(numeric) && numeric >= 0) return [gcStripped, `${Math.floor(numeric / 100)}.${String(numeric % 100).padStart(2, "0")} ${code.toUpperCase()}`];
+    const integer = nonNegativeI64(value);
+    if (integer !== null) {
+      return [gcStripped, `${integer / 100n}.${String(integer % 100n).padStart(2, "0")} ${code.toUpperCase()}`];
+    }
     return null;
   }
   const gm = tryStripGenericMicro(key);
   if (gm !== null) {
     const [gmStripped, code] = gm;
-    if (isInt(numeric) && numeric >= 0) return [gmStripped, `${Math.floor(numeric / 1_000_000)}.${String(numeric % 1_000_000).padStart(6, "0")} ${code.toUpperCase()}`];
+    const integer = nonNegativeI64(value);
+    if (integer !== null) {
+      return [gmStripped, `${integer / 1_000_000n}.${String(integer % 1_000_000n).padStart(6, "0")} ${code.toUpperCase()}`];
+    }
     return null;
   }
 
@@ -1171,7 +1264,8 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   // Group 5: short suffixes (last to avoid false positives)
   stripped = stripSuffixCI(key, "_jpy");
   if (stripped !== null) {
-    if (isInt(numeric) && numeric >= 0) return [stripped, `\u00a5${formatWithCommas(numeric)}`];
+    const integer = nonNegativeI64(value);
+    if (integer !== null) return [stripped, `\u00a5${formatWithCommas(integer)}`];
     return null;
   }
   stripped = stripSuffixCI(key, "_ns");
@@ -1210,7 +1304,13 @@ function processObjectFields(obj: { [key: string]: JsonValue }): ProcessedField[
   for (const [k, v] of Object.entries(obj)) {
     const secretStripped = stripSuffixCI(k, "_secret");
     if (secretStripped !== null) {
-      entries.push({ stripped: secretStripped, original: k, value: v, formatted: null });
+      // Dropping `_secret` is the readable half of an actual redaction: the
+      // marker has done its job once the value reads `***`. When the value was
+      // *not* redacted — policy `Off`, or a field outside `trace` under
+      // `TraceOnly` — the suffix is the only thing telling a downstream reader
+      // that `api_key_secret=sk-live-xxx` is a credential, so it stays.
+      const displayKey = isRedacted(v) ? secretStripped : k;
+      entries.push({ stripped: displayKey, original: k, value: v, formatted: null });
       continue;
     }
     const result = tryProcessField(k, v);
@@ -1299,7 +1399,7 @@ function formatBytesHuman(bytes: number): string {
   return `${bytes}B`;
 }
 
-function formatWithCommas(n: number): string {
+function formatWithCommas(n: bigint): string {
   const s = String(n);
   const result: string[] = [];
   for (let i = 0; i < s.length; i++) {
@@ -1399,15 +1499,31 @@ function escapeYamlStr(s: string): string {
   return s
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
-    .replace(/\n/g, "\\n")
-    .replace(/\r/g, "\\r")
-    .replace(/\t/g, "\\t")
-    .replace(/\f/g, "\\f")
-    .replace(/\v/g, "\\v");
+    .replace(/[\x00-\x1f]/g, (character) => {
+      switch (character) {
+        case "\0": return "\\0";
+        case "\b": return "\\b";
+        case "\t": return "\\t";
+        case "\n": return "\\n";
+        case "\v": return "\\v";
+        case "\f": return "\\f";
+        case "\r": return "\\r";
+        default: return `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`;
+      }
+    });
 }
 
 function yamlKey(key: string): string {
-  return /^[A-Za-z0-9_.-]+$/.test(key) ? key : `"${escapeYamlStr(key)}"`;
+  return /^[A-Za-z0-9_.-]+$/.test(key) && !isAmbiguousYamlKey(key)
+    ? key
+    : `"${escapeYamlStr(key)}"`;
+}
+
+function isAmbiguousYamlKey(key: string): boolean {
+  if (["true", "false", "null", "~", ".nan", ".inf", "+.inf", "-.inf"].includes(key.toLowerCase())) {
+    return true;
+  }
+  return key.trim() !== "" && Number.isFinite(Number(key));
 }
 
 function yamlScalar(value: JsonValue): string {
@@ -1415,6 +1531,7 @@ function yamlScalar(value: JsonValue): string {
   if (value === null) return "null";
   if (typeof value === "boolean") return value.toString();
   if (typeof value === "number") return value.toString();
+  if (typeof value === "bigint") return value.toString();
   // Decoded number: emit the exact source literal unquoted, matching JSON's
   // structure-preserving fidelity contract for YAML too.
   if (isLosslessNumber(value)) return value.toString();
@@ -1433,9 +1550,10 @@ function collectPlainPairs(value: JsonValue, prefix: string, pairs: [string, str
     if (pf.formatted !== null) {
       pairs.push([fullKey, pf.formatted]);
     } else if (isObject(pf.value)) {
-      collectPlainPairs(pf.value, fullKey, pairs);
+      if (Object.keys(pf.value).length === 0) pairs.push([fullKey, "{}"]);
+      else collectPlainPairs(pf.value, fullKey, pairs);
     } else if (Array.isArray(pf.value)) {
-      pairs.push([fullKey, pf.value.map((i) => plainScalar(i)).join(",")]);
+      pairs.push([fullKey, pf.value.length === 0 ? "[]" : pf.value.map((i) => plainScalar(i)).join(",")]);
     } else if (pf.value === null) {
       pairs.push([fullKey, ""]);
     } else {
@@ -1450,9 +1568,10 @@ function collectPlainPairsRaw(value: JsonValue, prefix: string, pairs: [string, 
     const v = value[key];
     const fullKey = prefix ? `${prefix}.${key}` : key;
     if (isObject(v)) {
-      collectPlainPairsRaw(v, fullKey, pairs);
+      if (Object.keys(v).length === 0) pairs.push([fullKey, "{}"]);
+      else collectPlainPairsRaw(v, fullKey, pairs);
     } else if (Array.isArray(v)) {
-      pairs.push([fullKey, v.map((i) => plainScalarRaw(i)).join(",")]);
+      pairs.push([fullKey, v.length === 0 ? "[]" : v.map((i) => plainScalarRaw(i)).join(",")]);
     } else if (v === null) {
       pairs.push([fullKey, ""]);
     } else {
@@ -1466,6 +1585,7 @@ function plainScalar(value: JsonValue): string {
   if (value === null) return "null";
   if (typeof value === "boolean") return value.toString();
   if (typeof value === "number") return value.toString();
+  if (typeof value === "bigint") return value.toString();
   // Decoded number: emit the exact source literal (Plain is documented lossy
   // for arithmetic-derived formatting, but a bare pass-through scalar still
   // gets its exact digits, not a mangled float64 round-trip).
@@ -1511,9 +1631,11 @@ function sanitizeForJson(value: unknown, stack = new WeakSet<object>(), depth = 
   if (t === "boolean") return value as boolean;
   if (t === "number") {
     const n = value as number;
-    return Number.isFinite(n) ? n : "<unsupported:number>";
+    if (!Number.isFinite(n)) return "<unsupported:number>";
+    if (Number.isInteger(n) && !Number.isSafeInteger(n)) return "<unsupported:unsafe-integer>";
+    return n;
   }
-  if (t === "bigint") return "<unsupported:bigint>";
+  if (t === "bigint") return value as bigint;
   if (t === "undefined") return "<unsupported:undefined>";
   if (t === "function") return "<unsupported:function>";
   if (t === "symbol") return "<unsupported:symbol>";

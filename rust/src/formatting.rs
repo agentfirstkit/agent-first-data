@@ -1,5 +1,16 @@
-use crate::cli::OutputFormat;
-use crate::redaction::{OutputOptions, PlainStyle};
+// `OutputFormat` lives here rather than in `cli` because `render` takes it and
+// `render` is part of the crate's base surface: a consumer with the `cli`
+// feature off still formats values, it just has no emitter or CLI compiler.
+/// Output format for CLI and pipe/MCP modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputFormat {
+    Json,
+    /// Structure-preserving YAML (same semantics as [`OutputFormat::Json`]).
+    Yaml,
+    Plain,
+}
+
+use crate::redaction::{OutputOptions, PlainStyle, REDACTED_MARKER};
 use serde_json::Value;
 
 /// Render a value as a string in the given format with the given options.
@@ -41,9 +52,15 @@ pub(crate) fn render_yaml(value: &Value, output_options: &OutputOptions) -> Stri
 pub(crate) fn render_plain(value: &Value, output_options: &OutputOptions) -> String {
     let mut pairs: Vec<(String, String)> = Vec::new();
     let v = output_options.redaction.value(value);
+    if !v.is_object() {
+        return plain_scalar(&v);
+    }
     match output_options.style {
         PlainStyle::Readable => collect_plain_pairs(&v, "", &mut pairs),
         PlainStyle::Raw => collect_plain_pairs_raw(&v, "", &mut pairs),
+    }
+    if pairs.is_empty() {
+        return "{}".to_string();
     }
     pairs.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
     pairs
@@ -105,8 +122,12 @@ fn as_int(value: &Value) -> Option<i64> {
     if let Some(i) = value.as_i64() {
         return Some(i);
     }
+    if value.is_u64() {
+        return value.as_u64()?.try_into().ok();
+    }
     let f = value.as_f64()?;
-    if f.is_finite() && f.fract() == 0.0 && (i64::MIN as f64..=i64::MAX as f64).contains(&f) {
+    let upper_exclusive = -(i64::MIN as f64);
+    if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f < upper_exclusive {
         return Some(f as i64);
     }
     None
@@ -164,13 +185,17 @@ fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
 
     // Group 2: compound currency suffixes
     if let Some(stripped) = strip_suffix_ci(key, "_usd_cents") {
-        return as_uint(value).map(|n| (stripped, format!("${}.{:02}", n / 100, n % 100)));
+        return as_int(value)
+            .filter(|n| *n >= 0)
+            .map(|n| (stripped, format!("${}.{:02}", n / 100, n % 100)));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_eur_cents") {
-        return as_uint(value).map(|n| (stripped, format!("€{}.{:02}", n / 100, n % 100)));
+        return as_int(value)
+            .filter(|n| *n >= 0)
+            .map(|n| (stripped, format!("€{}.{:02}", n / 100, n % 100)));
     }
     if let Some((stripped, code)) = try_strip_generic_cents(key) {
-        return as_uint(value).map(|n| {
+        return as_int(value).filter(|n| *n >= 0).map(|n| {
             (
                 stripped,
                 format!("{}.{:02} {}", n / 100, n % 100, code.to_uppercase()),
@@ -178,7 +203,7 @@ fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
         });
     }
     if let Some((stripped, code)) = try_strip_generic_micro(key) {
-        return as_uint(value).map(|n| {
+        return as_int(value).filter(|n| *n >= 0).map(|n| {
             (
                 stripped,
                 format!(
@@ -228,7 +253,9 @@ fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
     }
     // Group 5: short suffixes (last to avoid false positives)
     if let Some(stripped) = strip_suffix_ci(key, "_jpy") {
-        return as_uint(value).map(|n| (stripped, format!("¥{}", format_with_commas(n))));
+        return as_int(value)
+            .filter(|n| *n >= 0)
+            .map(|n| (stripped, format!("¥{}", format_with_commas(n as u64))));
     }
     if let Some(stripped) = strip_suffix_ci(key, "_ns") {
         return value
@@ -252,6 +279,12 @@ fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
     None
 }
 
+/// True when a field already carries the redaction marker, i.e. redaction ran
+/// over it and hid the value.
+fn is_redacted(value: &Value) -> bool {
+    value.as_str() == Some(REDACTED_MARKER)
+}
+
 /// Process object fields: strip keys, format values, detect collisions.
 fn process_object_fields<'a>(
     map: &'a serde_json::Map<String, Value>,
@@ -259,7 +292,18 @@ fn process_object_fields<'a>(
     let mut entries: Vec<(String, &'a str, &'a Value, Option<String>)> = Vec::new();
     for (key, value) in map {
         if let Some(stripped) = strip_suffix_ci(key, "_secret") {
-            entries.push((stripped, key.as_str(), value, None));
+            // Dropping `_secret` is the readable half of an actual redaction: the
+            // marker has done its job once the value reads `***`. When the value
+            // was *not* redacted — policy `Off`, or a field outside `trace` under
+            // `TraceOnly` — the suffix is the only thing telling a downstream
+            // reader that `api_key_secret=sk-live-xxx` is a credential, so it
+            // stays.
+            let display_key = if is_redacted(value) {
+                stripped
+            } else {
+                key.clone()
+            };
+            entries.push((display_key, key.as_str(), value, None));
             continue;
         }
         match try_process_field(key, value) {
@@ -521,21 +565,42 @@ fn render_yaml_array_raw(arr: &[Value], indent: usize, lines: &mut Vec<String>) 
 }
 
 fn escape_yaml_str(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-        .replace('\x0c', "\\f")
-        .replace('\x0b', "\\v")
+    let mut escaped = String::with_capacity(s.len());
+    for character in s.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\x08' => escaped.push_str("\\b"),
+            '\x0c' => escaped.push_str("\\f"),
+            '\x0b' => escaped.push_str("\\v"),
+            '\0' => escaped.push_str("\\0"),
+            control if control <= '\u{001f}' => {
+                use std::fmt::Write as _;
+                let _ = write!(escaped, "\\u{:04x}", control as u32);
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 fn yaml_key(key: &str) -> String {
-    if is_safe_key(key) {
+    if is_safe_key(key) && !is_ambiguous_yaml_key(key) {
         key.to_string()
     } else {
         format!("\"{}\"", escape_yaml_str(key))
     }
+}
+
+fn is_ambiguous_yaml_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "true" | "false" | "null" | "~" | ".nan" | ".inf" | "+.inf" | "-.inf"
+    ) || key.parse::<f64>().is_ok()
 }
 
 fn quote_logfmt_key(key: &str) -> String {
@@ -582,7 +647,13 @@ fn collect_plain_pairs(value: &Value, prefix: &str, pairs: &mut Vec<(String, Str
                 pairs.push((full_key, fv));
             } else {
                 match v {
+                    Value::Object(map) if map.is_empty() => {
+                        pairs.push((full_key, "{}".to_string()));
+                    }
                     Value::Object(_) => collect_plain_pairs(v, &full_key, pairs),
+                    Value::Array(arr) if arr.is_empty() => {
+                        pairs.push((full_key, "[]".to_string()));
+                    }
                     Value::Array(arr) => {
                         let joined = arr.iter().map(plain_scalar).collect::<Vec<_>>().join(",");
                         pairs.push((full_key, joined));
@@ -605,7 +676,13 @@ fn collect_plain_pairs_raw(value: &Value, prefix: &str, pairs: &mut Vec<(String,
                 format!("{}.{}", prefix, key)
             };
             match v {
+                Value::Object(map) if map.is_empty() => {
+                    pairs.push((full_key, "{}".to_string()));
+                }
                 Value::Object(_) => collect_plain_pairs_raw(v, &full_key, pairs),
+                Value::Array(arr) if arr.is_empty() => {
+                    pairs.push((full_key, "[]".to_string()));
+                }
                 Value::Array(arr) => {
                     let joined = arr.iter().map(plain_scalar).collect::<Vec<_>>().join(",");
                     pairs.push((full_key, joined));
@@ -673,4 +750,100 @@ fn sorted_value_keys(map: &serde_json::Map<String, Value>) -> Vec<String> {
     let mut keys: Vec<String> = map.keys().cloned().collect();
     keys.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
     keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::redaction::{RedactionPolicy, Redactor};
+    use serde_json::json;
+
+    fn plain(value: &Value, policy: RedactionPolicy) -> String {
+        render(
+            value,
+            OutputFormat::Plain,
+            &OutputOptions {
+                redaction: Redactor::new().policy(policy),
+                style: PlainStyle::Readable,
+            },
+        )
+    }
+
+    // ── `_secret` stripping follows redaction ──────────
+
+    #[test]
+    fn plain_strips_secret_suffix_once_the_value_is_redacted() {
+        assert_eq!(
+            plain(
+                &json!({"api_key_secret": "sk-live-xxx"}),
+                RedactionPolicy::All
+            ),
+            "api_key=***"
+        );
+    }
+
+    #[test]
+    fn plain_keeps_secret_suffix_when_redaction_is_off() {
+        // Stripping here would hand a live credential to a reader under a name
+        // that no longer says it is one.
+        assert_eq!(
+            plain(
+                &json!({"api_key_secret": "sk-live-xxx"}),
+                RedactionPolicy::Off
+            ),
+            "api_key_secret=sk-live-xxx"
+        );
+        assert_eq!(
+            plain(
+                &json!({"API_KEY_SECRET": "sk-live-xxx"}),
+                RedactionPolicy::Off
+            ),
+            "API_KEY_SECRET=sk-live-xxx"
+        );
+    }
+
+    #[test]
+    fn plain_keeps_secret_suffix_outside_trace_under_trace_only() {
+        assert_eq!(
+            plain(
+                &json!({
+                    "api_key_secret": "sk-live-xxx",
+                    "trace": {"request_secret": "top-secret"}
+                }),
+                RedactionPolicy::TraceOnly
+            ),
+            "api_key_secret=sk-live-xxx trace.request=***"
+        );
+    }
+
+    #[test]
+    fn plain_keeps_secret_suffix_on_an_unredacted_subtree() {
+        assert_eq!(
+            plain(
+                &json!({"db_secret": {"password": "hunter2"}}),
+                RedactionPolicy::Off
+            ),
+            "db_secret.password=hunter2"
+        );
+        assert_eq!(
+            plain(
+                &json!({"db_secret": {"password": "hunter2"}}),
+                RedactionPolicy::All
+            ),
+            "db=***"
+        );
+    }
+
+    #[test]
+    fn plain_unstripped_secret_key_does_not_collide_with_its_stem() {
+        // Keeping the suffix also means no collision to fall back from: both
+        // fields keep their own name and value.
+        assert_eq!(
+            plain(
+                &json!({"api_key": "public", "api_key_secret": "sk-live-xxx"}),
+                RedactionPolicy::Off
+            ),
+            "api_key=public api_key_secret=sk-live-xxx"
+        );
+    }
 }

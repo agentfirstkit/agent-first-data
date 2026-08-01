@@ -213,6 +213,14 @@ pub struct SkillError {
     pub partial_report: Option<SkillReport>,
 }
 
+impl std::fmt::Display for SkillError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SkillError {}
+
 impl SkillError {
     fn invalid_request(message: String, hint: Option<String>) -> Self {
         Self {

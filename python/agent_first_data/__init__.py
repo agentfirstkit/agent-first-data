@@ -44,7 +44,6 @@ from agent_first_data.cli import (
     build_cli_error,
     build_cli_version,
     cli_render_version,
-    cli_handle_version_or_continue,
 )
 
 __all__ = [
@@ -88,5 +87,4 @@ __all__ = [
     "build_cli_error",
     "build_cli_version",
     "cli_render_version",
-    "cli_handle_version_or_continue",
 ]

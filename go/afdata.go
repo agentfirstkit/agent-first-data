@@ -67,13 +67,29 @@ func (e Event) Value() map[string]any {
 }
 
 // BuildCLIError builds a standard CLI error with code "cli_error".
-// Pass empty string for hint to omit it. Returns a strict-ready Event.
-func BuildCLIError(message string, hint string) (Event, error) {
+// Pass empty string for hint to omit it. This helper is infallible: an empty
+// message is replaced with a stable placeholder.
+func BuildCLIError(message string, hint string) Event {
+	if message == "" {
+		message = "unspecified error"
+	}
 	builder := NewJSONError("cli_error", message)
 	if hint != "" {
 		builder.Hint(hint)
 	}
-	return builder.Build()
+	event, err := builder.Build()
+	if err == nil {
+		return event
+	}
+	return Event{envelope: map[string]any{
+		"kind": "error",
+		"error": map[string]any{
+			"code":      "cli_error",
+			"message":   "unspecified error",
+			"retryable": false,
+		},
+		"trace": map[string]any{},
+	}}
 }
 
 // ═════════════════════════════════════════════
@@ -277,6 +293,9 @@ func (b *JSONErrorBuilder) Build() (Event, error) {
 		"kind":  "error",
 		"error": errorPayload,
 		"trace": traceObj,
+	}
+	if _, err := json.Marshal(envelope); err != nil {
+		return Event{}, &BuilderError{msg: fmt.Sprintf("event is not JSON serializable: %v", err)}
 	}
 	return Event{envelope: envelope}, nil
 }
@@ -488,6 +507,11 @@ func isNonNegativeInteger(value any) bool {
 // ═══════════════════════════════════════════
 
 // RedactionPolicy controls scoped redaction behavior for Render.
+//
+// The policy selects a scope inside a structured value. A command line
+// (Redactor.Argv) and a bare URL string (Redactor.URL) have no result/trace
+// split to scope to, so on those two paths TraceOnly redacts in full like All,
+// and only RedactionOff turns redaction off.
 type RedactionPolicy string
 
 const (
@@ -499,6 +523,20 @@ const (
 	// RedactionOff redacts nothing.
 	RedactionOff RedactionPolicy = "Off"
 )
+
+// redactsUnscopedInput reports whether this policy redacts an input that carries
+// no scope of its own — a command line or a single URL string, as opposed to a
+// JSON value with a trace object to narrow to.
+//
+// TraceOnly narrows where redaction applies within a value; it does not weaken
+// redaction. A standalone argv or URL has no non-trace half to leave alone — and
+// both are diagnostic material by construction, the very thing TraceOnly scrubs
+// — so TraceOnly redacts them in full, exactly like All. Only Off, the caller
+// explicitly asking for raw output, disables redaction, and it does so on all
+// three paths alike.
+func (p RedactionPolicy) redactsUnscopedInput() bool {
+	return p != RedactionOff
+}
 
 // Redactor configures scoped redaction and extra secret field names.
 // The zero value applies default full redaction with no extra names.
@@ -521,12 +559,21 @@ func (r Redactor) Value(v any) any {
 // URL redacts secret components of a single URL string.
 //
 // A query parameter is redacted iff its (form-decoded) name ends in
-// _secret/_SECRET or matches an exact entry in SecretNames. The userinfo
-// password (scheme://user:pass@host) is always redacted as a structural rule.
+// _secret/_SECRET or matches an exact entry in SecretNames. A fragment written
+// in the same k=v&k=v shape — how an OAuth implicit-flow response carries its
+// token — is redacted by that same rule; any other fragment passes through
+// byte-for-byte. The userinfo password (scheme://user:pass@host) is always
+// redacted as a structural rule.
 // Only the secret spans are replaced with "***"; every other byte is preserved.
 // A string that is not a single, whitespace-free, scheme-prefixed URL (including
 // a URL embedded in surrounding prose) is returned unchanged.
+//
+// A URL is unscoped input: RedactionOff returns it unchanged, every other policy
+// redacts it in full.
 func (r Redactor) URL(rawURL string) string {
+	if !r.Policy.redactsUnscopedInput() {
+		return rawURL
+	}
 	context := newRedactionContext(r)
 	if redacted, ok := redactURLInStr(rawURL, context); ok {
 		return redacted
@@ -550,9 +597,12 @@ func (r Redactor) URL(rawURL string) string {
 //
 // Only long (--) flags are recognized, matching the convention's
 // long-flags-only rule.
+//
+// A command line is unscoped input: RedactionOff returns args unchanged, every
+// other policy redacts in full.
 func (r Redactor) Argv(args []string) []string {
 	out := make([]string, 0, len(args))
-	if r.Policy == RedactionOff {
+	if !r.Policy.redactsUnscopedInput() {
 		return append(out, args...)
 	}
 	context := newRedactionContext(r)
@@ -561,14 +611,14 @@ func (r Redactor) Argv(args []string) []string {
 		if redactNext {
 			redactNext = false
 			if !strings.HasPrefix(arg, "-") {
-				out = append(out, "***")
+				out = append(out, redactedMarker)
 				continue
 			}
 		}
 		if rest, ok := strings.CutPrefix(arg, "--"); ok {
 			if name, _, found := strings.Cut(rest, "="); found {
 				if isSecretFlagName(name, context) {
-					out = append(out, "--"+name+"=***")
+					out = append(out, "--"+name+"="+redactedMarker)
 					continue
 				}
 			} else if isSecretFlagName(rest, context) {
@@ -647,10 +697,16 @@ func renderYaml(value any, options OutputOptions) string {
 func renderPlain(value any, options OutputOptions) string {
 	var pairs [][2]string
 	v := options.Redaction.Value(value)
+	if _, ok := v.(map[string]any); !ok {
+		return plainScalar(v)
+	}
 	if options.Style == PlainStyleRaw {
 		collectPlainPairsRaw(v, "", &pairs)
 	} else {
 		collectPlainPairs(v, "", &pairs)
+	}
+	if len(pairs) == 0 {
+		return "{}"
 	}
 	sort.Slice(pairs, func(i, j int) bool {
 		return jcsLess(pairs[i][0], pairs[j][0])
@@ -944,6 +1000,11 @@ func isLeapYear(year int) bool {
 // Secret Redaction
 // ═══════════════════════════════════════════
 
+// redactedMarker is the scalar every redacted span, value, and subtree is
+// replaced with. Also the signal plain rendering reads to tell a hidden field
+// from a live one.
+const redactedMarker = "***"
+
 type redactionContext struct {
 	secretNames map[string]struct{}
 }
@@ -995,7 +1056,7 @@ func redactSecretsWithContextDepth(value any, context redactionContext, depth in
 		for k := range v {
 			switch {
 			case context.isSecretKey(k):
-				v[k] = "***"
+				v[k] = redactedMarker
 			case keyHasURLSuffix(k):
 				if s, ok := v[k].(string); ok {
 					v[k] = redactURLFieldValue(s, context)
@@ -1058,7 +1119,7 @@ func redactURLFieldValue(s string, context redactionContext) string {
 		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v'
 	}) >= 0
 	if hasWhitespace || strings.Contains(s, "@") {
-		return "***"
+		return redactedMarker
 	}
 	return s
 }
@@ -1094,21 +1155,24 @@ func redactURLInStr(s string, context redactionContext) (string, bool) {
 
 	newAuthority := redactUserinfoPassword(authority)
 
-	// Query runs from the first '?' to the first '#' (or end).
-	newRemainder := remainder
-	if q := strings.Index(remainder, "?"); q >= 0 {
-		path := remainder[:q]
-		queryBody := remainder[q+1:]
-		query := queryBody
-		fragment := ""
-		if h := strings.Index(queryBody, "#"); h >= 0 {
-			query = queryBody[:h]
-			fragment = queryBody[h:]
-		}
-		newRemainder = path + "?" + redactQuery(query, context) + fragment
+	// remainder is path[?query][#fragment]; '#' ends the query, so split the
+	// fragment off first and the query out of what is left.
+	beforeFragment, fragment, hasFragment := strings.Cut(remainder, "#")
+	newBeforeFragment := beforeFragment
+	if path, query, found := strings.Cut(beforeFragment, "?"); found {
+		newBeforeFragment = path + "?" + redactQuery(query, context)
+	}
+	// A fragment gets the same treatment as the query: k=v&k=v after the '#' is
+	// exactly how an OAuth implicit-flow response hands back a token, so a
+	// secret-named fragment parameter must not survive where the identically
+	// named query parameter would not. A fragment that is not in that shape has
+	// no '=' in its segments and passes through byte-for-byte.
+	newFragment := ""
+	if hasFragment {
+		newFragment = "#" + redactQuery(fragment, context)
 	}
 
-	return scheme + "://" + newAuthority + newRemainder, true
+	return scheme + "://" + newAuthority + newBeforeFragment + newFragment, true
 }
 
 // redactUserinfoPassword replaces the userinfo password (user:pass@) with "***",
@@ -1124,7 +1188,7 @@ func redactUserinfoPassword(authority string) string {
 	if colon < 0 {
 		return authority
 	}
-	return authority[:colon] + ":***" + authority[at:]
+	return authority[:colon] + ":" + redactedMarker + authority[at:]
 }
 
 // redactQuery redacts the values of secret-named query parameters, preserving
@@ -1141,7 +1205,7 @@ func redactQuery(query string, context redactionContext) string {
 		// Form-decode the name (`+` → space, percent-decode) for the check.
 		name := formDecodeName(segment)
 		if context.isSecretKey(name) {
-			segments[i] = rawKey + "=***"
+			segments[i] = rawKey + "=" + redactedMarker
 		}
 	}
 	return strings.Join(segments, "&")
@@ -1402,6 +1466,13 @@ func tryProcessField(key string, value any) (string, string, bool) {
 	return "", "", false
 }
 
+// isRedacted reports whether a field already carries the redaction marker, i.e.
+// redaction ran over it and hid the value.
+func isRedacted(value any) bool {
+	s, ok := value.(string)
+	return ok && s == redactedMarker
+}
+
 // processObjectFields processes fields: strip keys, format values, detect collisions.
 func processObjectFields(m map[string]any) []processedField {
 	type entry struct {
@@ -1415,7 +1486,16 @@ func processObjectFields(m map[string]any) []processedField {
 	entries := make([]entry, 0, len(m))
 	for k, v := range m {
 		if stripped, ok := stripSuffixCI(k, "_secret"); ok {
-			entries = append(entries, entry{stripped, k, v, "", false})
+			// Dropping _secret is the readable half of an actual redaction: the
+			// marker has done its job once the value reads "***". When the value
+			// was *not* redacted — policy Off, or a field outside trace under
+			// TraceOnly — the suffix is the only thing telling a downstream
+			// reader that api_key_secret=sk-live-xxx is a credential, so it stays.
+			displayKey := k
+			if isRedacted(v) {
+				displayKey = stripped
+			}
+			entries = append(entries, entry{displayKey, k, v, "", false})
 			continue
 		}
 		if stripped, formatted, ok := tryProcessField(k, v); ok {
@@ -1640,21 +1720,52 @@ func renderYamlArrayRaw(arr []any, indent int, lines *[]string) {
 }
 
 func escapeYamlStr(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	s = strings.ReplaceAll(s, "\r", `\r`)
-	s = strings.ReplaceAll(s, "\t", `\t`)
-	s = strings.ReplaceAll(s, "\f", `\f`)
-	s = strings.ReplaceAll(s, "\v", `\v`)
-	return s
+	var escaped strings.Builder
+	for _, character := range s {
+		switch character {
+		case '\\':
+			escaped.WriteString(`\\`)
+		case '"':
+			escaped.WriteString(`\"`)
+		case '\n':
+			escaped.WriteString(`\n`)
+		case '\r':
+			escaped.WriteString(`\r`)
+		case '\t':
+			escaped.WriteString(`\t`)
+		case '\b':
+			escaped.WriteString(`\b`)
+		case '\f':
+			escaped.WriteString(`\f`)
+		case '\v':
+			escaped.WriteString(`\v`)
+		case '\x00':
+			escaped.WriteString(`\0`)
+		default:
+			if character <= '\x1f' {
+				fmt.Fprintf(&escaped, `\u%04x`, character)
+			} else {
+				escaped.WriteRune(character)
+			}
+		}
+	}
+	return escaped.String()
 }
 
 func yamlKey(key string) string {
-	if isSafeKey(key) {
+	if isSafeKey(key) && !isAmbiguousYamlKey(key) {
 		return key
 	}
 	return `"` + escapeYamlStr(key) + `"`
+}
+
+func isAmbiguousYamlKey(key string) bool {
+	switch strings.ToLower(key) {
+	case "true", "false", "null", "~", ".nan", ".inf", "+.inf", "-.inf":
+		return true
+	}
+	_, err := strconv.ParseFloat(key, 64)
+	return err == nil
 }
 
 func quoteLogfmtKey(key string) string {
@@ -1724,8 +1835,16 @@ func collectPlainPairs(value any, prefix string, pairs *[][2]string) {
 		} else {
 			switch v := pf.value.(type) {
 			case map[string]any:
+				if len(v) == 0 {
+					*pairs = append(*pairs, [2]string{fullKey, "{}"})
+					continue
+				}
 				collectPlainPairs(v, fullKey, pairs)
 			case []any:
+				if len(v) == 0 {
+					*pairs = append(*pairs, [2]string{fullKey, "[]"})
+					continue
+				}
 				parts := make([]string, len(v))
 				for i, item := range v {
 					parts[i] = plainScalar(item)
@@ -1752,8 +1871,16 @@ func collectPlainPairsRaw(value any, prefix string, pairs *[][2]string) {
 		}
 		switch v := m[key].(type) {
 		case map[string]any:
+			if len(v) == 0 {
+				*pairs = append(*pairs, [2]string{fullKey, "{}"})
+				continue
+			}
 			collectPlainPairsRaw(v, fullKey, pairs)
 		case []any:
+			if len(v) == 0 {
+				*pairs = append(*pairs, [2]string{fullKey, "[]"})
+				continue
+			}
 			parts := make([]string, len(v))
 			for i, item := range v {
 				parts[i] = plainScalarRaw(item)
@@ -1894,7 +2021,19 @@ func asInt64(value any) (int64, bool) {
 	case int64:
 		return v, true
 	case float64:
-		if v == math.Trunc(v) && !math.IsInf(v, 0) {
+		// Converting a float64 outside int64's range is implementation-defined
+		// in Go, and in practice saturates to MaxInt64 — so `1e21` on an
+		// `_jpy` field rendered as ¥9,223,372,036,854,775,807: a plausible
+		// number that is wrong by any measure, on the one class of field where
+		// a wrong number is worst. Out of range now means "not an integer",
+		// and every caller already falls through to the raw value.
+		//
+		// The bounds are the powers of two either side, because MaxInt64
+		// itself is not representable as a float64 — comparing against it
+		// would round up and let 2^63 through.
+		const minInt64AsFloat = -9223372036854775808.0 // -2^63, exact
+		const beyondMaxInt64 = 9223372036854775808.0   // 2^63, exact
+		if v == math.Trunc(v) && v >= minInt64AsFloat && v < beyondMaxInt64 {
 			return int64(v), true
 		}
 	case json.Number:
