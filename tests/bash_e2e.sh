@@ -17,7 +17,7 @@ fail() {
 "$AFDATA_BIN" shell bash > "$TEST_TMP/exported.sh"
 cmp "$ROOTPATH/bash/afdata.sh" "$TEST_TMP/exported.sh" \
   || fail "afdata shell bash differs from bash/afdata.sh"
-bash -n "$ROOTPATH/bash/afdata.sh"
+"${OLDEST_BASH:-/bin/bash}" -n "$ROOTPATH/bash/afdata.sh"
 
 source_output="$({
   AFDATA_BIN="$AFDATA_BIN" bash -c '

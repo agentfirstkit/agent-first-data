@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,13 +13,10 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Replace help-v1 with a closed-world CLI compiler: one cli-spec-v1 registry is the single source for argv parsing, typed values, legal argument combinations, output contracts, help, and the offline reference, and an invocation runs only when it matches exactly one registered shape",
-    "Answer help in one round trip — --help returns every shape of a command complete with its optional arguments and closed value sets, and the second level --help-combination is gone because all it could omit is what a caller would then never discover",
-    "Name CLI failures in error.code like every other error: eight cli_* codes replace the generic cli_error and its parallel rule, command_path, and argument_names fields",
-    "Make redaction path-aware and policy-consistent: a _secret name marks its whole subtree, a URL fragment goes through the same redactor as the query, plain rendering keeps the suffix until the value is masked, and a boolean flag that merely names a secret is no longer marked sensitive",
-    "Hold the three README promises to their flagship cases: lint reports an unlabelled field as a missing_suffix warning, INI and dotenv edits can no longer save a file that stops parsing, and protocol-v1.schema.json is validated against the implementation event by event",
-    "Make Document::unset idempotent at any path depth: a missing ancestor means the leaf is absent too, so it answers false instead of erroring, while a path no document could satisfy still errors",
-    "Render the offline --docs reference from the registry without tool-specific text, so a consumer's generated CLI reference no longer cites files only agent-first-data ships"
+    "Address the empty-string key: a path segment may now be empty, so npm's package-lock root entry (packages..version) reads and writes, and join/parse round-trip as the grammar always claimed",
+    "Refuse to emit an address that cannot be read back: a document-root empty-string key has no path spelling, so paths fails with document_unaddressable_key instead of printing a blank line the caller would feed back and be refused on",
+    "Add values FILE KEY...: read many scalars from one parse, replacing one process and one full document re-parse per path (110 lockfile entries went from 632ms to 17ms, and from quadratic parse work to linear)",
+    "Refuse a value containing a newline in values, since one-per-line framing would otherwise pair every later value with the wrong path; value still reads it, having no framing to break"
   ],
   "bonds": [],
   "tree": {

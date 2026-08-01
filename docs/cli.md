@@ -44,6 +44,7 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 - [`afdata unset`](#afdata-unset) — Remove one document entry
 - [`afdata validate`](#afdata-validate) — Validate protocol-v1 events or a finite event stream
 - [`afdata value`](#afdata-value) — Read one scalar as raw stdout bytes
+- [`afdata values`](#afdata-values) — Read many scalars as raw lines, from one parse of the document
 
 ### `afdata add`
 
@@ -367,6 +368,25 @@ Output: raw bytes on success; rejects `--output` and `--output-to`; redirect wit
 |---|---|
 | `FILE` | Document file, or - for stdin |
 | `KEY` | Dot-path to one scalar |
+| `--reveal-secret` | Allow a secret-named leaf |
+| `--default` | Fallback for missing or null |
+| `--input-format` | Document format override |
+| `--secret-name` | Extra exact field name to redact |
+
+### `afdata values`
+
+Read many scalars as raw lines, from one parse of the document
+
+```
+afdata values <FILE> <KEY>... [--reveal-secret] [--default <VALUE>] [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter>] [--secret-name <FIELD>...]
+```
+
+Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
+
+| Argument | Meaning |
+|---|---|
+| `FILE` | Document file, or - for stdin |
+| `KEY` | Dot-path to one scalar; repeat for each value wanted |
 | `--reveal-secret` | Allow a secret-named leaf |
 | `--default` | Fallback for missing or null |
 | `--input-format` | Document format override |

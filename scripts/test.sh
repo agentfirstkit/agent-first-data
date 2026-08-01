@@ -71,22 +71,33 @@ run_static() {
 
   echo ""
   echo "[2/6] Bash (syntax + optional ShellCheck)"
-  bash -n "$ROOTPATH/bash/afdata.sh" "$ROOTPATH/tests/bash_e2e.sh"
+  # The kit advertises Bash 3.2+, so check it against the oldest bash present
+  # rather than whichever one is first on PATH. On macOS /bin/bash is 3.2 while
+  # a Homebrew bash 5 usually shadows it, and 5 accepts constructs 3.2 rejects —
+  # so a plain `bash -n` certifies a file the shebang's interpreter refuses.
+  # (On Linux /bin/bash is normally 5.x too; there the check is no weaker than
+  # it was, and the macOS side is where the claim actually gets tested.)
+  "${OLDEST_BASH:-/bin/bash}" -n "$ROOTPATH/bash/afdata.sh" "$ROOTPATH/tests/bash_e2e.sh"
   if command -v shellcheck >/dev/null 2>&1; then
     shellcheck -x "$ROOTPATH/bash/afdata.sh" "$ROOTPATH/tests/bash_e2e.sh"
   fi
 
   echo ""
   echo "[3/6] Spec registry"
+  # The spec checks below read this spore's own documents through this spore's
+  # own binary, so build it first: a clean checkout has no target/debug/afdata,
+  # and judging the tree with a previously installed release would test the
+  # wrong code.
+  (cd "$ROOTPATH" && cargo build --quiet --bin afdata)
   (cd "$ROOTPATH" && python3 scripts/validate_registry.py)
   (cd "$ROOTPATH" && python3 scripts/validate_protocol_docs.py)
   (cd "$ROOTPATH" && python3 scripts/validate_protocol_schema.py)
   (cd "$ROOTPATH" && python3 scripts/validate_api_surface.py)
   (cd "$ROOTPATH" && python3 scripts/validate_cli_core_boundary.py)
   (cd "$ROOTPATH" && python3 scripts/validate_cli_spec_schema.py)
-  (cd "$ROOTPATH" && python3 scripts/validate_versions.py)
+  (cd "$ROOTPATH" && bash scripts/validate_versions.sh)
   (cd "$ROOTPATH" && python3 scripts/sync_offline_assets.py --check)
-  (cd "$ROOTPATH" && python3 scripts/validate_no_binaries.py)
+  (cd "$ROOTPATH" && bash scripts/validate_no_binaries.sh)
 
   echo ""
   echo "[4/6] Go (gofmt + compile)"

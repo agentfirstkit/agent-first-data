@@ -345,6 +345,117 @@ fn test_value_scalar_bytes_on_stdout_no_envelope() {
     assert_eq!(output.stdout, b"");
 }
 
+#[test]
+fn test_paths_never_emits_an_address_it_cannot_read() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // npm keys a package-lock's root package by the empty string. Nested, that
+    // is addressable — `outer.` — and must round-trip.
+    let nested = write_temp(
+        &temp_dir,
+        "nested.json",
+        "{\"outer\":{\"\":{\"version\":\"1.2.3\"}}}\n",
+    );
+    let output = run(&["paths", &nested, "outer"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"outer.\n");
+    // The emitted address reads back.
+    let output = run(&["value", &nested, "outer..version"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"1.2.3");
+
+    // At the root there is no spelling: the address would be the empty string,
+    // which names no path. Refuse rather than print a blank line the caller
+    // will feed back and be refused on.
+    let rooted = write_temp(&temp_dir, "rooted.json", "{\"\":1,\"a\":2}\n");
+    let output = run(&["paths", &rooted]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("document_unaddressable_key"), "{stderr}");
+
+    // `keys` makes no addressing claim, so it still lists the key.
+    let output = run(&["keys", &rooted]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"\na\n");
+}
+
+#[test]
+fn test_values_reads_many_paths_from_one_parse() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = write_temp(
+        &temp_dir,
+        "config.json",
+        "{\"name\":\"hello\",\"port\":8080,\"enabled\":true}\n",
+    );
+
+    // One line per requested path, in the order asked for — so a caller can
+    // pair its own list against the output positionally.
+    let output = run(&["values", &config_path, "name", "port", "enabled"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"hello\n8080\ntrue\n");
+    assert!(output.stderr.is_empty());
+
+    // A single path is still a line, not `value`'s bare scalar: the framing is
+    // the point of the command.
+    let output = run(&["values", &config_path, "name"]);
+    assert_eq!(output.stdout, b"hello\n");
+}
+
+#[test]
+fn test_values_refuses_a_value_it_cannot_frame() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = write_temp(
+        &temp_dir,
+        "config.json",
+        "{\"one\":\"a\\nb\",\"two\":\"plain\"}\n",
+    );
+
+    // Emitting this would put two lines where the caller expects one, and
+    // every later value would be paired with the wrong path. Refuse instead.
+    let output = run(&["values", &config_path, "one", "two"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("document_multiline_value"), "{stderr}");
+
+    // The same value is readable one at a time, where there is no framing.
+    let output = run(&["value", &config_path, "one"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"a\nb");
+}
+
+#[test]
+fn test_values_keeps_the_guarantees_value_makes() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = write_temp(
+        &temp_dir,
+        "config.json",
+        "{\"api_key_secret\":\"sk-live\",\"name\":\"hello\"}\n",
+    );
+
+    // A secret-named leaf is gated exactly as `value` gates it.
+    let output = run(&["values", &config_path, "api_key_secret", "name"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("sk-live"));
+
+    let output = run(&[
+        "values",
+        &config_path,
+        "api_key_secret",
+        "name",
+        "--reveal-secret",
+    ]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"sk-live\nhello\n");
+
+    // `--default` covers a missing path, per path.
+    let output = run(&["values", &config_path, "name", "absent", "--default", "-"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"hello\n-\n");
+}
+
 #[cfg(feature = "yaml")]
 #[test]
 fn test_value_non_finite_float_errors() {

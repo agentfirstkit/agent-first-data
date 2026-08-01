@@ -384,6 +384,32 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .output(raw.clone()),
                 ),
         )
+        .command(
+            CommandSpec::new(["values"])
+                .about("Read many scalars as raw lines, from one parse of the document")
+                .arg(positional(
+                    "file",
+                    0,
+                    "FILE",
+                    "Document file, or - for stdin",
+                ))
+                .arg(
+                    ArgSpec::positional("key", 1, "KEY")
+                        .repeatable()
+                        .about("Dot-path to one scalar; repeat for each value wanted"),
+                )
+                .arg(ArgSpec::flag("--reveal-secret").about("Allow a secret-named leaf"))
+                .arg(ArgSpec::option("--default", "VALUE").about("Fallback for missing or null"))
+                .arg(input_format_arg())
+                .arg(secret_name_arg())
+                .combination(
+                    Combination::new("values")
+                        .action("values")
+                        .required(["file", "key"])
+                        .optional(["reveal_secret", "default", "input_format", "secret_name"])
+                        .output(raw.clone()),
+                ),
+        )
         .command(enumerate_command(
             "paths",
             "paths",
@@ -658,6 +684,7 @@ fn closed_world_main() -> ExitCode {
     };
     let mut handlers: Vec<(&str, AfdataActionHandler)> = vec![
         ("lint", dispatch_invocation),
+        ("values", dispatch_invocation),
         ("validate", dispatch_invocation),
         ("render", dispatch_invocation),
         ("emit_log", dispatch_invocation),
@@ -938,6 +965,7 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
         ),
         "get" => dispatch_get(invocation, format),
         "value" => dispatch_value(invocation, format),
+        "values" => dispatch_values(invocation, format),
         "paths" | "keys" => dispatch_enumerate(invocation, format),
         "set" => dispatch_set(invocation, format),
         "unset" => dispatch_unset(invocation, format),
@@ -967,6 +995,29 @@ fn dispatch_get(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
             secret_names: &secret_names,
             format,
         },
+    )
+}
+
+fn dispatch_values(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let file = invocation_string(invocation, "file");
+    let keys = invocation_strings(invocation, "key");
+    let default = invocation_optional_string(invocation, "default");
+    let input_format = invocation_optional_string(invocation, "input_format");
+    let secret_names = invocation_strings(invocation, "secret_name");
+    let ctx = DocumentContext {
+        input_format: input_format.as_deref(),
+        secret_names: &secret_names,
+        format,
+    };
+    finish_raw(
+        compute_values(
+            Path::new(&file),
+            &keys,
+            invocation_flag(invocation, "reveal_secret"),
+            default.as_deref(),
+            &ctx,
+        ),
+        &ctx,
     )
 }
 
@@ -2179,13 +2230,60 @@ fn compute_value(
 ) -> Result<Vec<u8>, CliDocError> {
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
     let (root, _doc_format) = read_document_input(file, input_format)?;
+    scalar_bytes_at(&root, key, reveal_secret, default, ctx)
+}
+
+/// Every path in `keys`, one line each, from a single parse of the document.
+///
+/// `value` re-reads and re-parses the whole file per invocation, so answering
+/// "which element has name X" from a shell costs one process and one full parse
+/// per candidate — 110 packages in a Cargo.lock took 400ms, and the parse work
+/// grows with the square of the document. Reading many paths at once is the
+/// same work done once.
+///
+/// Line framing is the contract, so a value containing a newline is refused
+/// rather than silently splitting across two lines: a caller pairing lines with
+/// the paths it asked for would read every later value against the wrong path.
+fn compute_values(
+    file: &Path,
+    keys: &[String],
+    reveal_secret: bool,
+    default: Option<&str>,
+    ctx: &DocumentContext<'_>,
+) -> Result<Vec<u8>, CliDocError> {
+    let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
+    let (root, _doc_format) = read_document_input(file, input_format)?;
+    let mut out = Vec::new();
+    for key in keys {
+        let bytes = scalar_bytes_at(&root, key, reveal_secret, default, ctx)?;
+        if bytes.contains(&b'\n') {
+            return Err(CliDocError::runtime(
+                "document_multiline_value",
+                format!(
+                    "path `{key}` holds a value containing a newline, which one-per-line output cannot frame; read that path with `value`"
+                ),
+            ));
+        }
+        out.extend_from_slice(&bytes);
+        out.push(b'\n');
+    }
+    Ok(out)
+}
+
+fn scalar_bytes_at(
+    root: &DocumentValue,
+    key: &str,
+    reveal_secret: bool,
+    default: Option<&str>,
+    ctx: &DocumentContext<'_>,
+) -> Result<Vec<u8>, CliDocError> {
     if !reveal_secret && document_path_is_secret(key, ctx.secret_names)? {
         return Err(CliDocError::runtime(
             "document_secret_redacted",
             format!("path `{key}` names a secret; pass --reveal-secret"),
         ));
     }
-    let target = match get_path(&root, key, &[]) {
+    let target = match get_path(root, key, &[]) {
         Ok(target) => target,
         Err(err) => {
             let err = CliDocError::Document(err);
@@ -2285,17 +2383,33 @@ fn compute_enumerate(
             ));
         }
     };
-    Ok(names
-        .into_iter()
-        .map(|name| match mode {
-            EnumerateMode::Keys => name,
+    let mut lines = Vec::with_capacity(names.len());
+    for name in names {
+        match mode {
+            EnumerateMode::Keys => lines.push(name),
             EnumerateMode::Paths => {
                 let mut segments = base_segments.clone();
                 segments.push(name);
-                join_path(&segments)
+                let path = join_path(&segments);
+                // Never hand back an address this tool cannot then read. A
+                // `""` key at the document root joins to the empty string,
+                // which names no path at all — emitting it would repeat the
+                // defect the empty-segment grammar exists to remove, one
+                // level up. Say so instead of printing a blank line the
+                // caller will feed back and be refused.
+                if path.is_empty() {
+                    return Err(CliDocError::runtime(
+                        "document_unaddressable_key",
+                        "the document root has an empty-string key, which has no path spelling; \
+                         read its children by their own paths, or use `keys`"
+                            .to_string(),
+                    ));
+                }
+                lines.push(path);
             }
-        })
-        .collect())
+        }
+    }
+    Ok(lines)
 }
 
 /// `set`: write a value at dot-path `key` into `file`, preserving the rest
