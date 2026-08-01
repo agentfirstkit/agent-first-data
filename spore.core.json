@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.28.0",
+  "version": "0.28.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,10 +13,8 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Address the empty-string key: a path segment may now be empty, so npm's package-lock root entry (packages..version) reads and writes, and join/parse round-trip as the grammar always claimed",
-    "Refuse to emit an address that cannot be read back: a document-root empty-string key has no path spelling, so paths fails with document_unaddressable_key instead of printing a blank line the caller would feed back and be refused on",
-    "Add values FILE KEY...: read many scalars from one parse, replacing one process and one full document re-parse per path (110 lockfile entries went from 632ms to 17ms, and from quadratic parse work to linear)",
-    "Refuse a value containing a newline in values, since one-per-line framing would otherwise pair every later value with the wrong path; value still reads it, having no framing to break"
+    "Let a path address many nodes: a bare * segment expands to every child, so reading one field across a collection is 'values FILE package.*.name' instead of enumerating, appending the field to each address with sed, and reading them back",
+    "BREAKING: * is a legal JSON key, so the grammar gains \\* alongside \\. and \\\\ and join_path escapes stars — paths now prints \\* where it printed *, and a bare * is refused rather than read as a key, so one spelling keeps one meaning"
   ],
   "bonds": [],
   "tree": {

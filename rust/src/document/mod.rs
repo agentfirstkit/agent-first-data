@@ -38,7 +38,7 @@ pub use coerce::{
 pub use error::{DocumentError, DocumentResult};
 pub use file::{Document, DocumentFile};
 pub use keyed::{KeyedList, add_keyed, remove_keyed};
-pub use path::{join_path, parse_path};
+pub use path::{PatternSegment, join_path, parse_path, parse_path_pattern};
 pub use traverse::{get_path, get_path_ref, set_path, unset_path};
 pub use typed::{from_value, to_value};
 pub use value::Value;

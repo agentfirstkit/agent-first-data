@@ -403,6 +403,69 @@ fn test_values_reads_many_paths_from_one_parse() {
 }
 
 #[test]
+fn test_values_expands_a_wildcard_across_a_collection() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = write_temp(
+        &temp_dir,
+        "config.json",
+        "{\"pkgs\":[{\"name\":\"a\"},{\"name\":\"b\"},{\"name\":\"c\"}]}\n",
+    );
+
+    // Reading one field across a collection used to be: enumerate the children,
+    // append the field to each address with `sed`, then read them back.
+    let output = run(&["values", &config_path, "pkgs.*.name"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"a\nb\nc\n");
+
+    // Objects fan out by key, in document order.
+    let object_path = write_temp(
+        &temp_dir,
+        "object.json",
+        "{\"svc\":{\"one\":{\"port\":1},\"two\":{\"port\":2}}}\n",
+    );
+    let output = run(&["values", &object_path, "svc.*.port"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"1\n2\n");
+
+    // A wildcard needs a container under it.
+    let output = run(&["values", &config_path, "pkgs.0.name.*"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("document_not_container"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_a_star_key_is_still_reachable_beside_the_wildcard() {
+    let temp_dir = TempDir::new().unwrap();
+    // `*` is a legal key; reserving the bare form must not strand it.
+    let config_path = write_temp(
+        &temp_dir,
+        "config.json",
+        "{\"a\":{\"*\":1},\"b\":{\"*\":2}}\n",
+    );
+
+    // Escaped, it is a key — even alongside a wildcard in the same path.
+    let output = run(&["values", &config_path, r"*.\*"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"1\n2\n");
+
+    // `paths` emits the escaped spelling, and that spelling reads back.
+    let output = run(&["paths", &config_path, "a"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"a.\\*\n");
+    let output = run(&["value", &config_path, r"a.\*"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"1");
+
+    // A bare `*` where nothing can expand it is refused, not read as a key.
+    let output = run(&["value", &config_path, "a.*"]);
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
 fn test_values_refuses_a_value_it_cannot_frame() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = write_temp(

@@ -1,9 +1,9 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use agent_first_data::document::{
-    BareOverwrite, Document, DocumentError, DocumentFile, Format as DocumentFormat,
+    BareOverwrite, Document, DocumentError, DocumentFile, Format as DocumentFormat, PatternSegment,
     Value as DocumentValue, ValueType, get_path, guard_bare_overwrite, join_path, parse_path,
-    value_from_type,
+    parse_path_pattern, value_from_type,
 };
 use agent_first_data::{
     ArgSpec, CliOutcome, CliSpec, Combination, CommandSpec, ErrorBuilder, Event, OutputFormat,
@@ -2253,8 +2253,12 @@ fn compute_values(
 ) -> Result<Vec<u8>, CliDocError> {
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
     let (root, _doc_format) = read_document_input(file, input_format)?;
-    let mut out = Vec::new();
+    let mut expanded = Vec::new();
     for key in keys {
+        expanded.extend(expand_pattern(&root, key)?);
+    }
+    let mut out = Vec::new();
+    for key in &expanded {
         let bytes = scalar_bytes_at(&root, key, reveal_secret, default, ctx)?;
         if bytes.contains(&b'\n') {
             return Err(CliDocError::runtime(
@@ -2268,6 +2272,70 @@ fn compute_values(
         out.push(b'\n');
     }
     Ok(out)
+}
+
+/// Resolve one path, which may contain `*` segments, into concrete addresses.
+///
+/// A pattern with no wildcard is itself, so the common case costs nothing. A
+/// wildcard expands to every child of the container at that point, in document
+/// order, and the addresses it produces are ordinary paths — they read back
+/// through `value`, and a literal star key inside one is escaped as `\*`.
+fn expand_pattern(root: &DocumentValue, pattern: &str) -> Result<Vec<String>, CliDocError> {
+    let segments = parse_path_pattern(pattern)?;
+    if !segments
+        .iter()
+        .any(|segment| matches!(segment, PatternSegment::Wildcard))
+    {
+        // No wildcard: hand back the path exactly as written, so escaping and
+        // error messages stay identical to a plain `value` read.
+        return Ok(vec![pattern.to_string()]);
+    }
+    let mut frontier = vec![Vec::<String>::new()];
+    for segment in &segments {
+        let mut next = Vec::new();
+        for prefix in frontier {
+            match segment {
+                PatternSegment::Key(key) => {
+                    let mut extended = prefix;
+                    extended.push(key.clone());
+                    next.push(extended);
+                }
+                PatternSegment::Wildcard => {
+                    let here = join_path(&prefix);
+                    let target = if prefix.is_empty() {
+                        root
+                    } else {
+                        &get_path(root, &here, &[]).map_err(CliDocError::Document)?
+                    };
+                    let names: Vec<String> = match target {
+                        DocumentValue::Object(map) => map.keys().cloned().collect(),
+                        DocumentValue::Array(items) => {
+                            (0..items.len()).map(|index| index.to_string()).collect()
+                        }
+                        _ => {
+                            return Err(CliDocError::runtime(
+                                "document_not_container",
+                                format!(
+                                    "`*` in `{pattern}` needs a container at `{}`, which is a scalar",
+                                    if here.is_empty() { "<root>" } else { &here }
+                                ),
+                            ));
+                        }
+                    };
+                    for name in names {
+                        let mut extended = prefix.clone();
+                        extended.push(name);
+                        next.push(extended);
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+    Ok(frontier
+        .iter()
+        .map(|segments| join_path(segments))
+        .collect())
 }
 
 fn scalar_bytes_at(

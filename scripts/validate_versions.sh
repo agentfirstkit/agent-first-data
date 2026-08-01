@@ -44,9 +44,9 @@ read_doc() {
 
 # The lockfile's own entry, whose index moves as dependencies come and go.
 #
-# Read every package name in one call rather than one call per package: `value`
-# re-parses the whole lockfile each time, so the obvious loop is 110 processes
-# and 110 parses (632ms here) where this is one of each (17ms).
+# One call for every package name. `value` re-parses the whole lockfile per
+# invocation, so the obvious loop is 110 processes and 110 parses (632ms here);
+# a pattern is one of each.
 cargo_lock_self_version() {
   local name index
   name="$(read_doc Cargo.toml package.name --input-format toml)"
@@ -57,12 +57,8 @@ cargo_lock_self_version() {
       return 0
     fi
     index=$((index + 1))
-  done < <(
-    keys="$("$AFDATA" paths "$ROOTPATH/Cargo.lock" package --input-format toml 2>/dev/null \
-      | sed 's/$/.name/')"
-    # shellcheck disable=SC2086
-    [ -n "$keys" ] && "$AFDATA" values "$ROOTPATH/Cargo.lock" $keys --input-format toml 2>/dev/null
-  )
+  done < <("$AFDATA" values "$ROOTPATH/Cargo.lock" 'package.*.name' \
+    --input-format toml 2>/dev/null || true)
   echo "Cargo.lock: no self entry for $name" >&2
   return 1
 }
