@@ -16,7 +16,8 @@
 //! gate.
 
 use agent_first_data::document::{
-    DocumentError, Format, KeyedList, Value, add_keyed, get_path, remove_keyed, set_path,
+    Addressing, Document, DocumentError, Format, KeyedList, Value, add_keyed, get_path,
+    remove_keyed, set_path,
 };
 use std::collections::BTreeMap;
 
@@ -26,15 +27,21 @@ fn test_json_round_trip() {
 
     let value = Format::Json.load(json_str).unwrap();
 
-    let host = get_path(&value, "imap.host", &[]).unwrap();
+    let host = get_path(&value, "imap.host", Addressing::INDEX_ONLY).unwrap();
     assert_eq!(host.as_str().unwrap(), "mail.example.com");
 
     let mut value = value;
-    set_path(&mut value, "imap.port", &Value::Integer(587), &[]).unwrap();
+    set_path(
+        &mut value,
+        "imap.port",
+        &Value::Integer(587),
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
 
     let output = Format::Json.save(&value).unwrap();
     let reloaded = Format::Json.load(&output).unwrap();
-    let port = get_path(&reloaded, "imap.port", &[]).unwrap();
+    let port = get_path(&reloaded, "imap.port", Addressing::INDEX_ONLY).unwrap();
     assert_eq!(port.as_integer().unwrap(), 587);
 }
 
@@ -167,15 +174,21 @@ port = 5432
 
     let value = Format::Toml.load(toml_str).unwrap();
 
-    let host = get_path(&value, "database.host", &[]).unwrap();
+    let host = get_path(&value, "database.host", Addressing::INDEX_ONLY).unwrap();
     assert_eq!(host.as_str().unwrap(), "localhost");
 
     let mut value = value;
-    set_path(&mut value, "database.port", &Value::Integer(3306), &[]).unwrap();
+    set_path(
+        &mut value,
+        "database.port",
+        &Value::Integer(3306),
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
 
     let output = Format::Toml.save(&value).unwrap();
     let reloaded = Format::Toml.load(&output).unwrap();
-    let port = get_path(&reloaded, "database.port", &[]).unwrap();
+    let port = get_path(&reloaded, "database.port", Addressing::INDEX_ONLY).unwrap();
     assert_eq!(port.as_integer().unwrap(), 3306);
 }
 
@@ -262,15 +275,21 @@ server:
 
     let value = Format::Yaml.load(yaml_str).unwrap();
 
-    let host = get_path(&value, "server.host", &[]).unwrap();
+    let host = get_path(&value, "server.host", Addressing::INDEX_ONLY).unwrap();
     assert_eq!(host.as_str().unwrap(), "localhost");
 
     let mut value = value;
-    set_path(&mut value, "server.port", &Value::Integer(9000), &[]).unwrap();
+    set_path(
+        &mut value,
+        "server.port",
+        &Value::Integer(9000),
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
 
     let output = Format::Yaml.save(&value).unwrap();
     let reloaded = Format::Yaml.load(&output).unwrap();
-    let port = get_path(&reloaded, "server.port", &[]).unwrap();
+    let port = get_path(&reloaded, "server.port", Addressing::INDEX_ONLY).unwrap();
     assert_eq!(port.as_integer().unwrap(), 9000);
 }
 
@@ -344,17 +363,12 @@ fn test_yaml_keyed_collection_edit_preserves_unrelated_source() {
     )
     .unwrap();
     assert!(added.contains("keep: 1.0"));
-    assert_eq!(
-        Format::Yaml
-            .load(&added)
-            .unwrap()
-            .get("items")
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+    let parsed = Format::Yaml.load(&added).unwrap();
+    let items = parsed.get("items").unwrap().as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[1].get("id").and_then(Value::as_str), Some("b"));
+    assert_eq!(items[1].get("name").and_then(Value::as_str), Some("B"));
+    assert!(parsed.get("name").is_none());
     let removed =
         agent_first_data::document::format::yaml::remove_array_item_preserving(&added, "items", 1)
             .unwrap();
@@ -398,11 +412,15 @@ fn test_yaml_cst_numeric_path_adapter_and_unsupported_escaped_keys() {
 fn test_yaml_uses_strict_yaml_1_2_parsing() {
     let value = Format::Yaml.load("country: NO\nenabled: true\n").unwrap();
     assert_eq!(
-        get_path(&value, "country", &[]).unwrap().as_str(),
+        get_path(&value, "country", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_str(),
         Some("NO")
     );
     assert_eq!(
-        get_path(&value, "enabled", &[]).unwrap().as_bool(),
+        get_path(&value, "enabled", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_bool(),
         Some(true)
     );
 
@@ -438,7 +456,12 @@ fn test_keyed_list_add_and_remove() {
     )
     .unwrap();
 
-    let alice_email = get_path(&root, "identities.alice.email", &keyed_lists).unwrap();
+    let alice_email = get_path(
+        &root,
+        "identities.alice.email",
+        Addressing::keyed(&keyed_lists),
+    )
+    .unwrap();
     assert_eq!(alice_email.as_str().unwrap(), "alice@example.com");
 
     add_keyed(
@@ -462,8 +485,57 @@ fn test_keyed_list_add_and_remove() {
     let arr = root.get("identities").unwrap().as_array().unwrap();
     assert_eq!(arr.len(), 1);
 
-    let bob_email = get_path(&root, "identities.bob.email", &keyed_lists).unwrap();
+    let bob_email = get_path(
+        &root,
+        "identities.bob.email",
+        Addressing::keyed(&keyed_lists),
+    )
+    .unwrap();
     assert_eq!(bob_email.as_str().unwrap(), "bob@example.com");
+}
+
+#[test]
+fn test_document_edits_a_root_json_keyed_list() {
+    let source = "[\n  {\"id\": \"a\", \"name\": \"\\u0041\"}\n]\n";
+    let mut document = Document::parse(source, Format::Json).unwrap();
+
+    document
+        .add(
+            "",
+            "b",
+            "id",
+            &[("name".to_string(), Value::String("B".to_string()))],
+        )
+        .unwrap();
+    assert_eq!(document.value().as_array().unwrap().len(), 2);
+    assert!(document.source().contains(r#""name": "\u0041""#));
+
+    document.remove("", "b", "id").unwrap();
+    assert_eq!(document.value().as_array().unwrap().len(), 1);
+    assert_eq!(document.source(), source);
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn test_document_edits_a_root_yaml_keyed_list() {
+    let source = "# keep\n- id: a\n  name: 'A'\n";
+    let mut document = Document::parse(source, Format::Yaml).unwrap();
+
+    document
+        .add(
+            "",
+            "b",
+            "id",
+            &[("name".to_string(), Value::String("B".to_string()))],
+        )
+        .unwrap();
+    assert_eq!(document.value().as_array().unwrap().len(), 2);
+    assert!(document.source().contains("# keep"));
+    assert!(document.source().contains("name: 'A'"));
+
+    document.remove("", "b", "id").unwrap();
+    assert_eq!(document.value().as_array().unwrap().len(), 1);
+    assert_eq!(document.source(), source);
 }
 
 #[test]
@@ -472,7 +544,7 @@ fn test_escaped_dotted_key_matching() {
 
     let value = Format::Json.load(json_str).unwrap();
 
-    let steps = get_path(&value, r"actions.case\.add.steps", &[]).unwrap();
+    let steps = get_path(&value, r"actions.case\.add.steps", Addressing::INDEX_ONLY).unwrap();
     assert!(steps.is_array());
 }
 
@@ -499,22 +571,30 @@ fn test_escaped_keyed_list_prefix_routes_consistently() {
     )
     .unwrap();
     assert_eq!(
-        get_path(&root, r"group\.list.items.one.name", &keyed_lists)
-            .unwrap()
-            .as_str(),
+        get_path(
+            &root,
+            r"group\.list.items.one.name",
+            Addressing::keyed(&keyed_lists)
+        )
+        .unwrap()
+        .as_str(),
         Some("first")
     );
     set_path(
         &mut root,
         r"group\.list.items.one.name",
         &Value::String("second".to_string()),
-        &keyed_lists,
+        Addressing::keyed(&keyed_lists),
     )
     .unwrap();
     assert_eq!(
-        get_path(&root, r"group\.list.items.one.name", &keyed_lists)
-            .unwrap()
-            .as_str(),
+        get_path(
+            &root,
+            r"group\.list.items.one.name",
+            Addressing::keyed(&keyed_lists)
+        )
+        .unwrap()
+        .as_str(),
         Some("second")
     );
 }
@@ -523,23 +603,47 @@ fn test_escaped_keyed_list_prefix_routes_consistently() {
 fn test_type_coercion() {
     let mut root = Value::Object(BTreeMap::new());
 
-    set_path(&mut root, "port", &Value::Integer(993), &[]).unwrap();
-    let port = get_path(&root, "port", &[]).unwrap();
+    set_path(
+        &mut root,
+        "port",
+        &Value::Integer(993),
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
+    let port = get_path(&root, "port", Addressing::INDEX_ONLY).unwrap();
     assert_eq!(port.as_integer(), Some(993));
 
-    set_path(&mut root, "enabled", &Value::Bool(true), &[]).unwrap();
-    let enabled = get_path(&root, "enabled", &[]).unwrap();
+    set_path(
+        &mut root,
+        "enabled",
+        &Value::Bool(true),
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
+    let enabled = get_path(&root, "enabled", Addressing::INDEX_ONLY).unwrap();
     assert_eq!(enabled.as_bool(), Some(true));
 
-    set_path(&mut root, "timeout", &Value::Float(3.14), &[]).unwrap();
-    let timeout = get_path(&root, "timeout", &[]).unwrap();
+    set_path(
+        &mut root,
+        "timeout",
+        &Value::Float(3.14),
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
+    let timeout = get_path(&root, "timeout", Addressing::INDEX_ONLY).unwrap();
     match timeout.as_float() {
         Some(f) => assert!((f - 3.14).abs() < 0.01),
         None => panic!("expected float"),
     }
 
-    set_path(&mut root, "name", &Value::String("Alice".to_string()), &[]).unwrap();
-    let name = get_path(&root, "name", &[]).unwrap();
+    set_path(
+        &mut root,
+        "name",
+        &Value::String("Alice".to_string()),
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
+    let name = get_path(&root, "name", Addressing::INDEX_ONLY).unwrap();
     assert_eq!(name.as_str(), Some("Alice"));
 }
 
@@ -555,11 +659,11 @@ fn test_scalar_array_replacement() {
             Value::String("staging".to_string()),
             Value::String("prod".to_string()),
         ]),
-        &[],
+        Addressing::INDEX_ONLY,
     )
     .unwrap();
 
-    let tags = get_path(&root, "tags", &[]).unwrap();
+    let tags = get_path(&root, "tags", Addressing::INDEX_ONLY).unwrap();
     let arr = tags.as_array().unwrap();
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0].as_str(), Some("dev"));
@@ -575,11 +679,16 @@ fn test_nested_object_creation() {
         &mut root,
         "server.database.connection.host",
         &Value::String("localhost".to_string()),
-        &[],
+        Addressing::INDEX_ONLY,
     )
     .unwrap();
 
-    let host = get_path(&root, "server.database.connection.host", &[]).unwrap();
+    let host = get_path(
+        &root,
+        "server.database.connection.host",
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
     assert_eq!(host.as_str().unwrap(), "localhost");
 }
 
@@ -595,11 +704,11 @@ fn test_json_array_coercion() {
             Value::String("b".to_string()),
             Value::String("c".to_string()),
         ]),
-        &[],
+        Addressing::INDEX_ONLY,
     )
     .unwrap();
 
-    let config = get_path(&root, "config", &[]).unwrap();
+    let config = get_path(&root, "config", Addressing::INDEX_ONLY).unwrap();
     let arr = config.as_array().unwrap();
     assert_eq!(arr.len(), 3);
 }
@@ -608,12 +717,24 @@ fn test_json_array_coercion() {
 fn test_type_prefix_coercion() {
     let mut root = Value::Object(BTreeMap::new());
 
-    set_path(&mut root, "field1", &Value::String("true".to_string()), &[]).unwrap();
-    let val = get_path(&root, "field1", &[]).unwrap();
+    set_path(
+        &mut root,
+        "field1",
+        &Value::String("true".to_string()),
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
+    let val = get_path(&root, "field1", Addressing::INDEX_ONLY).unwrap();
     assert_eq!(val.as_str(), Some("true"));
 
-    set_path(&mut root, "field2", &Value::Bool(true), &[]).unwrap();
-    let val = get_path(&root, "field2", &[]).unwrap();
+    set_path(
+        &mut root,
+        "field2",
+        &Value::Bool(true),
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
+    let val = get_path(&root, "field2", Addressing::INDEX_ONLY).unwrap();
     assert_eq!(val.as_bool(), Some(true));
 }
 
@@ -665,7 +786,9 @@ fn test_json_unsigned_boundary_round_trip() {
         .load("{\"n\":18446744073709551615,\"f\":3.0}")
         .unwrap();
     assert_eq!(
-        get_path(&value, "n", &[]).unwrap().as_unsigned(),
+        get_path(&value, "n", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_unsigned(),
         Some(u64::MAX)
     );
     // §4: a float literal is preserved verbatim as `Value::Number`, not
@@ -673,7 +796,7 @@ fn test_json_unsigned_boundary_round_trip() {
     // would survive that narrowing exactly. The point is the literal
     // *spelling* survives too.
     assert_eq!(
-        get_path(&value, "f", &[]).unwrap(),
+        get_path(&value, "f", Addressing::INDEX_ONLY).unwrap(),
         Value::Number("3.0".to_string())
     );
     // §4: an exponent so large it would overflow `f64` no longer fails to
@@ -700,15 +823,15 @@ fn test_json_number_literal_fidelity_matrix() {
     let value = Format::Json.load(&source).unwrap();
 
     assert_eq!(
-        get_path(&value, "huge", &[]).unwrap(),
+        get_path(&value, "huge", Addressing::INDEX_ONLY).unwrap(),
         Value::Number(huge_int.to_string())
     );
     assert_eq!(
-        get_path(&value, "precise", &[]).unwrap(),
+        get_path(&value, "precise", Addressing::INDEX_ONLY).unwrap(),
         Value::Number(precise_float.to_string())
     );
     assert_eq!(
-        get_path(&value, "exp", &[]).unwrap(),
+        get_path(&value, "exp", Addressing::INDEX_ONLY).unwrap(),
         Value::Number("1e+140".to_string())
     );
     // An integer `-0` has no distinct representation from `0` in `i64` —
@@ -716,13 +839,13 @@ fn test_json_number_literal_fidelity_matrix() {
     // `Integer(0)`, not a fidelity violation (no digits are lost; the sign
     // was mathematically redundant).
     assert_eq!(
-        get_path(&value, "neg_zero_int", &[]).unwrap(),
+        get_path(&value, "neg_zero_int", Addressing::INDEX_ONLY).unwrap(),
         Value::Integer(0)
     );
     // A *float* `-0.0` is a distinct IEEE 754 value from `0.0`, and its
     // literal is preserved exactly (not collapsed).
     assert_eq!(
-        get_path(&value, "neg_zero_float", &[]).unwrap(),
+        get_path(&value, "neg_zero_float", Addressing::INDEX_ONLY).unwrap(),
         Value::Number("-0.0".to_string())
     );
 
@@ -732,11 +855,11 @@ fn test_json_number_literal_fidelity_matrix() {
         &mut root,
         "set_huge",
         &Value::Number(huge_int.to_string()),
-        &[],
+        Addressing::INDEX_ONLY,
     )
     .unwrap();
     assert_eq!(
-        get_path(&root, "set_huge", &[]).unwrap(),
+        get_path(&root, "set_huge", Addressing::INDEX_ONLY).unwrap(),
         Value::Number(huge_int.to_string())
     );
 
@@ -746,7 +869,7 @@ fn test_json_number_literal_fidelity_matrix() {
         get_path(
             &Format::Json.load("{\"u\":18446744073709551615}").unwrap(),
             "u",
-            &[]
+            Addressing::INDEX_ONLY
         )
         .unwrap()
         .as_unsigned(),
@@ -761,11 +884,13 @@ fn test_yaml_unsigned_boundary_round_trip() {
         .load("n: 18446744073709551615\nf: 3.0\n")
         .unwrap();
     assert_eq!(
-        get_path(&value, "n", &[]).unwrap().as_unsigned(),
+        get_path(&value, "n", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_unsigned(),
         Some(u64::MAX)
     );
     assert_eq!(
-        get_path(&value, "f", &[]).unwrap(),
+        get_path(&value, "f", Addressing::INDEX_ONLY).unwrap(),
         Value::Number("3.0".to_string())
     );
 }
@@ -781,24 +906,32 @@ fn test_json_numeric_boundary_matrix() {
     );
     let value = Format::Json.load(&source).unwrap();
     assert_eq!(
-        get_path(&value, "min", &[]).unwrap().as_integer(),
+        get_path(&value, "min", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_integer(),
         Some(i64::MIN)
     );
     assert_eq!(
-        get_path(&value, "max", &[]).unwrap().as_integer(),
+        get_path(&value, "max", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_integer(),
         Some(i64::MAX)
     );
     assert_eq!(
-        get_path(&value, "above", &[]).unwrap().as_unsigned(),
+        get_path(&value, "above", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_unsigned(),
         Some(i64::MAX as u64 + 1)
     );
     assert_eq!(
-        get_path(&value, "u", &[]).unwrap().as_unsigned(),
+        get_path(&value, "u", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_unsigned(),
         Some(u64::MAX)
     );
     // §4: a decimal-exponent literal is preserved verbatim as `Value::Number`.
     assert_eq!(
-        get_path(&value, "f", &[]).unwrap(),
+        get_path(&value, "f", Addressing::INDEX_ONLY).unwrap(),
         Value::Number("1e-10".to_string())
     );
     // §4: no longer an error — see `test_json_unsigned_boundary_round_trip`.
@@ -820,19 +953,27 @@ fn test_yaml_numeric_boundary_matrix() {
     );
     let value = Format::Yaml.load(&source).unwrap();
     assert_eq!(
-        get_path(&value, "min", &[]).unwrap().as_integer(),
+        get_path(&value, "min", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_integer(),
         Some(i64::MIN)
     );
     assert_eq!(
-        get_path(&value, "max", &[]).unwrap().as_integer(),
+        get_path(&value, "max", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_integer(),
         Some(i64::MAX)
     );
     assert_eq!(
-        get_path(&value, "above", &[]).unwrap().as_unsigned(),
+        get_path(&value, "above", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_unsigned(),
         Some(i64::MAX as u64 + 1)
     );
     assert_eq!(
-        get_path(&value, "u", &[]).unwrap().as_unsigned(),
+        get_path(&value, "u", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_unsigned(),
         Some(u64::MAX)
     );
 }
@@ -848,15 +989,21 @@ fn test_toml_numeric_boundary_matrix() {
         ))
         .unwrap();
     assert_eq!(
-        get_path(&value, "min", &[]).unwrap().as_integer(),
+        get_path(&value, "min", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_integer(),
         Some(i64::MIN)
     );
     assert_eq!(
-        get_path(&value, "max", &[]).unwrap().as_integer(),
+        get_path(&value, "max", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_integer(),
         Some(i64::MAX)
     );
     assert_eq!(
-        get_path(&value, "precise", &[]).unwrap().as_integer(),
+        get_path(&value, "precise", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_integer(),
         Some(9_007_199_254_740_993)
     );
     assert!(Format::Toml.load("bad = 1e9999\n").is_err());
@@ -945,11 +1092,15 @@ fn test_ini_core_v1_strings_and_duplicates() {
         .load("[database]\r\nhost = localhost\r\nport=5432\r\n")
         .unwrap();
     assert_eq!(
-        get_path(&value, "database.host", &[]).unwrap().as_str(),
+        get_path(&value, "database.host", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_str(),
         Some("localhost")
     );
     assert_eq!(
-        get_path(&value, "database.port", &[]).unwrap().as_str(),
+        get_path(&value, "database.port", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_str(),
         Some("5432")
     );
     assert!(Format::Ini.load("[database]\na=1\na=2\n").is_err());
@@ -967,7 +1118,7 @@ fn test_ini_fixtures_and_source_editor() {
         "; comment\r\n[Database]\r\nkey.with.dot = value # literal\r\nempty=\r\n\r\n[empty]\r\n";
     let value = Format::Ini.load(source).unwrap();
     assert_eq!(
-        get_path(&value, r"Database.key\.with\.dot", &[])
+        get_path(&value, r"Database.key\.with\.dot", Addressing::INDEX_ONLY)
             .unwrap()
             .as_str(),
         Some("value # literal")
@@ -1038,7 +1189,7 @@ fn test_dotenv_read_semantics() {
         ("REFERENCE", "${AFDATA_TEST_PROCESS_VALUE}"),
     ];
     for (key, expected_value) in expected {
-        let actual = get_path(&value, key, &[]).expect("key should exist");
+        let actual = get_path(&value, key, Addressing::INDEX_ONLY).expect("key should exist");
         assert_eq!(actual.as_str(), Some(expected_value));
         assert!(actual.is_string());
     }
@@ -1050,7 +1201,9 @@ fn test_dotenv_multiline_and_missing_set_preserve_source() {
     let source = "# keep\nMULTI=\"first\nsecond\"\nOTHER=abc#def\n";
     let value = Format::Dotenv.load(source).unwrap();
     assert_eq!(
-        get_path(&value, "MULTI", &[]).unwrap().as_str(),
+        get_path(&value, "MULTI", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_str(),
         Some("first\nsecond")
     );
     let edited = agent_first_data::document::format::dotenv::set_preserving(
@@ -1140,7 +1293,7 @@ fn test_file_operations() {
         &mut value,
         "app.version",
         &Value::String("2.0".to_string()),
-        &[],
+        Addressing::INDEX_ONLY,
     )
     .expect("failed to set path");
 
@@ -1151,7 +1304,8 @@ fn test_file_operations() {
     let reloaded = Format::Json
         .load(&updated)
         .expect("failed to load updated JSON");
-    let version = get_path(&reloaded, "app.version", &[]).expect("failed to get version");
+    let version =
+        get_path(&reloaded, "app.version", Addressing::INDEX_ONLY).expect("failed to get version");
     assert_eq!(version.as_str().expect("version should be string"), "2.0");
 }
 
@@ -1180,13 +1334,20 @@ fn test_document_file_stages_edits_until_save() {
     // The in-memory value already reflects both edits, so a caller can
     // deserialize-and-validate the result before committing.
     assert_eq!(
-        get_path(doc.value(), "imap.host", &[])
+        get_path(doc.value(), "imap.host", Addressing::INDEX_ONLY)
             .unwrap()
             .as_str()
             .unwrap(),
         "new"
     );
-    assert!(get_path(doc.value(), "imap.password_secret_env", &[]).is_err());
+    assert!(
+        get_path(
+            doc.value(),
+            "imap.password_secret_env",
+            Addressing::INDEX_ONLY
+        )
+        .is_err()
+    );
 
     // A single atomic commit lands both edits.
     doc.save().unwrap();
@@ -1194,13 +1355,20 @@ fn test_document_file_stages_edits_until_save() {
         .load(&fs::read_to_string(&path).unwrap())
         .unwrap();
     assert_eq!(
-        get_path(&reloaded, "imap.host", &[])
+        get_path(&reloaded, "imap.host", Addressing::INDEX_ONLY)
             .unwrap()
             .as_str()
             .unwrap(),
         "new"
     );
-    assert!(get_path(&reloaded, "imap.password_secret_env", &[]).is_err());
+    assert!(
+        get_path(
+            &reloaded,
+            "imap.password_secret_env",
+            Addressing::INDEX_ONLY
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1256,14 +1424,17 @@ fn test_toml_set_creates_missing_parent_table() {
     // Parent table created; existing content preserved; parses back correctly.
     let parsed = Format::Toml.load(&edited).unwrap();
     assert_eq!(
-        get_path(&parsed, "imap.host", &[])
+        get_path(&parsed, "imap.host", Addressing::INDEX_ONLY)
             .unwrap()
             .as_str()
             .unwrap(),
         "mail.example.com"
     );
     assert_eq!(
-        get_path(&parsed, "title", &[]).unwrap().as_str().unwrap(),
+        get_path(&parsed, "title", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "cfg"
     );
 }

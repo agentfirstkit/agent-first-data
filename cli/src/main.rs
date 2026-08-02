@@ -1,9 +1,9 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use agent_first_data::document::{
-    BareOverwrite, Document, DocumentError, DocumentFile, Format as DocumentFormat, PatternSegment,
-    Value as DocumentValue, ValueType, get_path, guard_bare_overwrite, join_path, parse_path,
-    parse_path_pattern, value_from_type,
+    Addressing, ArrayRule, BareOverwrite, Document, DocumentError, DocumentFile,
+    Format as DocumentFormat, MatchKind, PatternSegment, Value as DocumentValue, ValueType,
+    get_path, guard_bare_overwrite, join_path, parse_path, parse_path_pattern, value_from_type,
 };
 use agent_first_data::{
     ArgSpec, CliOutcome, CliSpec, Combination, CommandSpec, ErrorBuilder, Event, OutputFormat,
@@ -177,7 +177,40 @@ fn positional(id: &str, index: usize, value_name: &str, about: &str) -> ArgSpec 
     ArgSpec::positional(id, index, value_name).about(about)
 }
 
+/// Every format a document can be *read* as.
 fn input_format_arg() -> ArgSpec {
+    ArgSpec::option_enum(
+        "--input-format",
+        [
+            "json",
+            "toml",
+            "yaml",
+            "yml",
+            "dotenv",
+            "env",
+            "ini",
+            "toml-frontmatter",
+            "yaml-frontmatter",
+            "markdown",
+        ],
+    )
+    .value_name("FORMAT")
+    .about("Document format override")
+}
+
+/// The same, minus `markdown`: the formats whose value tree the document's
+/// author actually wrote.
+///
+/// Markdown's tree is one afdata synthesizes — `type`, `text`, `level`,
+/// `blocks` are afdata's field names over prose, not the author's data — and
+/// two kinds of verb depend on that not being so. A mutating verb has nothing
+/// to write back through and answers `document_unsupported_operation`; `lint`
+/// judges field names against the naming convention and would be judging
+/// afdata's own. Offering the value anyway makes `--help` and `docs/cli.md`
+/// advertise a combination that cannot mean anything — an argv grammar that
+/// accepts what the runtime always refuses is a worse answer than refusing it
+/// at parse time.
+fn authored_input_format_arg() -> ArgSpec {
     ArgSpec::option_enum(
         "--input-format",
         [
@@ -194,6 +227,17 @@ fn input_format_arg() -> ArgSpec {
     )
     .value_name("FORMAT")
     .about("Document format override")
+}
+
+/// `--slug-field` for a *read* command: it declares what a non-numeric path
+/// segment means, so `identities.me.email` can name an element by its
+/// `identity` instead of by a position that moves when the list is edited.
+/// Without it such a segment is an error — afdata will not pick a field to
+/// match on. (Markdown needs none: its value is a tree afdata built, so the
+/// format states its own rule.)
+fn read_slug_field_arg() -> ArgSpec {
+    ArgSpec::option("--slug-field", "FIELD")
+        .about("Field naming each element of an array on the path")
 }
 
 fn secret_name_arg() -> ArgSpec {
@@ -225,7 +269,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                     "INPUT",
                     "Input file, or - for stdin",
                 ))
-                .arg(input_format_arg())
+                .arg(authored_input_format_arg())
                 .arg(
                     ArgSpec::option_enum("--min-severity", ["warning", "error"])
                         .value_name("SEVERITY")
@@ -353,12 +397,22 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                 ))
                 .arg(positional("key", 1, "KEY", "Optional dot-path"))
                 .arg(input_format_arg())
+                .arg(read_slug_field_arg())
                 .arg(secret_name_arg())
                 .combination(
-                    Combination::new("get")
+                    Combination::new("get-document")
                         .action("get")
+                        .about("Read the entire document")
                         .required(["file"])
-                        .optional(["key", "input_format", "secret_name"])
+                        .optional(["input_format", "secret_name"])
+                        .output(protocol.clone()),
+                )
+                .combination(
+                    Combination::new("get-value")
+                        .action("get")
+                        .about("Read one value at KEY")
+                        .required(["file", "key"])
+                        .optional(["input_format", "slug_field", "secret_name"])
                         .output(protocol.clone()),
                 ),
         )
@@ -375,12 +429,19 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                 .arg(ArgSpec::flag("--reveal-secret").about("Allow a secret-named leaf"))
                 .arg(ArgSpec::option("--default", "VALUE").about("Fallback for missing or null"))
                 .arg(input_format_arg())
+                .arg(read_slug_field_arg())
                 .arg(secret_name_arg())
                 .combination(
                     Combination::new("value")
                         .action("value")
                         .required(["file", "key"])
-                        .optional(["reveal_secret", "default", "input_format", "secret_name"])
+                        .optional([
+                            "reveal_secret",
+                            "default",
+                            "input_format",
+                            "slug_field",
+                            "secret_name",
+                        ])
                         .output(raw.clone()),
                 ),
         )
@@ -401,12 +462,19 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                 .arg(ArgSpec::flag("--reveal-secret").about("Allow a secret-named leaf"))
                 .arg(ArgSpec::option("--default", "VALUE").about("Fallback for missing or null"))
                 .arg(input_format_arg())
+                .arg(read_slug_field_arg())
                 .arg(secret_name_arg())
                 .combination(
                     Combination::new("values")
                         .action("values")
                         .required(["file", "key"])
-                        .optional(["reveal_secret", "default", "input_format", "secret_name"])
+                        .optional([
+                            "reveal_secret",
+                            "default",
+                            "input_format",
+                            "slug_field",
+                            "secret_name",
+                        ])
                         .output(raw.clone()),
                 ),
         )
@@ -441,14 +509,15 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                     ArgSpec::option("--secret-from", "SOURCE")
                         .about("Read a secret string from stdin, prompt, fd:N, or env:VAR"),
                 )
-                .arg(input_format_arg())
+                .arg(authored_input_format_arg())
+                .arg(read_slug_field_arg())
                 .combination(
                     Combination::new("set-value")
                         .action("set")
                         .about("Set one typed scalar or JSON value")
                         .fixed_one_of("value_type", ["string", "number", "bool", "json"])
                         .required(["file", "key", "value"])
-                        .optional(["input_format"])
+                        .optional(["input_format", "slug_field"])
                         .output(protocol.clone()),
                 )
                 .combination(
@@ -457,7 +526,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .about("Set the key to null; takes no VALUE")
                         .fixed("value_type", "null")
                         .required(["file", "key"])
-                        .optional(["input_format"])
+                        .optional(["input_format", "slug_field"])
                         .output(protocol.clone()),
                 )
                 .combination(
@@ -465,7 +534,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .action("set")
                         .about("Set the key from a secret source, never from argv")
                         .required(["file", "key", "secret_from"])
-                        .optional(["input_format"])
+                        .optional(["input_format", "slug_field"])
                         .output(protocol.clone()),
                 ),
         )
@@ -474,12 +543,13 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                 .about("Remove one document entry")
                 .arg(positional("file", 0, "FILE", "Document file to mutate"))
                 .arg(positional("key", 1, "KEY", "Dot-path to remove"))
-                .arg(input_format_arg())
+                .arg(authored_input_format_arg())
+                .arg(read_slug_field_arg())
                 .combination(
                     Combination::new("unset")
                         .action("unset")
                         .required(["file", "key"])
-                        .optional(["input_format"])
+                        .optional(["input_format", "slug_field"])
                         .output(protocol.clone()),
                 ),
         )
@@ -498,7 +568,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                     ArgSpec::option("--slug-field", "FIELD")
                         .about("Field that identifies each list element"),
                 )
-                .arg(input_format_arg())
+                .arg(authored_input_format_arg())
                 .combination(
                     Combination::new("add")
                         .action("add")
@@ -517,7 +587,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                     ArgSpec::option("--slug-field", "FIELD")
                         .about("Field that identifies each list element"),
                 )
-                .arg(input_format_arg())
+                .arg(authored_input_format_arg())
                 .combination(
                     Combination::new("remove")
                         .action("remove")
@@ -586,13 +656,23 @@ fn enumerate_command(name: &str, action: &str, about: &str, output: &OutputSpec)
         ))
         .arg(positional("key", 1, "KEY", "Optional container dot-path"))
         .arg(input_format_arg())
+        .arg(read_slug_field_arg())
         .arg(ArgSpec::flag("--missing-ok").about("Succeed with no output when KEY is absent"))
         .arg(ArgSpec::flag("--null").about("Use NUL separators"))
         .combination(
-            Combination::new(name)
+            Combination::new(format!("{name}-root"))
                 .action(action)
+                .about("List the document root's immediate children")
                 .required(["file"])
-                .optional(["key", "input_format", "missing_ok", "null"])
+                .optional(["input_format", "null"])
+                .output(output.clone()),
+        )
+        .combination(
+            Combination::new(format!("{name}-container"))
+                .action(action)
+                .about("List one addressed container's immediate children")
+                .required(["file", "key"])
+                .optional(["input_format", "slug_field", "missing_ok", "null"])
                 .output(output.clone()),
         )
 }
@@ -986,12 +1066,14 @@ fn dispatch_get(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
     let file = invocation_string(invocation, "file");
     let key = invocation_optional_string(invocation, "key");
     let input_format = invocation_optional_string(invocation, "input_format");
+    let slug_field = invocation_optional_string(invocation, "slug_field");
     let secret_names = invocation_strings(invocation, "secret_name");
     run_get(
         Path::new(&file),
         key.as_deref(),
         &DocumentContext {
             input_format: input_format.as_deref(),
+            slug_field: slug_field.as_deref(),
             secret_names: &secret_names,
             format,
         },
@@ -1003,9 +1085,11 @@ fn dispatch_values(invocation: &ResolvedInvocation, format: OutputFormat) -> Exi
     let keys = invocation_strings(invocation, "key");
     let default = invocation_optional_string(invocation, "default");
     let input_format = invocation_optional_string(invocation, "input_format");
+    let slug_field = invocation_optional_string(invocation, "slug_field");
     let secret_names = invocation_strings(invocation, "secret_name");
     let ctx = DocumentContext {
         input_format: input_format.as_deref(),
+        slug_field: slug_field.as_deref(),
         secret_names: &secret_names,
         format,
     };
@@ -1026,6 +1110,7 @@ fn dispatch_value(invocation: &ResolvedInvocation, format: OutputFormat) -> Exit
     let key = invocation_string(invocation, "key");
     let default = invocation_optional_string(invocation, "default");
     let input_format = invocation_optional_string(invocation, "input_format");
+    let slug_field = invocation_optional_string(invocation, "slug_field");
     let secret_names = invocation_strings(invocation, "secret_name");
     run_value_get(
         Path::new(&file),
@@ -1034,6 +1119,7 @@ fn dispatch_value(invocation: &ResolvedInvocation, format: OutputFormat) -> Exit
         default.as_deref(),
         &DocumentContext {
             input_format: input_format.as_deref(),
+            slug_field: slug_field.as_deref(),
             secret_names: &secret_names,
             format,
         },
@@ -1044,13 +1130,18 @@ fn dispatch_enumerate(invocation: &ResolvedInvocation, format: OutputFormat) -> 
     let file = invocation_string(invocation, "file");
     let key = invocation_optional_string(invocation, "key");
     let input_format = invocation_optional_string(invocation, "input_format");
+    let slug_field = invocation_optional_string(invocation, "slug_field");
     run_enumerate(
         Path::new(&file),
         key.as_deref(),
-        input_format.as_deref(),
+        &DocumentContext {
+            input_format: input_format.as_deref(),
+            slug_field: slug_field.as_deref(),
+            secret_names: &[],
+            format,
+        },
         invocation_flag(invocation, "missing_ok"),
         invocation_flag(invocation, "null"),
-        format,
         if invocation.action_id() == "paths" {
             EnumerateMode::Paths
         } else {
@@ -1069,6 +1160,7 @@ fn dispatch_set(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
         .flatten();
     let secret_from = invocation_optional_string(invocation, "secret_from");
     let input_format = invocation_optional_string(invocation, "input_format");
+    let slug_field = invocation_optional_string(invocation, "slug_field");
     run_set(
         Path::new(&file),
         &key,
@@ -1077,6 +1169,7 @@ fn dispatch_set(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
         secret_from.as_deref(),
         &DocumentContext {
             input_format: input_format.as_deref(),
+            slug_field: slug_field.as_deref(),
             secret_names: &[],
             format,
         },
@@ -1087,11 +1180,13 @@ fn dispatch_unset(invocation: &ResolvedInvocation, format: OutputFormat) -> Exit
     let file = invocation_string(invocation, "file");
     let key = invocation_string(invocation, "key");
     let input_format = invocation_optional_string(invocation, "input_format");
+    let slug_field = invocation_optional_string(invocation, "slug_field");
     run_unset(
         Path::new(&file),
         &key,
         &DocumentContext {
             input_format: input_format.as_deref(),
+            slug_field: slug_field.as_deref(),
             secret_names: &[],
             format,
         },
@@ -1113,6 +1208,9 @@ fn dispatch_add(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
         &fields,
         &DocumentContext {
             input_format: input_format.as_deref(),
+            // `add`/`remove` take their own `--slug-field` as a positional
+            // concern of the edit; this context drives output only.
+            slug_field: None,
             secret_names: &[],
             format,
         },
@@ -1132,6 +1230,9 @@ fn dispatch_remove(invocation: &ResolvedInvocation, format: OutputFormat) -> Exi
         &slug_field,
         &DocumentContext {
             input_format: input_format.as_deref(),
+            // `add`/`remove` take their own `--slug-field` as a positional
+            // concern of the edit; this context drives output only.
+            slug_field: None,
             secret_names: &[],
             format,
         },
@@ -1927,8 +2028,29 @@ fn write_text_exit_to(text: &str, code: u8, stream: Stream) -> ExitCode {
 /// list, and the negotiated `--output` rendering format.
 struct DocumentContext<'a> {
     input_format: Option<&'a str>,
+    /// `--slug-field` on a read command: the element field a non-numeric path
+    /// segment is matched against. See [`read_slug_field_arg`].
+    slug_field: Option<&'a str>,
     secret_names: &'a [String],
     format: OutputFormat,
+}
+
+impl DocumentContext<'_> {
+    /// How a non-numeric segment resolves for this invocation.
+    ///
+    /// An explicit `--slug-field` wins over the format's own rule: the caller
+    /// naming a field is the more specific statement, and it is the only way
+    /// to address a JSON/TOML/YAML array by content at all.
+    fn addressing(&self, format: DocumentFormat) -> Addressing<'_> {
+        let rule = match self.slug_field {
+            Some(field) => Some(ArrayRule {
+                field,
+                match_kind: MatchKind::Exact,
+            }),
+            None => format.array_rule(),
+        };
+        Addressing::INDEX_ONLY.with_array_rule(rule)
+    }
 }
 
 /// A document command failure, classified per R2: `Usage` is a CLI-shape
@@ -1963,13 +2085,27 @@ impl From<DocumentError> for CliDocError {
     }
 }
 
-/// Whether `err` is in the `document_path_not_found` bucket — the "the
-/// address doesn't exist" family that `value --default` and
-/// `paths`/`keys --missing-ok` are allowed to swallow. Reuses
-/// [`DocumentError::code`] directly so the exemption is always exactly the
-/// bucket agents see in `error.code`, never a separately-maintained variant list.
-fn is_path_not_found(err: &CliDocError) -> bool {
-    matches!(err, CliDocError::Document(doc_err) if doc_err.code() == "document_path_not_found")
+/// Whether `err` means "nothing is at that address" — the family `value
+/// --default` and `paths`/`keys --missing-ok` are allowed to swallow.
+///
+/// Two codes qualify. `document_path_not_found` is the structural miss (no such
+/// key, index past the end). `document_slug_not_found` is the same fact reached
+/// by name rather than by position — no element matched — and a caller that
+/// supplied a fallback for "the README has no synopsis" means it just as much
+/// when the address was a word as when it was an index.
+///
+/// `document_ambiguous_match` deliberately does **not**: several elements
+/// matched, so the document is not missing anything — the address is. Falling
+/// back there would answer a question the caller never asked.
+fn is_addressing_miss(err: &CliDocError) -> bool {
+    matches!(
+        err,
+        CliDocError::Document(doc_err)
+            if matches!(
+                doc_err.code(),
+                "document_path_not_found" | "document_slug_not_found"
+            )
+    )
 }
 
 /// Render `err` into `(event, exit_code)`.
@@ -2056,9 +2192,10 @@ fn parse_document_format(name: &str) -> Result<DocumentFormat, String> {
         "ini" => Ok(DocumentFormat::Ini),
         "toml-frontmatter" => Ok(DocumentFormat::TomlFrontmatter),
         "yaml-frontmatter" => Ok(DocumentFormat::YamlFrontmatter),
+        "markdown" => Ok(DocumentFormat::Markdown),
         other => Err(format!(
             "unsupported --input-format `{other}`; expected json, toml, yaml, yml, dotenv, env, ini, \
-             toml-frontmatter, or yaml-frontmatter"
+             toml-frontmatter, yaml-frontmatter, or markdown"
         )),
     }
 }
@@ -2185,7 +2322,7 @@ fn compute_get(
     let json_value: Value = match key {
         None => Value::try_from(root)?,
         Some(key) => {
-            let target = get_path(&root, key, &[])?;
+            let target = get_path(&root, key, ctx.addressing(doc_format))?;
             let is_secret = document_path_is_secret(key, ctx.secret_names)?;
             payload.insert("key".to_string(), json!(key));
             // A generic whole-document redact walk (applied via the
@@ -2229,8 +2366,15 @@ fn compute_value(
     ctx: &DocumentContext<'_>,
 ) -> Result<Vec<u8>, CliDocError> {
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
-    let (root, _doc_format) = read_document_input(file, input_format)?;
-    scalar_bytes_at(&root, key, reveal_secret, default, ctx)
+    let (root, doc_format) = read_document_input(file, input_format)?;
+    scalar_bytes_at(
+        &root,
+        key,
+        reveal_secret,
+        default,
+        ctx.addressing(doc_format),
+        ctx,
+    )
 }
 
 /// Every path in `keys`, one line each, from a single parse of the document.
@@ -2252,14 +2396,15 @@ fn compute_values(
     ctx: &DocumentContext<'_>,
 ) -> Result<Vec<u8>, CliDocError> {
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
-    let (root, _doc_format) = read_document_input(file, input_format)?;
+    let (root, doc_format) = read_document_input(file, input_format)?;
+    let addressing = ctx.addressing(doc_format);
     let mut expanded = Vec::new();
     for key in keys {
-        expanded.extend(expand_pattern(&root, key)?);
+        expanded.extend(expand_pattern(&root, key, addressing)?);
     }
     let mut out = Vec::new();
     for key in &expanded {
-        let bytes = scalar_bytes_at(&root, key, reveal_secret, default, ctx)?;
+        let bytes = scalar_bytes_at(&root, key, reveal_secret, default, addressing, ctx)?;
         if bytes.contains(&b'\n') {
             return Err(CliDocError::runtime(
                 "document_multiline_value",
@@ -2280,7 +2425,11 @@ fn compute_values(
 /// wildcard expands to every child of the container at that point, in document
 /// order, and the addresses it produces are ordinary paths — they read back
 /// through `value`, and a literal star key inside one is escaped as `\*`.
-fn expand_pattern(root: &DocumentValue, pattern: &str) -> Result<Vec<String>, CliDocError> {
+fn expand_pattern(
+    root: &DocumentValue,
+    pattern: &str,
+    addressing: Addressing<'_>,
+) -> Result<Vec<String>, CliDocError> {
     let segments = parse_path_pattern(pattern)?;
     if !segments
         .iter()
@@ -2305,7 +2454,7 @@ fn expand_pattern(root: &DocumentValue, pattern: &str) -> Result<Vec<String>, Cl
                     let target = if prefix.is_empty() {
                         root
                     } else {
-                        &get_path(root, &here, &[]).map_err(CliDocError::Document)?
+                        &get_path(root, &here, addressing).map_err(CliDocError::Document)?
                     };
                     let names: Vec<String> = match target {
                         DocumentValue::Object(map) => map.keys().cloned().collect(),
@@ -2343,6 +2492,7 @@ fn scalar_bytes_at(
     key: &str,
     reveal_secret: bool,
     default: Option<&str>,
+    addressing: Addressing<'_>,
     ctx: &DocumentContext<'_>,
 ) -> Result<Vec<u8>, CliDocError> {
     if !reveal_secret && document_path_is_secret(key, ctx.secret_names)? {
@@ -2351,11 +2501,11 @@ fn scalar_bytes_at(
             format!("path `{key}` names a secret; pass --reveal-secret"),
         ));
     }
-    let target = match get_path(root, key, &[]) {
+    let target = match get_path(root, key, addressing) {
         Ok(target) => target,
         Err(err) => {
             let err = CliDocError::Document(err);
-            if default.is_some() && is_path_not_found(&err) {
+            if default.is_some() && is_addressing_miss(&err) {
                 return Ok(default.unwrap_or_default().as_bytes().to_vec());
             }
             return Err(err);
@@ -2387,24 +2537,18 @@ enum EnumerateMode {
 /// §1: enumerate the immediate children of the container at `key` (the
 /// document's top level when `key` is omitted). Rejects a scalar target (the
 /// dual of `value` rejecting a container target). `--missing-ok` swallows
-/// only a `document_path_not_found`-coded failure into empty output + exit
-/// 0; every other error still fails, matching `value`'s stdout-stays-empty
-/// contract (R1).
+/// only a structural or named addressing miss into empty output + exit 0;
+/// ambiguity and every other error still fail, matching `value`'s
+/// stdout-stays-empty contract (R1).
 fn run_enumerate(
     file: &Path,
     key: Option<&str>,
-    input_format: Option<&str>,
+    ctx: &DocumentContext<'_>,
     missing_ok: bool,
     null_separated: bool,
-    format: OutputFormat,
     mode: EnumerateMode,
 ) -> ExitCode {
-    let ctx = DocumentContext {
-        input_format,
-        secret_names: &[],
-        format,
-    };
-    match compute_enumerate(file, key, &ctx, mode) {
+    match compute_enumerate(file, key, ctx, mode) {
         Ok(lines) => {
             let separator: u8 = if null_separated { 0 } else { b'\n' };
             let mut bytes = Vec::new();
@@ -2414,10 +2558,10 @@ fn run_enumerate(
             }
             write_raw_exit(&bytes)
         }
-        Err(err) if missing_ok && is_path_not_found(&err) => write_raw_exit(&[]),
+        Err(err) if missing_ok && is_addressing_miss(&err) => write_raw_exit(&[]),
         Err(err) => {
             let (event, code) = document_error_event(&err);
-            emit_document_event(event, &ctx, code, error_stream(output_to()))
+            emit_document_event(event, ctx, code, error_stream(output_to()))
         }
     }
 }
@@ -2429,13 +2573,13 @@ fn compute_enumerate(
     mode: EnumerateMode,
 ) -> Result<Vec<String>, CliDocError> {
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
-    let (root, _doc_format) = read_document_input(file, input_format)?;
+    let (root, doc_format) = read_document_input(file, input_format)?;
     let base_segments: Vec<String> = match key {
         Some(key) => parse_path(key)?,
         None => Vec::new(),
     };
     let target = match key {
-        Some(key) => get_path(&root, key, &[])?,
+        Some(key) => get_path(&root, key, ctx.addressing(doc_format))?,
         None => root,
     };
     let names: Vec<String> = match &target {
@@ -2535,7 +2679,7 @@ fn compute_set(
         // argument error, not a coercion decision. Only a brand-new key or an
         // existing string is unguarded. Containers are included: replacing an
         // array with a string used to exit 0 and discard every element.
-        let existing = get_path(doc.value(), key, &[]).ok();
+        let existing = get_path(doc.value(), key, ctx.addressing(doc.format())).ok();
         if let Err(overwrite) = guard_bare_overwrite(existing.as_ref()) {
             let verb = match overwrite {
                 BareOverwrite::Container(_) => "discard",
@@ -2555,7 +2699,8 @@ fn compute_set(
         DocumentValue::String(raw)
     };
 
-    doc.set(key, new_value)?;
+    let addressing = ctx.addressing(doc.format());
+    doc.set_addressed(key, new_value, addressing)?;
     doc.save()?;
     Ok(json!({
         "code": "document_set",
@@ -2666,7 +2811,8 @@ fn compute_unset(file: &Path, key: &str, ctx: &DocumentContext<'_>) -> Result<Va
     // `Document::unset` is idempotent, but the `afdata unset` CLI keeps its
     // strict contract: unsetting an absent key is a caught error, so scripts
     // can tell an actual removal from a no-op.
-    if !doc.unset(key)? {
+    let addressing = ctx.addressing(doc.format());
+    if !doc.unset_addressed(key, addressing)? {
         return Err(DocumentError::PathNotFound {
             path: key.to_string(),
         }

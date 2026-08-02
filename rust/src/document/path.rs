@@ -41,8 +41,7 @@ pub fn parse_path(path: &str) -> DocumentResult<Vec<String>> {
                     literal = true;
                 }
                 other => {
-                    return Err(DocumentError::ParseError {
-                        format: "path".to_string(),
+                    return Err(DocumentError::PathSyntax {
                         detail: format!("invalid escape `\\{other}`"),
                     });
                 }
@@ -63,8 +62,7 @@ pub fn parse_path(path: &str) -> DocumentResult<Vec<String>> {
         }
     }
     if escaped {
-        return Err(DocumentError::ParseError {
-            format: "path".to_string(),
+        return Err(DocumentError::PathSyntax {
             detail: "trailing path escape".to_string(),
         });
     }
@@ -77,8 +75,7 @@ pub fn parse_path(path: &str) -> DocumentResult<Vec<String>> {
     // another. The literal spelling is `\*`, which reaches this point as the
     // same string and must still be accepted.
     if wrote_bare_star {
-        return Err(DocumentError::ParseError {
-            format: "path".to_string(),
+        return Err(DocumentError::PathSyntax {
             detail: "a bare `*` segment is a pattern; write `\\*` for a literal star key, or use \
                      a command that expands patterns"
                 .to_string(),
@@ -134,8 +131,7 @@ pub fn parse_path_pattern(path: &str) -> DocumentResult<Vec<PatternSegment>> {
                     literal = true;
                 }
                 other => {
-                    return Err(DocumentError::ParseError {
-                        format: "path".to_string(),
+                    return Err(DocumentError::PathSyntax {
                         detail: format!("invalid escape `\\{other}`"),
                     });
                 }
@@ -156,8 +152,7 @@ pub fn parse_path_pattern(path: &str) -> DocumentResult<Vec<PatternSegment>> {
         }
     }
     if escaped {
-        return Err(DocumentError::ParseError {
-            format: "path".to_string(),
+        return Err(DocumentError::PathSyntax {
             detail: "trailing path escape".to_string(),
         });
     }

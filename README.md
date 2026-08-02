@@ -1,6 +1,6 @@
 # Agent-First Data
 
-A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.
+A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.
 
 > **Ask your agent:** "Apply the Agent-First Data convention across my project's fields, config, and logs."
 
@@ -110,8 +110,41 @@ whole subtree, so a `_secret` node stays redacted however you address it, and
 revealing it is an auditable opt-in. Errors carry stable codes and never quote
 the document, because an error event is the thing an agent logs.
 
-Flags, error codes, and exit codes are in [`docs/cli.md`](docs/cli.md); the
-Rust library is `agent_first_data::document` (`Document` / `DocumentFile`).
+A Markdown file has three valid readings, none of them guessed at: name
+`toml-frontmatter` or `yaml-frontmatter` to edit its metadata block with the body
+frozen, or `markdown` to read the body as a tree of heading sections. The last is
+read-only, and reports structure rather than what a project means by it — whether
+the H1 is the title is a layout convention, and stays with the caller that holds
+it.
+
+```bash
+afdata value README.md h1.0.paragraph.0.text --input-format markdown  # the synopsis
+afdata value README.md h1.0.h2.suffixes.text --input-format markdown  # a section by name
+afdata value README.md h1.0.paragraph.0.source_end_line \
+  --input-format markdown                                             # source cut point
+```
+
+An array element can be addressed by content rather than position, which is what
+makes an address survive an edit above it: a Markdown section matches a word of
+its heading, and any other document declares the field to match with
+`--slug-field` (`identities.me.email --slug-field identity`). Matching several
+elements is an error reporting their indices, never their document text and
+never the first one.
+
+Every Markdown block reports 1-based inclusive `source_start_line` and
+`source_end_line` — the lines `sed`, `awk`, `head`, and `git diff` count, so a
+range can be handed straight to them without Markdown reserialization or UTF-8
+byte indexing. A section's range covers the whole section; it additionally
+reports `heading_end_line`, where its own heading ends, which is what tells a
+setext heading's two lines from the body below. A recognised frontmatter block
+reports `type: "frontmatter"` and `format: "toml"|"yaml"` with empty `text` —
+read its fields through the matching frontmatter mode, where normal secret
+redaction applies.
+
+Flags and exit codes are in [`docs/cli.md`](docs/cli.md) and `afdata <command>
+--help`; the error codes and recovery rules are in the
+[skill reference](skills/agent-first-data/references/documents.md). The Rust
+library is `agent_first_data::document` (`Document` / `DocumentFile`).
 
 ## Token-efficient CLI discovery
 
@@ -238,7 +271,7 @@ afdata skill validate skills/agent-first-data
 - [CLI spec v1](spec/cli-spec-v1.schema.json) and [help v2](spec/cli-help-v2.schema.json) — the closed invocation registry and token-efficient help contracts
 - [Protocol v1](docs/protocol-v1.md) and [transport mappings](docs/transport-mappings.md) — the event envelope across CLI, HTTP, MCP, and SSE
 - [Bash authoring kit](docs/bash.md) — arguments, config reads, events, and transparent child processes
-- [Agent Skill](skills/agent-first-data/SKILL.md) — for AI-assisted development
+- [Agent Skill](skills/agent-first-data/SKILL.md) — for AI-assisted development, with the [document reference](skills/agent-first-data/references/documents.md) covering addressing, error codes, and recovery
 - Per-language API reference: [Rust](rust) · [Go](go) · [Python](python) · [TypeScript](typescript)
 
 ## License

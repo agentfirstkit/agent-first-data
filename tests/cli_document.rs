@@ -21,6 +21,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
+#[cfg(feature = "yaml")]
+use agent_first_data::document::Format;
+
 fn afdata() -> Command {
     Command::new(env!("CARGO_BIN_EXE_afdata"))
 }
@@ -887,9 +890,13 @@ fn test_add_field_value_is_always_string() {
         "count=007",
     ]);
     assert!(added.status.success(), "{:?}", added);
-    // Read-side keyed-list addressing is out of scope (R8); index by
-    // position instead.
-    let response = json_stdout(&run(&["get", &config_path, "items.0.count"]));
+    let response = json_stdout(&run(&[
+        "get",
+        &config_path,
+        "items.a.count",
+        "--slug-field",
+        "id",
+    ]));
     assert_eq!(response["result"]["value"], "007");
 }
 
@@ -1402,6 +1409,147 @@ fn test_json_keyed_collection_edits_preserve_document() {
 }
 
 #[test]
+fn test_json_root_keyed_collection_edits() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = write_temp(&temp_dir, "root.json", "[]\n");
+
+    let added = run(&["add", &config_path, "", "b", "--slug-field", "id", "name=B"]);
+    assert!(added.status.success(), "{added:?}");
+    let after_add: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(after_add.as_array().unwrap().len(), 1);
+    assert_eq!(after_add[0]["id"], "b");
+    assert_eq!(after_add[0]["name"], "B");
+
+    let removed = run(&["remove", &config_path, "", "b", "--slug-field", "id"]);
+    assert!(removed.status.success(), "{removed:?}");
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), "[]\n");
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn test_yaml_root_keyed_collection_edits() {
+    let temp_dir = TempDir::new().unwrap();
+    let source = "# keep\n- id: a\n  name: 'A'\n";
+    let config_path = write_temp(&temp_dir, "root.yaml", source);
+
+    let added = run(&["add", &config_path, "", "b", "--slug-field", "id", "name=B"]);
+    assert!(added.status.success(), "{added:?}");
+    let after_add = std::fs::read_to_string(&config_path).unwrap();
+    let parsed = Format::Yaml.load(&after_add).unwrap();
+    assert_eq!(parsed.as_array().unwrap().len(), 2);
+    assert!(after_add.contains("# keep"));
+    assert!(after_add.contains("name: 'A'"));
+
+    let removed = run(&["remove", &config_path, "", "b", "--slug-field", "id"]);
+    assert!(removed.status.success(), "{removed:?}");
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), source);
+}
+
+#[test]
+fn test_keyed_slug_with_a_dot_uses_the_normal_path_escape() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = write_temp(&temp_dir, "dotted-slug.json", "{\"items\":[]}\n");
+
+    let added = run(&[
+        "add",
+        &config_path,
+        "items",
+        "case.add",
+        "--slug-field",
+        "id",
+        "name=value",
+    ]);
+    assert!(added.status.success(), "{added:?}");
+
+    let read = run(&[
+        "value",
+        &config_path,
+        r"items.case\.add.name",
+        "--slug-field",
+        "id",
+    ]);
+    assert!(read.status.success(), "{read:?}");
+    assert_eq!(read.stdout, b"value");
+
+    let removed = run(&[
+        "remove",
+        &config_path,
+        "items",
+        "case.add",
+        "--slug-field",
+        "id",
+    ]);
+    assert!(removed.status.success(), "{removed:?}");
+    assert_eq!(
+        std::fs::read_to_string(config_path).unwrap(),
+        "{\"items\":[]}\n"
+    );
+}
+
+#[test]
+fn test_remove_refuses_duplicate_slug_without_changing_source() {
+    let temp_dir = TempDir::new().unwrap();
+    let cases = [
+        (
+            "duplicates.json",
+            "{\n  \"items\": [\n    {\"id\": \"same\", \"secret\": \"first\"},\n    {\"id\": \"same\", \"secret\": \"second\"}\n  ]\n}\n",
+        ),
+        #[cfg(feature = "yaml")]
+        (
+            "duplicates.yaml",
+            "items:\n  - id: same\n    secret: first\n  - id: same\n    secret: second\n",
+        ),
+    ];
+
+    for (name, source) in cases {
+        let config_path = write_temp(&temp_dir, name, source);
+        let removed = run(&[
+            "remove",
+            &config_path,
+            "items",
+            "same",
+            "--slug-field",
+            "id",
+        ]);
+
+        assert_eq!(removed.status.code(), Some(1), "{name}: {removed:?}");
+        let event = json_stderr(&removed);
+        assert_eq!(event["error"]["code"], "document_ambiguous_match");
+        assert_eq!(
+            event["error"]["message"],
+            "segment `same` matches 2 elements of `items` at indices 0, 1"
+        );
+        assert!(!String::from_utf8_lossy(&removed.stderr).contains("first"));
+        assert!(!String::from_utf8_lossy(&removed.stderr).contains("second"));
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), source);
+    }
+}
+
+#[test]
+fn test_keyed_remove_reports_a_non_array_as_a_type_error() {
+    let temp_dir = TempDir::new().unwrap();
+    let source = "{\"items\":\"not an array\"}\n";
+    let config_path = write_temp(&temp_dir, "scalar-items.json", source);
+
+    let removed = run(&[
+        "remove",
+        &config_path,
+        "items",
+        "same",
+        "--slug-field",
+        "id",
+    ]);
+
+    assert_eq!(removed.status.code(), Some(1), "{removed:?}");
+    assert_eq!(
+        json_stderr(&removed)["error"]["code"],
+        "document_type_mismatch"
+    );
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), source);
+}
+
+#[test]
 fn test_keyed_edits_on_nested_dotted_prefix() {
     let temp_dir = TempDir::new().unwrap();
     let source = "{\n  \"cfg\": {\n    \"users\": [\n      {\"uid\": \"a\", \"role\": \"admin\"}\n    ]\n  }\n}\n";
@@ -1910,6 +2058,431 @@ fn test_frontmatter_secret_field_still_redacts_on_get() {
     assert_eq!(json_stdout(&got)["result"]["value"], "***");
 }
 
+#[cfg(feature = "markdown")]
+#[test]
+fn test_markdown_frontmatter_block_never_copies_metadata_text() {
+    let output = run_with_stdin(
+        &[
+            "get",
+            "-",
+            "preamble.blocks.0",
+            "--input-format",
+            "markdown",
+        ],
+        b"---\ntoken_secret: sk-live-TOPSECRET\n---\n\n# T\n",
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        json_stdout(&output)["result"]["value"]["type"],
+        "frontmatter"
+    );
+    assert_eq!(json_stdout(&output)["result"]["value"]["format"], "yaml");
+    assert_eq!(json_stdout(&output)["result"]["value"]["text"], "");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("sk-live-TOPSECRET"));
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn test_markdown_reads_a_readme_as_sections() {
+    let temp_dir = TempDir::new().unwrap();
+    // The shape a real README opens with, including the badge line that makes
+    // "first block wins" publish the wrong name.
+    let readme = write_temp(
+        &temp_dir,
+        "README.md",
+        "[![CI](a.svg)](b)\n\n# Agent First Data\n\nA naming **convention** for\nagents.\n\n\
+         > **Ask your agent:** \"Lint this config.\"\n\n## A quick look\n\nInside.\n",
+    );
+
+    // The badge is preamble, so it cannot shift the title.
+    let preamble = run(&[
+        "get",
+        &readme,
+        "preamble.blocks.0",
+        "--input-format",
+        "markdown",
+    ]);
+    assert!(preamble.status.success(), "{preamble:?}");
+    assert_eq!(json_stdout(&preamble)["result"]["value"]["text"], "CI");
+
+    let title = run(&["value", &readme, "h1.0.text", "--input-format", "markdown"]);
+    assert!(title.status.success(), "{title:?}");
+    assert_eq!(String::from_utf8_lossy(&title.stdout), "Agent First Data");
+
+    // Wrapped lines join and inline emphasis is gone — this exact string is
+    // what reaches a package registry's description field.
+    let lead = run(&[
+        "value",
+        &readme,
+        "h1.0.paragraph.0.text",
+        "--input-format",
+        "markdown",
+    ]);
+    assert_eq!(
+        String::from_utf8_lossy(&lead.stdout),
+        "A naming convention for agents."
+    );
+
+    // Addressed by content, because this blockquote sits at no fixed index.
+    let prompt = run(&[
+        "value",
+        &readme,
+        "h1.0.blockquote.Ask your agent.text",
+        "--input-format",
+        "markdown",
+    ]);
+    assert!(prompt.status.success(), "{prompt:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&prompt.stdout),
+        "Ask your agent: \"Lint this config.\""
+    );
+
+    // A child section, by a word of its heading.
+    let section = run(&[
+        "value",
+        &readme,
+        "h1.0.h2.quick.paragraph.0.text",
+        "--input-format",
+        "markdown",
+    ]);
+    assert_eq!(String::from_utf8_lossy(&section.stdout), "Inside.");
+
+    let got = run(&["get", &readme, "h1.0.h2.0", "--input-format", "markdown"]);
+    assert_eq!(json_stdout(&got)["result"]["format"], "markdown");
+    assert_eq!(json_stdout(&got)["result"]["value"]["text"], "A quick look");
+    assert_eq!(
+        json_stdout(&got)["result"]["value"]["source_start_line"],
+        10
+    );
+    assert_eq!(json_stdout(&got)["result"]["value"]["heading_end_line"], 10);
+
+    let lead_end = run(&[
+        "value",
+        &readme,
+        "h1.0.paragraph.0.source_end_line",
+        "--input-format",
+        "markdown",
+    ]);
+    assert_eq!(String::from_utf8_lossy(&lead_end.stdout), "6");
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn test_markdown_content_addressing_refuses_to_guess() {
+    let temp_dir = TempDir::new().unwrap();
+    let readme = write_temp(
+        &temp_dir,
+        "README.md",
+        "# T\n\n## Quick look\n\na.\n\n## Another look\n\nb.\n",
+    );
+
+    let ambiguous = run(&[
+        "value",
+        &readme,
+        "h1.0.h2.look.text",
+        "--input-format",
+        "markdown",
+    ]);
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert_eq!(
+        json_stderr(&ambiguous)["error"]["code"],
+        "document_ambiguous_match"
+    );
+    let error_event = json_stderr(&ambiguous);
+    let error_message = error_event["error"]["message"].as_str().unwrap_or_default();
+    assert!(error_message.contains("indices 0, 1"), "{error_message}");
+    assert!(!error_message.contains("Quick look"), "{error_message}");
+    assert!(!error_message.contains("Another look"), "{error_message}");
+    assert!(
+        ambiguous.stdout.is_empty(),
+        "value writes nothing on failure"
+    );
+
+    let missing = run(&[
+        "value",
+        &readme,
+        "h1.0.h2.nowhere.text",
+        "--input-format",
+        "markdown",
+    ]);
+    assert_eq!(
+        json_stderr(&missing)["error"]["code"],
+        "document_slug_not_found"
+    );
+
+    // A word that separates them resolves.
+    let resolved = run(&[
+        "value",
+        &readme,
+        "h1.0.h2.Another.text",
+        "--input-format",
+        "markdown",
+    ]);
+    assert_eq!(String::from_utf8_lossy(&resolved.stdout), "Another look");
+}
+
+#[test]
+fn test_content_addressing_is_markdown_only() {
+    // JSON hands back whatever the file said; nothing in it tells afdata which
+    // field of a `deps` element `serde` is meant to match, so the segment stays
+    // an error rather than becoming a scan.
+    let output = run_with_stdin(
+        &["value", "-", "deps.serde", "--input-format", "json"],
+        br#"{"deps":[{"name":"serde"}]}"#,
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "document_path_not_found"
+    );
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn test_markdown_is_read_only_and_never_sniffed() {
+    let temp_dir = TempDir::new().unwrap();
+    let readme = write_temp(&temp_dir, "README.md", "# Title\n\nThe lead.\n");
+
+    // Never auto-detected: `.md` has valid readings as both blocks and
+    // frontmatter, and the caller picks one.
+    let sniffed = run(&["value", &readme, "h1.0.text"]);
+    assert!(!sniffed.status.success(), "{sniffed:?}");
+    assert_eq!(
+        json_stderr(&sniffed)["error"]["code"],
+        "document_format_unknown"
+    );
+
+    // Every write verb is refused, and the file is untouched.
+    for args in [
+        vec!["set", &readme, "h1.0.text", "New"],
+        vec!["unset", &readme, "h1.0"],
+        vec![
+            "add",
+            &readme,
+            "preamble.blocks",
+            "x",
+            "--slug-field",
+            "type",
+        ],
+        vec![
+            "remove",
+            &readme,
+            "preamble.blocks",
+            "x",
+            "--slug-field",
+            "type",
+        ],
+    ] {
+        let mut argv = args.clone();
+        argv.extend(["--input-format", "markdown"]);
+        let refused = run(&argv);
+        assert!(!refused.status.success(), "{args:?} must fail: {refused:?}");
+        // Refused while parsing argv, not after opening the file: a mutating
+        // verb does not accept `markdown` as an `--input-format` value at all,
+        // so `--help` and docs/cli.md cannot advertise a combination that only
+        // ever fails. Exit 2 (usage), not 1 (runtime).
+        assert_eq!(
+            json_stderr(&refused)["error"]["code"],
+            "cli_invalid_argument_value",
+            "{args:?}"
+        );
+        assert_eq!(refused.status.code(), Some(2), "{args:?}");
+    }
+
+    // The refusal lands before any external secret source is read. This missing
+    // environment variable would produce a different error if afdata reached
+    // for it first.
+    let secret_refused = run(&[
+        "set",
+        &readme,
+        "h1.0.text",
+        "--secret-from",
+        "env:AFDATA_TEST_MARKDOWN_READ_ONLY_MISSING_7F32A5",
+        "--input-format",
+        "markdown",
+    ]);
+    assert!(!secret_refused.status.success(), "{secret_refused:?}");
+    assert_eq!(
+        json_stderr(&secret_refused)["error"]["code"],
+        "cli_invalid_argument_value"
+    );
+
+    // `lint` judges field names against the naming convention, and Markdown's
+    // are afdata's own (`type`, `text`, `level`), so it is refused for the same
+    // reason rather than always answering "no findings".
+    let linted = run(&["lint", &readme, "--input-format", "markdown"]);
+    assert!(!linted.status.success(), "{linted:?}");
+    assert_eq!(
+        json_stderr(&linted)["error"]["code"],
+        "cli_invalid_argument_value"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&readme).unwrap(),
+        "# Title\n\nThe lead.\n"
+    );
+}
+
+/// Every address `paths` emits must be one the write verbs accept.
+///
+/// `paths` gained content-addressed output before `set`/`unset` could consume
+/// it, so listing an element's paths and then editing one — the obvious use for
+/// the feature — failed on afdata's own output. Reading and writing must agree
+/// on what an address means, and only a round trip proves they do; each verb
+/// tested alone passed throughout.
+#[test]
+fn test_content_addressed_paths_round_trip_through_the_write_verbs() {
+    let temp_dir = TempDir::new().unwrap();
+    let file = write_temp(
+        &temp_dir,
+        "identities.json",
+        r#"{"identities":[{"identity":"me","email":"a@b.c"},{"identity":"you","email":"d@e.f"}]}"#,
+    );
+
+    let listed = run(&["paths", &file, "identities.me", "--slug-field", "identity"]);
+    assert!(listed.status.success(), "{listed:?}");
+    let emitted: Vec<String> = String::from_utf8(listed.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert!(
+        emitted.contains(&"identities.me.email".to_string()),
+        "{emitted:?}"
+    );
+
+    // Each emitted address, fed straight back exactly as printed. A fresh copy
+    // per address because one of them is the slug field itself: writing it
+    // renames the element, which would move every sibling address mid-loop and
+    // test the wrong thing.
+    for (index, path) in emitted.iter().enumerate() {
+        let scratch = write_temp(
+            &temp_dir,
+            &format!("copy{index}.json"),
+            &std::fs::read_to_string(&file).unwrap(),
+        );
+        let written = run(&["set", &scratch, path, "z", "--slug-field", "identity"]);
+        assert!(written.status.success(), "set {path}: {written:?}");
+        let read_back = run(&["value", &scratch, path, "--slug-field", "identity"]);
+        // Reading `identities.me.identity` back after setting it to `z` is
+        // expected to miss — the address named the old slug. Only the addresses
+        // the write did not move must still resolve.
+        if !path.ends_with(".identity") {
+            assert_eq!(read_back.stdout, b"z", "{path}");
+        }
+    }
+
+    let written = run(&[
+        "set",
+        &file,
+        "identities.me.email",
+        "z",
+        "--slug-field",
+        "identity",
+    ]);
+    assert!(written.status.success(), "{written:?}");
+    // The sibling is untouched: a content address resolves to one element.
+    assert_eq!(
+        run(&[
+            "value",
+            &file,
+            "identities.you.email",
+            "--slug-field",
+            "identity"
+        ])
+        .stdout,
+        b"d@e.f"
+    );
+
+    let removed = run(&[
+        "unset",
+        &file,
+        "identities.me.email",
+        "--slug-field",
+        "identity",
+    ]);
+    assert!(removed.status.success(), "{removed:?}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        r#"{"identities":[{"identity":"me"},{"identity":"you","email":"d@e.f"}]}"#
+    );
+}
+
+/// A content address that names several elements, or none, is refused by the
+/// write verbs on the same terms as the read verbs — never resolved to the
+/// first hit, which would edit a different element than the caller named.
+#[test]
+fn test_write_verbs_refuse_ambiguous_and_missing_content_addresses() {
+    let temp_dir = TempDir::new().unwrap();
+    let file = write_temp(
+        &temp_dir,
+        "dupes.json",
+        r#"{"xs":[{"id":"me","v":1},{"id":"me","v":2}]}"#,
+    );
+    let before = std::fs::read_to_string(&file).unwrap();
+
+    for verb in [
+        vec!["set", &file, "xs.me.v", "9", "--slug-field", "id"],
+        vec!["unset", &file, "xs.me.v", "--slug-field", "id"],
+    ] {
+        let refused = run(&verb);
+        assert!(!refused.status.success(), "{verb:?}: {refused:?}");
+        assert_eq!(
+            json_stderr(&refused)["error"]["code"],
+            "document_ambiguous_match",
+            "{verb:?}"
+        );
+    }
+
+    let missing = run(&["unset", &file, "xs.nobody.v", "--slug-field", "id"]);
+    assert!(!missing.status.success(), "{missing:?}");
+    assert_eq!(
+        json_stderr(&missing)["error"]["code"],
+        "document_slug_not_found"
+    );
+
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+}
+
+/// The same round trip through a format whose writer preserves source, to prove
+/// the address is resolved before the backend sees it rather than by it.
+#[test]
+fn test_content_addressed_write_preserves_yaml_source() {
+    let temp_dir = TempDir::new().unwrap();
+    let file = write_temp(
+        &temp_dir,
+        "hosts.yaml",
+        "# fleet\nhosts:\n  - name: alpha   # first\n    port: 1\n  - name: beta\n    port: 2\n",
+    );
+
+    let written = run(&[
+        "set",
+        &file,
+        "hosts.beta.port",
+        "9",
+        "--value-type",
+        "number",
+        "--slug-field",
+        "name",
+    ]);
+    assert!(written.status.success(), "{written:?}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "# fleet\nhosts:\n  - name: alpha   # first\n    port: 1\n  - name: beta\n    port: 9\n"
+    );
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn test_markdown_reads_stdin() {
+    let output = run_with_stdin(
+        &["value", "-", "h1.0.text", "--input-format", "markdown"],
+        b"Setext title\n============\n",
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Setext title");
+}
+
 #[test]
 fn test_lint_reports_unlabelled_fields_without_failing() {
     // The four questions the README opens with. Before this, `lint` answered
@@ -1981,4 +2554,213 @@ fn test_bare_value_overwriting_a_container_is_guarded() {
         "json",
     ]);
     assert!(replaced.status.success(), "{replaced:?}");
+}
+
+#[test]
+fn test_read_commands_can_address_a_keyed_list_by_slug() {
+    // Registering a keyed list used to reach only `add`/`remove`: the read
+    // commands passed no registration at all, so `identities.me.email` was
+    // unreachable however the caller asked for it. `--slug-field` is how a
+    // read states what a non-numeric segment means.
+    let document =
+        br#"{"identities":[{"identity":"me","email":"a@x"},{"identity":"you","email":"b@x"}]}"#;
+
+    let refused = run_with_stdin(&["value", "-", "identities.me.email"], document);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert_eq!(
+        json_stderr(&refused)["error"]["code"],
+        "document_path_not_found"
+    );
+
+    let resolved = run_with_stdin(
+        &[
+            "value",
+            "-",
+            "identities.me.email",
+            "--slug-field",
+            "identity",
+        ],
+        document,
+    );
+    assert!(resolved.status.success(), "{resolved:?}");
+    assert_eq!(String::from_utf8_lossy(&resolved.stdout), "a@x");
+
+    // Same declaration works for the other read commands.
+    let keys = run_with_stdin(
+        &["keys", "-", "identities.you", "--slug-field", "identity"],
+        document,
+    );
+    assert!(keys.status.success(), "{keys:?}");
+    assert_eq!(String::from_utf8_lossy(&keys.stdout), "email\nidentity\n");
+
+    let got = run_with_stdin(
+        &[
+            "get",
+            "-",
+            "identities.you.email",
+            "--slug-field",
+            "identity",
+        ],
+        document,
+    );
+    assert_eq!(json_stdout(&got)["result"]["value"], "b@x");
+
+    // An unknown slug is still a miss, not a scan for something close.
+    let missing = run_with_stdin(
+        &[
+            "value",
+            "-",
+            "identities.nobody.email",
+            "--slug-field",
+            "identity",
+        ],
+        document,
+    );
+    assert_eq!(
+        json_stderr(&missing)["error"]["code"],
+        "document_slug_not_found"
+    );
+
+    // External documents are not guaranteed to obey keyed-edit uniqueness.
+    // A duplicate exact identity is ambiguous, never "take the first".
+    let duplicates =
+        br#"{"identities":[{"identity":"me","email":"first"},{"identity":"me","email":"second"}]}"#;
+    let ambiguous = run_with_stdin(
+        &[
+            "value",
+            "-",
+            "identities.me.email",
+            "--slug-field",
+            "identity",
+        ],
+        duplicates,
+    );
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    let event = json_stderr(&ambiguous);
+    assert_eq!(event["error"]["code"], "document_ambiguous_match");
+    assert_eq!(
+        event["error"]["message"],
+        "segment `me` matches 2 elements of `identities` at indices 0, 1"
+    );
+    assert!(!String::from_utf8_lossy(&ambiguous.stderr).contains("first"));
+    assert!(!String::from_utf8_lossy(&ambiguous.stderr).contains("second"));
+}
+
+#[test]
+fn test_root_reads_reject_address_only_flags() {
+    let document = br#"{"items":[{"id":"one"}]}"#;
+    let cases: &[&[&str]] = &[
+        &["get", "-", "--slug-field", "id"],
+        &["paths", "-", "--slug-field", "id"],
+        &["keys", "-", "--missing-ok"],
+    ];
+
+    for args in cases {
+        let output = run_with_stdin(args, document);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+        assert_eq!(
+            json_stderr(&output)["error"]["code"],
+            "cli_unregistered_combination",
+            "{args:?}"
+        );
+    }
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn test_explicit_slug_field_overrides_the_format_rule() {
+    let temp_dir = TempDir::new().unwrap();
+    let readme = write_temp(&temp_dir, "README.md", "# T\n\n## A Quick Look\n\nx.\n");
+
+    // Markdown's own rule is substring: a word finds the section.
+    let builtin = run(&[
+        "value",
+        &readme,
+        "h1.0.h2.look.text",
+        "--input-format",
+        "markdown",
+    ]);
+    assert_eq!(String::from_utf8_lossy(&builtin.stdout), "A Quick Look");
+
+    // Naming a field explicitly is the more specific statement, and it means
+    // exact match — so the same substring no longer resolves.
+    let exact = run(&[
+        "value",
+        &readme,
+        "h1.0.h2.look.text",
+        "--input-format",
+        "markdown",
+        "--slug-field",
+        "text",
+    ]);
+    assert!(!exact.status.success(), "{exact:?}");
+    assert_eq!(
+        json_stderr(&exact)["error"]["code"],
+        "document_slug_not_found"
+    );
+
+    let full = run(&[
+        "value",
+        &readme,
+        "h1.0.h2.A Quick Look.text",
+        "--input-format",
+        "markdown",
+        "--slug-field",
+        "text",
+    ]);
+    assert_eq!(String::from_utf8_lossy(&full.stdout), "A Quick Look");
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn test_default_absorbs_a_content_miss_but_not_an_ambiguity() {
+    let temp_dir = TempDir::new().unwrap();
+
+    // "Nothing matched" is a miss like any other, so `--default` covers it.
+    // Without this a script reading an optional section by name — a README
+    // that simply has no such heading — dies instead of taking its fallback.
+    let plain = write_temp(&temp_dir, "plain.md", "# T\n\n> a quote\n");
+    let missed = run(&[
+        "value",
+        &plain,
+        "h1.0.blocks.nothing like this.text",
+        "--input-format",
+        "markdown",
+        "--default",
+        "(none)",
+    ]);
+    assert!(missed.status.success(), "{missed:?}");
+    assert_eq!(String::from_utf8_lossy(&missed.stdout), "(none)");
+
+    // Several matched, so the document is not missing anything — the address
+    // is. Falling back would answer a question the caller never asked.
+    let twice = write_temp(&temp_dir, "twice.md", "# T\n\n> look one\n\n> look two\n");
+    let ambiguous = run(&[
+        "value",
+        &twice,
+        "h1.0.blocks.look.text",
+        "--input-format",
+        "markdown",
+        "--default",
+        "(none)",
+    ]);
+    assert!(!ambiguous.status.success(), "{ambiguous:?}");
+    assert!(ambiguous.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&ambiguous)["error"]["code"],
+        "document_ambiguous_match"
+    );
+
+    // `keys --missing-ok` shares the exemption, and the same split.
+    let keys = run(&[
+        "keys",
+        &plain,
+        "h1.0.blocks.nothing like this",
+        "--input-format",
+        "markdown",
+        "--missing-ok",
+    ]);
+    assert!(keys.status.success(), "{keys:?}");
+    assert!(keys.stdout.is_empty());
 }

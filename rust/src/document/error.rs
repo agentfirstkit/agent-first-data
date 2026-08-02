@@ -13,12 +13,34 @@ pub enum DocumentError {
         path: String,
         segment: String,
     },
+    /// A non-numeric segment addressed an array that nothing claims: no
+    /// [`KeyedList`](crate::document::KeyedList) registration covers it and its
+    /// format states no rule of its own.
+    ///
+    /// The message names the two ways out rather than the internal type that
+    /// happens to be missing — a caller can supply a rule or use an index, and
+    /// neither is discoverable from the name of a Rust struct.
     UnregisteredArray {
         path: String,
     },
     SlugNotFound {
         prefix: String,
         slug: String,
+    },
+    /// A non-numeric segment matched several elements of the array at `prefix`.
+    ///
+    /// Substring matching can produce this, as can an explicit keyed-list field
+    /// when an externally authored document contains duplicate identities.
+    /// Naming several things at once is not an address, and picking the first
+    /// would silently answer a different question than the one asked, so it is
+    /// refused with structural candidate indices.
+    ///
+    /// Candidate text is deliberately absent: an error must not become a route
+    /// for document content to bypass normal output redaction.
+    AmbiguousMatch {
+        prefix: String,
+        segment: String,
+        indices: Vec<usize>,
     },
     SlugAlreadyExists {
         prefix: String,
@@ -46,6 +68,33 @@ pub enum DocumentError {
     /// quotes the offending line — see [`Self::redacted_message`].
     ParseError {
         format: String,
+        detail: String,
+    },
+    /// A dot-path is malformed: a bad escape, a trailing `\`, a bare `*`, an
+    /// index past the platform's range.
+    ///
+    /// Distinct from [`Self::ParseError`] because nothing here came from the
+    /// document — the caller's own address is what failed to parse, and
+    /// `detail` is afdata's own words about it. Sharing a code with a rejected
+    /// *file* sent readers to inspect the wrong thing.
+    PathSyntax {
+        detail: String,
+    },
+    /// afdata declines to read a source its parser would accept, because it
+    /// cannot answer honestly about it.
+    ///
+    /// `detail` is authored here and names the way out; it holds no document
+    /// text, so [`Self::redacted_message`] keeps it. Distinct from
+    /// [`Self::ParseError`] because the file is not malformed — reporting it as
+    /// a parse failure sends the reader hunting for a syntax error that is not
+    /// there.
+    SourceRefused {
+        format: String,
+        detail: String,
+    },
+    /// A caller argument contradicts itself or the document. `detail` is
+    /// afdata's own words about the argument, never document content.
+    InvalidArgument {
         detail: String,
     },
     /// A staged edit rendered source this format's own parser rejects, caught
@@ -88,13 +137,37 @@ impl fmt::Display for DocumentError {
                 write!(f, "path `{}` segment `{}` not found", path, segment)
             }
             DocumentError::UnregisteredArray { path } => {
-                write!(f, "array at `{}` not registered in KeyedList", path)
+                write!(
+                    f,
+                    "array at `{}` has no rule for naming an element by its content; \
+                     address an element by index, or name the field that identifies one",
+                    path
+                )
             }
             DocumentError::SlugNotFound { prefix, slug } => {
                 write!(f, "no element with slug `{}` found in `{}`", slug, prefix)
             }
             DocumentError::SlugAlreadyExists { prefix, slug } => {
                 write!(f, "slug `{}` already exists in `{}`", slug, prefix)
+            }
+            DocumentError::AmbiguousMatch {
+                prefix,
+                segment,
+                indices,
+            } => {
+                let candidates = indices
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "segment `{}` matches {} elements of `{}` at indices {}",
+                    segment,
+                    indices.len(),
+                    prefix,
+                    candidates
+                )
             }
             DocumentError::NotTraversable { path, got } => {
                 write!(f, "path `{}` is {}, cannot traverse further", path, got)
@@ -123,6 +196,15 @@ impl fmt::Display for DocumentError {
             }
             DocumentError::ParseError { format, detail } => {
                 write!(f, "failed to parse {}: {}", format, detail)
+            }
+            DocumentError::PathSyntax { detail } => {
+                write!(f, "invalid path: {}", detail)
+            }
+            DocumentError::SourceRefused { format, detail } => {
+                write!(f, "refusing to read this {}: {}", format, detail)
+            }
+            DocumentError::InvalidArgument { detail } => {
+                write!(f, "invalid argument: {}", detail)
             }
             DocumentError::WriteWouldCorrupt { format, detail } => {
                 write!(
@@ -155,13 +237,15 @@ impl std::error::Error for DocumentError {}
 impl DocumentError {
     /// Stable, program-decidable error code for this failure category.
     ///
-    /// Multiple variants can share a code when callers should handle them in
-    /// the same way. In particular, all read-address failures report
-    /// `document_path_not_found`.
+    /// Multiple variants share a code only when callers should handle them in
+    /// the same way. An ordinary missing path is `document_path_not_found`;
+    /// named array lookup distinguishes a missing slug from an ambiguous one.
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
             Self::ParseError { .. } => "document_parse_failed",
+            Self::PathSyntax { .. } => "document_invalid_path",
+            Self::SourceRefused { .. } => "document_source_refused",
             Self::FormatUnknown { .. } => "document_format_unknown",
             Self::WriteWouldCorrupt { .. } => "document_write_would_corrupt",
             Self::PathNotFound { .. }
@@ -170,10 +254,13 @@ impl DocumentError {
             | Self::UnregisteredArray { .. } => "document_path_not_found",
             Self::NotTraversable { .. } | Self::TypeMismatch { .. } => "document_type_mismatch",
             Self::SlugNotFound { .. } => "document_slug_not_found",
+            Self::AmbiguousMatch { .. } => "document_ambiguous_match",
             Self::SlugAlreadyExists { .. } => "document_slug_exists",
             Self::IoError { .. } => "document_io_failed",
             Self::UnsupportedOperation { .. } => "document_unsupported_operation",
-            Self::EmptyPath | Self::EmptyValues => "document_invalid_argument",
+            Self::EmptyPath | Self::EmptyValues | Self::InvalidArgument { .. } => {
+                "document_invalid_argument"
+            }
         }
     }
 
@@ -190,7 +277,21 @@ impl DocumentError {
         let Self::ParseError { detail, .. } = self else {
             return None;
         };
-        let rest = &detail[detail.find("line ")? + 5..];
+        // A parser diagnostic opens with its own position and echoes the
+        // offending source on the lines below it:
+        //
+        //     TOML parse error at line 2, column 5
+        //       |
+        //     2 | note = "see at line 999 for details" bad
+        //
+        // So the position is on the first line and document content never is.
+        // Searching the whole detail — from either end — can read the echo:
+        // from the end it finds `at line 999`, which is the file's own text.
+        let head = detail.split('\n').next().unwrap_or(detail);
+        let rest = match head.find(" at line ") {
+            Some(start) => &head[start + " at line ".len()..],
+            None => head.strip_prefix("line ")?,
+        };
         let line: String = rest.chars().take_while(char::is_ascii_digit).collect();
         if line.is_empty() {
             return None;
@@ -213,18 +314,28 @@ impl DocumentError {
     /// A display message with any potentially content-bearing detail removed —
     /// safe to surface when the document may hold secrets.
     ///
-    /// Two variants quote material that originates in the document and are
+    /// Two variants can quote material that originates in the document and are
     /// rewritten here:
     ///
     /// - [`DocumentError::ParseError`] renders as `failed to parse {format}`
     ///   (with the [`location`](Self::location) appended when known), dropping
     ///   the parser detail, which echoes a snippet of the source.
+    ///
+    /// [`DocumentError::PathSyntax`], [`DocumentError::SourceRefused`] and
+    /// [`DocumentError::InvalidArgument`] keep their detail in full. It is the
+    /// reason they exist as separate variants: their text is written here, about
+    /// the caller's address, argument, or file *encoding* — never lifted from
+    /// document content — and it is the only part that says what to do next.
+    /// Dropping it as a precaution against a leak that cannot happen turned an
+    /// actionable refusal into `failed to parse Markdown`.
     /// - [`DocumentError::TypeMismatch`] drops `got` and `hint`. When built by
     ///   [`Self::from_serde`] those carry serde's rendering of the offending
     ///   value, which is document content.
     ///
     /// Every other variant renders the same as its [`Display`], carrying only
-    /// structural context: paths, slugs, indices, and type or format names.
+    /// structural context: paths, requested slugs, indices, and type or format
+    /// names. In particular, [`Self::AmbiguousMatch`] carries candidate indices
+    /// rather than matched field values.
     /// [`DocumentError::NotTraversable`] belongs to that group because `got` is
     /// a [`Value::kind_name`](crate::document::Value::kind_name), not a value.
     #[must_use]
@@ -312,6 +423,14 @@ mod tests {
                 "document_slug_exists",
             ),
             (
+                DocumentError::AmbiguousMatch {
+                    prefix: "items".to_string(),
+                    segment: "look".to_string(),
+                    indices: vec![0, 2],
+                },
+                "document_ambiguous_match",
+            ),
+            (
                 DocumentError::NotTraversable {
                     path: "root".to_string(),
                     got: "string".to_string(),
@@ -371,11 +490,20 @@ mod tests {
 
     #[test]
     fn location_extracts_position_without_content() {
+        // The real layout a parser produces: its own position first, then the
+        // offending source echoed below. The echo here carries `at line 999`
+        // out of the document, and a search from the end reads exactly that —
+        // reporting a wrong line and leaking a document-derived number through
+        // `redacted_message`, which promises never to surface file content.
         let err = DocumentError::ParseError {
-            format: "YAML".to_string(),
-            detail: "secret: [ TOPSECRET at line 5 column 12".to_string(),
+            format: "TOML".to_string(),
+            detail: "TOML parse error at line 5, column 12\n  |\n\
+                     5 | note = \"see at line 999 for TOPSECRET\" bad\n  |     ^"
+                .to_string(),
         };
         assert_eq!(err.location().as_deref(), Some("line 5 column 12"));
+        assert!(!err.redacted_message().contains("999"));
+        assert!(!err.redacted_message().contains("TOPSECRET"));
 
         let no_column = DocumentError::ParseError {
             format: "JSON".to_string(),
@@ -430,6 +558,20 @@ mod tests {
         let redacted = err.redacted_message();
         assert!(!redacted.contains("sk-live-TOPSECRET"), "{redacted}");
         assert!(redacted.contains("credentials.token"), "{redacted}");
+    }
+
+    #[test]
+    fn ambiguous_match_reports_indices_without_document_content() {
+        let err = DocumentError::AmbiguousMatch {
+            prefix: "h1.0.h2".to_string(),
+            segment: "look".to_string(),
+            indices: vec![0, 2],
+        };
+        assert_eq!(
+            err.redacted_message(),
+            "segment `look` matches 2 elements of `h1.0.h2` at indices 0, 2"
+        );
+        assert!(!err.redacted_message().contains("Quick look"));
     }
 
     #[test]

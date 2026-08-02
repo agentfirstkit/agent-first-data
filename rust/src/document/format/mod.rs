@@ -14,6 +14,8 @@ pub mod ini;
 // JSON is a core (non-optional) dependency of agent-first-data, so this
 // backend always compiles — unlike toml/yaml/dotenv/ini below.
 pub mod json;
+#[cfg(feature = "markdown")]
+pub mod markdown;
 #[cfg(feature = "toml")]
 pub mod toml;
 #[cfg(feature = "yaml")]
@@ -32,6 +34,11 @@ pub enum Format {
     /// A `---`-fenced YAML frontmatter block; the Markdown body is frozen. Never
     /// auto-detected — selected only via `--input-format yaml-frontmatter`.
     YamlFrontmatter,
+    /// A CommonMark document read as a tree of heading sections (`preamble`,
+    /// `h1`, `h1.0.h2`, …). Read-only, and never auto-detected — the same `.md`
+    /// file is legitimately readable as frontmatter, and choosing between two
+    /// valid readings is not something an extension can decide.
+    Markdown,
 }
 
 impl Format {
@@ -46,6 +53,54 @@ impl Format {
             Self::Ini => "INI",
             Self::TomlFrontmatter => "TOML frontmatter",
             Self::YamlFrontmatter => "YAML frontmatter",
+            Self::Markdown => "Markdown",
+        }
+    }
+
+    /// Whether this format can be written at all.
+    ///
+    /// Markdown is the one reader-only format: its parsed value is a flattened
+    /// view of prose, so re-rendering a document from it would discard
+    /// everything the flattening dropped. Every mutating verb refuses up front
+    /// rather than producing that file.
+    #[must_use]
+    pub const fn is_read_only(self) -> bool {
+        matches!(self, Self::Markdown)
+    }
+
+    /// This format's own rule for resolving a **non-numeric** path segment
+    /// against an array, or `None` when only a caller-declared keyed list can.
+    ///
+    /// A format earns a rule by owning the shape of its own value. Markdown's
+    /// value is a tree afdata synthesized — every node carries `text` because
+    /// this crate put it there — so `h2.look` can be answered from the format
+    /// alone. JSON, TOML, YAML, dotenv, and INI hand back whatever the file
+    /// said; nothing in `deps.foo` tells afdata which field of a `deps` element
+    /// `foo` is supposed to match, and inventing one is the shape-guessing this
+    /// crate exists to refuse. Those keep needing an explicit
+    /// [`KeyedList`](crate::document::KeyedList).
+    #[must_use]
+    pub const fn array_rule(self) -> Option<crate::document::ArrayRule<'static>> {
+        match self {
+            Self::Markdown => Some(crate::document::ArrayRule {
+                field: "text",
+                match_kind: crate::document::MatchKind::Contains,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The refusal every mutating operation answers with for a read-only
+    /// format. One constructor so `save` and the document verbs cannot drift
+    /// into giving two different reasons for the same fact.
+    pub(crate) fn read_only_error(self, operation: &str) -> DocumentError {
+        DocumentError::UnsupportedOperation {
+            format: self.name().to_string(),
+            operation: operation.to_string(),
+            detail: format!(
+                "{} is a read-only format: afdata reads its structure and never writes it",
+                self.name()
+            ),
         }
     }
 
@@ -62,6 +117,7 @@ impl Format {
             Self::Ini => "ini",
             Self::TomlFrontmatter => "toml-frontmatter",
             Self::YamlFrontmatter => "yaml-frontmatter",
+            Self::Markdown => "markdown",
         }
     }
 
@@ -152,6 +208,15 @@ impl Format {
                 operation: "load".to_string(),
                 detail: "requires Cargo feature `yaml`".to_string(),
             }),
+
+            #[cfg(feature = "markdown")]
+            Format::Markdown => markdown::load(content),
+            #[cfg(not(feature = "markdown"))]
+            Format::Markdown => Err(DocumentError::UnsupportedOperation {
+                format: "Markdown".to_string(),
+                operation: "load".to_string(),
+                detail: "requires Cargo feature `markdown`".to_string(),
+            }),
         }
     }
 
@@ -210,6 +275,10 @@ impl Format {
                             .to_string(),
                 })
             }
+
+            // A read-only format has no writer at all — not even a
+            // non-preserving one. See `Format::is_read_only`.
+            Format::Markdown => Err(self.read_only_error("save")),
         }
     }
 }
@@ -217,6 +286,8 @@ impl Format {
 #[cfg(feature = "dotenv")]
 pub use dotenv::load as load_dotenv;
 pub use json::{load as load_json, save as save_json};
+#[cfg(feature = "markdown")]
+pub use markdown::load as load_markdown;
 #[cfg(feature = "toml")]
 pub use toml::{load as load_toml, save as save_toml};
 #[cfg(feature = "yaml")]
@@ -225,6 +296,7 @@ pub use yaml::{load as load_yaml, save as save_yaml};
 #[cfg(test)]
 mod tests {
     use super::Format;
+    use std::path::Path;
 
     #[test]
     fn format_names_are_stable() {
@@ -236,6 +308,7 @@ mod tests {
             (Format::Ini, "INI"),
             (Format::TomlFrontmatter, "TOML frontmatter"),
             (Format::YamlFrontmatter, "YAML frontmatter"),
+            (Format::Markdown, "Markdown"),
         ];
 
         for (format, expected) in cases {
@@ -250,9 +323,36 @@ mod tests {
             (Format::Ini, "ini"),
             (Format::TomlFrontmatter, "toml-frontmatter"),
             (Format::YamlFrontmatter, "yaml-frontmatter"),
+            (Format::Markdown, "markdown"),
         ];
         for (format, expected) in cli_names {
             assert_eq!(format.cli_name(), expected);
         }
+    }
+
+    #[test]
+    fn markdown_is_the_only_read_only_format() {
+        for format in [
+            Format::Json,
+            Format::Toml,
+            Format::Yaml,
+            Format::Dotenv,
+            Format::Ini,
+            Format::TomlFrontmatter,
+            Format::YamlFrontmatter,
+        ] {
+            let name = format.name();
+            assert!(!format.is_read_only(), "{name} must stay writable");
+        }
+        assert!(Format::Markdown.is_read_only());
+    }
+
+    #[test]
+    fn markdown_is_never_detected_from_an_extension() {
+        // `.md` is genuinely ambiguous — the same file is readable as
+        // frontmatter — so it resolves to no format and the caller must say
+        // which reading it wants.
+        assert_eq!(Format::detect(Path::new("README.md")), None);
+        assert_eq!(Format::detect(Path::new("README.markdown")), None);
     }
 }

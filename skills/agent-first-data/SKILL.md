@@ -1,6 +1,6 @@
 ---
 name: agent-first-data
-description: Apply and review Agent-First Data (AFDATA) for structured field names, unit suffixes, secret and URL redaction, JSON/YAML/plain rendering, protocol events, logs, agent-facing CLI output and help, safe dot-path edits to JSON/TOML/YAML/dotenv/INI or Markdown frontmatter, and AFDATA-style Bash scripts. Use proactively for configs, logs, transport payloads, database or wire fields, public/persistent names, CLI design, and structured-data shell work.
+description: Apply and review Agent-First Data (AFDATA) for structured field names, unit suffixes, secret and URL redaction, JSON/YAML/plain rendering, protocol events, logs, agent-facing CLI output and help, safe dot-path edits to JSON/TOML/YAML/dotenv/INI or Markdown frontmatter, read-only Markdown structure, and AFDATA-style Bash scripts. Use proactively for configs, logs, transport payloads, database or wire fields, public/persistent names, CLI design, and structured-data shell work.
 ---
 
 <!-- Canonical source: skills/agent-first-data/SKILL.md. -->
@@ -19,7 +19,7 @@ Read only the route needed for the task:
 | Name or review fields, configs, logs, database columns, wire/API data, redaction, or rendering | [naming-output.md](references/naming-output.md), then use [registry.json](references/registry.json) for exact suffix metadata |
 | Build or review protocol events, CLI output, logging, version/help behavior, or stream routing | [cli-protocol.md](references/cli-protocol.md) and [protocol-v1.schema.json](references/protocol-v1.schema.json) |
 | Build or validate a closed-world CLI or structured help | [cli-protocol.md](references/cli-protocol.md), [cli-spec-v1.schema.json](references/cli-spec-v1.schema.json), and [cli-help-v2.schema.json](references/cli-help-v2.schema.json) |
-| Read or safely mutate JSON/TOML/YAML/dotenv/INI or Markdown frontmatter | [documents.md](references/documents.md) |
+| Read or safely mutate JSON/TOML/YAML/dotenv/INI or Markdown frontmatter, or read a Markdown file's heading sections | [documents.md](references/documents.md) |
 | Author an AFDATA-style Bash 3.2+ executable | [bash.md](references/bash.md) |
 
 In a repository checkout, the formal contract is `spec/agent-first-data.md`.

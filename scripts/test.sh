@@ -90,6 +90,7 @@ run_static() {
   # wrong code.
   (cd "$ROOTPATH" && cargo build --quiet --bin afdata)
   (cd "$ROOTPATH" && python3 scripts/validate_registry.py)
+  (cd "$ROOTPATH" && python3 scripts/validate_doc_examples.py)
   (cd "$ROOTPATH" && python3 scripts/validate_protocol_docs.py)
   (cd "$ROOTPATH" && python3 scripts/validate_protocol_schema.py)
   (cd "$ROOTPATH" && python3 scripts/validate_api_surface.py)

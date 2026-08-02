@@ -1,3 +1,3 @@
 package afdata
 
-const Version = "0.28.1"
+const Version = "0.29.0"

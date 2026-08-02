@@ -24,7 +24,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::document::{DocumentError, DocumentResult, Format, KeyedList, Value};
+use crate::document::{Addressing, DocumentError, DocumentResult, Format, KeyedList, Value};
 
 /// A format-neutral in-memory document: the original source text, its parsed
 /// [`Value`], and the [`Format`] both came from. Has no file coupling —
@@ -86,10 +86,32 @@ impl Document {
         self.format
     }
 
+    /// How a non-numeric path segment resolves against an array in this
+    /// document: whatever its format declares (see [`Format::array_rule`]),
+    /// with no caller-declared keyed lists.
+    ///
+    /// Use [`addressing_keyed`](Document::addressing_keyed) to add those.
+    #[must_use]
+    pub fn addressing(&self) -> Addressing<'static> {
+        Addressing::INDEX_ONLY.with_array_rule(self.format.array_rule())
+    }
+
+    /// [`addressing`](Document::addressing) plus the caller's keyed lists,
+    /// which take precedence over the format rule for the arrays they name.
+    #[must_use]
+    pub fn addressing_keyed<'a>(&self, keyed_lists: &'a [KeyedList<'a>]) -> Addressing<'a> {
+        Addressing::keyed(keyed_lists).with_array_rule(self.format.array_rule())
+    }
+
     /// Resolve a dotted `path` against the parsed document and return the value
     /// at that address.
+    ///
+    /// A non-empty ASCII-decimal segment against an array is an index;
+    /// anything else goes through the format's own rule, so a Markdown document answers
+    /// `h2.look` while a JSON one refuses `deps.foo`. See
+    /// [`addressing`](Document::addressing).
     pub fn value_at(&self, path: &str) -> DocumentResult<Value> {
-        crate::document::get_path(&self.value, path, &[])
+        crate::document::get_path(&self.value, path, self.addressing())
     }
 
     /// [`value_at`](Document::value_at) that also asserts the value at `path`
@@ -123,6 +145,20 @@ impl Document {
     ) -> DocumentResult<()> {
         let value = crate::document::value_from_type(value_type, raw)?;
         self.set(key, value)
+    }
+
+    /// Refuse `operation` when this document's format has no writer at all.
+    ///
+    /// A read-only format (see [`Format::is_read_only`]) is refused here, at
+    /// the top of every mutating verb, rather than at the backend dispatch
+    /// below it. The verbs stage an edit against the parsed value first, so a
+    /// later refusal would report whichever backend step happened to notice —
+    /// naming the wrong reason for a document that was never writable.
+    fn ensure_writable(&self, operation: &str) -> DocumentResult<()> {
+        if self.format.is_read_only() {
+            return Err(self.format.read_only_error(operation));
+        }
+        Ok(())
     }
 
     /// Re-render the current value in its format via [`Format::save`].
@@ -211,14 +247,16 @@ impl DocumentFile {
         &self.path
     }
 
-    /// Preflight-check that this file is safe to mutate — not a symlink, and
-    /// on unix not hardlinked — without performing any write.
+    /// Preflight-check that this document format is writable and this file is
+    /// safe to mutate — not a symlink, and on unix not hardlinked — without
+    /// performing any write.
     ///
     /// [`save`](DocumentFile::save) runs this same guard before it writes, so
     /// calling it directly is only useful to front-run a *separate* side effect
     /// with the same guarantee — e.g. a CLI reading a secret from stdin for a
     /// `set` should refuse an unsafe target before consuming that input.
     pub fn ensure_mutable(&self, operation: &str) -> DocumentResult<()> {
+        self.doc.ensure_writable(operation)?;
         guard_mutation(&self.path, operation)?;
         Ok(())
     }
@@ -236,9 +274,28 @@ impl Document {
     /// express an edit source-preserving (e.g. YAML collection mutation) return
     /// [`DocumentError::UnsupportedOperation`].
     pub fn set(&mut self, key: &str, value: Value) -> DocumentResult<()> {
+        let addressing = self.addressing();
+        self.set_addressed(key, value, addressing)
+    }
+
+    /// [`set`](Document::set) with the caller's own addressing, so a path that
+    /// names an array element by its content — `identities.me.email` — can be
+    /// written and not merely read.
+    ///
+    /// The address is canonicalized to indices first (see
+    /// [`crate::document::resolve_path`]); everything below this point, the
+    /// source-preserving backends included, sees only `identities.0.email`.
+    pub fn set_addressed(
+        &mut self,
+        key: &str,
+        value: Value,
+        addressing: Addressing<'_>,
+    ) -> DocumentResult<()> {
+        self.ensure_writable("set")?;
+        let key = &crate::document::resolve_path(&self.value, key, addressing)?;
         let mut new_doc = self.value.clone();
-        crate::document::set_path(&mut new_doc, key, &value, &[])?;
-        let target = crate::document::get_path(&new_doc, key, &[])?;
+        crate::document::set_path(&mut new_doc, key, &value, Addressing::INDEX_ONLY)?;
+        let target = crate::document::get_path(&new_doc, key, Addressing::INDEX_ONLY)?;
         #[allow(unreachable_patterns)]
         let output = match self.format {
             #[cfg(feature = "toml")]
@@ -289,7 +346,8 @@ impl Document {
 
     /// Add a new element to the keyed list at `key`, identified by
     /// `slug`/`slug_field`, with the given `fields`. Preserves the rest of
-    /// the source document.
+    /// the source document. An empty `key` targets the document root when the
+    /// root is itself the keyed array.
     ///
     /// Only JSON and YAML backends implement a source-preserving
     /// keyed-collection editor today; other formats return
@@ -301,46 +359,38 @@ impl Document {
         slug_field: &str,
         fields: &[(String, Value)],
     ) -> DocumentResult<()> {
+        self.ensure_writable("add")?;
         let mut value = self.value.clone();
         let keyed_lists = [KeyedList {
             prefix: key,
             slug_field,
         }];
         crate::document::add_keyed(&mut value, key, slug, &keyed_lists, None, fields)?;
+        let array = if key.is_empty() {
+            &value
+        } else {
+            crate::document::get_path_ref(&value, key, self.addressing_keyed(&keyed_lists))?
+        };
+        let item = array
+            .as_array()
+            .and_then(|items| items.last())
+            .ok_or_else(|| DocumentError::UnsupportedOperation {
+                format: self.format.name().to_string(),
+                operation: "add".to_string(),
+                detail: "keyed list did not produce an array item".to_string(),
+            })?;
         let output: String = match self.format {
-            Format::Json => {
-                let array = crate::document::get_path(&value, key, &keyed_lists)?;
-                let item = array
-                    .as_array()
-                    .and_then(|items| items.last())
-                    .ok_or_else(|| DocumentError::UnsupportedOperation {
-                        format: "JSON".to_string(),
-                        operation: "add".to_string(),
-                        detail: "keyed list did not produce an array item".to_string(),
-                    })?;
-                crate::document::format::json::append_array_item_preserving(
-                    &self.source,
-                    key,
-                    item,
-                )?
-            }
+            Format::Json => crate::document::format::json::append_array_item_preserving(
+                &self.source,
+                key,
+                item,
+            )?,
             #[cfg(feature = "yaml")]
-            Format::Yaml => {
-                let array = crate::document::get_path(&value, key, &keyed_lists)?;
-                let item = array
-                    .as_array()
-                    .and_then(|items| items.last())
-                    .ok_or_else(|| DocumentError::UnsupportedOperation {
-                        format: "YAML".to_string(),
-                        operation: "add".to_string(),
-                        detail: "keyed list did not produce an array item".to_string(),
-                    })?;
-                crate::document::format::yaml::append_array_item_preserving(
-                    &self.source,
-                    key,
-                    item,
-                )?
-            }
+            Format::Yaml => crate::document::format::yaml::append_array_item_preserving(
+                &self.source,
+                key,
+                item,
+            )?,
             _ => {
                 return Err(DocumentError::UnsupportedOperation {
                     format: self.format.name().to_string(),
@@ -356,38 +406,25 @@ impl Document {
     }
 
     /// Remove the element identified by `slug`/`slug_field` from the keyed
-    /// list at `key`. Preserves the rest of the source document.
+    /// list at `key`. Preserves the rest of the source document. An empty
+    /// `key` targets the document root when the root is itself the keyed array.
     ///
     /// Only JSON and YAML backends implement a source-preserving
     /// keyed-collection editor today; other formats return
     /// [`DocumentError::UnsupportedOperation`].
     pub fn remove(&mut self, key: &str, slug: &str, slug_field: &str) -> DocumentResult<()> {
+        self.ensure_writable("remove")?;
         let mut value = self.value.clone();
         let keyed_lists = [KeyedList {
             prefix: key,
             slug_field,
         }];
-        let original_array = crate::document::get_path(&value, key, &keyed_lists)?;
-        let removed_index = original_array
-            .as_array()
-            .and_then(|items| {
-                items
-                    .iter()
-                    .position(|item| item.get(slug_field).and_then(Value::as_str) == Some(slug))
-            })
-            .ok_or_else(|| DocumentError::SlugNotFound {
-                prefix: key.to_string(),
-                slug: slug.to_string(),
-            })?;
-        #[cfg(not(feature = "yaml"))]
-        let _ = removed_index;
-        crate::document::remove_keyed(&mut value, key, slug, &keyed_lists)?;
+        let removed_index = crate::document::remove_keyed(&mut value, key, slug, &keyed_lists)?;
         let output: String = match self.format {
             Format::Json => crate::document::format::json::remove_array_item_preserving(
                 &self.source,
                 key,
-                slug,
-                slug_field,
+                removed_index,
             )?,
             #[cfg(feature = "yaml")]
             Format::Yaml => crate::document::format::yaml::remove_array_item_preserving(
@@ -423,14 +460,39 @@ impl Document {
     /// *malformed* stays an error: bad syntax, an index into a non-array, or a
     /// segment that tries to traverse through a scalar. Those describe a caller
     /// asking something incoherent, not a document that already lacks the key.
+    ///
+    /// A read-only format is the one case that errors *before* the idempotent
+    /// answer: "nothing to remove" would report success for a document this
+    /// verb can never edit.
+    ///
+    /// A content-addressed segment that matches no element is also an error
+    /// ([`DocumentError::SlugNotFound`]), not `Ok(false)`. It is not the same
+    /// fact as an absent key: the caller named an element and the document has
+    /// none by that name, which is how a mistyped slug looks, and answering
+    /// "removed nothing, all good" would swallow it.
     pub fn unset(&mut self, key: &str) -> DocumentResult<bool> {
+        let addressing = self.addressing();
+        self.unset_addressed(key, addressing)
+    }
+
+    /// [`unset`](Document::unset) with the caller's own addressing, so an
+    /// element named by its content can be removed and not merely read. See
+    /// [`set_addressed`](Document::set_addressed) for why the address is
+    /// canonicalized before anything below sees it.
+    pub fn unset_addressed(
+        &mut self,
+        key: &str,
+        addressing: Addressing<'_>,
+    ) -> DocumentResult<bool> {
+        self.ensure_writable("unset")?;
+        let key = &crate::document::resolve_path(&self.value, key, addressing)?;
         let segments = crate::document::parse_path(key)?;
         let (leaf, parents) = segments.split_last().ok_or(DocumentError::EmptyPath)?;
         let parent = if parents.is_empty() {
             &self.value
         } else {
             let parent_path = crate::document::join_path(parents);
-            match crate::document::get_path_ref(&self.value, &parent_path, &[]) {
+            match crate::document::get_path_ref(&self.value, &parent_path, Addressing::INDEX_ONLY) {
                 Ok(parent) => parent,
                 // The ancestor is absent, so the leaf below it is too.
                 Err(DocumentError::UnknownSegment { .. }) => return Ok(false),
@@ -542,6 +604,10 @@ impl DocumentFile {
     /// it is not exported, so callers cannot write arbitrary raw text that
     /// bypasses the parse/edit path.
     pub(crate) fn save_atomic(&self, new_source: &str) -> DocumentResult<()> {
+        // A read-only format never reaches disk, even when nothing was staged
+        // and the bytes would be identical: a `save` that succeeds is a claim
+        // this file is under afdata's control for writing, and it is not.
+        self.ensure_writable("save")?;
         // Read back what is about to be written, before writing it. A
         // source-preserving edit splices text, and a splice that lands in the
         // wrong place can produce a file this very parser rejects — an INI key
@@ -955,6 +1021,62 @@ mod tests {
         assert!(doc.unset("service.host.child").is_err()); // through a scalar
         assert!(doc.unset("service.ports.9").is_err()); // index out of range
         assert!(doc.unset(r"service\q").is_err()); // malformed syntax
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn every_markdown_write_verb_is_refused() {
+        let source = "# Title\n\nThe lead.\n";
+        let mut doc = Document::parse(source, Format::Markdown).unwrap();
+
+        // Reading is the whole point, and works — including by content, which
+        // `value_at` gets from the format's own rule.
+        assert_eq!(
+            doc.value_at("h1.0.text").unwrap(),
+            Value::String("Title".to_string())
+        );
+        assert_eq!(
+            doc.value_at("h1.Tit.paragraph.0.text").unwrap(),
+            Value::String("The lead.".to_string())
+        );
+
+        // Every mutating verb refuses, including the two that would otherwise
+        // answer before reaching a backend: `unset` on an absent path (which
+        // is `Ok(false)` for a writable format) and `encode`.
+        let refusals: Vec<DocumentError> = vec![
+            doc.set("h1.0.text", Value::String("New".to_string()))
+                .unwrap_err(),
+            doc.add("preamble", "x", "type", &[]).unwrap_err(),
+            doc.remove("preamble", "x", "type").unwrap_err(),
+            doc.unset("h1.0").unwrap_err(),
+            doc.unset("nothing.here").unwrap_err(),
+            doc.encode().unwrap_err(),
+        ];
+        for error in refusals {
+            assert_eq!(error.code(), "document_unsupported_operation");
+            assert!(
+                error.to_string().contains("read-only"),
+                "refusal must name the reason: {error}"
+            );
+        }
+
+        // Nothing was staged by any of them.
+        assert_eq!(doc.source(), source);
+    }
+
+    #[cfg(feature = "markdown")]
+    #[test]
+    fn markdown_save_never_reaches_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(dir.path(), "README.md", "# Title\n");
+        // `.md` resolves to no format, so the reading has to be named.
+        assert!(DocumentFile::open(&path, None).is_err());
+
+        let doc = DocumentFile::open(&path, Some(Format::Markdown)).unwrap();
+        // Even an unmodified save, whose bytes would be identical, is refused.
+        let error = doc.save().unwrap_err();
+        assert_eq!(error.code(), "document_unsupported_operation");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# Title\n");
     }
 
     #[cfg(feature = "yaml")]

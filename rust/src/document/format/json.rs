@@ -261,7 +261,7 @@ pub fn append_array_item_preserving(
     path: &str,
     item: &Value,
 ) -> DocumentResult<String> {
-    let segments = crate::document::parse_path(path)?;
+    let segments = array_path_segments(path)?;
     let mut parser = Parser::new(content);
     let root = parser.parse_value(0)?;
     let target = resolve(&root, &segments, 0).ok_or_else(|| DocumentError::PathNotFound {
@@ -309,14 +309,14 @@ pub fn append_array_item_preserving(
     Ok(output)
 }
 
-/// Remove a keyed object from a JSON array without rebuilding the document.
+/// Remove one item from a JSON array by numeric index without rebuilding the
+/// document.
 pub fn remove_array_item_preserving(
     content: &str,
     path: &str,
-    slug: &str,
-    slug_field: &str,
+    index: usize,
 ) -> DocumentResult<String> {
-    let segments = crate::document::parse_path(path)?;
+    let segments = array_path_segments(path)?;
     let mut parser = Parser::new(content);
     let root = parser.parse_value(0)?;
     let target = resolve(&root, &segments, 0).ok_or_else(|| DocumentError::PathNotFound {
@@ -330,18 +330,11 @@ pub fn remove_array_item_preserving(
         });
     };
     let item = items
-        .iter()
-        .find(|item| {
-            let Ok(value) =
-                serde_json::from_str::<serde_json::Value>(&content[item.start..item.end])
-            else {
-                return false;
-            };
-            value.get(slug_field).and_then(serde_json::Value::as_str) == Some(slug)
-        })
-        .ok_or_else(|| DocumentError::SlugNotFound {
-            prefix: path.to_string(),
-            slug: slug.to_string(),
+        .get(index)
+        .ok_or_else(|| DocumentError::IndexOutOfBounds {
+            path: path.to_string(),
+            index,
+            len: items.len(),
         })?;
     let mut start = item.start;
     if let Some(newline) = content.as_bytes()[..start]
@@ -395,6 +388,17 @@ pub fn remove_array_item_preserving(
         }
     })?;
     Ok(output)
+}
+
+/// An empty keyed-list prefix names a root array. Other document operations
+/// continue to reject an empty dot-path because they require an addressed
+/// child.
+fn array_path_segments(path: &str) -> DocumentResult<Vec<String>> {
+    if path.is_empty() {
+        Ok(Vec::new())
+    } else {
+        crate::document::parse_path(path)
+    }
 }
 
 fn skip_ws_bytes(source: &[u8], mut position: usize) -> usize {

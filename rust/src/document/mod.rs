@@ -1,7 +1,7 @@
 //! Format-independent document values: dot-path get/set/add/remove, type-directed
 //! CLI-string coercion, keyed-list (slug-addressed array) helpers, and typed
 //! serde adapters, backed by pluggable JSON/TOML/YAML/dotenv/INI format readers
-//! and writers.
+//! and writers, plus a read-only CommonMark block reader.
 //!
 //! # Features
 //!
@@ -12,6 +12,7 @@
 //! - **yaml**: Enable YAML format support with CST-backed source-preserving mutation
 //! - **dotenv**: Enable source-preserving dotenv format support
 //! - **ini**: Enable INI Core v1 format support
+//! - **markdown**: Enable the read-only CommonMark block reader
 //! - **schema**: Enable the `CliSchema` trait and documentation rendering
 //!
 //! This module never redacts values on decode/encode/save — it returns and
@@ -37,9 +38,10 @@ pub use coerce::{
 };
 pub use error::{DocumentError, DocumentResult};
 pub use file::{Document, DocumentFile};
-pub use keyed::{KeyedList, add_keyed, remove_keyed};
+pub use keyed::{Addressing, ArrayRule, KeyedList, MatchKind, add_keyed, remove_keyed};
 pub use path::{PatternSegment, join_path, parse_path, parse_path_pattern};
-pub use traverse::{get_path, get_path_ref, set_path, unset_path};
+pub(crate) use traverse::keyed_prefix_matches;
+pub use traverse::{get_path, get_path_ref, resolve_path, set_path, unset_path};
 pub use typed::{from_value, to_value};
 pub use value::Value;
 

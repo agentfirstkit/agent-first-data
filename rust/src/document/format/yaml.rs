@@ -2,7 +2,7 @@
 //! lossless `cst::Document` editor so comments, ordering, styles, and untouched
 //! source bytes are preserved.
 
-use crate::document::{DocumentError, DocumentResult, Value};
+use crate::document::{Addressing, DocumentError, DocumentResult, Value};
 use noyalib::{
     DuplicateKeyPolicy, Mapping as YamlMapping, ParserConfig, Value as YamlValue,
     cst::{GreenChild, GreenNode, SyntaxKind, parse_document},
@@ -51,9 +51,9 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
     })?;
     // Existing leaf: replace in place (preserves the scalar's style). Missing
     // leaf under an existing mapping: splice a sibling entry via `insert_entry`.
-    let exists = load(content)
-        .ok()
-        .is_some_and(|loaded| crate::document::get_path_ref(&loaded, path, &[]).is_ok());
+    let exists = load(content).ok().is_some_and(|loaded| {
+        crate::document::get_path_ref(&loaded, path, Addressing::INDEX_ONLY).is_ok()
+    });
     if exists {
         let result = if let Value::Number(text) = value {
             document.set(&yaml_path, text)
@@ -130,12 +130,36 @@ pub fn append_array_item_preserving(
     path: &str,
     item: &Value,
 ) -> DocumentResult<String> {
+    let segments = array_path_segments(path)?;
+    let yaml_path = cst_path(&segments, "add")?;
     let mut document = parse_document(content).map_err(|error| DocumentError::ParseError {
         format: "YAML".to_string(),
         detail: error.to_string(),
     })?;
-    let fragment = yaml_fragment(item, "add")?;
-    let yaml_path = cst_path(&crate::document::parse_path(path)?, "add")?;
+    let loaded = load(content)?;
+    let existing = array_at_path(&loaded, path, "add")?;
+    let previous_len = existing.len();
+    let mut fragment = yaml_fragment(item, "add")?;
+    if previous_len > 0 {
+        let item_path = format!("{yaml_path}[{}]", previous_len - 1);
+        let (item_start, _) =
+            document
+                .span_at(&item_path)
+                .ok_or_else(|| DocumentError::UnsupportedOperation {
+                    format: "YAML".to_string(),
+                    operation: "add".to_string(),
+                    detail: "could not resolve the existing sequence-item indentation".to_string(),
+                })?;
+        let dash_column = preceding_sequence_dash_column(content, item_start).ok_or_else(|| {
+            DocumentError::UnsupportedOperation {
+                format: "YAML".to_string(),
+                operation: "add".to_string(),
+                detail: "only block sequences can be extended without rebuilding the document"
+                    .to_string(),
+            }
+        })?;
+        fragment = indent_continuation_lines(fragment.trim_end(), dash_column + 2);
+    }
     document
         .push_back(&yaml_path, fragment.trim_end())
         .map_err(|error| DocumentError::UnsupportedOperation {
@@ -149,7 +173,17 @@ pub fn append_array_item_preserving(
             format: "YAML".to_string(),
             detail: error.to_string(),
         })?;
-    Ok(document.to_string())
+    let output = document.to_string();
+    let edited = load(&output)?;
+    let edited_items = array_at_path(&edited, path, "add")?;
+    if edited_items.len() != previous_len + 1 || edited_items.last() != Some(item) {
+        return Err(DocumentError::UnsupportedOperation {
+            format: "YAML".to_string(),
+            operation: "add".to_string(),
+            detail: "the source edit did not reproduce the requested keyed item".to_string(),
+        });
+    }
+    Ok(output)
 }
 
 /// Remove one item from a YAML sequence by numeric index.
@@ -162,7 +196,7 @@ pub fn remove_array_item_preserving(
         format: "YAML".to_string(),
         detail: error.to_string(),
     })?;
-    let yaml_path = cst_path(&crate::document::parse_path(path)?, "remove")?;
+    let yaml_path = cst_path(&array_path_segments(path)?, "remove")?;
     document
         .remove(&format!("{yaml_path}[{index}]"))
         .map_err(|error| DocumentError::UnsupportedOperation {
@@ -179,14 +213,72 @@ pub fn remove_array_item_preserving(
     Ok(document.to_string())
 }
 
-fn cst_path(segments: &[String], operation: &str) -> DocumentResult<String> {
-    if segments.is_empty() {
-        return Err(DocumentError::UnsupportedOperation {
+/// An empty keyed-list prefix names a root sequence. Ordinary set/unset paths
+/// still pass through `parse_path` directly and therefore remain non-empty.
+fn array_path_segments(path: &str) -> DocumentResult<Vec<String>> {
+    if path.is_empty() {
+        Ok(Vec::new())
+    } else {
+        crate::document::parse_path(path)
+    }
+}
+
+fn array_at_path<'a>(
+    value: &'a Value,
+    path: &str,
+    operation: &str,
+) -> DocumentResult<&'a Vec<Value>> {
+    let target = if path.is_empty() {
+        value
+    } else {
+        crate::document::get_path_ref(value, path, Addressing::INDEX_ONLY)?
+    };
+    target
+        .as_array()
+        .ok_or_else(|| DocumentError::UnsupportedOperation {
             format: "YAML".to_string(),
             operation: operation.to_string(),
-            detail: "root mutation is not supported by the CST path adapter".to_string(),
-        });
+            detail: "target is not an array".to_string(),
+        })
+}
+
+fn preceding_sequence_dash_column(content: &str, value_start: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut position = value_start;
+    let dash = loop {
+        position = position.checked_sub(1)?;
+        match bytes.get(position)? {
+            b' ' | b'\t' => {}
+            b'-' => break position,
+            _ => return None,
+        }
+    };
+    let line_start = content.as_bytes()[..dash]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    Some(dash - line_start)
+}
+
+fn indent_continuation_lines(fragment: &str, indent: usize) -> String {
+    if !fragment.contains('\n') {
+        return fragment.to_string();
     }
+    let padding = " ".repeat(indent);
+    let mut output = String::with_capacity(fragment.len() + indent * 4);
+    for (index, line) in fragment.split('\n').enumerate() {
+        if index > 0 {
+            output.push('\n');
+            if !line.is_empty() {
+                output.push_str(&padding);
+            }
+        }
+        output.push_str(line);
+    }
+    output
+}
+
+fn cst_path(segments: &[String], operation: &str) -> DocumentResult<String> {
     let mut path = String::new();
     for segment in segments {
         if segment.contains(['.', '\\', '[', ']']) {

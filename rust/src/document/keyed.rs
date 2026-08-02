@@ -1,6 +1,6 @@
 //! KeyedList operations for slug-based array access.
 
-use crate::document::{DocumentError, DocumentResult, Value};
+use crate::document::{DocumentError, DocumentResult, Value, join_path};
 
 /// Declares that an array at `prefix` is keyed by `slug_field`.
 ///
@@ -11,6 +11,116 @@ use crate::document::{DocumentError, DocumentResult, Value};
 pub struct KeyedList<'a> {
     pub prefix: &'a str,
     pub slug_field: &'a str,
+}
+
+/// How a **non-numeric** path segment resolves against an array.
+///
+/// A non-empty ASCII-decimal segment is always an index and never consults
+/// this (overflow is an error, not a slug fallback). Everything else has two
+/// possible sources, tried in this order:
+///
+/// - [`keyed_lists`](Self::keyed_lists) — the caller's own declarations, e.g.
+///   "the array at `identities` is keyed by each element's `identity` field".
+///   A JSON or TOML document does not say this about itself, so only the
+///   caller can, and it names one exact array by path.
+/// - [`array_rule`](Self::array_rule) — the *format's* rule, for a format whose
+///   value is a tree afdata synthesized and therefore knows the shape of. Only
+///   Markdown has one today; it applies to every array in the document rather
+///   than to one named path.
+///
+/// With neither, a non-numeric segment against an array is
+/// [`DocumentError::UnregisteredArray`](crate::document::DocumentError::UnregisteredArray)
+/// — afdata will not scan an array it was told nothing about.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Addressing<'a> {
+    pub keyed_lists: &'a [KeyedList<'a>],
+    pub array_rule: Option<ArrayRule<'a>>,
+}
+
+impl<'a> Addressing<'a> {
+    /// Indices only: no keyed lists, no format rule.
+    pub const INDEX_ONLY: Addressing<'static> = Addressing {
+        keyed_lists: &[],
+        array_rule: None,
+    };
+
+    /// Caller-declared keyed lists, with no format rule.
+    #[must_use]
+    pub const fn keyed(keyed_lists: &'a [KeyedList<'a>]) -> Self {
+        Addressing {
+            keyed_lists,
+            array_rule: None,
+        }
+    }
+
+    /// The same addressing plus a format's built-in array rule.
+    #[must_use]
+    pub const fn with_array_rule(self, array_rule: Option<ArrayRule<'a>>) -> Self {
+        Addressing { array_rule, ..self }
+    }
+}
+
+/// A format's built-in rule for resolving a non-numeric segment against an
+/// array: compare the segment to [`field`](Self::field) on each element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArrayRule<'a> {
+    /// Element field the segment is compared against. An element lacking it,
+    /// or holding a non-string there, simply does not match.
+    pub field: &'a str,
+    pub match_kind: MatchKind,
+}
+
+/// How an [`ArrayRule`] compares a segment to an element's field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchKind {
+    /// The field equals the segment.
+    Exact,
+    /// The field contains the segment after Unicode lowercase conversion — so
+    /// `h2.look`
+    /// finds `## A Quick Look`. Prose headings are long and get reworded;
+    /// a memorable word out of one is a far steadier address than either its
+    /// position or its full text.
+    ///
+    /// Exactly one element must match. Several is
+    /// [`DocumentError::AmbiguousMatch`](crate::document::DocumentError::AmbiguousMatch),
+    /// never the first one.
+    Contains,
+}
+
+impl ArrayRule<'_> {
+    /// Whether `element` matches `segment` under this rule.
+    #[must_use]
+    pub fn matches(&self, element: &Value, segment: &str) -> bool {
+        let Some(field) = element.get(self.field).and_then(Value::as_str) else {
+            return false;
+        };
+        match self.match_kind {
+            MatchKind::Exact => field == segment,
+            // An empty segment is not an address. `contains("")` is true for
+            // every element, so without this a path built by interpolation —
+            // which is how both consumers build theirs — resolves to a
+            // confident wrong answer on any single-element array, and only
+            // becomes an error once a second element exists. `Exact` already
+            // rejects it by construction (nothing equals ""), so this keeps
+            // the two modes agreeing about what is addressable.
+            MatchKind::Contains if segment.is_empty() => false,
+            MatchKind::Contains => field.to_lowercase().contains(&segment.to_lowercase()),
+        }
+    }
+}
+
+/// Path segments a keyed-list prefix names, where the empty prefix means the
+/// document root is itself the keyed array.
+///
+/// `parse_path` rejects an empty path, which is right for an address but wrong
+/// for this prefix: `traverse::keyed_prefix_matches` has always accepted
+/// `KeyedList { prefix: "" }`, so a root array could be read by slug while
+/// `add`/`remove` answered `EmptyPath` for the very same registration.
+fn keyed_prefix_segments(prefix: &str) -> DocumentResult<Vec<String>> {
+    if prefix.is_empty() {
+        return Ok(Vec::new());
+    }
+    crate::document::parse_path(prefix)
 }
 
 /// Add a new element to a keyed list.
@@ -29,38 +139,33 @@ pub fn add_keyed(
 ) -> DocumentResult<()> {
     // Resolve the prefix through the single path grammar so top-level and nested
     // (dotted or escaped) prefixes are all matched by their normalized segments.
-    let segments = crate::document::parse_path(prefix)?;
-    let registered = keyed_lists.iter().any(|list| {
-        crate::document::parse_path(list.prefix).ok().as_deref() == Some(segments.as_slice())
-    });
+    let segments = keyed_prefix_segments(prefix)?;
+    let registered = keyed_lists
+        .iter()
+        .any(|list| crate::document::keyed_prefix_matches(list, &segments));
     if !registered {
         return Err(DocumentError::UnregisteredArray {
             path: prefix.to_string(),
         });
     }
 
-    // '.' is the path separator — a slug containing it would be unreachable via get/set_path.
-    if slug.contains('.') {
-        return Err(DocumentError::ParseError {
-            format: "slug".to_string(),
-            detail: format!("slug `{slug}` must not contain '.' (path separator)"),
-        });
-    }
-
     add_keyed_segments(root, &segments, 0, slug, seed, fields, keyed_lists)
 }
 
-/// Remove an element from a keyed list by slug.
+/// Remove the unique element named by `slug` and return its former index.
+///
+/// The index lets a source-preserving backend remove the exact same element
+/// from its syntax tree without independently repeating the identity lookup.
 pub fn remove_keyed(
     root: &mut Value,
     prefix: &str,
     slug: &str,
     keyed_lists: &[KeyedList<'_>],
-) -> DocumentResult<()> {
-    let segments = crate::document::parse_path(prefix)?;
-    let registered = keyed_lists.iter().any(|list| {
-        crate::document::parse_path(list.prefix).ok().as_deref() == Some(segments.as_slice())
-    });
+) -> DocumentResult<usize> {
+    let segments = keyed_prefix_segments(prefix)?;
+    let registered = keyed_lists
+        .iter()
+        .any(|list| crate::document::keyed_prefix_matches(list, &segments));
     if !registered {
         return Err(DocumentError::UnregisteredArray {
             path: prefix.to_string(),
@@ -82,8 +187,8 @@ fn add_keyed_segments(
     if index + 1 < segments.len() {
         let Value::Object(object) = current else {
             return Err(DocumentError::NotTraversable {
-                path: segments[..=index].join("."),
-                got: "not an object".to_string(),
+                path: join_path(&segments[..=index]),
+                got: current.kind_name().to_string(),
             });
         };
         let next = object
@@ -91,26 +196,30 @@ fn add_keyed_segments(
             .or_insert_with(|| Value::Object(Default::default()));
         return add_keyed_segments(next, segments, index + 1, slug, seed, fields, keyed_lists);
     }
-    let Value::Object(object) = current else {
-        return Err(DocumentError::NotTraversable {
-            path: segments.join("."),
-            got: "not an object".to_string(),
-        });
+    let array = if segments.is_empty() {
+        current
+    } else {
+        let Value::Object(object) = current else {
+            return Err(DocumentError::NotTraversable {
+                path: join_path(segments),
+                got: current.kind_name().to_string(),
+            });
+        };
+        object
+            .entry(segments[index].clone())
+            .or_insert_with(|| Value::Array(Vec::new()))
     };
-    let array = object
-        .entry(segments[index].clone())
-        .or_insert_with(|| Value::Array(Vec::new()));
     let Value::Array(array) = array else {
         return Err(DocumentError::NotTraversable {
-            path: segments.join("."),
-            got: "not an array".to_string(),
+            path: join_path(segments),
+            got: array.kind_name().to_string(),
         });
     };
     let registration = keyed_lists
         .iter()
-        .find(|list| crate::document::parse_path(list.prefix).ok().as_deref() == Some(segments))
+        .find(|list| crate::document::keyed_prefix_matches(list, segments))
         .ok_or_else(|| DocumentError::UnregisteredArray {
-            path: segments.join("."),
+            path: join_path(segments),
         })?;
     if array.iter().any(|entry| {
         entry
@@ -120,7 +229,7 @@ fn add_keyed_segments(
             == Some(slug)
     }) {
         return Err(DocumentError::SlugAlreadyExists {
-            prefix: segments.join("."),
+            prefix: join_path(segments),
             slug: slug.to_string(),
         });
     }
@@ -128,7 +237,7 @@ fn add_keyed_segments(
     let object = element
         .as_object_mut()
         .ok_or_else(|| DocumentError::NotTraversable {
-            path: segments.join("."),
+            path: join_path(segments),
             got: "failed to create object".to_string(),
         })?;
     if let Some(seed) = seed.and_then(Value::as_object) {
@@ -144,8 +253,7 @@ fn add_keyed_segments(
     );
     for (key, value) in fields {
         if key == registration.slug_field {
-            return Err(DocumentError::ParseError {
-                format: "keyed list".to_string(),
+            return Err(DocumentError::InvalidArgument {
                 detail: format!("field `{key}` cannot override slug field"),
             });
         }
@@ -161,54 +269,78 @@ fn remove_keyed_segments(
     index: usize,
     slug: &str,
     keyed_lists: &[KeyedList<'_>],
-) -> DocumentResult<()> {
+) -> DocumentResult<usize> {
     if index + 1 < segments.len() {
         let Value::Object(object) = current else {
             return Err(DocumentError::NotTraversable {
-                path: segments[..=index].join("."),
-                got: "not an object".to_string(),
+                path: join_path(&segments[..=index]),
+                got: current.kind_name().to_string(),
             });
         };
         let next = object
             .get_mut(&segments[index])
             .ok_or_else(|| DocumentError::PathNotFound {
-                path: segments.join("."),
+                path: join_path(segments),
             })?;
         return remove_keyed_segments(next, segments, index + 1, slug, keyed_lists);
     }
-    let Value::Object(object) = current else {
+    let target = if segments.is_empty() {
+        current
+    } else {
+        let Value::Object(object) = current else {
+            return Err(DocumentError::NotTraversable {
+                path: join_path(segments),
+                got: current.kind_name().to_string(),
+            });
+        };
+        object
+            .get_mut(&segments[index])
+            .ok_or_else(|| DocumentError::PathNotFound {
+                path: join_path(segments),
+            })?
+    };
+    let Value::Array(array) = target else {
         return Err(DocumentError::NotTraversable {
-            path: segments.join("."),
-            got: "not an object".to_string(),
+            path: join_path(segments),
+            got: target.kind_name().to_string(),
         });
     };
-    let array = object
-        .get_mut(&segments[index])
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| DocumentError::PathNotFound {
-            path: segments.join("."),
-        })?;
     let registration = keyed_lists
         .iter()
-        .find(|list| crate::document::parse_path(list.prefix).ok().as_deref() == Some(segments))
+        .find(|list| crate::document::keyed_prefix_matches(list, segments))
         .ok_or_else(|| DocumentError::UnregisteredArray {
-            path: segments.join("."),
+            path: join_path(segments),
         })?;
-    let before = array.len();
-    array.retain(|entry| {
-        entry
-            .as_object()
-            .and_then(|object| object.get(registration.slug_field))
-            .and_then(Value::as_str)
-            != Some(slug)
-    });
-    if before == array.len() {
-        return Err(DocumentError::SlugNotFound {
-            prefix: segments.join("."),
-            slug: slug.to_string(),
-        });
-    }
-    Ok(())
+    let matches: Vec<usize> = array
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry
+                .as_object()
+                .and_then(|object| object.get(registration.slug_field))
+                .and_then(Value::as_str)
+                == Some(slug)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let index = match matches.as_slice() {
+        [] => {
+            return Err(DocumentError::SlugNotFound {
+                prefix: join_path(segments),
+                slug: slug.to_string(),
+            });
+        }
+        [index] => *index,
+        _ => {
+            return Err(DocumentError::AmbiguousMatch {
+                prefix: join_path(segments),
+                segment: slug.to_string(),
+                indices: matches,
+            });
+        }
+    };
+    array.remove(index);
+    Ok(index)
 }
 
 #[cfg(test)]
@@ -322,11 +454,47 @@ mod tests {
             .unwrap()
             .insert("identities".to_string(), Value::Array(vec![elem1, elem2]));
 
-        remove_keyed(&mut root, "identities", "me", &keyed).unwrap();
+        let removed_index = remove_keyed(&mut root, "identities", "me", &keyed).unwrap();
 
+        assert_eq!(removed_index, 0);
         let arr = root.get("identities").unwrap().as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].get("identity").unwrap().as_str().unwrap(), "other");
+    }
+
+    #[test]
+    fn test_remove_keyed_refuses_duplicate_slug_without_mutating() {
+        let item = |email: &str| {
+            let mut value = Value::Object(Default::default());
+            let object = value.as_object_mut().unwrap();
+            object.insert("identity".to_string(), Value::String("me".to_string()));
+            object.insert("email".to_string(), Value::String(email.to_string()));
+            value
+        };
+        let mut original = Value::Object(Default::default());
+        original.as_object_mut().unwrap().insert(
+            "identities".to_string(),
+            Value::Array(vec![item("first"), item("second")]),
+        );
+        let mut root = original.clone();
+        let keyed = [KeyedList {
+            prefix: "identities",
+            slug_field: "identity",
+        }];
+
+        let error = remove_keyed(&mut root, "identities", "me", &keyed).unwrap_err();
+
+        assert!(matches!(
+            error,
+            DocumentError::AmbiguousMatch {
+                prefix,
+                segment,
+                indices
+            } if prefix == "identities"
+                && segment == "me"
+                && indices == vec![0, 1]
+        ));
+        assert_eq!(root, original);
     }
 
     #[test]
@@ -369,5 +537,53 @@ mod tests {
             .as_array()
             .unwrap();
         assert!(arr.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod root_array_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::document::{Addressing, get_path};
+    use std::collections::BTreeMap;
+
+    fn element(id: &str) -> Value {
+        Value::Object(BTreeMap::from([(
+            "id".to_string(),
+            Value::String(id.to_string()),
+        )]))
+    }
+
+    #[test]
+    fn a_root_array_reads_and_edits_through_the_same_registration() {
+        // `KeyedList { prefix: "" }` has always resolved on the read walk;
+        // `add`/`remove` rejected it with `EmptyPath` because they ran the
+        // prefix through `parse_path`, which refuses an empty address. One
+        // registration must mean one thing to both.
+        let lists = [KeyedList {
+            prefix: "",
+            slug_field: "id",
+        }];
+        let mut root = Value::Array(vec![element("a"), element("b")]);
+
+        assert_eq!(
+            get_path(&root, "a.id", Addressing::keyed(&lists)).unwrap(),
+            Value::String("a".to_string())
+        );
+        assert_eq!(remove_keyed(&mut root, "", "a", &lists).unwrap(), 0);
+        assert_eq!(root.as_array().map(Vec::len), Some(1));
+
+        add_keyed(&mut root, "", "c", &lists, None, &[]).unwrap();
+        assert_eq!(
+            get_path(&root, "c.id", Addressing::keyed(&lists)).unwrap(),
+            Value::String("c".to_string())
+        );
+
+        // An unregistered root array is still refused, not scanned.
+        let mut bare = Value::Array(vec![element("a")]);
+        assert_eq!(
+            remove_keyed(&mut bare, "", "a", &[]).unwrap_err().code(),
+            "document_path_not_found"
+        );
     }
 }

@@ -4,8 +4,8 @@
 
 Use `afdata` document commands instead of `sed`, regex replacement, or a
 generic reserializer when reading or editing JSON, TOML, YAML, dotenv, INI, or
-Markdown frontmatter. These commands preserve unrelated comments, order,
-quoting, anchors, and body text.
+Markdown frontmatter, and when reading Markdown structure. Mutating commands
+preserve unrelated comments, order, quoting, anchors, and body text.
 
 ## Contents
 
@@ -13,7 +13,8 @@ quoting, anchors, and body text.
 - [Read safely](#read-safely)
 - [Write exact types](#write-exact-types)
 - [Keyed lists](#keyed-lists)
-- [Markdown frontmatter](#markdown-frontmatter)
+- [Addressing an array element by content](#addressing-an-array-element-by-content)
+- [Markdown](#markdown)
 - [Mutation safety and errors](#mutation-safety-and-errors)
 - [Exit criteria](#exit-criteria)
 
@@ -23,6 +24,7 @@ quoting, anchors, and body text.
 |---|---|
 | Whole document or subtree as an AFDATA record | `get FILE [KEY]` |
 | One raw scalar for shell use | `value FILE KEY` |
+| Many scalars from a single parse | `values FILE KEY...` |
 | Immediate children as reusable dot-paths | `paths FILE [KEY]` |
 | Immediate children as literal external names | `keys FILE [KEY]` |
 | Write one value | `set FILE KEY VALUE` |
@@ -57,8 +59,10 @@ consumer explicitly wants a scalar string. For a CLI round trip, take the
 typed value from `get` and write it with the matching `set --value-type`
 (`json` for a container); never feed `value` output back when type matters.
 
-`paths` emits root-relative grammar-escaped paths that feed back into
-`get`/`value`/`unset`. `keys` emits raw immediate names for external tools.
+`paths` emits root-relative grammar-escaped paths that feed back into every read
+and write verb — `get`/`value`/`set`/`unset` — unchanged. Pass the same
+`--slug-field` you listed with, or a content-addressed path arrives at a verb
+that cannot resolve it. `keys` emits raw immediate names for external tools.
 They differ when a key contains a dot or space.
 
 Consume either line stream with `while IFS= read -r`; never use command
@@ -97,18 +101,146 @@ For secrets, do not put values in argv. Use
 require `--slug-field FIELD`; identity is never inferred. Keyed editing is
 implemented for JSON and YAML only.
 
-Existing or missing slugs are explicit errors, not silent no-ops. Wrap the
-command deliberately if idempotence is required.
+An existing slug on `add` is `document_slug_exists`; a missing slug on
+`remove` is `document_slug_not_found`. Wrap the command deliberately if
+idempotence is required. If `remove` finds the same exact slug more than once,
+it reports `document_ambiguous_match` and leaves the document unchanged rather
+than guessing or removing several elements.
 
-## Markdown frontmatter
+`KEY` is the dot-path to the array. If the document root is itself the keyed
+array, pass an explicit empty argument: `afdata add FILE "" SLUG ...` or
+`afdata remove FILE "" SLUG ...`.
 
-Name the format explicitly:
+## Addressing an array element by content
 
-- `--input-format toml-frontmatter` for a `+++` block;
-- `--input-format yaml-frontmatter` for a `---` block.
+A non-empty ASCII-decimal path segment is always an index (and overflow is an
+error, never a slug fallback). Anything else has to be declared, because
+nothing in `identities.me.email` tells afdata which field of an `identities`
+element `me` is supposed to match:
 
-Frontmatter is never auto-detected. The same dot-path commands then edit only
-the metadata block and leave the Markdown body byte-for-byte unchanged.
+```bash
+afdata value config.json identities.me.email --slug-field identity
+```
+
+`--slug-field` works on every **addressed** read form (`get`, `value`, `values`,
+`keys`, `paths`) and on every write (`set`, `unset`, `add`, `remove`), so an
+address that reads also writes. Whole-document `get` and root-level
+`keys`/`paths` reject it because no address exists for the option to affect.
+Without it a non-numeric segment is `document_path_not_found`. A slug that
+matches nothing is `document_slug_not_found` — never a scan for something close,
+and on `unset` an error rather than a silent "nothing to remove". If an external
+document contains the same exact slug more than once, the read *or write* is
+`document_ambiguous_match` with candidate indices; afdata never takes the first,
+so no edit lands on a guessed element.
+Slug text uses the normal path grammar: for example, `case.add` is addressed as
+`items.case\.add`. An ASCII-decimal segment is always an array index, even when
+the declared field contains the same digits.
+
+Markdown needs no declaration: its value is a tree afdata built, so the format
+states its own rule (see below). Passing `--slug-field` anyway overrides that
+rule and switches to exact matching.
+
+## Markdown
+
+A `.md` file has three valid readings, so none of them is ever auto-detected —
+name the one you want:
+
+- `--input-format toml-frontmatter` edits a `+++` metadata block;
+- `--input-format yaml-frontmatter` edits a `---` metadata block;
+- `--input-format markdown` reads the body's CommonMark blocks.
+
+The two frontmatter readings edit only the metadata block and leave the body
+byte-for-byte unchanged.
+
+`markdown` is **read-only**, and a mutating verb does not accept the value at
+all: `set`/`unset`/`add`/`remove` reject `--input-format markdown` while parsing
+argv (`cli_invalid_argument_value`, exit 2). `lint` rejects it too — it judges
+field names against the naming convention, and these names are afdata's own.
+
+A heading owns everything under it until the next heading of its own level or
+shallower, so the document reads as a tree of sections. Anything before the
+first heading is `preamble`.
+
+```
+preamble.blocks    everything before the first heading, in source order
+preamble.paragraph its CommonMark paragraph blocks (skips non-paragraph blocks)
+preamble.blockquote its blockquote blocks only
+h1.0.text          the first level-1 heading's text
+h1.0.level         1
+h1.0.source_start_line / source_end_line the whole section's inclusive range
+h1.0.heading_end_line the inclusive end of the heading itself
+h1.0.paragraph     that section's paragraphs only
+h1.0.blockquote    that section's blockquotes only
+h1.0.blocks        that section's blocks, all kinds, in source order
+h1.0.h2.0          its first level-2 subsection
+```
+
+A leading `+++`/`---` frontmatter block is recognised as
+`{type: "frontmatter", format: "toml"|"yaml", text: ""}` rather than read as
+prose. Its raw metadata is deliberately not copied into this structural view:
+use `--input-format toml-frontmatter` or `yaml-frontmatter` to read its fields
+with normal secret redaction.
+
+Each block carries `type`, `text`, and 1-based inclusive `source_start_line` /
+`source_end_line`, plus `language` on a code block, `format` on a
+frontmatter block, and `ordered` on a list. Prose is
+flattened (emphasis unwrapped, links reduced to text, wrapped lines joined);
+code and HTML remain verbatim, while frontmatter text is empty. Block kinds:
+`paragraph`, `code`, `blockquote`, `list`, `html`, `rule`, `frontmatter`.
+
+Section `source_start_line` / `source_end_line` cover the heading and everything
+the section owns, including child sections. The heading begins at the same
+`source_start_line`; `heading_end_line` marks its inclusive end and therefore
+includes both lines of a setext heading. These ranges use source lines rather
+than byte offsets so Bash, Python, and JavaScript consumers can splice complete
+blocks safely for UTF-8 under LF and CRLF input. A file containing a lone CR is
+refused, as described below. afdata still does no Markdown-to-Markdown
+serialization.
+
+**Address by content, not position.** A non-numeric segment matches an
+element's `text` as a case-insensitive substring, so a memorable word out of a
+heading is a far steadier address than an index that moves:
+
+```bash
+afdata value README.md h1.0.text --input-format markdown              # the title
+afdata value README.md h1.0.paragraph.0.text --input-format markdown  # the synopsis
+afdata value README.md h1.0.h2.suffixes.text --input-format markdown  # a section by name
+```
+
+Matching several elements is `document_ambiguous_match`, which reports the
+candidate indices without copying document text into an error — pick a word
+that separates. Matching none is `document_slug_not_found`.
+
+**Line numbers are 1-based, inclusive, and count `\n`** — the same lines `sed`,
+`awk`, `head`, `git diff`, and an editor count, so a range goes straight to
+them:
+
+```bash
+end=$(afdata value README.md h1.0.paragraph.0.source_end_line --input-format markdown)
+sed -n "1,${end}p" README.md      # the title and synopsis, exactly
+```
+
+A file containing a bare `\r` (classic pre-2002 Mac line endings) is refused
+rather than numbered: CommonMark ends a line there and those tools do not, so
+no single number would be right for both readers. LF and CRLF are unaffected —
+both rules agree on them.
+
+Apply your own layout convention on top; do not assume one is built in. "The
+title is the H1" and "the synopsis is the first paragraph" are your project's
+rules, so assert them. A README opening with a badge line puts that badge in
+`preamble` and still has its title at `h1.0` — but a file whose first heading
+is an `h2`, or which has no heading at all, has no `h1` key, and reading
+`h1.0.text` fails loudly rather than inventing one.
+
+Pure CommonMark only: no GFM tables, footnotes, task lists, or strikethrough
+(table rows read as a paragraph, which is the specification's answer). Heading
+sections nest, but blocks do not — a blockquote or list reports its flattened
+text, not its inner structure.
+
+`paragraph` means exactly what CommonMark parsed as a paragraph. Badge syntax
+and GFM-looking table rows are therefore paragraphs, not magically skipped
+decoration. If your layout says the first paragraph is a synopsis, enforce that
+badge/table syntax does not occupy that position.
 
 ## Mutation safety and errors
 
@@ -119,20 +251,41 @@ original untouched, then reread before retrying.
 Branch on stable `error.code`, not message text. Common runtime codes include:
 
 - `document_path_not_found`
+- `document_invalid_path`
 - `document_type_mismatch`
 - `document_slug_not_found`
 - `document_slug_exists`
+- `document_ambiguous_match`
 - `document_parse_failed`
+- `document_source_refused`
 - `document_format_unknown`
+- `document_unsupported_operation`
+- `document_invalid_argument`
 - `document_write_would_corrupt`
 - `document_io_failed`
 - `document_not_scalar`
 - `document_not_container`
 - `document_secret_redacted`
 
-`document_format_unknown` means the file's extension named no format, so
-nothing was parsed — pass `--input-format`. It is distinct from
-`document_parse_failed`, which means a parser read the file and rejected it.
+Four codes describe four different things that all read as "it did not parse",
+and the difference is what to fix:
+
+- `document_format_unknown` — the file's extension named no format, so nothing
+  was parsed. Pass `--input-format`.
+- `document_parse_failed` — a parser read the file and rejected it. The file is
+  malformed; the message carries the format and position, never the text.
+- `document_invalid_path` — the *address* is malformed (a bad escape, a trailing
+  `\`, a bare `*`, an index beyond the platform's range). The file is fine; fix
+  the path.
+- `document_source_refused` — the file parses, and afdata declines to answer
+  about it anyway because it cannot do so honestly. Markdown containing a bare
+  `\r` is the one case: CommonMark ends a line there and `sed`/`awk`/`git` do
+  not, so no single `source_start_line` would be right for both. The message
+  names the way out; convert the file to LF or CRLF.
+
+`document_unsupported_operation` means the format cannot express the edit —
+a read-only backend, or a YAML collection mutation no source-preserving editor
+can make. It is not retryable as-is; change the verb or the format.
 
 `document_write_would_corrupt` means the edit was rendered, read back, and
 found unparseable, so it was refused before reaching disk. The file is

@@ -2,10 +2,10 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.28.1",
+  "version": "0.29.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
-  "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
+  "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
   "intent": [
     "Encode all semantic information in the field name itself so agents parse structured data without external schemas, documentation, or type systems — _ms/_s/_epoch_ms for time, _msats/_sats/_usd_cents for currency, _bytes for size, _secret for auto-redaction",
     "Define a JSONL output protocol where every line carries a kind discriminator (result, error, progress, or log), a payload field named after that kind, and a trace object for execution context (duration, token counts, cost, data source) — same structure whether the transport is CLI stdout, HTTP response body, MCP tool result, or SSE stream",
@@ -13,8 +13,12 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Let a path address many nodes: a bare * segment expands to every child, so reading one field across a collection is 'values FILE package.*.name' instead of enumerating, appending the field to each address with sed, and reading them back",
-    "BREAKING: * is a legal JSON key, so the grammar gains \\* alongside \\. and \\\\ and join_path escapes stars — paths now prints \\* where it printed *, and a bare * is refused rather than read as a key, so one spelling keeps one meaning"
+    "Read Markdown structure: --input-format markdown exposes a document body as a tree of heading sections carrying 1-based inclusive source line ranges, so a caller can splice exact source without reserializing Markdown or counting UTF-8 bytes",
+    "Address an array element by its content instead of its position: a non-numeric path segment resolves against the field named by --slug-field, and matching several elements is an error naming the candidate indices rather than silently taking the first",
+    "Accept --slug-field on set and unset as well as on reads, so an address that paths emits can be fed straight back to a write instead of failing on afdata's own output",
+    "Refuse --input-format markdown while parsing argv on every mutating verb and on lint, so help and the CLI reference stop advertising a combination whose only outcome is failure",
+    "Split three failures out of document_parse_failed: a malformed address is document_invalid_path, a file afdata declines to number is document_source_refused, and a contradictory argument is document_invalid_argument, each keeping the detail that says what to fix",
+    "Complete keyed-array editing at the document root, so add and remove work with an empty KEY on a root-level JSON or YAML array"
   ],
   "bonds": [],
   "tree": {

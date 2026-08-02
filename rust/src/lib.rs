@@ -46,7 +46,8 @@ mod skill_admin;
 pub mod skill;
 
 /// Format-independent document values (dot-path access, typed coercion, and
-/// pluggable JSON/TOML/YAML/dotenv/INI backends).
+/// pluggable JSON/TOML/YAML/dotenv/INI backends, plus a read-only Markdown
+/// block reader).
 pub mod document;
 
 // The closed-world CLI compiler: spec types, build gates, argv resolution, and
