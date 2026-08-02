@@ -2181,12 +2181,19 @@ fn document_output_options(ctx: &DocumentContext<'_>) -> OutputOptions {
 fn parse_document_format(name: &str) -> Result<DocumentFormat, String> {
     match name.to_ascii_lowercase().as_str() {
         "json" => Ok(DocumentFormat::Json),
+        #[cfg(feature = "toml")]
         "toml" => Ok(DocumentFormat::Toml),
+        #[cfg(feature = "yaml")]
         "yaml" | "yml" => Ok(DocumentFormat::Yaml),
+        #[cfg(feature = "dotenv")]
         "dotenv" | "env" => Ok(DocumentFormat::Dotenv),
+        #[cfg(feature = "ini")]
         "ini" => Ok(DocumentFormat::Ini),
+        #[cfg(feature = "toml")]
         "toml-frontmatter" => Ok(DocumentFormat::TomlFrontmatter),
+        #[cfg(feature = "yaml")]
         "yaml-frontmatter" => Ok(DocumentFormat::YamlFrontmatter),
+        #[cfg(feature = "markdown")]
         "markdown" => Ok(DocumentFormat::Markdown),
         other => Err(format!(
             "unsupported --input-format `{other}`; expected json, toml, yaml, yml, dotenv, env, ini, \

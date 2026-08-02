@@ -21,23 +21,38 @@ pub mod toml;
 #[cfg(feature = "yaml")]
 pub mod yaml;
 
+/// A format this build can actually read.
+///
+/// The optional backends gate their variants, not just their bodies: in a build
+/// without `toml` there is no `Format::Toml` at all, so code naming a format it
+/// did not enable fails to compile instead of returning a runtime refusal from
+/// deep inside `load`. Detection still answers for those files — see
+/// [`Format::unavailable`] — because a file's format is a fact about the file,
+/// not about this build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     Json,
+    #[cfg(feature = "toml")]
     Toml,
+    #[cfg(feature = "yaml")]
     Yaml,
+    #[cfg(feature = "dotenv")]
     Dotenv,
+    #[cfg(feature = "ini")]
     Ini,
     /// A `+++`-fenced TOML frontmatter block; the Markdown body is frozen. Never
     /// auto-detected — selected only via `--input-format toml-frontmatter`.
+    #[cfg(feature = "toml")]
     TomlFrontmatter,
     /// A `---`-fenced YAML frontmatter block; the Markdown body is frozen. Never
     /// auto-detected — selected only via `--input-format yaml-frontmatter`.
+    #[cfg(feature = "yaml")]
     YamlFrontmatter,
     /// A CommonMark document read as a tree of heading sections (`preamble`,
     /// `h1`, `h1.0.h2`, …). Read-only, and never auto-detected — the same `.md`
     /// file is legitimately readable as frontmatter, and choosing between two
     /// valid readings is not something an extension can decide.
+    #[cfg(feature = "markdown")]
     Markdown,
 }
 
@@ -47,12 +62,19 @@ impl Format {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Json => "JSON",
+            #[cfg(feature = "toml")]
             Self::Toml => "TOML",
+            #[cfg(feature = "yaml")]
             Self::Yaml => "YAML",
+            #[cfg(feature = "dotenv")]
             Self::Dotenv => "dotenv",
+            #[cfg(feature = "ini")]
             Self::Ini => "INI",
+            #[cfg(feature = "toml")]
             Self::TomlFrontmatter => "TOML frontmatter",
+            #[cfg(feature = "yaml")]
             Self::YamlFrontmatter => "YAML frontmatter",
+            #[cfg(feature = "markdown")]
             Self::Markdown => "Markdown",
         }
     }
@@ -65,7 +87,11 @@ impl Format {
     /// rather than producing that file.
     #[must_use]
     pub const fn is_read_only(self) -> bool {
-        matches!(self, Self::Markdown)
+        match self {
+            #[cfg(feature = "markdown")]
+            Self::Markdown => true,
+            _ => false,
+        }
     }
 
     /// This format's own rule for resolving a **non-numeric** path segment
@@ -82,6 +108,7 @@ impl Format {
     #[must_use]
     pub const fn array_rule(self) -> Option<crate::document::ArrayRule<'static>> {
         match self {
+            #[cfg(feature = "markdown")]
             Self::Markdown => Some(crate::document::ArrayRule {
                 field: "text",
                 match_kind: crate::document::MatchKind::Contains,
@@ -104,6 +131,20 @@ impl Format {
         }
     }
 
+    /// Frontmatter has no whole-document re-render, and both frontmatter
+    /// variants say so identically — one constructor so the two gated arms
+    /// cannot drift into two different reasons for the same fact.
+    #[cfg(any(feature = "toml", feature = "yaml"))]
+    fn frontmatter_save_error() -> DocumentError {
+        DocumentError::UnsupportedOperation {
+            format: "frontmatter".to_string(),
+            operation: "save".to_string(),
+            detail: "frontmatter mode has no whole-document re-render; the Markdown body is not \
+                     part of the parsed value — use source-preserving set/unset"
+                .to_string(),
+        }
+    }
+
     /// Exact CLI token accepted by `--input-format` and emitted in result
     /// payloads. Unlike [`Self::name`], this is stable machine data rather than
     /// a display label.
@@ -111,18 +152,66 @@ impl Format {
     pub const fn cli_name(self) -> &'static str {
         match self {
             Self::Json => "json",
+            #[cfg(feature = "toml")]
             Self::Toml => "toml",
+            #[cfg(feature = "yaml")]
             Self::Yaml => "yaml",
+            #[cfg(feature = "dotenv")]
             Self::Dotenv => "dotenv",
+            #[cfg(feature = "ini")]
             Self::Ini => "ini",
+            #[cfg(feature = "toml")]
             Self::TomlFrontmatter => "toml-frontmatter",
+            #[cfg(feature = "yaml")]
             Self::YamlFrontmatter => "yaml-frontmatter",
+            #[cfg(feature = "markdown")]
             Self::Markdown => "markdown",
         }
     }
 
-    /// Detect format from file extension.
+    /// Detect format from file extension, when this build can read it.
     pub fn detect(path: &Path) -> Option<Self> {
+        match Self::extension_kind(path)? {
+            #[cfg(feature = "dotenv")]
+            "dotenv" => Some(Format::Dotenv),
+            "json" => Some(Format::Json),
+            #[cfg(feature = "toml")]
+            "toml" => Some(Format::Toml),
+            #[cfg(feature = "yaml")]
+            "yaml" => Some(Format::Yaml),
+            #[cfg(feature = "ini")]
+            "ini" => Some(Format::Ini),
+            _ => None,
+        }
+    }
+
+    /// The Cargo feature a path's format needs, when this build lacks it.
+    ///
+    /// `detect` answers `None` both for a file this crate has never heard of
+    /// and for one it knows perfectly well but was not built to read. Only the
+    /// second is worth a different message, and only this can tell them apart,
+    /// so the caller reports the missing feature instead of calling a `.toml`
+    /// file's format unknown.
+    #[must_use]
+    pub fn unavailable(path: &Path) -> Option<&'static str> {
+        if Self::detect(path).is_some() {
+            return None;
+        }
+        match Self::extension_kind(path)? {
+            "dotenv" => Some("dotenv"),
+            "toml" => Some("toml"),
+            "yaml" => Some("yaml"),
+            "ini" => Some("ini"),
+            // JSON is a core dependency; there is no feature to be missing.
+            _ => None,
+        }
+    }
+
+    /// The format family a path's name implies, independent of this build.
+    ///
+    /// Always compiled, for exactly the reason the enum is not: which format a
+    /// file is written in does not change with the features this binary chose.
+    fn extension_kind(path: &Path) -> Option<&'static str> {
         let file_name = path.file_name().and_then(|name| name.to_str())?;
         let file_name_lower = file_name.to_lowercase();
         if file_name_lower == ".env"
@@ -132,18 +221,21 @@ impl Format {
                 .and_then(|ext| ext.to_str())
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("env"))
         {
-            return Some(Format::Dotenv);
+            return Some("dotenv");
         }
 
-        path.extension().and_then(|ext| ext.to_str()).and_then(|s| {
-            match s.to_lowercase().as_str() {
-                "json" => Some(Format::Json),
-                "toml" => Some(Format::Toml),
-                "yaml" | "yml" => Some(Format::Yaml),
-                "ini" => Some(Format::Ini),
-                _ => None,
-            }
-        })
+        match path
+            .extension()
+            .and_then(|ext| ext.to_str())?
+            .to_lowercase()
+            .as_str()
+        {
+            "json" => Some("json"),
+            "toml" => Some("toml"),
+            "yaml" | "yml" => Some("yaml"),
+            "ini" => Some("ini"),
+            _ => None,
+        }
     }
 
     /// Load a config file in the detected format.
@@ -153,70 +245,28 @@ impl Format {
 
             #[cfg(feature = "toml")]
             Format::Toml => toml::load(content),
-            #[cfg(not(feature = "toml"))]
-            Format::Toml => Err(DocumentError::UnsupportedOperation {
-                format: "TOML".to_string(),
-                operation: "load".to_string(),
-                detail: "requires Cargo feature `toml`".to_string(),
-            }),
 
             #[cfg(feature = "yaml")]
             Format::Yaml => yaml::load(content),
-            #[cfg(not(feature = "yaml"))]
-            Format::Yaml => Err(DocumentError::UnsupportedOperation {
-                format: "YAML".to_string(),
-                operation: "load".to_string(),
-                detail: "requires Cargo feature `yaml`".to_string(),
-            }),
 
             #[cfg(feature = "dotenv")]
             Format::Dotenv => dotenv::load(content),
-            #[cfg(not(feature = "dotenv"))]
-            Format::Dotenv => Err(DocumentError::UnsupportedOperation {
-                format: "dotenv".to_string(),
-                operation: "load".to_string(),
-                detail: "requires Cargo feature `dotenv`".to_string(),
-            }),
 
             #[cfg(feature = "ini")]
             Format::Ini => ini::load(content),
-            #[cfg(not(feature = "ini"))]
-            Format::Ini => Err(DocumentError::UnsupportedOperation {
-                format: "INI".to_string(),
-                operation: "load".to_string(),
-                detail: "requires Cargo feature `ini`".to_string(),
-            }),
 
             #[cfg(feature = "toml")]
             Format::TomlFrontmatter => {
                 toml::load(frontmatter::split(content, frontmatter::Delimiter::Plus)?.frontmatter)
             }
-            #[cfg(not(feature = "toml"))]
-            Format::TomlFrontmatter => Err(DocumentError::UnsupportedOperation {
-                format: "TOML frontmatter".to_string(),
-                operation: "load".to_string(),
-                detail: "requires Cargo feature `toml`".to_string(),
-            }),
 
             #[cfg(feature = "yaml")]
             Format::YamlFrontmatter => {
                 yaml::load(frontmatter::split(content, frontmatter::Delimiter::Dash)?.frontmatter)
             }
-            #[cfg(not(feature = "yaml"))]
-            Format::YamlFrontmatter => Err(DocumentError::UnsupportedOperation {
-                format: "YAML frontmatter".to_string(),
-                operation: "load".to_string(),
-                detail: "requires Cargo feature `yaml`".to_string(),
-            }),
 
             #[cfg(feature = "markdown")]
             Format::Markdown => markdown::load(content),
-            #[cfg(not(feature = "markdown"))]
-            Format::Markdown => Err(DocumentError::UnsupportedOperation {
-                format: "Markdown".to_string(),
-                operation: "load".to_string(),
-                detail: "requires Cargo feature `markdown`".to_string(),
-            }),
         }
     }
 
@@ -227,57 +277,28 @@ impl Format {
 
             #[cfg(feature = "toml")]
             Format::Toml => toml::save(value),
-            #[cfg(not(feature = "toml"))]
-            Format::Toml => Err(DocumentError::UnsupportedOperation {
-                format: "TOML".to_string(),
-                operation: "save".to_string(),
-                detail: "requires Cargo feature `toml`".to_string(),
-            }),
 
             #[cfg(feature = "yaml")]
             Format::Yaml => yaml::save(value),
-            #[cfg(not(feature = "yaml"))]
-            Format::Yaml => Err(DocumentError::UnsupportedOperation {
-                format: "YAML".to_string(),
-                operation: "save".to_string(),
-                detail: "requires Cargo feature `yaml`".to_string(),
-            }),
 
             #[cfg(feature = "dotenv")]
             Format::Dotenv => dotenv::save(value),
-            #[cfg(not(feature = "dotenv"))]
-            Format::Dotenv => Err(DocumentError::UnsupportedOperation {
-                format: "dotenv".to_string(),
-                operation: "save".to_string(),
-                detail: "requires Cargo feature `dotenv`".to_string(),
-            }),
 
             #[cfg(feature = "ini")]
             Format::Ini => ini::save(value),
-            #[cfg(not(feature = "ini"))]
-            Format::Ini => Err(DocumentError::UnsupportedOperation {
-                format: "INI".to_string(),
-                operation: "save".to_string(),
-                detail: "requires Cargo feature `ini`".to_string(),
-            }),
 
             // Frontmatter has no whole-document re-render: the Markdown body is
             // frozen source, not part of the parsed value, so a fresh render
             // cannot reconstruct the file. Edits go through the source-preserving
             // set/unset seam (see `DocumentFile`), never here.
-            Format::TomlFrontmatter | Format::YamlFrontmatter => {
-                Err(DocumentError::UnsupportedOperation {
-                    format: "frontmatter".to_string(),
-                    operation: "save".to_string(),
-                    detail:
-                        "frontmatter mode has no whole-document re-render; the Markdown body is \
-                             not part of the parsed value — use source-preserving set/unset"
-                            .to_string(),
-                })
-            }
+            #[cfg(feature = "toml")]
+            Format::TomlFrontmatter => Err(Self::frontmatter_save_error()),
+            #[cfg(feature = "yaml")]
+            Format::YamlFrontmatter => Err(Self::frontmatter_save_error()),
 
             // A read-only format has no writer at all — not even a
             // non-preserving one. See `Format::is_read_only`.
+            #[cfg(feature = "markdown")]
             Format::Markdown => Err(self.read_only_error("save")),
         }
     }
@@ -293,7 +314,17 @@ pub use toml::{load as load_toml, save as save_toml};
 #[cfg(feature = "yaml")]
 pub use yaml::{load as load_yaml, save as save_yaml};
 
-#[cfg(test)]
+// Every test here enumerates the whole format table, so the module says which
+// build it is describing rather than each test repeating the condition. A
+// narrowed build has fewer variants by design; the gate exercises the full one.
+#[cfg(all(
+    test,
+    feature = "toml",
+    feature = "yaml",
+    feature = "dotenv",
+    feature = "ini",
+    feature = "markdown"
+))]
 mod tests {
     use super::Format;
     use std::path::Path;

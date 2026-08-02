@@ -1482,3 +1482,26 @@ fn test_toml_set_creates_missing_parent_table() {
         "cfg"
     );
 }
+
+/// A known format this build was not compiled to read must say so, rather than
+/// claiming afdata has never heard of the extension. Runs in a narrowed build
+/// only: with every backend on there is no such format to test.
+#[cfg(not(feature = "toml"))]
+#[test]
+fn a_known_but_unbuilt_format_names_the_missing_feature() {
+    let dir = std::env::temp_dir().join(format!("afdata_unbuilt_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("config.toml");
+    std::fs::write(&file, "a = 1\n").unwrap();
+
+    let error = agent_first_data::document::DocumentFile::open(&file, None).unwrap_err();
+    assert_eq!(error.code(), "document_unsupported_operation", "{error:?}");
+    assert!(error.to_string().contains("toml"), "{error}");
+
+    // An extension afdata genuinely does not know stays unknown.
+    let alien = dir.join("config.xyz");
+    std::fs::write(&alien, "x").unwrap();
+    let unknown = agent_first_data::document::DocumentFile::open(&alien, None).unwrap_err();
+    assert_eq!(unknown.code(), "document_format_unknown", "{unknown:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}

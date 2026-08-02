@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.29.1",
+  "version": "0.29.2",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,11 +13,9 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Scope reserved argument names to where AFDATA actually parses them: --version and --docs are reserved at the root command only, so a subcommand may declare its own --version VALUE business argument instead of being forced to rename it",
-    "Add write_raw so a CLI compiled from a registry no longer hand-rolls the write for --docs, plain help and other raw documents: AFDATA injects those outcomes, so it owns stream routing and the rule that a closed reader (tool --docs | head) is success rather than a failure exit code",
-    "Fix the TOML document editor so unset can remove a key inside an inline table that set can already write, preserving the table's closing whitespace",
-    "Drop the unread command_path and argument_names fields from CliError; the command path is already in hint and the offending argument in message",
-    "Correct shipped documentation that no longer matched the code: the tracing layer writes to stderr not stdout, the Go export is BuildCLIError, --help-combination never shipped, and cli-spec-v1 is an authoring contract with no runtime export"
+    "Gate each optional Format variant behind its Cargo feature: a build without toml has no Format::Toml at all, so naming a format the build never enabled is a compile error instead of a runtime refusal returned from deep inside load — and the eight paired refusal arms disappear with the variants they guarded",
+    "Report the missing Cargo feature when opening a known format this build cannot read, instead of calling the file's format unknown: detect() answers only for available formats, and the new Format::unavailable names what is missing",
+    "Offer exactly the --input-format values the running build can read, so a narrowed afdata binary never advertises a format it would then refuse"
   ],
   "bonds": [],
   "tree": {

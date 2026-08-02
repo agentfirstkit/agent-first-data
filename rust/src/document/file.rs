@@ -197,9 +197,25 @@ impl DocumentFile {
         let path = path.as_ref().to_path_buf();
         let format = match format_override {
             Some(format) => format,
-            None => Format::detect(&path).ok_or_else(|| DocumentError::FormatUnknown {
-                path: path.display().to_string(),
-            })?,
+            // A `.toml` file read by a build without the `toml` feature is not
+            // an unknown format — it is a known one this binary cannot read, and
+            // saying so names the fix. Only `Format::unavailable` can tell the
+            // two apart, because `detect` answers `None` for both.
+            None => match Format::detect(&path) {
+                Some(format) => format,
+                None => {
+                    return Err(match Format::unavailable(&path) {
+                        Some(feature) => DocumentError::UnsupportedOperation {
+                            format: feature.to_string(),
+                            operation: "open".to_string(),
+                            detail: format!("requires Cargo feature `{feature}`"),
+                        },
+                        None => DocumentError::FormatUnknown {
+                            path: path.display().to_string(),
+                        },
+                    });
+                }
+            },
         };
         let source = fs::read_to_string(&path).map_err(|error| DocumentError::IoError {
             detail: format!("read `{}`: {error}", path.display()),
@@ -379,6 +395,10 @@ impl Document {
                 operation: "add".to_string(),
                 detail: "keyed list did not produce an array item".to_string(),
             })?;
+        // The catch-all covers the formats with no source-preserving keyed
+        // editor. A build with only JSON has none left to catch, which makes it
+        // unreachable there and reachable everywhere else — the arm stays.
+        #[allow(unreachable_patterns)]
         let output: String = match self.format {
             Format::Json => crate::document::format::json::append_array_item_preserving(
                 &self.source,
@@ -420,6 +440,10 @@ impl Document {
             slug_field,
         }];
         let removed_index = crate::document::remove_keyed(&mut value, key, slug, &keyed_lists)?;
+        // The catch-all covers the formats with no source-preserving keyed
+        // editor. A build with only JSON has none left to catch, which makes it
+        // unreachable there and reachable everywhere else — the arm stays.
+        #[allow(unreachable_patterns)]
         let output: String = match self.format {
             Format::Json => crate::document::format::json::remove_array_item_preserving(
                 &self.source,
