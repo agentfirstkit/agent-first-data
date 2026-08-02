@@ -1998,25 +1998,20 @@ fn write_text_exit(text: &str, code: u8) -> ExitCode {
     write_text_exit_to(text, code, Stream::Stdout)
 }
 
-// The sanctioned emitter sink. Per the spec's Channel policy, a finite
-// command splits by kind (`result` → stdout, `error`/diagnostics → stderr) and
-// `--output-to stdout|stderr` collapses everything onto one stream; both routes
-// resolve to a `Stream` here. This is the one place allowed to touch
-// `std::io::stderr` directly (clippy.toml's `disallowed-methods` guards against
-// stray stderr writes elsewhere that would bypass this routing).
-#[allow(clippy::disallowed_methods)]
+// Routing and the broken-pipe policy belong to the library, not to this
+// binary: every CLI compiled from a registry inherits `--docs`, plain help and
+// the other raw outcomes, so a private copy here is the first of the six that
+// drifted. `clippy.toml`'s `disallowed-methods` keeps stray stderr writes from
+// bypassing `write_raw`.
 fn write_text_exit_to(text: &str, code: u8, stream: Stream) -> ExitCode {
-    let result = match stream {
-        Stream::Stdout => std::io::stdout().lock().write_all(text.as_bytes()),
-        Stream::Stderr => std::io::stderr().lock().write_all(text.as_bytes()),
+    let selector = match stream {
+        Stream::Stdout => OutputTo::Stdout,
+        Stream::Stderr => OutputTo::Stderr,
     };
-    if let Err(err) = result {
-        if err.kind() == std::io::ErrorKind::BrokenPipe {
-            return ExitCode::from(0);
-        }
-        return ExitCode::from(1);
+    match agent_first_data::write_raw(text, selector) {
+        Ok(()) => ExitCode::from(code),
+        Err(_) => ExitCode::from(1),
     }
-    ExitCode::from(code)
 }
 
 // ═══════════════════════════════════════════

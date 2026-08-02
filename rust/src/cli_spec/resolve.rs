@@ -71,12 +71,12 @@ impl BuiltCliSpec {
         fixtures
     }
 
-    /// The help model for one command, or for one of its combinations.
+    /// The help model for one command.
     ///
-    /// The same model `--help` and `--help-combination` return, reachable
-    /// in-process. Build-time tooling — an offline reference renderer, for
-    /// example — needs the whole registry, and this is how it consumes it
-    /// without a full-spec dump on the agent's discovery path.
+    /// The same model `--help` returns, reachable in-process. Build-time
+    /// tooling — an offline reference renderer, for example — needs the whole
+    /// registry, and this is how it consumes it without a full-spec dump on
+    /// the agent's discovery path.
     pub fn help(&self, command_path: &[String]) -> Option<CliHelpV2> {
         let command = self
             .spec
@@ -131,7 +131,6 @@ impl BuiltCliSpec {
                 return Err(CliError::new(
                     CliErrorRule::InvalidUtf8,
                     self.spec.name.clone(),
-                    Vec::new(),
                     "argv contains a token that is not valid UTF-8",
                 ));
             };
@@ -144,38 +143,27 @@ impl BuiltCliSpec {
 
         if parsed.control_count() > 0 {
             if parsed.control_count() != 1 || !parsed.application_values.is_empty() {
-                return Err(CliError::unregistered(
-                    command_path,
-                    parsed.explicit_names(),
-                ));
+                return Err(CliError::unregistered(command_path));
             }
             // `--docs` renders the whole registry, which is raw bytes, not
             // protocol events. It therefore gets its own contract instead of
             // `lifecycle_output`, and must be settled before the shared
             // protocol plan below would wrongly accept `--output`.
             if parsed.docs {
+                // Root-only, like `--version` below: past the command path the
+                // spelling belongs to the application, and where it declared
+                // one, `tokenize` bound the token to that argument and never
+                // set this flag at all.
                 if !command.command_path.is_empty() {
-                    return Err(CliError::unregistered(
-                        command_path,
-                        vec!["--docs".to_string()],
-                    ));
+                    return Err(CliError::unregistered(command_path));
                 }
                 let contract = OutputSpec::raw()
                     .file_sinks(self.spec.lifecycle_output.file_sinks_ref().to_vec());
-                let output = resolve_output(
-                    &contract,
-                    &parsed.output,
-                    &command_path,
-                    parsed.explicit_names(),
-                )?;
+                let output = resolve_output(&contract, &parsed.output, &command_path)?;
                 return Ok(CliOutcome::Docs(ResolvedDocs { output }));
             }
-            let output = resolve_output(
-                &self.spec.lifecycle_output,
-                &parsed.output,
-                &command_path,
-                parsed.explicit_names(),
-            )?;
+            let output =
+                resolve_output(&self.spec.lifecycle_output, &parsed.output, &command_path)?;
             if parsed.help {
                 return Ok(CliOutcome::Help(ResolvedHelp {
                     model: self.help_model(command),
@@ -184,10 +172,7 @@ impl BuiltCliSpec {
             }
             if parsed.version {
                 if !command.command_path.is_empty() {
-                    return Err(CliError::unregistered(
-                        command_path,
-                        vec!["--version".to_string()],
-                    ));
+                    return Err(CliError::unregistered(command_path));
                 }
                 return Ok(CliOutcome::Version(ResolvedVersion {
                     name: self.spec.name.clone(),
@@ -205,25 +190,16 @@ impl BuiltCliSpec {
             .filter(|combination| combination_matches(command, combination, &parsed))
             .collect();
         let Some(combination) = matching.first().copied() else {
-            return Err(CliError::unregistered(
-                command_path,
-                parsed.explicit_names(),
-            ));
+            return Err(CliError::unregistered(command_path));
         };
         if matching.len() != 1 {
             return Err(CliError::new(
                 CliErrorRule::UnregisteredCombination,
                 command_path,
-                parsed.explicit_names(),
                 "arguments match more than one registered CLI combination",
             ));
         }
-        let output = resolve_output(
-            &combination.output,
-            &parsed.output,
-            &command_path,
-            parsed.explicit_names(),
-        )?;
+        let output = resolve_output(&combination.output, &parsed.output, &command_path)?;
         let values = project_values(command, combination, &parsed);
         Ok(CliOutcome::Run(ResolvedInvocation {
             command_path: command.command_path.clone(),
@@ -259,7 +235,6 @@ impl BuiltCliSpec {
                 return Err(CliError::new(
                     CliErrorRule::UnknownCommand,
                     self.display_command_path(command),
-                    Vec::new(),
                     format!("unknown command `{}`", remaining[0]),
                 ));
             }
@@ -268,7 +243,6 @@ impl BuiltCliSpec {
         Err(CliError::new(
             CliErrorRule::UnknownCommand,
             self.spec.name.clone(),
-            Vec::new(),
             "unknown command",
         ))
     }
@@ -500,7 +474,6 @@ impl OutputPlan {
 struct ParsedArgs {
     application_values: BTreeMap<String, Vec<CliValue>>,
     explicit_application_ids: BTreeSet<String>,
-    explicit_application_names: BTreeMap<String, String>,
     output: ParsedOutput,
     help: bool,
     version: bool,
@@ -510,23 +483,6 @@ struct ParsedArgs {
 impl ParsedArgs {
     fn control_count(&self) -> usize {
         usize::from(self.help) + usize::from(self.version) + usize::from(self.docs)
-    }
-
-    fn explicit_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.explicit_application_names.values().cloned().collect();
-        names.extend(self.output.explicit_names());
-        if self.help {
-            names.push("--help".to_string());
-        }
-        if self.version {
-            names.push("--version".to_string());
-        }
-        if self.docs {
-            names.push("--docs".to_string());
-        }
-        names.sort();
-        names.dedup();
-        names
     }
 }
 
@@ -538,24 +494,6 @@ struct ParsedOutput {
     stderr_file: Option<PathBuf>,
 }
 
-impl ParsedOutput {
-    fn explicit_names(&self) -> Vec<String> {
-        let mut names = Vec::new();
-        if self.format.is_some() {
-            names.push("--output".to_string());
-        }
-        if self.destination.is_some() {
-            names.push("--output-to".to_string());
-        }
-        if self.stdout_file.is_some() {
-            names.push("--stdout-file".to_string());
-        }
-        if self.stderr_file.is_some() {
-            names.push("--stderr-file".to_string());
-        }
-        names
-    }
-}
 fn tokenize(
     command: &CommandSpec,
     tokens: &[String],
@@ -673,7 +611,6 @@ fn tokenize(
                     return Err(CliError::new(
                         CliErrorRule::UnknownArgument,
                         command_path.to_string(),
-                        vec![name.to_string()],
                         format!("unknown argument `{name}`"),
                     ));
                 }
@@ -685,7 +622,6 @@ fn tokenize(
             return Err(CliError::new(
                 CliErrorRule::UnknownArgument,
                 command_path.to_string(),
-                vec![token.to_string()],
                 format!("unknown argument `{token}`"),
             ));
         }
@@ -693,7 +629,6 @@ fn tokenize(
             return Err(CliError::new(
                 CliErrorRule::UnexpectedPositional,
                 command_path.to_string(),
-                Vec::new(),
                 "unexpected positional argument",
             ));
         };
@@ -791,9 +726,6 @@ fn insert_application(
     parsed
         .explicit_application_ids
         .insert(argument.argument_id.clone());
-    parsed
-        .explicit_application_names
-        .insert(argument.argument_id.clone(), display);
     Ok(())
 }
 
@@ -924,17 +856,13 @@ fn resolve_output(
     spec: &OutputSpec,
     parsed: &ParsedOutput,
     command_path: &str,
-    argument_names: Vec<String>,
 ) -> Result<OutputPlan, CliError> {
     match spec {
         OutputSpec::Raw { file_sinks } => {
             if parsed.format.is_some() || parsed.destination.is_some() {
-                return Err(CliError::unregistered(
-                    command_path.to_string(),
-                    argument_names,
-                ));
+                return Err(CliError::unregistered(command_path.to_string()));
             }
-            ensure_sinks(file_sinks, parsed, command_path, argument_names)?;
+            ensure_sinks(file_sinks, parsed, command_path)?;
             Ok(OutputPlan::Raw {
                 stdout_file: parsed.stdout_file.clone(),
                 stderr_file: parsed.stderr_file.clone(),
@@ -948,7 +876,7 @@ fn resolve_output(
             default_destination,
             file_sinks,
         } => {
-            ensure_sinks(file_sinks, parsed, command_path, argument_names.clone())?;
+            ensure_sinks(file_sinks, parsed, command_path)?;
             let format = parsed.format.as_ref().unwrap_or(default_format);
             if !formats.contains(format) {
                 return Err(invalid_value(
@@ -980,15 +908,11 @@ fn ensure_sinks(
     allowed: &[String],
     parsed: &ParsedOutput,
     command_path: &str,
-    argument_names: Vec<String>,
 ) -> Result<(), CliError> {
     if (parsed.stdout_file.is_some() && !allowed.iter().any(|sink| sink == "stdout"))
         || (parsed.stderr_file.is_some() && !allowed.iter().any(|sink| sink == "stderr"))
     {
-        return Err(CliError::unregistered(
-            command_path.to_string(),
-            argument_names,
-        ));
+        return Err(CliError::unregistered(command_path.to_string()));
     }
     Ok(())
 }

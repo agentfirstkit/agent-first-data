@@ -475,6 +475,48 @@ impl CliEmitter<Box<dyn std::io::Write>> {
     }
 }
 
+/// Write a raw document to the process stream `selector` names.
+///
+/// Not everything a CLI emits is an event. `--docs` renders a Markdown
+/// reference, `--output plain` help renders a human catalog, and `shell bash`
+/// renders a sourceable script: the consumer is `>` or `source`, so wrapping
+/// them in a protocol envelope would mean `tool --docs > cli.md` wrote JSON.
+/// Every CLI compiled from a registry inherits those outcomes, so something
+/// must write bytes to a process stream — and this is that one place. Without
+/// it each CLI hand-rolls the same dispatch, and they drift: this crate's own
+/// binary treats a broken pipe as success while other tools returned a failure
+/// exit code for it.
+///
+/// A broken pipe is success. `tool --docs | head` closes the reader early, and
+/// reading the first page of a document is not a failure to report.
+///
+/// `Split` writes to stdout: a document is the result, not a diagnostic.
+// The spec's Channel policy sanctions this sink, exactly as it does the
+// emitter's constructors above; `clippy.toml`'s `disallowed-methods` keeps
+// stray writes elsewhere from bypassing this routing.
+#[allow(clippy::disallowed_methods)]
+pub fn write_raw(text: &str, selector: OutputTo) -> std::io::Result<()> {
+    use std::io::Write;
+    let written = match selector {
+        OutputTo::Stderr => std::io::stderr().lock().write_all(text.as_bytes()),
+        OutputTo::Split | OutputTo::Stdout => std::io::stdout().lock().write_all(text.as_bytes()),
+    };
+    forgive_broken_pipe(written)
+}
+
+/// A closed reader is not a failure to report.
+///
+/// Split out so the policy is reachable from a test: piping a document into
+/// `head` is a normal way to read one, and the exit code must not say the tool
+/// failed. Every hand-rolled copy of this write got to decide that separately,
+/// and they did not agree.
+fn forgive_broken_pipe(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
 /// Build a standard CLI version event: a `kind:"result"` event whose payload is
 /// `{ "code": "version", "name": <name>, "version": <version> }`, plus
 /// `"display_name"`/`"build"` when given. `name` is the short/bin identity
@@ -520,4 +562,21 @@ pub fn cli_render_version(
     }
     rendered.push('\n');
     rendered
+}
+
+#[cfg(test)]
+mod raw_write_tests {
+    use super::forgive_broken_pipe;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn a_closed_reader_is_success_and_every_other_failure_is_not() {
+        assert!(forgive_broken_pipe(Ok(())).is_ok());
+        assert!(forgive_broken_pipe(Err(Error::from(ErrorKind::BrokenPipe))).is_ok());
+        let denied = forgive_broken_pipe(Err(Error::from(ErrorKind::PermissionDenied)));
+        assert_eq!(
+            denied.map_err(|error| error.kind()),
+            Err(ErrorKind::PermissionDenied)
+        );
+    }
 }

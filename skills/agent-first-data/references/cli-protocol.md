@@ -69,9 +69,10 @@ next; neither ever carries a raw value.
 
 The full command path comes first. There are no application globals, shorts,
 abbreviations, optional-value options, compatibility no-ops, rule priorities,
-or post-parse combination callbacks. Reserved built-ins are `--help`,
-`--docs`, `--version`, `--output`, `--output-to`, `--stdout-file`, and
-`--stderr-file`.
+or post-parse combination callbacks. Reserved built-ins are reserved only where
+AFDATA parses them: `--help`, `--output`, `--output-to`, `--stdout-file`, and
+`--stderr-file` at every command; `--version` and `--docs` at the root command
+only, so a subcommand may declare its own (`tool release --version 1.2.0`).
 
 Output tokens do not select or distinguish business combinations. Select one
 application shape first, then validate output against only that combination.
@@ -85,8 +86,9 @@ Version is a root-only lifecycle combination generated from `CliSpec`:
 {"kind":"result","result":{"code":"version","name":"tool","version":"1.2.3"},"trace":{}}
 ```
 
-It uses `CliSpec.lifecycle_output`. A subcommand `--version` is recognized but
-rejected as an unregistered combination.
+It uses `CliSpec.lifecycle_output`. Past the root the name is the
+application's: a subcommand that declares `--version` gets its own argument,
+and one that does not rejects it as an unregistered combination.
 
 ## Help v2
 
@@ -110,7 +112,9 @@ that command, each complete:
   would be registered but undiscoverable to a caller that stopped at the first.
 - There is no recursive argument catalog in v2. `--docs` renders the whole
   registry as Markdown.
-- Full-spec consumers use `cli-spec-v1`, not lossy help.
+- `cli-spec-v1` is the authoring contract, not a runtime export: it describes
+  the registry a tool is compiled from. No CLI emits one. Read `--docs` for the
+  whole registry, `--help` for one command.
 - Help describes invocation shapes and arguments. Domain idempotency, runtime
   errors, side effects, and recovery behavior belong in the owning tool's
   focused documentation and tests, not in `CliSpec` or help-v2.

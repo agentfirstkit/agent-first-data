@@ -24,7 +24,7 @@
 //! - (feature `skill-admin`): [`skill::run_skill_admin`] — install/uninstall/status a spore's
 //!   embedded Agent Skill across Codex, Claude Code, opencode, and Hermes; returns a typed
 //!   [`skill::SkillReport`]
-//! - (feature `tracing`): [`afdata_tracing::try_init`] initializes an AFDATA stdout logging
+//! - (feature `tracing`): [`afdata_tracing::try_init`] initializes an AFDATA stderr logging
 //!   layer with configurable format and redaction; also [`afdata_tracing::LogFormat`]
 //!
 //! The shared cross-language contract (which of these exist, under what name, in each of
@@ -73,7 +73,7 @@ mod validation;
 #[cfg(feature = "cli")]
 pub use cli::{
     CliEmitter, CliEmitterError, LogFilters, OutputTo, build_cli_version, cli_parse_log_filters,
-    cli_parse_output, cli_render_version,
+    cli_parse_output, cli_render_version, write_raw,
 };
 #[cfg(feature = "cli")]
 pub use cli_afdata::{

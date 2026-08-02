@@ -451,6 +451,15 @@
       "go": "CliRenderVersion"
     },
     {
+      "id": "write_raw",
+      "kind": "fn",
+      "rust": "write_raw",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only writer for the raw documents the CliSpec compiler injects into every registry (--docs Markdown, --output plain help, shell scripts): it owns stream routing and the rule that a closed reader is success. The other SDKs have no CliSpec compiler yet (see cli_spec), so they produce none of those outcomes and need no writer for them; add it there alongside the deferred compilers."
+    },
+    {
       "id": "cli_spec",
       "kind": "type",
       "rust": "CliSpec",

@@ -8,7 +8,7 @@ A naming convention that lets AI agents understand your data without being told 
 
 ## Global arguments
 
-AFDATA registers these; no command declares them, and the syntax in [Commands](#commands) leaves them out.
+AFDATA registers these itself, so the syntax in [Commands](#commands) leaves them out.
 
 | Argument | Where | What it does |
 |---|---|---|

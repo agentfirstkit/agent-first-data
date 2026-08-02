@@ -132,6 +132,13 @@ def assert_rust_example_uses_help_v2() -> None:
     version = json.loads(version_proc.stdout)
     assert version["result"]["code"] == "version", version
 
+    # Past the command path the spelling is the application's: this asks the
+    # release command for version 1.2.0, not agent-cli for its own version.
+    release_proc = run_rust_example(("release", "--version", "1.2.0"))
+    assert release_proc.returncode == 0, release_proc.stderr
+    release = json.loads(release_proc.stdout)
+    assert release["result"] == {"code": "release", "version": "1.2.0"}, release
+
     conflict = run_rust_example(("ping", "--host", "example.com", "--dry-run"))
     assert conflict.returncode == 2, conflict
     assert not conflict.stdout, conflict.stdout

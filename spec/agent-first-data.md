@@ -296,8 +296,14 @@ Applications MUST NOT maintain a second clap/argparse/flag definition,
 post-parse `requires`/`conflicts` policy, ignored compatibility option, or
 application global. The full command path comes first, followed by that
 command's options and positionals. Built-in lifecycle/output names are
-reserved: `--help`, `--docs`, `--version`, `--output`, `--output-to`,
-`--stdout-file`, and `--stderr-file`.
+reserved where AFDATA parses them and nowhere else. `--help`, `--output`,
+`--output-to`, `--stdout-file`, and `--stderr-file` are parsed at every
+command, so no command may declare them. `--version` and `--docs` are answered
+by the root command alone, so a **subcommand MAY declare its own**: in
+`tool release --version 1.2.0` that version is the release's, and the command
+path is fixed before that command's arguments are parsed, so the two spellings
+are never ambiguous. Where a subcommand declares neither, `--version` and
+`--docs` past the root stay an unregistered combination.
 
 **Help scope and output.** Help is generated directly from the same registry
 and answers in **one** round trip: `myapp [command] --help` returns every
@@ -342,8 +348,10 @@ reports the generic `cli_error`; see
 **Version output.** The registry automatically adds version as a root-only
 lifecycle combination. It emits
 `{"kind":"result","result":{"code":"version","name":"<name>","version":"<semver>"},"trace":{}}`
-through `CliSpec.lifecycle_output`. A version token under a subcommand is
-recognized but rejected as `unregistered_combination`.
+through `CliSpec.lifecycle_output`. Past the root the spelling is the
+application's: a subcommand that declares `--version` receives its own
+argument, and one that does not rejects the token as
+`unregistered_combination`.
 
 ### Environment variables
 

@@ -111,17 +111,41 @@ pub fn unset_preserving(content: &str, path: &str) -> DocumentResult<String> {
                 path: path.to_string(),
             })?;
     }
+    // `as_table_like_mut`, not `as_table_mut`: an inline table is a `Value`, not
+    // an `Item::Table`, and reading only the latter made `unset` refuse a key
+    // `set` had just written — `foo = { path = "..." }` could be edited but not
+    // emptied. The two verbs address the same nodes or neither is trustworthy.
     let table = current
-        .as_table_mut()
+        .as_table_like_mut()
         .ok_or_else(|| DocumentError::UnsupportedOperation {
             format: "TOML".to_string(),
             operation: "unset".to_string(),
-            detail: "only table entries can be removed by the current TOML editor".to_string(),
+            detail: "cannot address a key inside a non-table TOML value".to_string(),
         })?;
-    if table.remove(last).is_none() {
+    let Some(removed) = table.remove(last) else {
         return Err(DocumentError::PathNotFound {
             path: path.to_string(),
         });
+    };
+    // An inline table's closing space lives in the trailing decor of its final
+    // value, so removing the last entry takes ` }` down to `}` — a change to
+    // source the caller did not address. Hand that suffix to the new final
+    // entry, unless it already carries one of its own.
+    let removed_suffix = removed
+        .as_value()
+        .and_then(|value| value.decor().suffix())
+        .cloned();
+    if let (Some(inline), Some(suffix)) = (current.as_inline_table_mut(), removed_suffix)
+        && let Some((_, final_value)) = inline.iter_mut().last()
+    {
+        let carries_its_own = final_value
+            .decor()
+            .suffix()
+            .and_then(|raw| raw.as_str())
+            .is_some_and(|text| !text.is_empty());
+        if !carries_its_own {
+            final_value.decor_mut().set_suffix(suffix);
+        }
     }
     Ok(document.to_string())
 }

@@ -99,14 +99,26 @@ fn validate_command(
         }
         match &argument.syntax {
             ArgSyntax::Long { name } => {
+                if is_reserved_long(&command.command_path, name) {
+                    return Err(CliSpecError::new(
+                        "reserved_long_argument",
+                        format!(
+                            "long `{name}` is reserved by AFDATA at {}",
+                            if RESERVED_ARGUMENTS.contains(&name.as_str()) {
+                                "every command"
+                            } else {
+                                "the root command; a subcommand may declare it"
+                            }
+                        ),
+                    ));
+                }
                 if !is_canonical_long(name)
-                    || RESERVED_ARGUMENTS.contains(&name.as_str())
                     || name.trim_start_matches("--").replace('-', "_") != argument.argument_id
                 {
                     return Err(CliSpecError::new(
                         "invalid_long_argument",
                         format!(
-                            "long `{name}` must canonically map to `{}` and not be reserved",
+                            "long `{name}` must canonically map to `{}`",
                             argument.argument_id
                         ),
                     ));

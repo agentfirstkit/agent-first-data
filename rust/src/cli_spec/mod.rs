@@ -42,15 +42,33 @@ pub use spec::{
     FixedValue, OutputLifecycle, OutputSpec,
 };
 
+/// Names AFDATA parses at every command, so no command may declare them.
 pub(crate) const RESERVED_ARGUMENTS: &[&str] = &[
     "--help",
-    "--version",
-    "--docs",
     "--output",
     "--output-to",
     "--stdout-file",
     "--stderr-file",
 ];
+
+/// Names AFDATA answers at the root command only.
+///
+/// Reserving these everywhere would cost an application a name it legitimately
+/// owns past the command path — in `tool release --version 1.2.0` the version
+/// is the release's, not a request for the tool's, exactly as git and cargo
+/// read it — and would buy nothing: the command path is fixed before that
+/// command's arguments are parsed, so a subcommand's own `--version` is never
+/// ambiguous with this one.
+pub(crate) const ROOT_RESERVED_ARGUMENTS: &[&str] = &["--version", "--docs"];
+
+/// Whether AFDATA answers `name` at this command, and so owns the spelling here.
+///
+/// Reservation follows injection: a name is unavailable exactly where AFDATA
+/// would parse it, never merely because AFDATA parses it somewhere.
+fn is_reserved_long(command_path: &[String], name: &str) -> bool {
+    RESERVED_ARGUMENTS.contains(&name)
+        || (command_path.is_empty() && ROOT_RESERVED_ARGUMENTS.contains(&name))
+}
 
 fn nonempty(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)

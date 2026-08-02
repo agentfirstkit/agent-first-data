@@ -49,11 +49,14 @@ impl CliErrorRule {
 }
 
 /// Structured CLI-resolution error. It never contains raw argument values.
+///
+/// `rule` is the classification and the only thing worth branching on; the two
+/// strings are for a human. The command path and the implicated argument names
+/// are not fields: both are already inside `hint` and `message` respectively,
+/// and a second, stringly-typed copy of either is a place for them to drift.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CliError {
     pub rule: CliErrorRule,
-    pub command_path: String,
-    pub argument_names: Vec<String>,
     pub message: String,
     pub hint: String,
 }
@@ -62,24 +65,20 @@ impl CliError {
     pub(super) fn new(
         rule: CliErrorRule,
         command_path: String,
-        argument_names: Vec<String>,
         message: impl Into<String>,
     ) -> Self {
         let hint = format!("run `{command_path} --help` and choose one registered combination");
         Self {
             rule,
-            command_path,
-            argument_names,
             message: message.into(),
             hint,
         }
     }
 
-    pub(super) fn unregistered(command_path: String, argument_names: Vec<String>) -> Self {
+    pub(super) fn unregistered(command_path: String) -> Self {
         Self::new(
             CliErrorRule::UnregisteredCombination,
             command_path,
-            argument_names,
             "arguments do not match a registered CLI combination",
         )
     }
@@ -105,7 +104,6 @@ pub(super) fn invalid_value(command_path: &str, name: String, message: &str) -> 
     CliError::new(
         CliErrorRule::InvalidArgumentValue,
         command_path.to_string(),
-        vec![name.clone()],
         format!("invalid value for `{name}`: {message}"),
     )
 }
@@ -114,7 +112,6 @@ pub(super) fn missing_value(command_path: &str, name: &str) -> CliError {
     CliError::new(
         CliErrorRule::MissingArgumentValue,
         command_path.to_string(),
-        vec![name.to_string()],
         format!("argument `{name}` requires a value"),
     )
 }
@@ -123,7 +120,6 @@ pub(super) fn duplicate_error(command_path: &str, name: &str) -> CliError {
     CliError::new(
         CliErrorRule::DuplicateArgument,
         command_path.to_string(),
-        vec![name.to_string()],
         format!("argument `{name}` may not be repeated"),
     )
 }

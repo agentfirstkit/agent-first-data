@@ -133,9 +133,12 @@ pub fn render_cli_reference(cli: &BuiltCliSpec) -> String {
     // section would ever mention them.
     let baseline = baseline_output(&commands);
     out.push_str("## Global arguments\n\n");
+    // Not "no command declares them": `--version` and `--docs` are answered by
+    // the root alone, so a command may declare its own argument under that
+    // spelling — where one does, the entry below is still only the root's.
     out.push_str(
-        "AFDATA registers these; no command declares them, and the syntax in \
-         [Commands](#commands) leaves them out.\n\n",
+        "AFDATA registers these itself, so the syntax in [Commands](#commands) \
+         leaves them out.\n\n",
     );
     out.push_str("| Argument | Where | What it does |\n|---|---|---|\n");
     out.push_str(

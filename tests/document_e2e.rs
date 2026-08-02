@@ -220,6 +220,50 @@ fn test_toml_unset_preserves_comments() {
 
 #[cfg(feature = "toml")]
 #[test]
+fn test_toml_set_and_unset_address_the_same_inline_table_keys() {
+    // `set` reached inside an inline table while `unset` refused it, so a key
+    // could be written and then not removed. Whatever one verb can address, the
+    // other must.
+    let source = "[dependencies]\nfoo = { version = \"1\", path = \"../foo\" } # pinned\n";
+    let edited = agent_first_data::document::format::toml::set_preserving(
+        source,
+        "dependencies.foo.path",
+        &Value::String("../bar".to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        edited,
+        "[dependencies]\nfoo = { version = \"1\", path = \"../bar\" } # pinned\n"
+    );
+
+    let removed = agent_first_data::document::format::toml::unset_preserving(
+        &edited,
+        "dependencies.foo.path",
+    )
+    .unwrap();
+    assert_eq!(
+        removed,
+        "[dependencies]\nfoo = { version = \"1\" } # pinned\n"
+    );
+
+    // An absent key inside an inline table is still a path error, not a silent
+    // success — the parent being addressable must not weaken that.
+    let missing = agent_first_data::document::format::toml::unset_preserving(
+        &removed,
+        "dependencies.foo.absent",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            missing,
+            agent_first_data::document::DocumentError::PathNotFound { .. }
+        ),
+        "{missing:?}"
+    );
+}
+
+#[cfg(feature = "toml")]
+#[test]
 fn test_toml_golden_array_and_datetime_bytes() {
     let source = "# keep\nwhen = 2024-01-01T00:00:00Z\nvalues = [1, 2, 3]\ntarget = 1\n";
     let edited = agent_first_data::document::format::toml::set_preserving(

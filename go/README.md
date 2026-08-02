@@ -27,7 +27,7 @@ func main() {
 }
 ```
 
-Useful names use Go casing: `Render` (the single `value × format × options → string` entry point), `OutputFormat`, `OutputTo`, `OutputOptions`, `OutputOptionsForPolicy`, `RedactedValue`, `RedactURLSecrets`, `RedactArgv`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `IsValidRFC3339`, `IsValidBCP47`, `CliParseOutput`, `CliParseLogFilters`, `ParseOutputTo`, `CliEmitter`, `BuildCliError`, `BuildCliVersion`, `CliRenderVersion`, `ValidateProtocolEvent`, and `DecodeProtocolEvent`.
+Useful names use Go casing: `Render` (the single `value × format × options → string` entry point), `OutputFormat`, `OutputTo`, `OutputOptions`, `OutputOptionsForPolicy`, `RedactedValue`, `RedactURLSecrets`, `RedactArgv`, `NormalizeUTCOffset`, `IsValidRFC3339Date`, `IsValidRFC3339Time`, `IsValidRFC3339`, `IsValidBCP47`, `CliParseOutput`, `CliParseLogFilters`, `ParseOutputTo`, `CliEmitter`, `BuildCLIError`, `BuildCliVersion`, `CliRenderVersion`, `ValidateProtocolEvent`, and `DecodeProtocolEvent`.
 
 Scoped redaction and extra secret names use the `Redactor` struct:
 

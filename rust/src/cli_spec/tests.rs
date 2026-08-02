@@ -85,7 +85,6 @@ fn rejects_known_but_unregistered_argument_combination_without_values() {
         .unwrap_err();
     assert_eq!(error.rule, CliErrorRule::UnregisteredCombination);
     assert!(!error.message.contains("do-not-leak"));
-    assert_eq!(error.argument_names, vec!["--dry-run", "--dsn", "--mode"]);
 }
 
 #[test]
@@ -236,7 +235,8 @@ fn output_contract_is_checked_after_shape_selection() {
         ])
         .unwrap_err();
     assert_eq!(error.rule, CliErrorRule::InvalidArgumentValue);
-    assert_eq!(error.argument_names, vec!["--output"]);
+    // The rejected argument is named in the message, not in a second field.
+    assert!(error.message.contains("--output"), "{}", error.message);
 }
 
 #[test]
@@ -350,10 +350,7 @@ fn secret_values_never_enter_structured_cli_errors() {
             "--unknown",
         ])
         .unwrap_err();
-    let rendered = format!(
-        "{:?}|{}|{:?}|{}|{}",
-        error.rule, error.command_path, error.argument_names, error.message, error.hint
-    );
+    let rendered = format!("{:?}|{}|{}", error.rule, error.message, error.hint);
     assert!(!rendered.contains("password"));
     assert_eq!(error.rule, CliErrorRule::UnknownArgument);
 }
@@ -512,6 +509,95 @@ fn docs_is_injected_and_costs_the_agent_nothing() {
             spec.resolve_from(argv.clone()).unwrap_err().rule,
             CliErrorRule::UnregisteredCombination,
             "{argv:?}"
+        );
+    }
+}
+
+/// A registry whose only application argument is `long`, declared on `path`.
+fn declaring(path: &[&str], long: &str) -> Result<BuiltCliSpec, CliSpecError> {
+    let argument = ArgSpec::option(long, "VALUE");
+    let command = CommandSpec::new(path.to_vec())
+        .arg(argument.clone())
+        .combination(
+            Combination::new("only")
+                .action("only")
+                .required([argument.argument_id])
+                .output(protocol()),
+        );
+    let spec = CliSpec::new("demo", "1.0.0").lifecycle_output(protocol());
+    if path.is_empty() {
+        spec.command(command).build()
+    } else {
+        spec.command(CommandSpec::root()).command(command).build()
+    }
+}
+
+#[test]
+fn a_subcommand_may_declare_a_name_the_root_reserves() {
+    // `tool release --version 1.2.0` names the release's version, not a request
+    // for the tool's own. Reserving the spelling everywhere would take a name
+    // the application legitimately owns and force it to invent `--app-version`.
+    let spec = declaring(&["release"], "--version").unwrap();
+    let CliOutcome::Run(invocation) = spec
+        .resolve_from(["demo", "release", "--version", "1.2.0"])
+        .unwrap()
+    else {
+        panic!("expected a run outcome");
+    };
+    assert_eq!(invocation.required("version").as_str(), Some("1.2.0"));
+
+    // And the lifecycle answer is untouched where AFDATA does inject it.
+    let CliOutcome::Version(version) = spec.resolve_from(["demo", "--version"]).unwrap() else {
+        panic!("expected version");
+    };
+    assert_eq!(version.version(), "1.0.0");
+}
+
+#[test]
+fn reservation_reaches_exactly_as_far_as_injection() {
+    // Reserved everywhere, because AFDATA parses them at every command: taking
+    // one would shadow a name the caller can always write.
+    for long in [
+        "--help",
+        "--output",
+        "--output-to",
+        "--stdout-file",
+        "--stderr-file",
+    ] {
+        for path in [&[][..], &["release"][..]] {
+            assert_eq!(
+                declaring(path, long).unwrap_err().rule,
+                "reserved_long_argument",
+                "{long} on {path:?}"
+            );
+        }
+    }
+    // Reserved at the root alone, because that is the only command that answers
+    // them — a subcommand's is its own argument, and `tool release --version`
+    // without a value is that argument missing one, not a version request.
+    for long in ["--version", "--docs"] {
+        assert_eq!(
+            declaring(&[], long).unwrap_err().rule,
+            "reserved_long_argument",
+            "{long}"
+        );
+        let spec = declaring(&["release"], long).unwrap();
+        assert_eq!(
+            spec.resolve_from(["demo", "release", long])
+                .unwrap_err()
+                .rule,
+            CliErrorRule::MissingArgumentValue,
+            "{long}"
+        );
+    }
+    // A subcommand that declares neither still gets the old answer: AFDATA
+    // reaches no further than the root, so there is nothing to run.
+    let spec = sample_spec().unwrap();
+    for long in ["--version", "--docs"] {
+        assert_eq!(
+            spec.resolve_from(["demo", "query", long]).unwrap_err().rule,
+            CliErrorRule::UnregisteredCombination,
+            "{long}"
         );
     }
 }

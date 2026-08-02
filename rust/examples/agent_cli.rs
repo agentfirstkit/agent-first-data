@@ -7,11 +7,10 @@
 
 use agent_first_data::{
     ArgSpec, CliOutcome, CliSpec, Combination, CommandSpec, Event, OutputFormat, OutputPlan,
-    OutputSpec, ResolvedInvocation, cli_error_event, cli_help_event, cli_version_event, json_error,
-    json_result, render,
+    OutputSpec, OutputTo, ResolvedInvocation, cli_error_event, cli_help_event, cli_version_event,
+    json_error, json_result, render,
 };
 use serde_json::json;
-use std::io::{self, Write};
 use std::process::ExitCode;
 
 fn output() -> OutputSpec {
@@ -54,6 +53,21 @@ fn cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data::CliSpe
                         .output(output()),
                 ),
         )
+        // Here so it stays proven: AFDATA answers `--version` at the root, but
+        // the name past the command path belongs to the application — this one
+        // is the release's version, not a request for agent-cli's.
+        .command(
+            CommandSpec::new(["release"])
+                .about("Describe a release request")
+                .arg(ArgSpec::option("--version", "VERSION").about("Version to release"))
+                .combination(
+                    Combination::new("release")
+                        .action("release")
+                        .about("Describe a release request")
+                        .required(["version"])
+                        .output(output()),
+                ),
+        )
         .build()
 }
 
@@ -74,6 +88,14 @@ fn ping(invocation: &ResolvedInvocation) -> Event {
     .build()
 }
 
+fn release(invocation: &ResolvedInvocation) -> Event {
+    json_result(json!({
+        "code": "release",
+        "version": invocation.required("version").as_str(),
+    }))
+    .build()
+}
+
 fn output_format(plan: &OutputPlan) -> OutputFormat {
     match plan.format() {
         Some("yaml") => OutputFormat::Yaml,
@@ -82,18 +104,18 @@ fn output_format(plan: &OutputPlan) -> OutputFormat {
     }
 }
 
-// Closed-world CLI errors use the protocol's sanctioned stderr channel.
-#[allow(clippy::disallowed_methods)]
+// Routing, and the rule that a broken pipe is not a failure, belong to AFDATA:
+// `--docs` and plain help are injected into every registry, so a CLI that
+// hand-rolled this write would be reimplementing a decision it does not own.
 fn write_text(text: &str, stderr: bool, code: u8) -> ExitCode {
-    let result = if stderr {
-        io::stderr().lock().write_all(text.as_bytes())
+    let selector = if stderr {
+        OutputTo::Stderr
     } else {
-        io::stdout().lock().write_all(text.as_bytes())
+        OutputTo::Stdout
     };
-    if result.is_ok() {
-        ExitCode::from(code)
-    } else {
-        ExitCode::FAILURE
+    match agent_first_data::write_raw(text, selector) {
+        Ok(()) => ExitCode::from(code),
+        Err(_) => ExitCode::FAILURE,
     }
 }
 
@@ -132,6 +154,7 @@ fn main() -> ExitCode {
     let app = match cli.bind_actions([
         ("echo", echo as fn(&ResolvedInvocation) -> Event),
         ("ping", ping as fn(&ResolvedInvocation) -> Event),
+        ("release", release as fn(&ResolvedInvocation) -> Event),
     ]) {
         Ok(app) => app,
         Err(error) => return write_startup_error("cli_actions_invalid", &error.to_string()),
@@ -191,6 +214,24 @@ mod tests {
         // One round trip, so the optional argument is in the answer rather
         // than behind a second call the caller might never make.
         assert!(shape.usage.contains("[--dry-run]"), "{}", shape.usage);
+    }
+
+    #[test]
+    fn a_subcommand_owns_the_version_name_the_root_answers() {
+        let cli = cli_spec().unwrap();
+        let CliOutcome::Run(invocation) = cli
+            .resolve_from(["agent-cli", "release", "--version", "1.2.0"])
+            .unwrap()
+        else {
+            panic!("expected a run outcome");
+        };
+        assert_eq!(invocation.required("version").as_str(), Some("1.2.0"));
+
+        let CliOutcome::Version(version) = cli.resolve_from(["agent-cli", "--version"]).unwrap()
+        else {
+            panic!("expected version");
+        };
+        assert_eq!(version.name(), "agent-cli");
     }
 
     #[test]

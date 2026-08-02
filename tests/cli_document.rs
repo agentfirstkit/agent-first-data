@@ -709,6 +709,28 @@ fn test_paths_and_keys_object_array_and_top_level() {
     let top = run_with_stdin(&["keys", "-"], stdin);
     assert!(top.status.success());
     assert_eq!(String::from_utf8_lossy(&top.stdout), "deps\nextra\n");
+
+    // A key holding a space needs no escaping — only `.` and `\` do — and each
+    // line stays one whole address, so `while IFS= read -r` reads it back
+    // unsplit. Asserted because the line format is what shell callers parse.
+    let spaced = br#"{"deps":{"two words":1,"a.b":2}}"#;
+    let paths_spaced = run_with_stdin(&["paths", "-", "deps"], spaced);
+    assert!(paths_spaced.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&paths_spaced.stdout),
+        "deps.a\\.b\ndeps.two words\n"
+    );
+    let keys_spaced = run_with_stdin(&["keys", "-", "deps"], spaced);
+    assert!(keys_spaced.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&keys_spaced.stdout),
+        "a.b\ntwo words\n"
+    );
+
+    // And the address `paths` printed round-trips back through a read.
+    let read_back = run_with_stdin(&["value", "-", "deps.two words"], spaced);
+    assert!(read_back.status.success(), "{read_back:?}");
+    assert_eq!(String::from_utf8_lossy(&read_back.stdout), "1");
 }
 
 #[test]
