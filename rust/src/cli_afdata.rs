@@ -262,8 +262,18 @@ pub fn render_cli_reference(cli: &BuiltCliSpec) -> String {
          | 0 | The command ran and succeeded. |\n\
          | 1 | The command ran and failed. The event carries a domain `error.code`. |\n\
          | 2 | The invocation was rejected before anything ran. `error.code` is one of the \
-         `cli_*` codes below. |\n\n\
-         The split is the useful one for a caller: exit 2 means the call was never made, so \
+         `cli_*` codes below. |\n",
+    );
+    // Sorted rather than left in declaration order: the table is read by code,
+    // and a registry author's ordering is not the reader's.
+    let mut declared_exit_codes: Vec<&crate::cli_spec::ExitCodeSpec> =
+        spec.exit_codes.iter().collect();
+    declared_exit_codes.sort_by_key(|exit| exit.code);
+    for exit in declared_exit_codes {
+        out.push_str(&format!("| {} | {} |\n", exit.code, exit.meaning));
+    }
+    out.push_str(
+        "\nThe split is the useful one for a caller: exit 2 means the call was never made, so \
          retrying it unchanged cannot help, while exit 1 means it was.\n\n",
     );
 
@@ -443,6 +453,27 @@ mod tests {
                     .output(output()),
             ),
         )
+    }
+
+    #[test]
+    fn a_cli_declares_exit_codes_beyond_afdatas_own() {
+        let spec = CliSpec::new("demo", "1.0.0")
+            .lifecycle_output(output())
+            .exit_code(4, "The output could not be written.")
+            .exit_code(3, "The command ran and partly succeeded.")
+            .command(CommandSpec::root())
+            .build()
+            .unwrap();
+        let reference = render_cli_reference(&spec);
+        let table = reference
+            .split("## Exit codes")
+            .nth(1)
+            .expect("the reference documents exit codes");
+        // Sorted by code, not by declaration order: the table is read by code.
+        let partial = table.find("| 3 | The command ran and partly succeeded. |");
+        let write_failed = table.find("| 4 | The output could not be written. |");
+        assert!(partial.is_some() && write_failed.is_some(), "{table}");
+        assert!(partial < write_failed, "{table}");
     }
 
     #[test]

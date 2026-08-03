@@ -1056,7 +1056,14 @@ func redactSecretsWithContextDepth(value any, context redactionContext, depth in
 		for k := range v {
 			switch {
 			case context.isSecretKey(k):
-				v[k] = redactedMarker
+				// A null secret is an absent secret. Masking it would
+				// manufacture the appearance of a configured credential —
+				// readers cannot tell "***"-because-set from
+				// "***"-because-null. Redaction hides a value that exists;
+				// it does not invent one.
+				if v[k] != nil {
+					v[k] = redactedMarker
+				}
 			case keyHasURLSuffix(k):
 				if s, ok := v[k].(string); ok {
 					v[k] = redactURLFieldValue(s, context)

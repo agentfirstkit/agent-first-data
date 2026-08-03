@@ -306,7 +306,15 @@ fn redact_secrets_with_context_depth(value: &mut Value, context: &RedactionConte
             let keys: Vec<String> = map.keys().cloned().collect();
             for key in keys {
                 if context.is_secret_key(&key) {
-                    map.insert(key, Value::String(REDACTED_MARKER.into()));
+                    // A null secret is an *absent* secret. Masking it would
+                    // manufacture the appearance of a configured credential:
+                    // readers cannot tell `"***"`-because-set from
+                    // `"***"`-because-null, so a tool showing its own config
+                    // would report every unset secret as configured. Redaction
+                    // hides a value that exists; it does not invent one.
+                    if !map.get(&key).is_some_and(Value::is_null) {
+                        map.insert(key, Value::String(REDACTED_MARKER.into()));
+                    }
                 } else if key_has_url_suffix(&key) {
                     if let Some(Value::String(s)) = map.get_mut(&key) {
                         *s = redact_url_field_value(s, context);

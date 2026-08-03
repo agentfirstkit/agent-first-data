@@ -1505,3 +1505,55 @@ fn a_known_but_unbuilt_format_names_the_missing_feature() {
     assert_eq!(unknown.code(), "document_format_unknown", "{unknown:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Markdown file whose frontmatter a human has edited, holding the shapes
+/// that used to be lost on any write: a leading comment, an author's key
+/// order, a mixed quote style, and a body with its own leading blank line.
+#[cfg(feature = "yaml")]
+const HAND_EDITED_CONTACT: &str = "---\n# Alice is the Q3 contract contact\ndisplay_name: Alice Example\nkind: contact\nemails:\n  - alice@example.com\ntags: []\nrole: ''\n---\n\n# Notes\n\nFirst paragraph.\n";
+
+#[test]
+#[cfg(feature = "yaml")]
+fn frontmatter_collection_edits_leave_the_rest_of_the_file_alone() {
+    let mut document = Document::parse(HAND_EDITED_CONTACT, Format::YamlFrontmatter).unwrap();
+
+    document
+        .set("tags", Value::Array(vec![Value::String("vip".into())]))
+        .unwrap();
+
+    let edited = document.source().to_string();
+    assert_eq!(
+        edited,
+        "---\n# Alice is the Q3 contract contact\ndisplay_name: Alice Example\nkind: contact\nemails:\n  - alice@example.com\ntags:\n  - vip\nrole: ''\n---\n\n# Notes\n\nFirst paragraph.\n"
+    );
+    // The parts a from-struct re-render used to destroy.
+    assert!(edited.contains("# Alice is the Q3 contract contact"));
+    assert!(edited.contains("role: ''"));
+    assert!(edited.contains("---\n\n# Notes\n\nFirst paragraph.\n"));
+}
+
+#[test]
+#[cfg(feature = "yaml")]
+fn frontmatter_keyed_lists_are_editable_like_a_standalone_yaml_file() {
+    // `add`/`remove` had no frontmatter arm at all: the same keyed list was
+    // editable in a `.yaml` file and refused inside a `.md` one. The list also
+    // starts empty, which the CST's append cannot anchor indentation on.
+    let source = "---\n# managed by hand\nkind: contact\nidentities: []\n---\n\nBody stays.\n";
+    let mut document = Document::parse(source, Format::YamlFrontmatter).unwrap();
+
+    document
+        .add(
+            "identities",
+            "work",
+            "identity",
+            &[("label".to_string(), Value::String("Work".into()))],
+        )
+        .unwrap();
+    let added = document.source().to_string();
+    assert!(added.contains("# managed by hand"), "{added}");
+    assert!(added.ends_with("---\n\nBody stays.\n"), "{added}");
+    assert!(added.contains("identity: work"), "{added}");
+
+    document.remove("identities", "work", "identity").unwrap();
+    assert_eq!(document.source(), source);
+}

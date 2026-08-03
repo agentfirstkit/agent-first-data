@@ -284,8 +284,17 @@ and the difference is what to fix:
   names the way out; convert the file to LF or CRLF.
 
 `document_unsupported_operation` means the format cannot express the edit —
-a read-only backend, or a YAML collection mutation no source-preserving editor
-can make. It is not retryable as-is; change the verb or the format.
+a read-only backend, an escaped or keyed-list route through YAML, or a YAML
+path that resolves through an alias (editing it would rewrite the anchor, a
+different key than the one named). It is not retryable as-is; change the verb,
+the path, or the format.
+
+Writing a whole sequence or mapping into YAML *is* supported, including inside
+Markdown frontmatter, and keeps every byte outside that value: surrounding
+keys, their comments, key order, quote styles, and the body. What it cannot
+keep are comments and blank lines *inside* the collection being replaced —
+those go with the value they annotated. Editing a single element (`tags.1`) or
+appending one leaves its neighbours, and their comments, untouched.
 
 `document_write_would_corrupt` means the edit was rendered, read back, and
 found unparseable, so it was refused before reaching disk. The file is

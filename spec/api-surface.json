@@ -559,6 +559,15 @@
       "note": "Rust reference closed raw/protocol output contract."
     },
     {
+      "id": "exit_code_spec",
+      "kind": "type",
+      "rust": "ExitCodeSpec",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference cli-spec-v1 declaration of an exit code the CLI defines beyond AFDATA's 0/1/2, so the rendered reference documents what the binary returns. Belongs to the CliSpec compiler, which the other SDKs intentionally defer (see cli_spec)."
+    },
+    {
       "id": "output_lifecycle",
       "kind": "type",
       "rust": "OutputLifecycle",

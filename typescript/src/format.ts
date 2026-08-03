@@ -863,7 +863,13 @@ function redactSecrets(value: JsonValue, context: RedactionContext = DEFAULT_CON
     for (const k of Object.keys(value)) {
       const v = value[k];
       if (isSecretKey(k, context.secretNames)) {
-        value[k] = REDACTED_MARKER;
+        // A null secret is an absent secret. Masking it would manufacture the
+        // appearance of a configured credential — readers cannot tell
+        // "***"-because-set from "***"-because-null. Redaction hides a value
+        // that exists; it does not invent one.
+        if (v !== null) {
+          value[k] = REDACTED_MARKER;
+        }
       } else if (keyHasUrlSuffix(k)) {
         if (typeof v === "string") {
           value[k] = redactUrlFieldValue(v, context.secretNames);

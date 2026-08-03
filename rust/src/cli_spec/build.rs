@@ -16,6 +16,33 @@ pub(super) fn validate_spec(spec: &CliSpec) -> Result<(), CliSpecError> {
         ));
     }
     validate_output(&spec.lifecycle_output)?;
+    let mut declared_exit_codes = BTreeSet::new();
+    for exit in &spec.exit_codes {
+        // 0/1/2 are AFDATA's own and already in the rendered table. Letting a
+        // CLI redeclare one would either duplicate the row or quietly restate a
+        // meaning the protocol fixes.
+        if exit.code <= 2 {
+            return Err(CliSpecError::new(
+                "reserved_exit_code",
+                format!(
+                    "exit code {} is defined by AFDATA and cannot be redeclared",
+                    exit.code
+                ),
+            ));
+        }
+        if !declared_exit_codes.insert(exit.code) {
+            return Err(CliSpecError::new(
+                "duplicate_exit_code",
+                format!("exit code {} is declared more than once", exit.code),
+            ));
+        }
+        if exit.meaning.trim().is_empty() {
+            return Err(CliSpecError::new(
+                "empty_exit_code_meaning",
+                format!("exit code {} must say what it means", exit.code),
+            ));
+        }
+    }
     // Checked here rather than inside the per-command loop: there it could only
     // run while iterating a non-empty list, so it never fired.
     if spec.commands.is_empty() {

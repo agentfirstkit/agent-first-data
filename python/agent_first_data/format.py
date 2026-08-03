@@ -1014,7 +1014,13 @@ def _redact_secrets(value: Any, context: _RedactionContext = _RedactionContext()
         for k in list(value.keys()):
             v = value[k]
             if context.is_secret_key(k):
-                value[k] = REDACTED_MARKER
+                # A null secret is an absent secret. Masking it would
+                # manufacture the appearance of a configured credential —
+                # readers cannot tell "***"-because-set from
+                # "***"-because-null. Redaction hides a value that exists;
+                # it does not invent one.
+                if v is not None:
+                    value[k] = REDACTED_MARKER
             elif _key_has_url_suffix(k):
                 if isinstance(v, str):
                     value[k] = _redact_url_field_value(v, context)

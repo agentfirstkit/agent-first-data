@@ -83,7 +83,7 @@ pub use cli_afdata::{
 pub use cli_spec::{
     ArgSpec, ArgSyntax, ArgValueType, BoundCliSpec, BuiltCliSpec, CliError, CliErrorRule,
     CliHelpV2, CliOutcome, CliShape, CliSpec, CliSpecError, CliValue, Combination, CommandSpec,
-    FixedValue, OutputLifecycle, OutputPlan, OutputSpec, ResolvedDocs, ResolvedHelp,
+    ExitCodeSpec, FixedValue, OutputLifecycle, OutputPlan, OutputSpec, ResolvedDocs, ResolvedHelp,
     ResolvedInvocation, ResolvedVersion, SyntheticInvocation,
 };
 pub use formatting::{OutputFormat, render};

@@ -35,6 +35,28 @@
     "lifecycle_output": {
       "$ref": "#/$defs/output"
     },
+    "exit_codes": {
+      "type": "array",
+      "description": "Exit codes this CLI returns beyond AFDATA's 0/1/2, rendered into the reference's exit-code table. 0/1/2 are AFDATA's own and may not be redeclared.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "meaning"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer",
+            "minimum": 3,
+            "maximum": 255
+          },
+          "meaning": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        }
+      }
+    },
     "commands": {
       "type": "array",
       "minItems": 1,

@@ -39,7 +39,7 @@ pub use resolve::{
 };
 pub use spec::{
     ArgSpec, ArgSyntax, ArgValueType, CliSpec, CliSpecError, CliValue, Combination, CommandSpec,
-    FixedValue, OutputLifecycle, OutputSpec,
+    ExitCodeSpec, FixedValue, OutputLifecycle, OutputSpec,
 };
 
 /// Names AFDATA parses at every command, so no command may declare them.

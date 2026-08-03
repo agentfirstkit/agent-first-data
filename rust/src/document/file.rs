@@ -411,6 +411,23 @@ impl Document {
                 key,
                 item,
             )?,
+            // Same editor as `set` reaches through frontmatter: the delimited
+            // block is an ordinary YAML document, and the body is spliced back
+            // untouched. Without this arm a keyed list was editable in a `.yaml`
+            // file and refused in the frontmatter of a `.md` one.
+            #[cfg(feature = "yaml")]
+            Format::YamlFrontmatter => {
+                let parts = crate::document::format::frontmatter::split(
+                    &self.source,
+                    crate::document::format::frontmatter::Delimiter::Dash,
+                )?;
+                let new_fm = crate::document::format::yaml::append_array_item_preserving(
+                    parts.frontmatter,
+                    key,
+                    item,
+                )?;
+                format!("{}{}{}", parts.pre, new_fm, parts.post)
+            }
             _ => {
                 return Err(DocumentError::UnsupportedOperation {
                     format: self.format.name().to_string(),
@@ -456,6 +473,19 @@ impl Document {
                 key,
                 removed_index,
             )?,
+            #[cfg(feature = "yaml")]
+            Format::YamlFrontmatter => {
+                let parts = crate::document::format::frontmatter::split(
+                    &self.source,
+                    crate::document::format::frontmatter::Delimiter::Dash,
+                )?;
+                let new_fm = crate::document::format::yaml::remove_array_item_preserving(
+                    parts.frontmatter,
+                    key,
+                    removed_index,
+                )?;
+                format!("{}{}{}", parts.pre, new_fm, parts.post)
+            }
             _ => {
                 return Err(DocumentError::UnsupportedOperation {
                     format: self.format.name().to_string(),

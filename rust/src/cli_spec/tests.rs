@@ -609,3 +609,32 @@ fn an_empty_registry_is_rejected() {
     let error = CliSpec::new("demo", "1").build().unwrap_err();
     assert_eq!(error.rule, "missing_commands");
 }
+
+#[test]
+fn a_cli_cannot_redeclare_or_repeat_an_exit_code() {
+    let build = |codes: &[(u8, &str)]| {
+        let mut spec = CliSpec::new("demo", "1.0.0").lifecycle_output(protocol());
+        for (code, meaning) in codes {
+            spec = spec.exit_code(*code, *meaning);
+        }
+        spec.command(CommandSpec::root()).build()
+    };
+    // 0/1/2 are the protocol's; a tool restating one could contradict it.
+    for reserved in [0u8, 1, 2] {
+        assert_eq!(
+            build(&[(reserved, "mine now")]).unwrap_err().rule,
+            "reserved_exit_code",
+            "{reserved}"
+        );
+    }
+    assert_eq!(
+        build(&[(3, "partial"), (3, "also partial")])
+            .unwrap_err()
+            .rule,
+        "duplicate_exit_code"
+    );
+    assert_eq!(
+        build(&[(3, "  ")]).unwrap_err().rule,
+        "empty_exit_code_meaning"
+    );
+}

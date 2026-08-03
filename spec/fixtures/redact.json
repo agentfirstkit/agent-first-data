@@ -157,5 +157,40 @@
       "next_url": "/callback?page=2",
       "name": "test"
     }
+  },
+  {
+    "name": "null secret stays null",
+    "input": {
+      "api_key_secret": null,
+      "name": "test"
+    },
+    "expected": {
+      "api_key_secret": null,
+      "name": "test"
+    }
+  },
+  {
+    "name": "empty string secret is redacted",
+    "input": {
+      "api_key_secret": ""
+    },
+    "expected": {
+      "api_key_secret": "***"
+    }
+  },
+  {
+    "name": "null secret inside a container is untouched",
+    "input": {
+      "imap": {
+        "password_secret": null,
+        "host": "mail.example.com"
+      }
+    },
+    "expected": {
+      "imap": {
+        "password_secret": null,
+        "host": "mail.example.com"
+      }
+    }
   }
 ]
