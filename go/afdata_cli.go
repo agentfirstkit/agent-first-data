@@ -23,7 +23,7 @@ const (
 )
 
 // CliParseOutput parses the --output flag value into an OutputFormat.
-// Returns an error with a message suitable for BuildCliError on unknown values.
+// Returns a value-safe error suitable for BuildCliError on unknown values.
 func CliParseOutput(s string) (OutputFormat, error) {
 	switch s {
 	case "json":
@@ -33,7 +33,7 @@ func CliParseOutput(s string) (OutputFormat, error) {
 	case "plain":
 		return OutputFormatPlain, nil
 	default:
-		return "", fmt.Errorf("invalid --output format %q: expected json, yaml, or plain", s)
+		return "", errors.New("invalid --output format: expected json, yaml, or plain")
 	}
 }
 
@@ -139,7 +139,7 @@ const (
 )
 
 // ParseOutputTo parses an --output-to value: split (default), stdout, or stderr.
-// It returns an error with a message suitable for BuildCliError on unknown values.
+// It returns a value-safe error suitable for BuildCliError on unknown values.
 func ParseOutputTo(value string) (OutputTo, error) {
 	switch value {
 	case "split":
@@ -149,7 +149,7 @@ func ParseOutputTo(value string) (OutputTo, error) {
 	case "stderr":
 		return OutputToStderr, nil
 	default:
-		return "", fmt.Errorf("unsupported --output-to `%s`; expected split, stdout, or stderr", value)
+		return "", errors.New("unsupported --output-to: expected split, stdout, or stderr")
 	}
 }
 

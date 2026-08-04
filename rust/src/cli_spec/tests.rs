@@ -67,6 +67,17 @@ fn resolves_one_registered_combination() {
     assert_eq!(invocation.action_id(), "query");
     assert_eq!(invocation.required("dsn").as_str(), Some("secret"));
     assert_eq!(invocation.required("mode").as_str(), Some("cli"));
+    // A misspelled id is a handler defect, not a runtime condition. It fails
+    // its type check instead of reading as a value, and `call_every_combination`
+    // is what names it.
+    assert!(invocation.required("misspelled").as_str().is_none());
+    assert_eq!(
+        invocation.output_plan().output_format(),
+        Some(OutputFormat::Json)
+    );
+    assert_eq!(invocation.output_plan().output_to(), Some(OutputTo::Split));
+    assert_eq!(invocation.output_plan().format(), Some("json"));
+    assert_eq!(invocation.output_plan().destination(), Some("split"));
 }
 
 #[test]
@@ -337,6 +348,125 @@ fn action_binding_requires_exact_distinct_coverage() {
 }
 
 #[test]
+fn action_binding_rejects_an_invocation_from_another_registry() {
+    fn query(_: &ResolvedInvocation) -> &'static str {
+        "query"
+    }
+    fn pipe(_: &ResolvedInvocation) -> &'static str {
+        "pipe"
+    }
+
+    let first = sample_spec().unwrap();
+    let app = first
+        .bind_actions([
+            ("query", query as fn(&ResolvedInvocation) -> &'static str),
+            ("pipe", pipe as fn(&ResolvedInvocation) -> &'static str),
+        ])
+        .unwrap();
+    let BoundOutcome::Run(own) = app
+        .resolve_from(["demo", "query", "--dsn", "secret", "--sql", "select 1"])
+        .unwrap()
+    else {
+        panic!("expected run");
+    };
+    assert_eq!(own.run(), "query");
+}
+
+/// Dispatch is infallible because the handler is bound during resolution, by
+/// the registry that owns it. There is no step that accepts an invocation from
+/// somewhere else, so the mismatch the old runtime check guarded against is not
+/// expressible — which is why no caller carries a branch for it.
+#[test]
+fn resolution_binds_the_handler_so_running_cannot_miss() {
+    fn query(_: &ResolvedInvocation) -> &'static str {
+        "query"
+    }
+    fn pipe(_: &ResolvedInvocation) -> &'static str {
+        "pipe"
+    }
+    let app = sample_spec()
+        .unwrap()
+        .bind_actions([
+            ("query", query as fn(&ResolvedInvocation) -> &'static str),
+            ("pipe", pipe as fn(&ResolvedInvocation) -> &'static str),
+        ])
+        .unwrap();
+
+    // Driven from the registry's own fixtures rather than hand-written argv, so
+    // the test cannot drift from the spec it is checking.
+    let fixtures = sample_spec().unwrap().synthetic_invocations();
+    assert!(!fixtures.is_empty());
+    for fixture in fixtures {
+        let BoundOutcome::Run(invocation) = app.resolve_from(fixture.argv.clone()).unwrap() else {
+            continue;
+        };
+        // The plan is readable before the handler runs, so a caller can still
+        // install redirection first.
+        assert!(invocation.output_plan().output_format().is_some());
+        let action = invocation.invocation().action_id().to_string();
+        assert_eq!(invocation.run(), action);
+    }
+}
+
+/// The other half of `required` being infallible: a handler that reads an id
+/// its combination does not declare is caught here, from a test, rather than
+/// silently receiving a failed read in production.
+#[test]
+#[should_panic(expected = "does not declare argument id `nonexistent`")]
+fn call_every_combination_names_a_handler_reading_an_undeclared_id() {
+    fn reads_a_bad_id(invocation: &ResolvedInvocation) -> &'static str {
+        let _ = invocation.required("nonexistent");
+        "ok"
+    }
+    fn fine(_: &ResolvedInvocation) -> &'static str {
+        "ok"
+    }
+    let app = sample_spec()
+        .unwrap()
+        .bind_actions([
+            (
+                "query",
+                reads_a_bad_id as fn(&ResolvedInvocation) -> &'static str,
+            ),
+            ("pipe", fine as fn(&ResolvedInvocation) -> &'static str),
+        ])
+        .unwrap();
+
+    app.call_every_combination();
+}
+
+/// It stays quiet when every handler reads only what it declared, and hands
+/// back what each one produced so a fallible handler can be checked too —
+/// otherwise a caller would still hand-roll the loop this replaces.
+#[test]
+fn call_every_combination_passes_and_returns_each_handler_result() {
+    fn query(invocation: &ResolvedInvocation) -> &'static str {
+        let _ = invocation.required("dsn");
+        "query"
+    }
+    fn pipe(invocation: &ResolvedInvocation) -> &'static str {
+        let _ = invocation.required("dsn");
+        "pipe"
+    }
+    let app = sample_spec()
+        .unwrap()
+        .bind_actions([
+            ("query", query as fn(&ResolvedInvocation) -> &'static str),
+            ("pipe", pipe as fn(&ResolvedInvocation) -> &'static str),
+        ])
+        .unwrap();
+
+    let results = app.call_every_combination();
+    assert!(!results.is_empty());
+    for (combination, produced) in &results {
+        assert!(
+            ["query", "pipe"].contains(produced),
+            "combination `{combination}` produced {produced}"
+        );
+    }
+}
+
+#[test]
 fn secret_values_never_enter_structured_cli_errors() {
     let spec = sample_spec().unwrap();
     let error = spec
@@ -353,6 +483,41 @@ fn secret_values_never_enter_structured_cli_errors() {
     let rendered = format!("{:?}|{}|{}", error.rule, error.message, error.hint);
     assert!(!rendered.contains("password"));
     assert_eq!(error.rule, CliErrorRule::UnknownArgument);
+
+    for argv in [
+        vec!["demo", "postgres://user:command-secret@example.test/db"],
+        vec!["demo", "query", "-short-secret"],
+    ] {
+        let error = spec.resolve_from(argv).unwrap_err();
+        let rendered = format!("{:?}|{}|{}", error.rule, error.message, error.hint);
+        assert!(!rendered.contains("secret"), "{rendered}");
+    }
+}
+
+#[test]
+fn separated_and_positional_negative_numbers_are_values() {
+    let mut positional = ArgSpec::positional("limit", 0, "LIMIT");
+    positional.value_type = ArgValueType::I64;
+    let spec = CliSpec::new("demo", "1")
+        .command(
+            CommandSpec::root()
+                .arg(ArgSpec::option_i64("--offset", "OFFSET"))
+                .arg(positional)
+                .combination(
+                    Combination::new("numbers")
+                        .action("numbers")
+                        .required(["offset", "limit"]),
+                ),
+        )
+        .build()
+        .unwrap();
+
+    let CliOutcome::Run(invocation) = spec.resolve_from(["demo", "--offset", "-2", "-3"]).unwrap()
+    else {
+        panic!("expected run");
+    };
+    assert_eq!(invocation.required("offset").as_i64(), Some(-2));
+    assert_eq!(invocation.required("limit").as_i64(), Some(-3));
 }
 
 #[test]
@@ -637,4 +802,332 @@ fn a_cli_cannot_redeclare_or_repeat_an_exit_code() {
         build(&[(3, "  ")]).unwrap_err().rule,
         "empty_exit_code_meaning"
     );
+}
+
+/// A shared argument is accepted at every command, wherever the user puts it on
+/// the command line — which is the point: without it a root `--config` has to be
+/// redeclared on every leaf, and users who typed `tool --config x sub` before
+/// suddenly have to type `tool sub --config x`.
+#[test]
+fn a_shared_argument_is_accepted_at_every_command() {
+    fn handler(invocation: &ResolvedInvocation) -> String {
+        invocation
+            .optional("config")
+            .and_then(CliValue::as_str)
+            .unwrap_or("default")
+            .to_string()
+    }
+    let spec = CliSpec::new("demo", "1")
+        .shared_arg(ArgSpec::option("--config", "PATH").default("default"))
+        .command(
+            CommandSpec::root().combination(Combination::new("root").action("root").output(
+                OutputSpec::protocol_finite(["json"], ["split"], "json", "split"),
+            )),
+        )
+        .command(
+            CommandSpec::new(["sub"]).combination(Combination::new("sub").action("sub").output(
+                OutputSpec::protocol_finite(["json"], ["split"], "json", "split"),
+            )),
+        )
+        .build()
+        .unwrap();
+    let app = spec
+        .bind_actions([
+            ("root", handler as fn(&ResolvedInvocation) -> String),
+            ("sub", handler),
+        ])
+        .unwrap();
+
+    for argv in [
+        vec!["demo", "--config", "here"],
+        vec!["demo", "sub", "--config", "here"],
+    ] {
+        let BoundOutcome::Run(invocation) = app.resolve_from(argv.clone()).unwrap() else {
+            panic!("expected a run for {argv:?}");
+        };
+        assert_eq!(invocation.run(), "here", "{argv:?}");
+    }
+
+    // Every combination still sees it as optional, so omitting it is legal.
+    let BoundOutcome::Run(invocation) = app.resolve_from(["demo", "sub"]).unwrap() else {
+        panic!("expected a run");
+    };
+    assert_eq!(invocation.run(), "default");
+}
+
+/// Sharing an argument and also declaring it on a command is a contradiction,
+/// not a merge: one of the two spellings would silently win.
+#[test]
+fn redeclaring_a_shared_argument_fails_the_build() {
+    let error = CliSpec::new("demo", "1")
+        .shared_arg(ArgSpec::option("--config", "PATH"))
+        .command(
+            CommandSpec::root()
+                .arg(ArgSpec::option("--config", "PATH"))
+                .combination(
+                    Combination::new("root")
+                        .action("root")
+                        .optional(["config"])
+                        .output(OutputSpec::protocol_finite(
+                            ["json"],
+                            ["split"],
+                            "json",
+                            "split",
+                        )),
+                ),
+        )
+        .build()
+        .unwrap_err();
+
+    assert_eq!(error.rule, "shared_argument_redeclared");
+}
+
+/// A shared argument is held to the same reserved-name rule as a declared one.
+#[test]
+fn a_shared_argument_cannot_take_a_reserved_name() {
+    let error = CliSpec::new("demo", "1")
+        .shared_arg(ArgSpec::option("--output", "FORMAT"))
+        .command(
+            CommandSpec::root().combination(Combination::new("root").action("root").output(
+                OutputSpec::protocol_finite(["json"], ["split"], "json", "split"),
+            )),
+        )
+        .build()
+        .unwrap_err();
+
+    assert_eq!(error.rule, "reserved_long_argument");
+}
+
+/// A UUID argument is checked before the command runs, so a malformed one is a
+/// usage error at exit 2 rather than something the handler has to re-report as
+/// a domain failure.
+#[test]
+fn a_uuid_argument_is_validated_at_parse_time() {
+    let spec = CliSpec::new("demo", "1")
+        .command(
+            CommandSpec::root()
+                .arg(ArgSpec::option("--analysis-id", "UUID").uuid())
+                .combination(
+                    Combination::new("root")
+                        .action("root")
+                        .required(["analysis_id"])
+                        .output(OutputSpec::protocol_finite(
+                            ["json"],
+                            ["split"],
+                            "json",
+                            "split",
+                        )),
+                ),
+        )
+        .build()
+        .unwrap();
+
+    let ok = spec
+        .resolve_from([
+            "demo",
+            "--analysis-id",
+            "e8414c67-dc1c-4da3-a6f7-69541b0841c7",
+        ])
+        .unwrap();
+    let CliOutcome::Run(invocation) = ok else {
+        panic!("expected a run");
+    };
+    assert_eq!(
+        invocation.required("analysis_id").as_str(),
+        Some("e8414c67-dc1c-4da3-a6f7-69541b0841c7")
+    );
+
+    for bad in ["not-a-uuid", "e8414c67dc1c4da3a6f769541b0841c7", ""] {
+        let error = spec
+            .resolve_from(["demo", "--analysis-id", bad])
+            .unwrap_err();
+        assert_eq!(error.rule, CliErrorRule::InvalidArgumentValue, "{bad:?}");
+        assert_eq!(error.exit_code(), 2);
+    }
+}
+
+/// A range keeps a count that must fit a narrower integer out of the handler's
+/// error channel: out of bounds is rejected with the other usage errors.
+#[test]
+fn an_integer_range_is_enforced_at_parse_time() {
+    let spec = CliSpec::new("demo", "1")
+        .command(
+            CommandSpec::root()
+                .arg(ArgSpec::option("--limit", "N").range(1, 1000))
+                .combination(
+                    Combination::new("root")
+                        .action("root")
+                        .required(["limit"])
+                        .output(OutputSpec::protocol_finite(
+                            ["json"],
+                            ["split"],
+                            "json",
+                            "split",
+                        )),
+                ),
+        )
+        .build()
+        .unwrap();
+
+    for good in ["1", "1000", "500"] {
+        let CliOutcome::Run(invocation) = spec.resolve_from(["demo", "--limit", good]).unwrap()
+        else {
+            panic!("expected a run for {good}");
+        };
+        assert_eq!(
+            invocation.required("limit").as_i64(),
+            Some(good.parse().unwrap())
+        );
+    }
+
+    for bad in ["0", "1001", "-1", "99999999999"] {
+        let error = spec.resolve_from(["demo", "--limit", bad]).unwrap_err();
+        assert_eq!(error.rule, CliErrorRule::InvalidArgumentValue, "{bad:?}");
+        assert_eq!(error.exit_code(), 2);
+    }
+}
+
+/// `shared_arg` removes the duplicate declaration; it does not change where the
+/// argument may appear. The command path is still matched against the leading
+/// tokens of argv, so the interleaved form stays an error.
+///
+/// Pinned explicitly because the first version of this feature shipped a doc
+/// comment claiming the opposite, and the test beside it only covered the two
+/// forms that already worked.
+#[test]
+fn a_shared_argument_does_not_move_the_command_path() {
+    fn handler(_: &ResolvedInvocation) -> &'static str {
+        "ok"
+    }
+    let spec = CliSpec::new("demo", "1")
+        .shared_arg(ArgSpec::option("--config", "PATH").default("default"))
+        .command(
+            CommandSpec::root().combination(Combination::new("root").action("root").output(
+                OutputSpec::protocol_finite(["json"], ["split"], "json", "split"),
+            )),
+        )
+        .command(
+            CommandSpec::new(["sub"]).combination(Combination::new("sub").action("sub").output(
+                OutputSpec::protocol_finite(["json"], ["split"], "json", "split"),
+            )),
+        )
+        .build()
+        .unwrap();
+    let app = spec
+        .bind_actions([
+            ("root", handler as fn(&ResolvedInvocation) -> &'static str),
+            ("sub", handler),
+        ])
+        .unwrap();
+
+    // Accepted: after the path.
+    assert!(
+        app.resolve_from(["demo", "sub", "--config", "here"])
+            .is_ok_and(|outcome| matches!(outcome, BoundOutcome::Run(_)))
+    );
+    // Rejected: before it. `sub` is read as a positional, not a command.
+    let error = app
+        .resolve_from(["demo", "--config", "here", "sub"])
+        .unwrap_err();
+    assert_eq!(error.rule, CliErrorRule::UnexpectedPositional);
+}
+
+/// A help-only path node carries no combinations, so a shared argument must not
+/// be spliced into it — the registry would fail to build for declaring an
+/// argument no combination covers.
+#[test]
+fn a_shared_argument_skips_a_help_only_command() {
+    let spec = CliSpec::new("demo", "1")
+        .shared_arg(ArgSpec::option("--config", "PATH").default("default"))
+        .command(
+            CommandSpec::root().combination(Combination::new("root").action("root").output(
+                OutputSpec::protocol_finite(["json"], ["split"], "json", "split"),
+            )),
+        )
+        // Exists only so `demo group --help` lists its children.
+        .command(CommandSpec::new(["group"]))
+        .command(
+            CommandSpec::new(["group", "leaf"]).combination(
+                Combination::new("leaf")
+                    .action("leaf")
+                    .output(OutputSpec::protocol_finite(
+                        ["json"],
+                        ["split"],
+                        "json",
+                        "split",
+                    )),
+            ),
+        )
+        .build()
+        .unwrap();
+
+    assert!(matches!(
+        spec.resolve_from(["demo", "group", "leaf", "--config", "here"]),
+        Ok(CliOutcome::Run(_))
+    ));
+}
+
+/// A default is held to the same range as a value typed on the command line.
+/// Otherwise a registry can ship a default its own argument rejects, and
+/// nothing downstream can report it — the value never passes through the parser.
+#[test]
+fn a_default_outside_the_range_fails_the_build() {
+    let error = CliSpec::new("demo", "1")
+        .command(
+            CommandSpec::root()
+                .arg(ArgSpec::option("--limit", "N").range(1, 100).default_i64(0))
+                .combination(
+                    Combination::new("root")
+                        .action("root")
+                        .optional(["limit"])
+                        .output(OutputSpec::protocol_finite(
+                            ["json"],
+                            ["split"],
+                            "json",
+                            "split",
+                        )),
+                ),
+        )
+        .build()
+        .unwrap_err();
+
+    assert!(
+        error.message.contains("0..=100") || error.message.contains("1..=100"),
+        "{}",
+        error.message
+    );
+}
+
+/// Putting the command after its arguments is the one mistake this rule
+/// reliably produces, and "unexpected positional argument" does not name the
+/// fix. When the offending token is a registered command name, say so.
+#[test]
+fn a_misordered_command_name_says_what_is_wrong() {
+    let spec = CliSpec::new("tool", "1")
+        .shared_arg(ArgSpec::option("--config", "PATH").default("cfg"))
+        .command(
+            CommandSpec::root().combination(Combination::new("root").action("root").output(
+                OutputSpec::protocol_finite(["json"], ["split"], "json", "split"),
+            )),
+        )
+        .command(
+            CommandSpec::new(["sub"]).combination(Combination::new("sub").action("sub").output(
+                OutputSpec::protocol_finite(["json"], ["split"], "json", "split"),
+            )),
+        )
+        .build()
+        .unwrap();
+
+    let error = spec
+        .resolve_from(["tool", "--config", "x", "sub"])
+        .unwrap_err();
+    assert_eq!(error.rule, CliErrorRule::UnexpectedPositional);
+    assert_eq!(error.message, "command name must come before its arguments");
+
+    // A token that is not a command keeps the general message — the sharper one
+    // would be a guess.
+    let error = spec
+        .resolve_from(["tool", "--config", "x", "nonsense"])
+        .unwrap_err();
+    assert_eq!(error.message, "unexpected positional argument");
 }

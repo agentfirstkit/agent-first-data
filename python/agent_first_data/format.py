@@ -539,6 +539,8 @@ class OutputOptions:
     # Exact field-name matches at any nesting level. The same list also matches
     # URL query-parameter names inside _url fields (see redact_url_secrets).
     secret_names: Sequence[str] = ()
+    # Exact legacy field names whose string leaves receive URL-aware redaction.
+    url_names: Sequence[str] = ()
     # None or RedactionPolicy.All = full redaction (default).
     policy: RedactionPolicy | None = None
     style: PlainStyle = PlainStyle.Readable
@@ -555,7 +557,12 @@ def _format_json(value: Any, *, options: OutputOptions | None = None) -> str:
     Single-line JSON. Secrets redacted, original keys, raw values.
     """
     output_options = options or OutputOptions()
-    redacted = redacted_value(value, secret_names=output_options.secret_names, policy=output_options.policy)
+    redacted = redacted_value(
+        value,
+        secret_names=output_options.secret_names,
+        url_names=output_options.url_names,
+        policy=output_options.policy,
+    )
     return _encode_json_lossless(redacted)
 
 
@@ -590,7 +597,12 @@ def _format_yaml(value: Any, *, options: OutputOptions | None = None) -> str:
     types, secrets redacted. `PlainStyle` has no effect on YAML.
     """
     output_options = options or OutputOptions()
-    value = redacted_value(value, secret_names=output_options.secret_names, policy=output_options.policy)
+    value = redacted_value(
+        value,
+        secret_names=output_options.secret_names,
+        url_names=output_options.url_names,
+        policy=output_options.policy,
+    )
     lines = ["---"]
     _render_yaml_raw(value, 0, lines)
     return "\n".join(lines)
@@ -602,7 +614,12 @@ def _format_plain(value: Any, *, options: OutputOptions | None = None) -> str:
     Single-line logfmt. Keys stripped, values formatted, secrets redacted.
     """
     output_options = options or OutputOptions()
-    value = redacted_value(value, secret_names=output_options.secret_names, policy=output_options.policy)
+    value = redacted_value(
+        value,
+        secret_names=output_options.secret_names,
+        url_names=output_options.url_names,
+        policy=output_options.policy,
+    )
     if not isinstance(value, dict):
         return _plain_scalar(value)
     pairs: list[tuple[str, str]] = []
@@ -624,14 +641,20 @@ def _format_plain(value: Any, *, options: OutputOptions | None = None) -> str:
 # ═══════════════════════════════════════════
 
 
-def redacted_value(value: Any, *, secret_names: Sequence[str] = (), policy: RedactionPolicy | None = None) -> Any:
+def redacted_value(
+    value: Any,
+    *,
+    secret_names: Sequence[str] = (),
+    url_names: Sequence[str] = (),
+    policy: RedactionPolicy | None = None,
+) -> Any:
     """Return a JSON-safe copy with redaction options applied.
 
     Redacts fields ending in _secret/_SECRET and those listed in secret_names.
-    Redacts _url fields' query parameters by the same rules.
+    Redacts _url fields and exact ``url_names`` entries by the same rules.
     """
     v = _sanitize_for_json(value)
-    _apply_redaction(v, secret_names, policy)
+    _apply_redaction(v, secret_names, url_names, policy)
     return v
 
 
@@ -663,6 +686,23 @@ def redact_url_secrets(
     context = _RedactionContext.from_names(secret_names)
     redacted = _redact_url_in_str(url, context)
     return redacted if redacted is not None else url
+
+
+def redact_urls_in_text(
+    text: str,
+    *,
+    secret_names: Sequence[str] = (),
+    policy: RedactionPolicy | None = None,
+) -> str:
+    """Redact complete scheme-prefixed URL spans embedded in prose.
+
+    This helper is explicit and URL-only: surrounding text is never scanned
+    for secret-looking names or values.
+    """
+    if not _redacts_unscoped_input(policy):
+        return text
+    context = _RedactionContext.from_names(secret_names)
+    return _redact_urls_in_text_with_context(text, context)
 
 
 def redact_argv(
@@ -725,8 +765,13 @@ def _is_secret_flag_name(flag_name: str, context: _RedactionContext) -> bool:
     return context.is_secret_key(normalized) or context.is_secret_key(flag_name)
 
 
-def _apply_redaction(value: Any, secret_names: Sequence[str], policy: RedactionPolicy | None) -> None:
-    context = _RedactionContext.from_names(secret_names)
+def _apply_redaction(
+    value: Any,
+    secret_names: Sequence[str],
+    url_names: Sequence[str],
+    policy: RedactionPolicy | None,
+) -> None:
+    context = _RedactionContext.from_names(secret_names, url_names)
     _apply_redaction_policy_with_context(value, policy, context)
 
 
@@ -987,16 +1032,27 @@ def _sanitize_for_json(value: Any, stack: set[int] | None = None, depth: int = 0
 
 @dataclass(frozen=True)
 class _RedactionContext:
-    """Internal redaction context: the secret-name set."""
+    """Internal redaction context: exact secret-name and URL-name sets."""
 
     secret_names: frozenset[str] = frozenset()
+    url_names: frozenset[str] = frozenset()
 
     @classmethod
-    def from_names(cls, secret_names: Sequence[str]) -> _RedactionContext:
-        return cls(secret_names=frozenset(secret_names))
+    def from_names(
+        cls,
+        secret_names: Sequence[str],
+        url_names: Sequence[str] = (),
+    ) -> _RedactionContext:
+        return cls(
+            secret_names=frozenset(secret_names),
+            url_names=frozenset(url_names),
+        )
 
     def is_secret_key(self, key: str) -> bool:
         return _key_has_secret_suffix(key) or key in self.secret_names
+
+    def is_url_key(self, key: str) -> bool:
+        return _key_has_url_suffix(key) or key in self.url_names
 
 
 def _key_has_secret_suffix(key: str) -> bool:
@@ -1021,13 +1077,8 @@ def _redact_secrets(value: Any, context: _RedactionContext = _RedactionContext()
                 # it does not invent one.
                 if v is not None:
                     value[k] = REDACTED_MARKER
-            elif _key_has_url_suffix(k):
-                if isinstance(v, str):
-                    value[k] = _redact_url_field_value(v, context)
-                elif depth + 1 >= MAX_DEPTH:
-                    value[k] = MAX_DEPTH_MARKER
-                else:
-                    _redact_secrets(v, context, depth + 1)
+            elif context.is_url_key(k):
+                value[k] = _redact_url_value(v, context, depth + 1)
             elif depth + 1 >= MAX_DEPTH:
                 value[k] = MAX_DEPTH_MARKER
             else:
@@ -1038,6 +1089,27 @@ def _redact_secrets(value: Any, context: _RedactionContext = _RedactionContext()
                 value[i] = MAX_DEPTH_MARKER
             else:
                 _redact_secrets(item, context, depth + 1)
+
+
+def _redact_url_value(value: Any, context: _RedactionContext, depth: int) -> Any:
+    if depth >= MAX_DEPTH:
+        return MAX_DEPTH_MARKER
+    if isinstance(value, str):
+        return _redact_url_field_value(value, context)
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            value[index] = _redact_url_value(item, context, depth + 1)
+        return value
+    if isinstance(value, dict):
+        for key in list(value.keys()):
+            item = value[key]
+            if context.is_secret_key(key):
+                if item is not None:
+                    value[key] = REDACTED_MARKER
+            else:
+                value[key] = _redact_url_value(item, context, depth + 1)
+        return value
+    return value
 
 
 # ═══════════════════════════════════════════
@@ -1086,6 +1158,115 @@ def _redact_url_in_str(s: str, context: _RedactionContext) -> str | None:
     new_fragment = f"#{_redact_query(fragment, context)}" if hash_sep else ""
 
     return f"{scheme}://{new_authority}{new_before_fragment}{new_fragment}"
+
+
+def _redact_urls_in_text_with_context(text: str, context: _RedactionContext) -> str:
+    output: list[str] = []
+    copied_through = 0
+    search_from = 0
+    while True:
+        span = _next_scheme_url_span(text, search_from)
+        if span is None:
+            break
+        start, end = span
+        output.append(text[copied_through:start])
+        url = text[start:end]
+        output.append(_redact_url_in_str(url, context) or url)
+        copied_through = end
+        search_from = end
+    if not output:
+        return text
+    output.append(text[copied_through:])
+    return "".join(output)
+
+
+def _next_scheme_url_span(text: str, start_at: int) -> tuple[int, int] | None:
+    start = start_at
+    while start < len(text):
+        # Only consider the head of a maximal scheme-character run: a scheme
+        # cannot begin mid-run, so a position whose predecessor is a scheme
+        # character was already covered by the run that contains it.
+        if start == 0 or not _is_scheme_character(text[start - 1]):
+            scheme_end = start
+            while scheme_end < len(text) and _is_scheme_character(text[scheme_end]):
+                scheme_end += 1
+            # A scheme must start with a letter, but the run need not: prose like
+            # "2https://h/?token_secret=x" glues a digit onto the URL. Retry from
+            # the first letter *inside* the run instead of abandoning the span --
+            # giving up there fails open and leaks the whole query.
+            scheme_start = next(
+                (
+                    i
+                    for i in range(start, scheme_end)
+                    if text[i].isascii() and text[i].isalpha()
+                ),
+                None,
+            )
+            if scheme_start is not None and text.startswith("://", scheme_end):
+                end = scheme_end + 3
+                while (
+                    end < len(text)
+                    and not _is_span_terminator_whitespace(text[end])
+                    and not _is_text_url_delimiter(text[end])
+                ):
+                    end += 1
+                while (
+                    end > scheme_end + 3
+                    and _is_trailing_text_url_punctuation(text[end - 1])
+                ):
+                    end -= 1
+                if end > scheme_end + 3:
+                    return scheme_start, end
+        start += 1
+    return None
+
+
+def _is_scheme_character(character: str) -> bool:
+    return character.isascii() and (character.isalnum() or character in "+-.")
+
+
+# Characters that end a URL span in prose: the Unicode White_Space property,
+# written out here instead of delegated to ``str.isspace()``.
+#
+# The four AFDATA implementations must cut the span at the same byte, and each
+# language's native predicate covers a different set -- ``str.isspace()`` counts
+# U+001C-U+001F, JS ``\s`` counts U+FEFF but not U+0085, Rust and Go count
+# neither. Divergence is a defect in both directions: ending a span early leaves
+# the rest of the query readable, and ending it late pulls the following prose
+# into the URL, where redacting the parameter it lands in deletes it. So the set
+# is enumerated, and it is generous -- a redaction helper exists to keep a log
+# line readable, so anything a human reads as a space must end the URL.
+#
+# Two exclusions are deliberate, not oversights:
+#   * U+FEFF (zero-width no-break space) is not White_Space. Treating it as one
+#     would cut a URL carrying it short and leave the secret after it in the
+#     clear -- the exact leak JS ``\s`` used to cause here.
+#   * U+001C-U+001F (the file/group/record/unit separators) are not White_Space
+#     either; only ``str.isspace()`` counted them.
+#
+# This is a different question from :func:`_is_single_url`, which asks whether a
+# whole string is one URL and stays ASCII-only. A span this scanner produces
+# contains no whitespace at all, so it satisfies that stricter gate either way.
+_SPAN_TERMINATOR_WHITESPACE = frozenset(
+    "\u0009\u000a\u000b\u000c\u000d\u0020"  # TAB, LF, VT, FF, CR, SPACE
+    "\u0085\u00a0\u1680"  # NEL, NBSP, OGHAM SPACE MARK
+    "\u2000\u2001\u2002\u2003\u2004\u2005"  # EN QUAD .. FOUR-PER-EM SPACE
+    "\u2006\u2007\u2008\u2009\u200a"  # SIX-PER-EM SPACE .. HAIR SPACE
+    "\u2028\u2029"  # LINE SEPARATOR, PARAGRAPH SEPARATOR
+    "\u202f\u205f\u3000"  # NARROW NBSP, MEDIUM MATH SPACE, IDEOGRAPHIC SPACE
+)
+
+
+def _is_span_terminator_whitespace(character: str) -> bool:
+    return character in _SPAN_TERMINATOR_WHITESPACE
+
+
+def _is_text_url_delimiter(character: str) -> bool:
+    return character in "\"'<>`，。；！？）》】」』"
+
+
+def _is_trailing_text_url_punctuation(character: str) -> bool:
+    return character in ".,;!)]}，。；！）》】"
 
 
 def _redact_url_field_value(s: str, context: _RedactionContext) -> str:
@@ -1249,16 +1430,20 @@ def _as_non_neg_int(value: Any) -> int | None:
     return None
 
 
-def _as_non_neg_i64(value: Any) -> int | None:
+def _as_i64(value: Any) -> int | None:
     if isinstance(value, _RawNumber):
         if not re.fullmatch(r"-?\d+", value.literal):
             return None
         n = int(value.literal)
     else:
         n = _as_int(value)
-    if n is not None and 0 <= n <= 9_223_372_036_854_775_807:
+    if n is not None and -9_223_372_036_854_775_808 <= n <= 9_223_372_036_854_775_807:
         return n
     return None
+
+
+def _signed_magnitude(value: int) -> tuple[str, int]:
+    return ("-", -value) if value < 0 else ("", value)
 
 
 def _as_decimal_int(value: Any) -> int | None:
@@ -1318,29 +1503,39 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
     # Group 2: compound currency suffixes
     stripped = _strip_suffix_ci(key, "_usd_cents")
     if stripped is not None:
-        n = _as_non_neg_i64(value)
+        n = _as_i64(value)
         if n is not None:
-            return stripped, f"${n // 100}.{n % 100:02d}"
+            sign, magnitude = _signed_magnitude(n)
+            return stripped, f"{sign}${magnitude // 100}.{magnitude % 100:02d}"
         return None
     stripped = _strip_suffix_ci(key, "_eur_cents")
     if stripped is not None:
-        n = _as_non_neg_i64(value)
+        n = _as_i64(value)
         if n is not None:
-            return stripped, f"\u20ac{n // 100}.{n % 100:02d}"
+            sign, magnitude = _signed_magnitude(n)
+            return stripped, f"{sign}\u20ac{magnitude // 100}.{magnitude % 100:02d}"
         return None
     gc = _try_strip_generic_cents(key)
     if gc is not None:
         stripped, code = gc
-        n = _as_non_neg_i64(value)
+        n = _as_i64(value)
         if n is not None:
-            return stripped, f"{n // 100}.{n % 100:02d} {code.upper()}"
+            sign, magnitude = _signed_magnitude(n)
+            return (
+                stripped,
+                f"{sign}{magnitude // 100}.{magnitude % 100:02d} {code.upper()}",
+            )
         return None
     gm = _try_strip_generic_micro(key)
     if gm is not None:
         stripped, code = gm
-        n = _as_non_neg_i64(value)
+        n = _as_i64(value)
         if n is not None:
-            return stripped, f"{n // 1_000_000}.{n % 1_000_000:06d} {code.upper()}"
+            sign, magnitude = _signed_magnitude(n)
+            return (
+                stripped,
+                f"{sign}{magnitude // 1_000_000}.{magnitude % 1_000_000:06d} {code.upper()}",
+            )
         return None
 
     # Group 3: multi-char suffixes
@@ -1392,9 +1587,10 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
     # Group 5: short suffixes (last to avoid false positives)
     stripped = _strip_suffix_ci(key, "_jpy")
     if stripped is not None:
-        n = _as_non_neg_i64(value)
+        n = _as_i64(value)
         if n is not None:
-            return stripped, f"\u00a5{_format_with_commas(n)}"
+            sign, magnitude = _signed_magnitude(n)
+            return stripped, f"{sign}\u00a5{_format_with_commas(magnitude)}"
         return None
     stripped = _strip_suffix_ci(key, "_ns")
     if stripped is not None:

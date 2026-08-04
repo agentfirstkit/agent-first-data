@@ -114,6 +114,20 @@ pub enum DocumentError {
     FormatUnknown {
         path: String,
     },
+    /// A create-only commit found an existing target. Kept separate from
+    /// [`Self::IoError`] so callers can safely implement idempotent create
+    /// workflows without parsing platform-specific I/O messages.
+    AlreadyExists {
+        path: String,
+    },
+    /// A capped read found more bytes than the caller allowed. Kept separate
+    /// from [`Self::IoError`] for the same reason as [`Self::AlreadyExists`]: a
+    /// caller enforcing a size budget has to tell "too big" from "missing" or
+    /// "unreadable", and should not have to match on a message to do it.
+    TooLarge {
+        path: String,
+        max_bytes: u64,
+    },
     IoError {
         detail: String,
     },
@@ -220,6 +234,12 @@ impl fmt::Display for DocumentError {
                     path
                 )
             }
+            DocumentError::AlreadyExists { path } => {
+                write!(f, "document target `{path}` already exists")
+            }
+            DocumentError::TooLarge { path, max_bytes } => {
+                write!(f, "`{path}` exceeds the {max_bytes}-byte read limit")
+            }
             DocumentError::IoError { detail } => {
                 write!(f, "io error: {}", detail)
             }
@@ -247,6 +267,8 @@ impl DocumentError {
             Self::PathSyntax { .. } => "document_invalid_path",
             Self::SourceRefused { .. } => "document_source_refused",
             Self::FormatUnknown { .. } => "document_format_unknown",
+            Self::AlreadyExists { .. } => "document_target_exists",
+            Self::TooLarge { .. } => "document_too_large",
             Self::WriteWouldCorrupt { .. } => "document_write_would_corrupt",
             Self::PathNotFound { .. }
             | Self::UnknownSegment { .. }
@@ -472,6 +494,19 @@ mod tests {
                     detail: "unreadable".to_string(),
                 },
                 "document_io_failed",
+            ),
+            (
+                DocumentError::AlreadyExists {
+                    path: "config.toml".to_string(),
+                },
+                "document_target_exists",
+            ),
+            (
+                DocumentError::TooLarge {
+                    path: "config.toml".to_string(),
+                    max_bytes: 1024,
+                },
+                "document_too_large",
             ),
             (
                 DocumentError::UnsupportedOperation {

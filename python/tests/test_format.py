@@ -27,6 +27,7 @@ from agent_first_data import (
     redacted_value,
     redact_argv,
     redact_url_secrets,
+    redact_urls_in_text,
     render,
     normalize_utc_offset,
     is_valid_rfc3339_date,
@@ -85,7 +86,11 @@ def test_builder_contract_fixtures():
 def _redaction_options(case):
     opts = case.get("options", {})
     policy = RedactionPolicy(opts["policy"]) if "policy" in opts else None
-    return OutputOptions(policy=policy, secret_names=opts.get("secret_names", ()))
+    return OutputOptions(
+        policy=policy,
+        secret_names=opts.get("secret_names", ()),
+        url_names=opts.get("url_names", ()),
+    )
 
 
 # --- Redact fixtures ---
@@ -108,6 +113,18 @@ def test_redact_url_fixtures():
             policy=options.policy,
         )
         assert got == case["expected"], f"[redact_url/{name}] got {got!r}"
+
+
+def test_redact_urls_in_text_fixtures():
+    for case in _load("redact_urls_in_text.json"):
+        name = case["name"]
+        options = _redaction_options(case)
+        got = redact_urls_in_text(
+            case["input"],
+            secret_names=options.secret_names,
+            policy=options.policy,
+        )
+        assert got == case["expected"], f"[redact_urls_in_text/{name}] got {got!r}"
 
 
 def test_redact_argv_fixtures():
@@ -133,7 +150,12 @@ def test_redaction_options_fixtures():
         output_options = _redaction_options(case)
         expected = case["expected"]
 
-        got = redacted_value(case["input"], secret_names=output_options.secret_names, policy=output_options.policy)
+        got = redacted_value(
+            case["input"],
+            secret_names=output_options.secret_names,
+            url_names=output_options.url_names,
+            policy=output_options.policy,
+        )
         assert got == expected, f"[redaction_options/{name}] value mismatch: {got}"
 
         got_json = json.loads(render(case["input"], OutputFormat.JSON, options=output_options))
@@ -152,7 +174,12 @@ def test_security_fixtures():
     for case in fixture["redaction_cases"]:
         name = case["name"]
         output_options = _redaction_options(case)
-        assert redacted_value(case["input"], secret_names=output_options.secret_names, policy=output_options.policy) == case["expected"]
+        assert redacted_value(
+            case["input"],
+            secret_names=output_options.secret_names,
+            url_names=output_options.url_names,
+            policy=output_options.policy,
+        ) == case["expected"]
         outputs = (
             render(case["input"], OutputFormat.JSON, options=output_options),
             render(case["input"], OutputFormat.YAML, options=output_options),
@@ -772,3 +799,11 @@ def test_number_fidelity_does_not_regress_ordinary_decoded_numbers_in_plain_outp
     decoded = decode_protocol_event(line)
     plain = render(decoded.result, OutputFormat.PLAIN)
     assert plain == "cpu=85.5% duration=42ms size=5.0MiB"
+
+
+def test_signed_fiat_i64_min_formats_without_overflow():
+    plain = render(
+        {"adjustment_usd_cents": -9_223_372_036_854_775_808},
+        OutputFormat.PLAIN,
+    )
+    assert plain == "adjustment=-$92233720368547758.08"

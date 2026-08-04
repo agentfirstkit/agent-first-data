@@ -52,21 +52,22 @@ class OutputTo(enum.Enum):
     def parse(cls, value: str) -> OutputTo:
         """Parse an ``--output-to`` value: ``split`` (default), ``stdout``, or ``stderr``.
 
-        Raises ValueError with a message suitable for build_cli_error on unknown values.
+        Raises ValueError with a value-safe message suitable for build_cli_error
+        on unknown values.
 
         >>> OutputTo.parse("split")
         <OutputTo.SPLIT: 'split'>
         >>> OutputTo.parse("xml")
         Traceback (most recent call last):
             ...
-        ValueError: unsupported --output-to 'xml'; expected split, stdout, or stderr
+        ValueError: unsupported --output-to: expected split, stdout, or stderr
         """
         try:
             return cls(value)
         except ValueError:
             raise ValueError(
-                f"unsupported --output-to {value!r}; expected split, stdout, or stderr"
-            )
+                "unsupported --output-to: expected split, stdout, or stderr"
+            ) from None
 
 
 class LogFilters:
@@ -112,21 +113,22 @@ class LogFilters:
 def cli_parse_output(s: str) -> OutputFormat:
     """Parse the --output flag value into an OutputFormat.
 
-    Raises ValueError with a message suitable for build_cli_error on unknown values.
+    Raises ValueError with a value-safe message suitable for build_cli_error on
+    unknown values.
 
     >>> cli_parse_output("json")
     <OutputFormat.JSON: 'json'>
     >>> cli_parse_output("xml")
     Traceback (most recent call last):
         ...
-    ValueError: invalid --output format 'xml': expected json, yaml, or plain
+    ValueError: invalid --output format: expected json, yaml, or plain
     """
     try:
         return OutputFormat(s)
     except ValueError:
         raise ValueError(
-            f"invalid --output format {s!r}: expected json, yaml, or plain"
-        )
+            "invalid --output format: expected json, yaml, or plain"
+        ) from None
 
 
 def cli_parse_log_filters(entries: list[str]) -> LogFilters:

@@ -69,6 +69,18 @@ Consume either line stream with `while IFS= read -r`; never use command
 substitution in a `for` loop. Path grammar escapes a literal dot as `\.` and a
 literal backslash as `\\`. Unknown escapes and empty segments are errors.
 
+For untrusted or secret-bearing paths in Rust, prefer
+`DocumentFile::open_capped`. It opens once, checks regular-file metadata on
+that handle, and limits the actual read to one byte beyond the cap so a path
+replacement or later growth cannot bypass the limit. Choose
+`SymlinkPolicy::NoFollow` when the final path component must not be a symlink;
+on Unix this requires the default-on Cargo feature `libc`, and
+`stream-redirect` enables that feature automatically. Builds without `libc`
+and platforms without an atomic no-follow open refuse that policy instead of
+simulating it with a racy precheck. Without `libc`, a normal `Follow` read
+retains the single-handle and byte-cap guarantees, but opening a special file
+can block before its type is rejected.
+
 ## Write exact types
 
 A bare `set` value and each bare `FIELD=VALUE` is always a string. Use:
@@ -91,6 +103,17 @@ or replace it deliberately with `--value-type string`.
 existing scalar or incompatible container in the middle of the path; that is a
 path/type error. Treat parent creation as part of the requested mutation and
 review the full path before writing.
+
+TOML source-preserving edits support arrays, numeric array elements, inline
+tables, and ordinary tables. They retain surrounding comments, decor, key
+order, trailing-comma style, and untouched datetime syntax. Arrays of tables
+are explicitly refused because this editor has no caller-declared element
+identity policy; do not fall back to a generic TOML reserializer.
+
+In Rust, `Document::decode<T>()` deserializes the complete document, and
+`DocumentFile::edit_and_validate<T>(...)` stages edits on a clone, decodes the
+typed model, then commits once. An edit or type failure rolls back both the
+in-memory handle and disk state.
 
 For secrets, do not put values in argv. Use
 `--secret-from stdin|prompt|fd:<N>|env:<VAR>`. There is no inline argv form.
@@ -245,8 +268,19 @@ badge/table syntax does not occupy that position.
 ## Mutation safety and errors
 
 Mutations are atomic and source-preserving. They refuse symlink targets and,
-on Unix, multi-link hardlink targets. Treat a failed mutation as leaving the
-original untouched, then reread before retrying.
+on Unix, multi-link hardlink targets. No partial file is observable, and every
+failure before atomic installation leaves the original untouched. A
+parent-directory fsync can fail after a complete replacement was installed;
+that error means durability is unconfirmed, so reopen the path to determine
+the committed state before retrying.
+
+For a Rust library caller's first write, use
+`DocumentFile::create_atomic(path, document, CreateOptions::new())`. It accepts
+only an already-parsed `Document`, creates a private same-directory temporary
+file, fsyncs it, and defaults to no-clobber mode with Unix permissions `0o600`.
+Choose `.unix_mode(...)` deliberately when different permissions are required,
+and `.replace()` only when replacing an existing target is intended. The raw
+atomic text writer is not public.
 
 Branch on stable `error.code`, not message text. Common runtime codes include:
 
@@ -261,6 +295,8 @@ Branch on stable `error.code`, not message text. Common runtime codes include:
 - `document_format_unknown`
 - `document_unsupported_operation`
 - `document_invalid_argument`
+- `document_target_exists`
+- `document_too_large`
 - `document_write_would_corrupt`
 - `document_io_failed`
 - `document_not_scalar`
@@ -286,8 +322,24 @@ and the difference is what to fix:
 `document_unsupported_operation` means the format cannot express the edit —
 a read-only backend, an escaped or keyed-list route through YAML, or a YAML
 path that resolves through an alias (editing it would rewrite the anchor, a
-different key than the one named). It is not retryable as-is; change the verb,
-the path, or the format.
+different key than the one named). A TOML array of tables is refused because
+the editor has no explicit element-identity policy. It is not retryable as-is;
+change the verb, the path, or the format.
+
+`document_target_exists` is the expected no-clobber result from
+`create_atomic`; decide explicitly whether the existing file wins or a
+subsequent call may opt into replacement.
+
+`document_too_large` is a capped read finding more bytes than the caller
+allowed. It is separate from `document_io_failed` so a size budget can be
+enforced without matching on a message: missing, unreadable, and not-a-regular
+-file stay `document_io_failed`, and only the cap reports this. The file was not
+parsed; raise the cap or refuse the input.
+
+`create_atomic` also refuses a document whose format disagrees with the path
+(`document_unsupported_operation`), because installing it would produce a file
+the next `open` rejects. Replacing an existing file keeps that file's
+permissions unless a mode is named explicitly.
 
 Writing a whole sequence or mapping into YAML *is* supported, including inside
 Markdown frontmatter, and keeps every byte outside that value: surrounding

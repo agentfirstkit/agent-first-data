@@ -126,9 +126,19 @@ run_static() {
 run_unit() {
   echo "[1/4] Rust (tests)"
   (cd "$ROOTPATH" && cargo test --lib --tests)
-  (cd "$ROOTPATH" && cargo test --lib --tests --features tracing)
+  # The library's own tests must respect the same feature boundary as downstream
+  # consumers. This catches tests that accidentally import CLI-only APIs while
+  # `default-features = false`, instead of proving only that the library builds.
+  (cd "$ROOTPATH" && cargo test --lib --test libc_feature --no-default-features)
+  (cd "$ROOTPATH" && cargo test --lib --no-default-features --features cli)
+  (cd "$ROOTPATH" && cargo test --lib --no-default-features --features tracing)
+  # `libc` must work as a standalone capability, and `stream-redirect` must
+  # continue to imply it. The integration target exercises the public
+  # NoFollow behavior on both sides of the feature boundary.
+  (cd "$ROOTPATH" && cargo test --lib --test libc_feature --no-default-features --features libc)
+  (cd "$ROOTPATH" && cargo test --lib --test libc_feature --no-default-features --features stream-redirect)
   (cd "$ROOTPATH" && cargo test --all-features)
-  (cd "$ROOTPATH" && cargo test --example agent_cli --features cli)
+  (cd "$ROOTPATH" && cargo test --example agent_cli --no-default-features --features cli)
 
   echo ""
   echo "[2/4] Go"

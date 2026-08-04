@@ -20,11 +20,112 @@
 //! This module never redacts values — it reads and writes raw values as-is;
 //! redaction is the caller's responsibility.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::document::{Addressing, DocumentError, DocumentResult, Format, KeyedList, Value};
+
+/// Whether a capped file read may follow a symbolic link.
+///
+/// [`NoFollow`](SymlinkPolicy::NoFollow) is implemented with the operating
+/// system's atomic `O_NOFOLLOW` open on unix when Cargo feature `libc` is
+/// enabled. Builds without that feature, and other platforms, return
+/// [`DocumentError::UnsupportedOperation`] rather than pretending a
+/// check-before-open sequence provides the same guarantee.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SymlinkPolicy {
+    /// Follow a symbolic link in the same way as [`File::open`].
+    #[default]
+    Follow,
+    /// Refuse a symbolic-link final path component atomically.
+    ///
+    /// This requires Cargo feature `libc` on unix.
+    NoFollow,
+}
+
+/// Whether [`DocumentFile::create_atomic`] may replace an existing target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CreateMode {
+    /// Fail with `document_target_exists` if the target already exists.
+    #[default]
+    NewOnly,
+    /// Atomically replace an existing target, or create it when absent.
+    Replace,
+}
+
+/// Options for a safe first commit with [`DocumentFile::create_atomic`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreateOptions {
+    mode: CreateMode,
+    unix_mode: Option<u32>,
+}
+
+impl CreateOptions {
+    /// Create with no-clobber semantics and unix mode `0o600` for a new file.
+    ///
+    /// Replacing an existing target preserves that target's mode unless
+    /// [`unix_mode`](Self::unix_mode) asks for a specific one.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            mode: CreateMode::NewOnly,
+            unix_mode: None,
+        }
+    }
+
+    /// Set the target's unix permission bits.
+    ///
+    /// The value must contain only the low `0o777` permission bits. It is
+    /// ignored on non-unix platforms. Setting it explicitly also applies the
+    /// mode when replacing an existing file, which otherwise keeps its own.
+    #[must_use]
+    pub const fn unix_mode(mut self, unix_mode: u32) -> Self {
+        self.unix_mode = Some(unix_mode);
+        self
+    }
+
+    /// Explicitly allow an existing target to be atomically replaced.
+    #[must_use]
+    pub const fn replace(mut self) -> Self {
+        self.mode = CreateMode::Replace;
+        self
+    }
+
+    /// The configured target-existence behavior.
+    #[must_use]
+    pub const fn mode(&self) -> CreateMode {
+        self.mode
+    }
+
+    /// The explicitly configured unix permission bits, if any.
+    ///
+    /// `None` means "`0o600` when creating, and keep the existing mode when
+    /// replacing".
+    #[must_use]
+    pub const fn configured_unix_mode(&self) -> Option<u32> {
+        self.unix_mode
+    }
+
+    /// The mode to apply, given whether the target already exists.
+    const fn effective_unix_mode(&self, target_exists: bool) -> Option<u32> {
+        match self.unix_mode {
+            Some(mode) => Some(mode),
+            // Replacing must not silently re-permission a file the caller did
+            // not ask about: `save()` preserves the original, and a second
+            // write path with the opposite rule would quietly widen a 0600
+            // secrets file to the create default, or narrow a shared one.
+            None if target_exists => None,
+            None => Some(0o600),
+        }
+    }
+}
+
+impl Default for CreateOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// A format-neutral in-memory document: the original source text, its parsed
 /// [`Value`], and the [`Format`] both came from. Has no file coupling —
@@ -135,6 +236,15 @@ impl Document {
         }
     }
 
+    /// Deserialize the complete document into a typed serde model.
+    ///
+    /// This is the convenience form of
+    /// [`crate::document::from_value(self.value(), "")`](crate::document::from_value).
+    /// Type errors are returned as content-redactable [`DocumentError`] values.
+    pub fn decode<T: serde::de::DeserializeOwned>(&self) -> DocumentResult<T> {
+        crate::document::from_value(self.value(), "")
+    }
+
     /// Build a value from the CLI string `raw` per an explicit
     /// [`ValueType`](crate::document::ValueType) and [`set`](Document::set) it.
     pub fn set_typed(
@@ -195,28 +305,7 @@ impl DocumentFile {
         format_override: Option<Format>,
     ) -> DocumentResult<DocumentFile> {
         let path = path.as_ref().to_path_buf();
-        let format = match format_override {
-            Some(format) => format,
-            // A `.toml` file read by a build without the `toml` feature is not
-            // an unknown format — it is a known one this binary cannot read, and
-            // saying so names the fix. Only `Format::unavailable` can tell the
-            // two apart, because `detect` answers `None` for both.
-            None => match Format::detect(&path) {
-                Some(format) => format,
-                None => {
-                    return Err(match Format::unavailable(&path) {
-                        Some(feature) => DocumentError::UnsupportedOperation {
-                            format: feature.to_string(),
-                            operation: "open".to_string(),
-                            detail: format!("requires Cargo feature `{feature}`"),
-                        },
-                        None => DocumentError::FormatUnknown {
-                            path: path.display().to_string(),
-                        },
-                    });
-                }
-            },
-        };
+        let format = resolve_format(&path, format_override)?;
         let source = fs::read_to_string(&path).map_err(|error| DocumentError::IoError {
             detail: format!("read `{}`: {error}", path.display()),
         })?;
@@ -226,36 +315,87 @@ impl DocumentFile {
         })
     }
 
-    /// Open and parse `path` like [`DocumentFile::open`], but first reject any
-    /// non-regular file, or any file larger than `max_bytes`, without reading
-    /// its contents.
+    /// Open and parse `path` like [`DocumentFile::open`], but reject any
+    /// non-regular file and limit the actual read to `max_bytes + 1`.
     ///
     /// Use this over [`open`](DocumentFile::open) when reading untrusted or
     /// secret-bearing config, where an unbounded read of an arbitrary path is
-    /// a denial-of-service risk.
+    /// a denial-of-service risk. The file is opened exactly once; both metadata
+    /// and contents come from that same handle, so replacing or growing the
+    /// path cannot bypass the cap.
+    ///
+    /// On unix, Cargo feature `libc` also opens with `O_NONBLOCK`, so a special
+    /// file such as a FIFO cannot block before metadata rejects it. Without
+    /// that feature, the single-handle and byte-cap guarantees still hold, but
+    /// opening a special file can block before its type is inspected.
     pub fn open_capped(
         path: impl AsRef<Path>,
         format_override: Option<Format>,
         max_bytes: u64,
     ) -> DocumentResult<DocumentFile> {
-        let path = path.as_ref();
-        let metadata = fs::metadata(path).map_err(|error| DocumentError::IoError {
-            detail: format!("read `{}`: {error}", path.display()),
-        })?;
-        if !metadata.is_file() {
-            return Err(DocumentError::IoError {
-                detail: format!("`{}` is not a regular file", path.display()),
-            });
-        }
-        if metadata.len() > max_bytes {
-            return Err(DocumentError::IoError {
+        Self::open_capped_with_policy(path, format_override, max_bytes, SymlinkPolicy::Follow)
+    }
+
+    /// [`open_capped`](DocumentFile::open_capped) with an explicit symbolic-link
+    /// policy.
+    ///
+    /// [`SymlinkPolicy::NoFollow`] requires Cargo feature `libc` on unix and is
+    /// unsupported on other platforms.
+    pub fn open_capped_with_policy(
+        path: impl AsRef<Path>,
+        format_override: Option<Format>,
+        max_bytes: u64,
+        symlink_policy: SymlinkPolicy,
+    ) -> DocumentResult<DocumentFile> {
+        let path = path.as_ref().to_path_buf();
+        let format = resolve_format(&path, format_override)?;
+        let file = open_read_handle(&path, symlink_policy)?;
+        let source = read_capped_source(file, &path, max_bytes)?;
+        Ok(DocumentFile {
+            doc: Document::parse(&source, format)?,
+            path,
+        })
+    }
+
+    /// Safely create and commit a new file-backed document.
+    ///
+    /// Safely create and commit a new file-backed document.
+    ///
+    /// The document must already have passed a supported parser through
+    /// [`Document::parse`]. Its source is parsed once more before any write,
+    /// then written to a private same-directory temporary file, fsynced, and
+    /// atomically installed. The default [`CreateOptions`] never replaces an
+    /// existing path; replacement must be explicitly requested.
+    ///
+    /// The document's format must match what the path resolves to, so a commit
+    /// cannot produce a file [`open`](DocumentFile::open) would then reject.
+    pub fn create_atomic(
+        path: impl AsRef<Path>,
+        document: Document,
+        options: CreateOptions,
+    ) -> DocumentResult<DocumentFile> {
+        let path = path.as_ref().to_path_buf();
+        document.ensure_writable("create")?;
+        // Resolving the path's own format is what `open` does; disagreeing here
+        // would install a document that only this call can read back.
+        let path_format = resolve_format(&path, None)?;
+        if path_format != document.format() {
+            return Err(DocumentError::UnsupportedOperation {
+                format: document.format().name().to_string(),
+                operation: "create".to_string(),
                 detail: format!(
-                    "`{}` exceeds the {max_bytes}-byte read limit",
-                    path.display()
+                    "path resolves to {}, so the created file could not be reopened",
+                    path_format.name()
                 ),
             });
         }
-        DocumentFile::open(path, format_override)
+        validate_source_for_write(&document)?;
+        validate_create_options(options)?;
+        write_atomic_create(&path, document.source().as_bytes(), options)?;
+        Ok(DocumentFile {
+            doc: document,
+            path,
+        })
     }
 
     /// The file path this document was opened from.
@@ -286,9 +426,12 @@ impl Document {
     /// Backend capability mirrors [`crate::document::set_path`] where the
     /// source editor allows it: the JSON backend replaces an existing value
     /// (scalar or collection) and creates missing intermediate parent objects;
-    /// the TOML backend creates missing parent tables. Backends that cannot
-    /// express an edit source-preserving (e.g. YAML collection mutation) return
-    /// [`DocumentError::UnsupportedOperation`].
+    /// YAML replaces collection blocks while preserving bytes outside the
+    /// replaced block; TOML updates arrays, inline tables, and ordinary tables
+    /// in place. Arrays of tables are refused because this editor has no
+    /// explicit element-identity policy. Backends return
+    /// [`DocumentError::UnsupportedOperation`] when an edit cannot be expressed
+    /// source-preservingly.
     pub fn set(&mut self, key: &str, value: Value) -> DocumentResult<()> {
         let addressing = self.addressing();
         self.set_addressed(key, value, addressing)
@@ -624,14 +767,44 @@ impl Document {
 impl DocumentFile {
     /// Run `edit` against the in-memory [`Document`], then commit once with
     /// [`save`](DocumentFile::save). The single-call form of stage-then-save:
-    /// the edits either all land (on `Ok`) or none reach disk (on `Err`,
-    /// nothing is written), and the commit can't be forgotten.
+    /// closure and pre-install failures reach neither this handle nor disk,
+    /// while a successful commit updates both. As with [`save`](Self::save), a
+    /// parent-directory fsync error after installation is commit-uncertain and
+    /// callers should reopen the path.
     pub fn edit<F>(&mut self, edit: F) -> DocumentResult<()>
     where
         F: FnOnce(&mut Document) -> DocumentResult<()>,
     {
-        edit(&mut self.doc)?;
-        self.save()
+        let mut draft = self.doc.clone();
+        edit(&mut draft)?;
+        self.save_document(&draft)?;
+        self.doc = draft;
+        Ok(())
+    }
+
+    /// Transactionally edit, deserialize, and validate the complete document
+    /// before committing it.
+    ///
+    /// The closure works on a clone. Editing, typed decoding, and every
+    /// pre-install write failure leave both this handle and the file in their
+    /// original state. No partial file is observable. If the final parent
+    /// directory fsync fails after the rename, a complete new file may already
+    /// be installed even though durability could not be confirmed; reopen the
+    /// file after that error. On success the decoded model is returned so
+    /// callers need not deserialize a second time.
+    pub fn edit_and_validate<T>(
+        &mut self,
+        edit: impl FnOnce(&mut Document) -> DocumentResult<()>,
+    ) -> DocumentResult<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let mut draft = self.doc.clone();
+        edit(&mut draft)?;
+        let decoded = draft.decode::<T>()?;
+        self.save_document(&draft)?;
+        self.doc = draft;
+        Ok(decoded)
     }
 
     /// Persist the document — every edit staged since [`open`](DocumentFile::open)
@@ -650,9 +823,11 @@ impl DocumentFile {
     /// Atomically replace the file's contents with `new_source`: guard
     /// against symlinks/hardlinked files, write to a same-directory temp
     /// file, fsync it, re-apply the original file's permissions, then
-    /// `rename` it over the target. No partial write is ever observable —
-    /// on any failure the temp file is removed and the original file is
-    /// untouched.
+    /// `rename` it over the target. No partial write is ever observable.
+    /// Failures before the rename leave the original untouched. A failure
+    /// syncing the parent directory after the rename means the complete new
+    /// file may already be installed, but its crash durability could not be
+    /// confirmed.
     ///
     /// Crate-internal write seam behind the public [`save`](DocumentFile::save);
     /// it is not exported, so callers cannot write arbitrary raw text that
@@ -668,13 +843,14 @@ impl DocumentFile {
         // added to a section that had already closed, for one. Of the three
         // possible outcomes, reporting success and leaving an unreadable file
         // behind is the only unrecoverable one.
-        Document::parse(new_source, self.format).map_err(|error| {
-            DocumentError::WriteWouldCorrupt {
-                format: self.format.name().to_string(),
-                detail: error.redacted_message(),
-            }
-        })?;
+        validate_source_text_for_write(new_source, self.format)?;
         write_atomic(&self.path, new_source.as_bytes(), "write")
+    }
+
+    fn save_document(&self, document: &Document) -> DocumentResult<()> {
+        document.ensure_writable("save")?;
+        validate_source_for_write(document)?;
+        write_atomic(&self.path, document.source().as_bytes(), "write")
     }
 }
 
@@ -690,6 +866,135 @@ impl std::ops::DerefMut for DocumentFile {
     fn deref_mut(&mut self) -> &mut Document {
         &mut self.doc
     }
+}
+
+fn resolve_format(path: &Path, format_override: Option<Format>) -> DocumentResult<Format> {
+    match format_override {
+        Some(format) => Ok(format),
+        // A `.toml` file read by a build without the `toml` feature is not an
+        // unknown format — it is a known one this binary cannot read, and
+        // saying so names the fix. Only `Format::unavailable` can tell the two
+        // apart, because `detect` answers `None` for both.
+        None => match Format::detect(path) {
+            Some(format) => Ok(format),
+            None => Err(match Format::unavailable(path) {
+                Some(feature) => DocumentError::UnsupportedOperation {
+                    format: feature.to_string(),
+                    operation: "open".to_string(),
+                    detail: format!("requires Cargo feature `{feature}`"),
+                },
+                None => DocumentError::FormatUnknown {
+                    path: path.display().to_string(),
+                },
+            }),
+        },
+    }
+}
+
+fn open_read_handle(path: &Path, symlink_policy: SymlinkPolicy) -> DocumentResult<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(all(unix, feature = "libc"))]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Opening a FIFO for reading can otherwise block before handle
+        // metadata gets the chance to reject it as non-regular. O_NONBLOCK has
+        // no effect on ordinary regular-file reads.
+        let mut flags = libc::O_NONBLOCK;
+        if symlink_policy == SymlinkPolicy::NoFollow {
+            flags |= libc::O_NOFOLLOW;
+        }
+        options.custom_flags(flags);
+    }
+    #[cfg(all(unix, not(feature = "libc")))]
+    if symlink_policy == SymlinkPolicy::NoFollow {
+        return Err(DocumentError::UnsupportedOperation {
+            format: "filesystem".to_string(),
+            operation: "open".to_string(),
+            detail: "atomic no-follow reads require Cargo feature `libc` on unix".to_string(),
+        });
+    }
+    #[cfg(not(unix))]
+    if symlink_policy == SymlinkPolicy::NoFollow {
+        return Err(DocumentError::UnsupportedOperation {
+            format: "filesystem".to_string(),
+            operation: "open".to_string(),
+            detail: "atomic no-follow reads are unavailable on this platform".to_string(),
+        });
+    }
+    options.open(path).map_err(|error| DocumentError::IoError {
+        detail: format!("read `{}`: {error}", path.display()),
+    })
+}
+
+fn read_capped_source(file: File, path: &Path, max_bytes: u64) -> DocumentResult<String> {
+    inspect_capped_source(&file, path, max_bytes)?;
+    read_capped_contents(file, path, max_bytes)
+}
+
+fn inspect_capped_source(file: &File, path: &Path, max_bytes: u64) -> DocumentResult<()> {
+    let metadata = file.metadata().map_err(|error| DocumentError::IoError {
+        detail: format!("inspect `{}`: {error}", path.display()),
+    })?;
+    if !metadata.is_file() {
+        return Err(DocumentError::IoError {
+            detail: format!("`{}` is not a regular file", path.display()),
+        });
+    }
+    if metadata.len() > max_bytes {
+        return Err(DocumentError::TooLarge {
+            path: path.display().to_string(),
+            max_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn read_capped_contents(file: File, path: &Path, max_bytes: u64) -> DocumentResult<String> {
+    let read_limit = max_bytes.saturating_add(1);
+    let initial_capacity = usize::try_from(max_bytes.min(1024 * 1024)).unwrap_or(1024 * 1024);
+    let mut bytes = Vec::with_capacity(initial_capacity);
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| DocumentError::IoError {
+            detail: format!("read `{}`: {error}", path.display()),
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(DocumentError::TooLarge {
+            path: path.display().to_string(),
+            max_bytes,
+        });
+    }
+    String::from_utf8(bytes).map_err(|error| DocumentError::IoError {
+        detail: format!(
+            "read `{}`: document is not UTF-8 (valid through byte {})",
+            path.display(),
+            error.utf8_error().valid_up_to()
+        ),
+    })
+}
+
+fn validate_source_for_write(document: &Document) -> DocumentResult<()> {
+    validate_source_text_for_write(document.source(), document.format())
+}
+
+fn validate_source_text_for_write(source: &str, format: Format) -> DocumentResult<()> {
+    Document::parse(source, format).map_err(|error| DocumentError::WriteWouldCorrupt {
+        format: format.name().to_string(),
+        detail: error.redacted_message(),
+    })?;
+    Ok(())
+}
+
+fn validate_create_options(options: CreateOptions) -> DocumentResult<()> {
+    if let Some(unix_mode) = options.unix_mode
+        && unix_mode & !0o777 != 0
+    {
+        return Err(DocumentError::InvalidArgument {
+            detail: format!("unix mode {unix_mode:o} contains bits outside 0o777"),
+        });
+    }
+    Ok(())
 }
 
 /// Reject mutation of a symlink or (on unix) a hardlinked file. Returns the
@@ -720,81 +1025,249 @@ fn guard_mutation(path: &Path, operation: &str) -> DocumentResult<fs::Metadata> 
     Ok(metadata)
 }
 
-/// Write `bytes` to `path` atomically: guard, same-directory temp file,
-/// fsync, permission preservation, then rename over the target.
-fn write_atomic(path: &Path, bytes: &[u8], operation: &str) -> DocumentResult<()> {
-    let metadata = guard_mutation(path, operation)?;
+/// Compose a temporary file name that stays within one path component's limit.
+///
+/// The marker, pid, and attempt add about 35 bytes. A target whose own name is
+/// close to `NAME_MAX` would push the composed name past it, and the failure
+/// would surface at `save()` — after the caller had already made their edits, on
+/// a file they opened successfully. Truncating the stem keeps the write
+/// possible; uniqueness still comes from the pid and attempt, with `create_new`
+/// retrying the rare collision.
+fn temp_file_name(file_name: &str, pid: u32, attempt: u32) -> String {
+    // The smallest NAME_MAX across the platforms this runs on.
+    const MAX_NAME_BYTES: usize = 255;
+    let suffix = format!(".afdata-document.{pid}.{attempt}.tmp");
+    // One byte for the leading dot that hides the temporary file.
+    let budget = MAX_NAME_BYTES.saturating_sub(suffix.len() + 1);
+    let mut stem = file_name;
+    if stem.len() > budget {
+        let mut cut = budget;
+        while cut > 0 && !stem.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        stem = &stem[..cut];
+    }
+    format!(".{stem}{suffix}")
+}
 
-    let parent = path.parent().ok_or_else(|| DocumentError::IoError {
-        detail: format!(
-            "{operation} has no parent directory for `{}`",
-            path.display()
-        ),
-    })?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| DocumentError::IoError {
-            detail: format!("{operation} path is not valid UTF-8: `{}`", path.display()),
-        })?;
+fn allocate_private_temp(
+    parent: &Path,
+    file_name: &str,
+    operation: &str,
+) -> DocumentResult<(PathBuf, File)> {
     let pid = std::process::id();
-    let mut temp_path = None;
-    let mut temp_file = None;
     for attempt in 0..32_u32 {
-        let candidate = parent.join(format!(".{file_name}.afdata-document.{pid}.{attempt}.tmp"));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
+        let candidate = parent.join(temp_file_name(file_name, pid, attempt));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
-            Ok(file) => {
-                temp_path = Some(candidate);
-                temp_file = Some(file);
-                break;
-            }
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => return Ok((candidate, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(DocumentError::IoError {
                     detail: format!(
-                        "{operation} create temporary file in `{}`: {error}",
+                        "{operation} temporary file in `{}`: {error}",
                         parent.display()
                     ),
                 });
             }
         }
     }
-    let temp_path = temp_path.ok_or_else(|| DocumentError::IoError {
+    Err(DocumentError::IoError {
         detail: format!(
             "{operation} could not allocate temporary file in `{}`",
             parent.display()
         ),
-    })?;
-    let mut temp_file = temp_file.ok_or_else(|| DocumentError::IoError {
-        detail: format!("{operation} temporary file handle missing"),
-    })?;
-    let result = (|| -> DocumentResult<()> {
-        temp_file
-            .write_all(bytes)
-            .map_err(|error| DocumentError::IoError {
-                detail: format!("{operation} write `{}`: {error}", path.display()),
-            })?;
-        temp_file
-            .sync_all()
-            .map_err(|error| DocumentError::IoError {
-                detail: format!("{operation} fsync `{}`: {error}", path.display()),
-            })?;
-        drop(temp_file);
-        fs::set_permissions(&temp_path, metadata.permissions()).map_err(|error| {
-            DocumentError::IoError {
+    })
+}
+
+fn atomic_parent_and_name<'a>(
+    path: &'a Path,
+    operation: &str,
+) -> DocumentResult<(&'a Path, String)> {
+    let parent = match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+        Some(parent) => parent,
+        None => {
+            return Err(DocumentError::IoError {
                 detail: format!(
-                    "{operation} preserve permissions `{}`: {error}",
+                    "{operation} has no parent directory for `{}`",
                     path.display()
                 ),
-            }
+            });
+        }
+    };
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| DocumentError::IoError {
+            detail: format!("{operation} path is not valid UTF-8: `{}`", path.display()),
+        })?
+        .to_string();
+    Ok((parent, file_name))
+}
+
+#[cfg(unix)]
+fn sync_parent(parent: &Path, operation: &str) -> DocumentResult<()> {
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| DocumentError::IoError {
+            detail: format!(
+                "{operation} fsync parent directory `{}`: {error}",
+                parent.display()
+            ),
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_parent: &Path, _operation: &str) -> DocumentResult<()> {
+    // Rust does not expose a portable directory handle on non-unix targets.
+    // The file itself is still synced before its atomic installation.
+    Ok(())
+}
+
+fn write_temp_bytes(
+    mut temp_file: File,
+    temp_path: &Path,
+    target_path: &Path,
+    bytes: &[u8],
+    operation: &str,
+    permissions: Option<fs::Permissions>,
+    unix_mode: Option<u32>,
+) -> DocumentResult<()> {
+    temp_file
+        .write_all(bytes)
+        .map_err(|error| DocumentError::IoError {
+            detail: format!("{operation} write `{}`: {error}", target_path.display()),
         })?;
+    if let Some(permissions) = permissions {
+        temp_file
+            .set_permissions(permissions)
+            .map_err(|error| DocumentError::IoError {
+                detail: format!(
+                    "{operation} preserve permissions `{}`: {error}",
+                    target_path.display()
+                ),
+            })?;
+    }
+    #[cfg(unix)]
+    if let Some(unix_mode) = unix_mode {
+        use std::os::unix::fs::PermissionsExt as _;
+        temp_file
+            .set_permissions(fs::Permissions::from_mode(unix_mode))
+            .map_err(|error| DocumentError::IoError {
+                detail: format!(
+                    "{operation} set permissions on `{}`: {error}",
+                    target_path.display()
+                ),
+            })?;
+    }
+    #[cfg(not(unix))]
+    let _ = unix_mode;
+    temp_file
+        .sync_all()
+        .map_err(|error| DocumentError::IoError {
+            detail: format!("{operation} fsync `{}`: {error}", temp_path.display()),
+        })
+}
+
+/// Write `bytes` to `path` atomically: guard, same-directory temp file,
+/// fsync, permission preservation, then rename over the target.
+fn write_atomic(path: &Path, bytes: &[u8], operation: &str) -> DocumentResult<()> {
+    let metadata = guard_mutation(path, operation)?;
+    let (parent, file_name) = atomic_parent_and_name(path, operation)?;
+    let (temp_path, temp_file) = allocate_private_temp(parent, &file_name, operation)?;
+    let result = (|| -> DocumentResult<()> {
+        write_temp_bytes(
+            temp_file,
+            &temp_path,
+            path,
+            bytes,
+            operation,
+            Some(metadata.permissions()),
+            None,
+        )?;
         fs::rename(&temp_path, path).map_err(|error| DocumentError::IoError {
             detail: format!("{operation} atomic replace `{}`: {error}", path.display()),
         })?;
+        sync_parent(parent, operation)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn write_atomic_create(path: &Path, bytes: &[u8], options: CreateOptions) -> DocumentResult<()> {
+    let operation = "create";
+    let mut existing_permissions = None;
+    match fs::symlink_metadata(path) {
+        Ok(_) => match options.mode {
+            CreateMode::NewOnly => {
+                return Err(DocumentError::AlreadyExists {
+                    path: path.display().to_string(),
+                });
+            }
+            CreateMode::Replace => {
+                let metadata = guard_mutation(path, operation)?;
+                existing_permissions = Some(metadata.permissions());
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(DocumentError::IoError {
+                detail: format!("create preflight `{}`: {error}", path.display()),
+            });
+        }
+    }
+
+    let (parent, file_name) = atomic_parent_and_name(path, operation)?;
+    let (temp_path, temp_file) = allocate_private_temp(parent, &file_name, operation)?;
+    let result = (|| -> DocumentResult<()> {
+        // A replace with no explicit mode keeps the target's own permissions,
+        // exactly as `save()` does; only a first creation falls back to 0o600.
+        let unix_mode = options.effective_unix_mode(existing_permissions.is_some());
+        let preserved = unix_mode
+            .is_none()
+            .then(|| existing_permissions.clone())
+            .flatten();
+        write_temp_bytes(
+            temp_file, &temp_path, path, bytes, operation, preserved, unix_mode,
+        )?;
+        match options.mode {
+            CreateMode::NewOnly => match fs::hard_link(&temp_path, path) {
+                Ok(()) => {
+                    // The document is installed from here on. Failing to unlink
+                    // the temporary link leaves a stray file, but reporting an
+                    // error would tell the caller the commit did not happen —
+                    // and a retry would then get `document_target_exists` for a
+                    // write that in fact succeeded.
+                    let _ = fs::remove_file(&temp_path);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(DocumentError::AlreadyExists {
+                        path: path.display().to_string(),
+                    });
+                }
+                Err(error) => {
+                    return Err(DocumentError::IoError {
+                        detail: format!("create install `{}`: {error}", path.display()),
+                    });
+                }
+            },
+            CreateMode::Replace => {
+                fs::rename(&temp_path, path).map_err(|error| DocumentError::IoError {
+                    detail: format!("create atomic replace `{}`: {error}", path.display()),
+                })?;
+            }
+        }
+        sync_parent(parent, operation)?;
         Ok(())
     })();
     if result.is_err() {
@@ -859,14 +1332,273 @@ mod tests {
         // Within the cap: opens normally.
         assert!(DocumentFile::open_capped(&path, None, 1024).is_ok());
 
-        // Over the cap: rejected without parsing, as an io failure.
+        // Over the cap: rejected without parsing, under its own code so a
+        // caller enforcing a size budget need not match on the message.
         let err = DocumentFile::open_capped(&path, None, 4).unwrap_err();
-        assert_eq!(err.code(), "document_io_failed");
-        assert!(err.to_string().contains("read limit"));
+        assert_eq!(err.code(), "document_too_large");
 
-        // A directory is not a regular file.
+        // A directory is not a regular file, and that is a different failure.
         let dir_err = DocumentFile::open_capped(dir.path(), Some(Format::Json), 1024).unwrap_err();
         assert_eq!(dir_err.code(), "document_io_failed");
+
+        // Missing is different again — the three must stay distinguishable.
+        let missing =
+            DocumentFile::open_capped(dir.path().join("absent.json"), None, 1024).unwrap_err();
+        assert_ne!(missing.code(), "document_too_large");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capped_read_uses_the_open_handle_when_the_path_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = r#"{"source":"original"}"#;
+        let path = write_temp(dir.path(), "config.json", original);
+        let handle = open_read_handle(&path, SymlinkPolicy::Follow).unwrap();
+        inspect_capped_source(&handle, &path, 64).unwrap();
+
+        fs::rename(&path, dir.path().join("original.json")).unwrap();
+        fs::write(&path, r#"{"source":"replacement"}"#).unwrap();
+
+        let source = read_capped_contents(handle, &path, 64).unwrap();
+        assert_eq!(source, original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capped_read_rechecks_the_actual_bytes_after_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(dir.path(), "config.json", "{}");
+        let handle = open_read_handle(&path, SymlinkPolicy::Follow).unwrap();
+        inspect_capped_source(&handle, &path, 4).unwrap();
+
+        let mut writer = OpenOptions::new().append(true).open(&path).unwrap();
+        writer.write_all(b"123").unwrap();
+        writer.sync_all().unwrap();
+
+        let error = read_capped_contents(handle, &path, 4).unwrap_err();
+        assert_eq!(error.code(), "document_too_large");
+    }
+
+    #[cfg(all(unix, feature = "libc"))]
+    #[test]
+    fn open_capped_can_atomically_refuse_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = write_temp(dir.path(), "target.json", r#"{"k": "v"}"#);
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(
+            DocumentFile::open_capped_with_policy(&link, None, 1024, SymlinkPolicy::Follow).is_ok()
+        );
+        let error =
+            DocumentFile::open_capped_with_policy(&link, None, 1024, SymlinkPolicy::NoFollow)
+                .unwrap_err();
+        assert_eq!(error.code(), "document_io_failed");
+    }
+
+    #[test]
+    fn create_atomic_is_no_clobber_and_returns_a_file_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let document = Document::parse(r#"{"port": 993}"#, Format::Json).unwrap();
+
+        let created = DocumentFile::create_atomic(&path, document, CreateOptions::new()).unwrap();
+        assert_eq!(created.path(), path);
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"port": 993}"#);
+
+        let replacement = Document::parse(r#"{"port": 1024}"#, Format::Json).unwrap();
+        let error =
+            DocumentFile::create_atomic(&path, replacement, CreateOptions::new()).unwrap_err();
+        assert_eq!(error.code(), "document_target_exists");
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"port": 993}"#);
+    }
+
+    #[test]
+    fn create_atomic_requires_explicit_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_temp(dir.path(), "config.json", r#"{"port": 993}"#);
+        let replacement = Document::parse(r#"{"port": 1024}"#, Format::Json).unwrap();
+
+        let created =
+            DocumentFile::create_atomic(&path, replacement, CreateOptions::new().replace())
+                .unwrap();
+
+        assert_eq!(created.value_at("port").unwrap(), Value::Integer(1024));
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"port": 1024}"#);
+    }
+
+    /// Two write paths must not disagree about permissions. `save()` preserves
+    /// the target's mode, so a replace does too unless the caller names one —
+    /// otherwise committing through the other verb silently re-permissions a
+    /// file, which on a secrets file means widening it.
+    #[cfg(unix)]
+    #[test]
+    fn create_atomic_replace_preserves_the_targets_mode_unless_told_otherwise() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mode_of = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        for original in [0o644, 0o600, 0o640] {
+            let path = write_temp(dir.path(), &format!("m{original:o}.json"), r#"{"a": 1}"#);
+            fs::set_permissions(&path, fs::Permissions::from_mode(original)).unwrap();
+            let replacement = Document::parse(r#"{"a": 2}"#, Format::Json).unwrap();
+            DocumentFile::create_atomic(&path, replacement, CreateOptions::new().replace())
+                .unwrap();
+            assert_eq!(
+                mode_of(&path),
+                original,
+                "replace must keep the file's mode"
+            );
+        }
+
+        // An explicit mode still wins.
+        let path = write_temp(dir.path(), "explicit.json", r#"{"a": 1}"#);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let replacement = Document::parse(r#"{"a": 2}"#, Format::Json).unwrap();
+        DocumentFile::create_atomic(
+            &path,
+            replacement,
+            CreateOptions::new().replace().unix_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+
+        // A first creation still defaults to owner-only.
+        let fresh = dir.path().join("fresh.json");
+        let document = Document::parse(r#"{"a": 1}"#, Format::Json).unwrap();
+        DocumentFile::create_atomic(&fresh, document, CreateOptions::new()).unwrap();
+        assert_eq!(mode_of(&fresh), 0o600);
+    }
+
+    /// A "safe first commit" that installs a file `open` would reject is not
+    /// safe. The format the path resolves to and the document's own format have
+    /// to agree before anything is written.
+    #[cfg(feature = "toml")]
+    #[test]
+    fn create_atomic_refuses_a_document_the_path_could_not_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mismatch.toml");
+        let document = Document::parse(r#"{"port": 993}"#, Format::Json).unwrap();
+
+        let error = DocumentFile::create_atomic(&path, document, CreateOptions::new()).unwrap_err();
+
+        assert_eq!(error.code(), "document_unsupported_operation");
+        assert!(
+            !path.exists(),
+            "nothing may be written when the check fails"
+        );
+    }
+
+    #[test]
+    fn bare_relative_atomic_paths_use_the_current_directory() {
+        let (parent, file_name) =
+            atomic_parent_and_name(Path::new("config.json"), "write").unwrap();
+
+        assert_eq!(parent, Path::new("."));
+        assert_eq!(file_name, "config.json");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_atomic_applies_requested_private_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let document = Document::parse(r#"{"port": 993}"#, Format::Json).unwrap();
+
+        DocumentFile::create_atomic(&path, document, CreateOptions::new().unix_mode(0o640))
+            .unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+    }
+
+    #[test]
+    fn create_atomic_rejects_invalid_permission_bits_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let document = Document::parse(r#"{"port": 993}"#, Format::Json).unwrap();
+
+        let error =
+            DocumentFile::create_atomic(&path, document, CreateOptions::new().unix_mode(0o1600))
+                .unwrap_err();
+
+        assert_eq!(error.code(), "document_invalid_argument");
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_atomic_replace_refuses_symlinks_and_hardlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = write_temp(dir.path(), "target.json", r#"{"port": 993}"#);
+        let symlink = dir.path().join("symlink.json");
+        std::os::unix::fs::symlink(&target, &symlink).unwrap();
+        let replacement = Document::parse(r#"{"port": 1024}"#, Format::Json).unwrap();
+
+        let symlink_error = DocumentFile::create_atomic(
+            &symlink,
+            replacement.clone(),
+            CreateOptions::new().replace(),
+        )
+        .unwrap_err();
+        assert_eq!(symlink_error.code(), "document_unsupported_operation");
+        assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"port": 993}"#);
+
+        let hardlink = dir.path().join("hardlink.json");
+        fs::hard_link(&target, &hardlink).unwrap();
+        let hardlink_error =
+            DocumentFile::create_atomic(&hardlink, replacement, CreateOptions::new().replace())
+                .unwrap_err();
+        assert_eq!(hardlink_error.code(), "document_unsupported_operation");
+        assert_eq!(fs::read_to_string(&target).unwrap(), r#"{"port": 993}"#);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_atomic_replace_refuses_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.json");
+        let symlink = dir.path().join("dangling.json");
+        std::os::unix::fs::symlink(&missing, &symlink).unwrap();
+        let replacement = Document::parse(r#"{"port": 1024}"#, Format::Json).unwrap();
+
+        let error =
+            DocumentFile::create_atomic(&symlink, replacement, CreateOptions::new().replace())
+                .unwrap_err();
+
+        assert_eq!(error.code(), "document_unsupported_operation");
+        assert!(
+            fs::symlink_metadata(&symlink)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn edit_rolls_back_memory_and_disk_when_the_closure_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = r#"{"port": 993}"#;
+        let path = write_temp(dir.path(), "config.json", original);
+        let mut document = DocumentFile::open(&path, None).unwrap();
+
+        let error = document
+            .edit(|draft| {
+                draft.set("port", Value::Integer(1024))?;
+                Err(DocumentError::InvalidArgument {
+                    detail: "validation failed".to_string(),
+                })
+            })
+            .unwrap_err();
+
+        assert_eq!(error.code(), "document_invalid_argument");
+        assert_eq!(document.source(), original);
+        assert_eq!(document.value_at("port").unwrap(), Value::Integer(993));
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 
     #[test]
@@ -900,6 +1632,37 @@ mod tests {
                 .code(),
             "document_parse_failed"
         );
+    }
+
+    #[test]
+    fn decode_and_edit_and_validate_share_one_typed_boundary() {
+        #[derive(Debug, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Config {
+            port: u16,
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let original = r#"{"port": 8080}"#;
+        let path = write_temp(dir.path(), "config.json", original);
+        let mut document = DocumentFile::open(&path, None).unwrap();
+
+        assert_eq!(document.decode::<Config>().unwrap().port, 8080);
+
+        let error = document
+            .edit_and_validate::<Config>(|draft| {
+                draft.set("port", Value::String("invalid".to_string()))
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "document_type_mismatch");
+        assert_eq!(document.source(), original);
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+
+        let config = document
+            .edit_and_validate::<Config>(|draft| draft.set("port", Value::Unsigned(9090)))
+            .unwrap();
+        assert_eq!(config.port, 9090);
+        assert_eq!(document.value_at("port").unwrap(), Value::Unsigned(9090));
     }
 
     #[cfg(feature = "toml")]
@@ -940,6 +1703,205 @@ mod tests {
         assert_eq!(doc.source(), saved);
     }
 
+    /// A comment documents the value it was written beside. Growing an array
+    /// must not copy a neighbour's comment onto a value the author never wrote
+    /// it for, and shrinking must not leave a removed element's comment
+    /// documenting a survivor. Both are content this module invented.
+    #[cfg(feature = "toml")]
+    #[test]
+    fn toml_array_edits_never_invent_or_misattribute_a_comment() {
+        let contents = "paths = [\n  \"one\", # first\n  \"two\", # second\n]\n";
+
+        let mut grown = Document::parse(contents, Format::Toml).unwrap();
+        grown
+            .set(
+                "paths",
+                Value::Array(vec![
+                    Value::String("a".into()),
+                    Value::String("b".into()),
+                    Value::String("c".into()),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(
+            grown.source(),
+            "paths = [\n  \"a\", # first\n  \"b\",\n  \"c\", # second\n]\n",
+            "an appended element must carry no comment of its own"
+        );
+
+        let mut shrunk = Document::parse(contents, Format::Toml).unwrap();
+        shrunk
+            .set("paths", Value::Array(vec![Value::String("only".into())]))
+            .unwrap();
+        assert_eq!(
+            shrunk.source(),
+            "paths = [\n  \"only\", # first\n]\n",
+            "the surviving element keeps its own comment, not the removed one's"
+        );
+
+        // Same length: every comment stays exactly where the author put it.
+        let mut replaced = Document::parse(contents, Format::Toml).unwrap();
+        replaced
+            .set(
+                "paths",
+                Value::Array(vec![Value::String("x".into()), Value::String("y".into())]),
+            )
+            .unwrap();
+        assert_eq!(
+            replaced.source(),
+            "paths = [\n  \"x\", # first\n  \"y\", # second\n]\n"
+        );
+
+        // Growing a single-line array keeps the bracket spacing.
+        let mut inline = Document::parse("paths = [ \"one\" ]\n", Format::Toml).unwrap();
+        inline
+            .set(
+                "paths",
+                Value::Array(vec![
+                    Value::String("one".into()),
+                    Value::String("two".into()),
+                ]),
+            )
+            .unwrap();
+        assert_eq!(inline.source(), "paths = [ \"one\", \"two\" ]\n");
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn set_toml_array_preserves_single_line_decor() {
+        let contents = "# before\npaths = [ \"old\", 'second', ] # keep this\nother = 42\n";
+        let mut document = Document::parse(contents, Format::Toml).unwrap();
+
+        document
+            .set(
+                "paths",
+                Value::Array(vec![
+                    Value::String("new".to_string()),
+                    Value::String("next".to_string()),
+                ]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            document.source(),
+            "# before\npaths = [ \"new\", \"next\", ] # keep this\nother = 42\n"
+        );
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn set_toml_array_preserves_multiline_comments_and_trailing_comma() {
+        let contents = "paths = [\n  \"one\", # first\n  \"two\", # second\n]\nother = 42\n";
+        let mut document = Document::parse(contents, Format::Toml).unwrap();
+
+        document
+            .set(
+                "paths",
+                Value::Array(vec![
+                    Value::String("uno".to_string()),
+                    Value::String("dos".to_string()),
+                ]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            document.source(),
+            "paths = [\n  \"uno\", # first\n  \"dos\", # second\n]\nother = 42\n"
+        );
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn set_toml_array_element_preserves_its_neighbors() {
+        let contents = "paths = [\n  \"one\", # first\n  \"two\", # second\n]\n";
+        let mut document = Document::parse(contents, Format::Toml).unwrap();
+
+        document
+            .set("paths.1", Value::String("changed".to_string()))
+            .unwrap();
+
+        assert_eq!(
+            document.source(),
+            "paths = [\n  \"one\", # first\n  \"changed\", # second\n]\n"
+        );
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn set_toml_array_can_become_empty_without_touching_neighbors() {
+        let contents = "before = 1\npaths = [ \"one\", ] # list\nafter = 2\n";
+        let mut document = Document::parse(contents, Format::Toml).unwrap();
+
+        document.set("paths", Value::Array(Vec::new())).unwrap();
+
+        assert_eq!(
+            document.source(),
+            "before = 1\npaths = [ ] # list\nafter = 2\n"
+        );
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn set_toml_inline_table_preserves_layout_and_comments() {
+        let contents = "cache = { ttl_s = 1, enabled = true } # cache\nother = 42\n";
+        let mut document = Document::parse(contents, Format::Toml).unwrap();
+        let replacement = Value::from(serde_json::json!({
+            "enabled": false,
+            "ttl_s": 60
+        }));
+
+        document.set("cache", replacement).unwrap();
+
+        assert_eq!(
+            document.source(),
+            "cache = { ttl_s = 60, enabled = false } # cache\nother = 42\n"
+        );
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn set_toml_ordinary_table_preserves_header_and_unrelated_section() {
+        let contents = "# lead\n[cache] # cache header\nttl_s = 1 # ttl\nenabled = true\n\n[next]\nvalue = 9\n";
+        let mut document = Document::parse(contents, Format::Toml).unwrap();
+        let replacement = Value::from(serde_json::json!({
+            "enabled": false,
+            "ttl_s": 60
+        }));
+
+        document.set("cache", replacement).unwrap();
+
+        assert_eq!(
+            document.source(),
+            "# lead\n[cache] # cache header\nttl_s = 60 # ttl\nenabled = false\n\n[next]\nvalue = 9\n"
+        );
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn set_toml_collection_preserves_unchanged_datetime_syntax() {
+        let contents = "[cache]\nexpires_at = 2026-08-04T12:30:00Z\npaths = [\"one\"]\n";
+        let mut document = Document::parse(contents, Format::Toml).unwrap();
+        let replacement = document.value_at("cache").unwrap();
+
+        document.set("cache", replacement).unwrap();
+
+        assert_eq!(document.source(), contents);
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn set_toml_array_of_tables_is_explicitly_refused() {
+        let contents = "[[servers]]\nname = \"one\"\n[[servers]]\nname = \"two\"\n";
+        let mut document = Document::parse(contents, Format::Toml).unwrap();
+        let replacement = document.value_at("servers").unwrap();
+
+        let error = document.set("servers", replacement).unwrap_err();
+
+        assert_eq!(error.code(), "document_unsupported_operation");
+        assert_eq!(document.source(), contents);
+    }
+
+    #[cfg(feature = "ini")]
     #[test]
     fn save_refuses_source_its_own_parser_rejects() {
         // The read-back guard, exercised directly: no backend should be able to
@@ -958,6 +1920,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
     }
 
+    #[cfg(feature = "ini")]
     #[test]
     fn save_writes_source_the_parser_accepts() {
         let dir = tempfile::tempdir().unwrap();

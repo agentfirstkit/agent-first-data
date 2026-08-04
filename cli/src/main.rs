@@ -6,19 +6,17 @@ use agent_first_data::document::{
     get_path, guard_bare_overwrite, join_path, parse_path, parse_path_pattern, value_from_type,
 };
 use agent_first_data::{
-    ArgSpec, CliOutcome, CliSpec, Combination, CommandSpec, ErrorBuilder, Event, OutputFormat,
-    OutputOptions, OutputPlan, OutputSpec, OutputTo, PlainStyle, Redactor, ResolvedInvocation,
-    build_afdata_cli, build_cli_error, cli_error_event, cli_help_event, cli_parse_output,
-    cli_version_event, is_valid_bcp47, is_valid_rfc3339, is_valid_rfc3339_date,
-    is_valid_rfc3339_time, json_error, json_log, json_result, normalize_utc_offset, render,
-    render_cli_reference, validate_protocol_event, validate_protocol_stream,
+    ArgSpec, BoundOutcome, CliSpec, Combination, CommandSpec, ErrorBuilder, Event, LintFinding,
+    LintOptions, LintSeverity, OutputFormat, OutputOptions, OutputPlan, OutputSpec, OutputTo,
+    PlainStyle, Redactor, ResolvedInvocation, build_afdata_cli, build_cli_error, cli_error_event,
+    cli_help_event, cli_invocation_invalid_event, cli_version_event, json_error, json_log,
+    json_result, lint_value as lint_serialized_value, render, render_cli_reference,
+    validate_protocol_event, validate_protocol_stream,
 };
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-
-const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 enum EmitCommand {
     /// Emit a diagnostic log event (stderr under the default split)
@@ -94,47 +92,7 @@ enum SkillCommand {
     },
 }
 
-#[derive(Clone, Debug)]
-struct Finding {
-    rule_id: &'static str,
-    severity: &'static str,
-    pointer: String,
-    message: String,
-}
-
-impl Finding {
-    fn error(rule_id: &'static str, pointer: String, message: String) -> Self {
-        Self {
-            rule_id,
-            severity: "error",
-            pointer,
-            message,
-        }
-    }
-
-    /// A finding the tool is not certain about. Convention-adoption checks are
-    /// heuristic — they read intent from a field's name — so they must not fail
-    /// a document the way a violated suffix rule does. They still have to be
-    /// said: staying silent about them is what let `lint` pass a file made
-    /// entirely of the ambiguities this convention exists to remove.
-    fn warning(rule_id: &'static str, pointer: String, message: String) -> Self {
-        Self {
-            rule_id,
-            severity: "warning",
-            pointer,
-            message,
-        }
-    }
-
-    fn to_json(&self) -> Value {
-        json!({
-            "rule_id": self.rule_id,
-            "severity": self.severity,
-            "pointer": self.pointer,
-            "message": self.message,
-        })
-    }
-}
+type Finding = LintFinding;
 
 enum ParsedInput {
     Single(Value),
@@ -806,7 +764,7 @@ fn closed_world_main() -> ExitCode {
         }
     };
     match outcome {
-        CliOutcome::Run(invocation) => {
+        BoundOutcome::Run(invocation) => {
             let _stream_redirect = match install_output_redirect(invocation.output_plan()) {
                 Ok(guard) => guard,
                 Err(message) => return emit_output_setup_error(&message),
@@ -814,19 +772,19 @@ fn closed_world_main() -> ExitCode {
             if let Err(message) = activate_output_plan(invocation.output_plan()) {
                 return emit_output_setup_error(&message);
             }
-            app.execute(&invocation)
+            invocation.run()
         }
         // Injected for every registry, so a spore gets an offline reference
         // without registering anything — and without spending a line of the
         // agent's discovery surface on a command no agent calls.
-        CliOutcome::Docs(docs) => {
+        BoundOutcome::Docs(docs) => {
             let _stream_redirect = match install_output_redirect(docs.output_plan()) {
                 Ok(guard) => guard,
                 Err(message) => return emit_output_setup_error(&message),
             };
             write_text_exit(&render_cli_reference(&cli), 0)
         }
-        CliOutcome::Help(help) => {
+        BoundOutcome::Help(help) => {
             let _stream_redirect = match install_output_redirect(help.output_plan()) {
                 Ok(guard) => guard,
                 Err(message) => return emit_output_setup_error(&message),
@@ -841,7 +799,7 @@ fn closed_world_main() -> ExitCode {
                 emit_event(cli_help_event(&help), format, 0)
             }
         }
-        CliOutcome::Version(version) => {
+        BoundOutcome::Version(version) => {
             let _stream_redirect = match install_output_redirect(version.output_plan()) {
                 Ok(guard) => guard,
                 Err(message) => return emit_output_setup_error(&message),
@@ -897,14 +855,28 @@ fn activate_output_plan(plan: &OutputPlan) -> Result<OutputFormat, String> {
             destination,
             ..
         } => {
-            let format = cli_parse_output(format)?;
-            let destination = OutputTo::parse(destination)?;
             OUTPUT_TO
-                .set(destination)
+                .set(*destination)
                 .map_err(|_| "output plan was activated more than once".to_string())?;
-            Ok(format)
+            Ok(*format)
         }
     }
+}
+
+/// Report a defect in this binary's own use of the resolved invocation.
+///
+/// Distinct from [`emit_output_setup_error`], which means a stdout/stderr sink
+/// could not be established: these are dispatch-table and argument-id mistakes,
+/// and `examples/agent_cli.rs` names them the same way so an agent that learned
+/// the pattern from the example reads the same code here.
+fn emit_invocation_error(message: &str) -> ExitCode {
+    emit_event_to(
+        cli_invocation_invalid_event(message),
+        OutputFormat::Json,
+        &OutputOptions::default(),
+        1,
+        Stream::Stderr,
+    )
 }
 
 fn emit_output_setup_error(message: &str) -> ExitCode {
@@ -918,12 +890,23 @@ fn emit_output_setup_error(message: &str) -> ExitCode {
     )
 }
 
-fn invocation_string(invocation: &ResolvedInvocation, id: &str) -> String {
-    invocation
-        .required(id)
-        .as_str()
-        .unwrap_or_default()
-        .to_string()
+fn required_invocation_string(invocation: &ResolvedInvocation, id: &str) -> Option<String> {
+    invocation.required(id).as_str().map(str::to_string)
+}
+
+macro_rules! required_string {
+    ($invocation:expr, $id:literal) => {
+        match required_invocation_string($invocation, $id) {
+            Some(value) => value,
+            None => {
+                return emit_invocation_error(concat!(
+                    "resolved invocation is missing required string `",
+                    $id,
+                    "`"
+                ));
+            }
+        }
+    };
 }
 
 fn invocation_optional_string(invocation: &ResolvedInvocation, id: &str) -> Option<String> {
@@ -952,14 +935,13 @@ fn invocation_flag(invocation: &ResolvedInvocation, id: &str) -> bool {
 fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
     let format = invocation
         .output_plan()
-        .format()
-        .and_then(|format| cli_parse_output(format).ok())
+        .output_format()
         .unwrap_or(OutputFormat::Json);
     match invocation.action_id() {
         "lint" => {
-            let input = invocation_string(invocation, "input");
+            let input = required_string!(invocation, "input");
             let input_format = invocation_optional_string(invocation, "input_format");
-            let min_severity = invocation_string(invocation, "min_severity");
+            let min_severity = required_string!(invocation, "min_severity");
             run_lint(
                 Path::new(&input),
                 input_format.as_deref(),
@@ -968,7 +950,7 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
             )
         }
         "validate" => {
-            let input = invocation_string(invocation, "input");
+            let input = required_string!(invocation, "input");
             run_validate(
                 Path::new(&input),
                 format,
@@ -977,7 +959,7 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
             )
         }
         "render" => {
-            let input = invocation_string(invocation, "input");
+            let input = required_string!(invocation, "input");
             run_render(
                 Path::new(&input),
                 &invocation_strings(invocation, "secret_name"),
@@ -986,21 +968,21 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
         }
         "emit_log" => run_emit(
             EmitCommand::Log {
-                level: invocation_string(invocation, "level"),
-                message: invocation_string(invocation, "message"),
+                level: required_string!(invocation, "level"),
+                message: required_string!(invocation, "message"),
             },
             format,
         ),
         "emit_result" => run_emit(
             EmitCommand::Result {
-                message: invocation_string(invocation, "message"),
+                message: required_string!(invocation, "message"),
             },
             format,
         ),
         "emit_error" => run_emit(
             EmitCommand::Error {
-                code: invocation_string(invocation, "code"),
-                message: invocation_string(invocation, "message"),
+                code: required_string!(invocation, "code"),
+                message: required_string!(invocation, "message"),
                 hint: invocation_optional_string(invocation, "hint"),
                 retryable: invocation_flag(invocation, "retryable"),
             },
@@ -1010,15 +992,15 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
         #[cfg(feature = "skill")]
         "skill_validate" => run_skill(
             SkillCommand::Validate {
-                input: PathBuf::from(invocation_string(invocation, "input")),
+                input: PathBuf::from(required_string!(invocation, "input")),
             },
             format,
         ),
         #[cfg(feature = "skill-admin")]
         "skill_status" => run_skill(
             SkillCommand::Status {
-                agent: invocation_string(invocation, "agent"),
-                scope: invocation_string(invocation, "scope"),
+                agent: required_string!(invocation, "agent"),
+                scope: required_string!(invocation, "scope"),
                 skills_dir: invocation_optional_string(invocation, "skills_dir"),
             },
             format,
@@ -1026,8 +1008,8 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
         #[cfg(feature = "skill-admin")]
         "skill_install" => run_skill(
             SkillCommand::Install {
-                agent: invocation_string(invocation, "agent"),
-                scope: invocation_string(invocation, "scope"),
+                agent: required_string!(invocation, "agent"),
+                scope: required_string!(invocation, "scope"),
                 skills_dir: invocation_optional_string(invocation, "skills_dir"),
                 force: invocation_flag(invocation, "force"),
             },
@@ -1036,8 +1018,8 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
         #[cfg(feature = "skill-admin")]
         "skill_uninstall" => run_skill(
             SkillCommand::Uninstall {
-                agent: invocation_string(invocation, "agent"),
-                scope: invocation_string(invocation, "scope"),
+                agent: required_string!(invocation, "agent"),
+                scope: required_string!(invocation, "scope"),
                 skills_dir: invocation_optional_string(invocation, "skills_dir"),
                 force: invocation_flag(invocation, "force"),
             },
@@ -1063,7 +1045,7 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
 }
 
 fn dispatch_get(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
-    let file = invocation_string(invocation, "file");
+    let file = required_string!(invocation, "file");
     let key = invocation_optional_string(invocation, "key");
     let input_format = invocation_optional_string(invocation, "input_format");
     let slug_field = invocation_optional_string(invocation, "slug_field");
@@ -1081,7 +1063,7 @@ fn dispatch_get(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
 }
 
 fn dispatch_values(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
-    let file = invocation_string(invocation, "file");
+    let file = required_string!(invocation, "file");
     let keys = invocation_strings(invocation, "key");
     let default = invocation_optional_string(invocation, "default");
     let input_format = invocation_optional_string(invocation, "input_format");
@@ -1106,8 +1088,8 @@ fn dispatch_values(invocation: &ResolvedInvocation, format: OutputFormat) -> Exi
 }
 
 fn dispatch_value(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
-    let file = invocation_string(invocation, "file");
-    let key = invocation_string(invocation, "key");
+    let file = required_string!(invocation, "file");
+    let key = required_string!(invocation, "key");
     let default = invocation_optional_string(invocation, "default");
     let input_format = invocation_optional_string(invocation, "input_format");
     let slug_field = invocation_optional_string(invocation, "slug_field");
@@ -1127,7 +1109,7 @@ fn dispatch_value(invocation: &ResolvedInvocation, format: OutputFormat) -> Exit
 }
 
 fn dispatch_enumerate(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
-    let file = invocation_string(invocation, "file");
+    let file = required_string!(invocation, "file");
     let key = invocation_optional_string(invocation, "key");
     let input_format = invocation_optional_string(invocation, "input_format");
     let slug_field = invocation_optional_string(invocation, "slug_field");
@@ -1151,8 +1133,8 @@ fn dispatch_enumerate(invocation: &ResolvedInvocation, format: OutputFormat) -> 
 }
 
 fn dispatch_set(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
-    let file = invocation_string(invocation, "file");
-    let key = invocation_string(invocation, "key");
+    let file = required_string!(invocation, "file");
+    let key = required_string!(invocation, "key");
     let value = invocation_optional_string(invocation, "value");
     let value_type = invocation
         .was_explicit("value_type")
@@ -1177,8 +1159,8 @@ fn dispatch_set(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
 }
 
 fn dispatch_unset(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
-    let file = invocation_string(invocation, "file");
-    let key = invocation_string(invocation, "key");
+    let file = required_string!(invocation, "file");
+    let key = required_string!(invocation, "key");
     let input_format = invocation_optional_string(invocation, "input_format");
     let slug_field = invocation_optional_string(invocation, "slug_field");
     run_unset(
@@ -1194,10 +1176,10 @@ fn dispatch_unset(invocation: &ResolvedInvocation, format: OutputFormat) -> Exit
 }
 
 fn dispatch_add(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
-    let file = invocation_string(invocation, "file");
-    let key = invocation_string(invocation, "key");
-    let slug = invocation_string(invocation, "slug");
-    let slug_field = invocation_string(invocation, "slug_field");
+    let file = required_string!(invocation, "file");
+    let key = required_string!(invocation, "key");
+    let slug = required_string!(invocation, "slug");
+    let slug_field = required_string!(invocation, "slug_field");
     let fields = invocation_strings(invocation, "fields");
     let input_format = invocation_optional_string(invocation, "input_format");
     run_add(
@@ -1218,10 +1200,10 @@ fn dispatch_add(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
 }
 
 fn dispatch_remove(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
-    let file = invocation_string(invocation, "file");
-    let key = invocation_string(invocation, "key");
-    let slug = invocation_string(invocation, "slug");
-    let slug_field = invocation_string(invocation, "slug_field");
+    let file = required_string!(invocation, "file");
+    let key = required_string!(invocation, "key");
+    let slug = required_string!(invocation, "slug");
+    let slug_field = required_string!(invocation, "slug_field");
     let input_format = invocation_optional_string(invocation, "input_format");
     run_remove(
         Path::new(&file),
@@ -1249,6 +1231,11 @@ fn run_lint(
     min_severity: &str,
     format: OutputFormat,
 ) -> ExitCode {
+    let options = if min_severity == "error" {
+        LintOptions::errors_only()
+    } else {
+        LintOptions::default()
+    };
     let resolved = match resolve_input_format(input_format) {
         Ok(resolved) => resolved,
         Err(message) => return emit_usage_error(&message, format),
@@ -1283,10 +1270,12 @@ fn run_lint(
             Err(err) => return emit_parse_error(err, format),
         };
         match parsed {
-            ParsedInput::Single(value) => lint_value(&value, "", &mut findings),
+            ParsedInput::Single(value) => {
+                append_lint_findings(&value, "", options, &mut findings);
+            }
             ParsedInput::Lines(values) => {
                 for (idx, value) in values.iter().enumerate() {
-                    lint_value(value, &format!("/{}", idx + 1), &mut findings);
+                    append_lint_findings(value, &format!("/{}", idx + 1), options, &mut findings);
                 }
             }
         }
@@ -1305,12 +1294,24 @@ fn run_lint(
                 return emit_event(event, format, 1);
             }
         };
-        lint_value(&json_value, "", &mut findings);
-    }
-    if min_severity == "error" {
-        findings.retain(|finding| finding.severity == "error");
+        append_lint_findings(&json_value, "", options, &mut findings);
     }
     emit_findings("lint_failed", "lint failed", findings, format)
+}
+
+fn append_lint_findings(
+    value: &Value,
+    pointer_prefix: &str,
+    options: LintOptions,
+    findings: &mut Vec<Finding>,
+) {
+    let mut nested = lint_serialized_value(value, options);
+    if !pointer_prefix.is_empty() {
+        for finding in &mut nested {
+            finding.pointer = format!("{pointer_prefix}{}", finding.pointer);
+        }
+    }
+    findings.extend(nested);
 }
 
 fn run_validate(input: &Path, format: OutputFormat, strict: bool, per_event: bool) -> ExitCode {
@@ -1868,7 +1869,10 @@ fn emit_findings(
     format: OutputFormat,
 ) -> ExitCode {
     let findings_json = Value::Array(findings.iter().map(Finding::to_json).collect());
-    if findings.iter().any(|finding| finding.severity == "error") {
+    if findings
+        .iter()
+        .any(|finding| finding.severity == LintSeverity::Error)
+    {
         let event = build_error_event(
             json_error(error_code, error_message).fields(json!({"findings": findings_json})),
         );
@@ -3013,624 +3017,9 @@ impl Drop for TerminalEchoGuard {
     }
 }
 
-// ═══════════════════════════════════════════
-// Lint rules (deterministic AFDATA naming/suffix checks)
-// ═══════════════════════════════════════════
-
-fn lint_value(value: &Value, pointer: &str, findings: &mut Vec<Finding>) {
-    lint_unsafe_integer(value, pointer, findings);
-    match value {
-        Value::Object(map) => {
-            if let Some(Value::Object(properties)) = map.get("properties") {
-                for (name, schema) in properties {
-                    lint_schema_property(
-                        name,
-                        schema,
-                        &join_pointer(pointer, "properties"),
-                        findings,
-                    );
-                }
-            }
-            for (key, child) in map {
-                // A JSON Schema `properties` object maps public field names to
-                // schema descriptors. Those descriptors are not runtime field
-                // values, so applying `lint_suffix_type` to the descriptor
-                // object itself would reject every correctly typed suffix
-                // property (for example `duration_ms: {"type":"integer"}`).
-                // Each property is checked by `lint_schema_property` above and
-                // its descriptor is recursively inspected there.
-                if key == "properties" && child.is_object() {
-                    continue;
-                }
-                lint_suffix_type(key, child, &join_pointer(pointer, key), findings);
-                lint_missing_suffix(key, child, &join_pointer(pointer, key), findings);
-                lint_value(child, &join_pointer(pointer, key), findings);
-            }
-        }
-        Value::Array(items) => {
-            for (idx, item) in items.iter().enumerate() {
-                lint_value(item, &join_pointer(pointer, &idx.to_string()), findings);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn lint_schema_property(
-    name: &str,
-    schema: &Value,
-    properties_pointer: &str,
-    findings: &mut Vec<Finding>,
-) {
-    let property_pointer = join_pointer(properties_pointer, name);
-    let normalized_name = name.to_ascii_lowercase();
-    // A JSON Schema is always an object or a boolean. A scalar or array here
-    // means the enclosing `properties` object is runtime data that happens to
-    // use `properties` as a field name, not a property map, so the value keeps
-    // the ordinary runtime suffix check.
-    if !matches!(schema, Value::Object(_) | Value::Bool(_)) {
-        lint_suffix_type(name, schema, &property_pointer, findings);
-        lint_value(schema, &property_pointer, findings);
-        return;
-    }
-    if normalized_name.ends_with("_secret")
-        && let Some(obj) = schema.as_object()
-    {
-        for field in ["default", "example"] {
-            if let Some(value) = obj.get(field)
-                && !is_redacted_secret_literal(value)
-            {
-                findings.push(Finding::error(
-                    "secret_schema_value_exposed",
-                    join_pointer(&property_pointer, field),
-                    format!("schema property {name:?} exposes secret {field}"),
-                ));
-            }
-        }
-        if let Some(Value::Array(examples)) = obj.get("examples") {
-            for (idx, value) in examples.iter().enumerate() {
-                if !is_redacted_secret_literal(value) {
-                    findings.push(Finding::error(
-                        "secret_schema_value_exposed",
-                        join_pointer(
-                            &join_pointer(&property_pointer, "examples"),
-                            &idx.to_string(),
-                        ),
-                        format!("schema property {name:?} exposes secret example"),
-                    ));
-                }
-            }
-        }
-    }
-    lint_schema_suffix_type(name, schema, &property_pointer, findings);
-    lint_value(schema, &property_pointer, findings);
-}
-
-fn lint_schema_suffix_type(name: &str, schema: &Value, pointer: &str, findings: &mut Vec<Finding>) {
-    let normalized = name.to_ascii_lowercase();
-    let (expected, description): (&[&str], &str) = if normalized.ends_with("_bytes") {
-        (&["integer"], "an integer byte count")
-    } else if normalized.ends_with("_epoch_s") || normalized.ends_with("_epoch_ms") {
-        (&["integer"], "an integer epoch timestamp")
-    } else if normalized.ends_with("_epoch_ns") {
-        (&["string"], "a decimal integer string")
-    } else if normalized.ends_with("_sats") || normalized.ends_with("_msats") {
-        (
-            &["integer", "string"],
-            "an integer or decimal integer string",
-        )
-    } else if normalized.ends_with("_percent") || is_duration_suffix(&normalized) {
-        (&["integer", "number"], "a numeric value")
-    } else if is_currency_minor_unit_suffix(&normalized) {
-        (&["integer"], "an integer currency amount")
-    } else if normalized.ends_with("_rfc3339")
-        || normalized.ends_with("_url")
-        || normalized.ends_with("_bcp47")
-        || normalized.ends_with("_rfc3339_date")
-        || normalized.ends_with("_rfc3339_time")
-        || normalized.ends_with("_utc_offset")
-    {
-        (&["string"], "a string")
-    } else {
-        return;
-    };
-
-    if !schema_accepts_any_type(schema, expected) {
-        findings.push(Finding::error(
-            "suffix_type_mismatch",
-            join_pointer(pointer, "type"),
-            format!("schema property {name:?} must allow {description}"),
-        ));
-    }
-}
-
-fn schema_accepts_any_type(schema: &Value, expected: &[&str]) -> bool {
-    let Some(object) = schema.as_object() else {
-        // Boolean schemas and unresolved references do not declare a
-        // contradictory primitive type at this location.
-        return true;
-    };
-
-    if let Some(schema_type) = object.get("type") {
-        return match schema_type {
-            Value::String(value) => expected.contains(&value.as_str()),
-            Value::Array(values) => values.iter().any(|value| {
-                value
-                    .as_str()
-                    .is_some_and(|value| expected.contains(&value))
-            }),
-            _ => true,
-        };
-    }
-
-    for keyword in ["anyOf", "oneOf"] {
-        if let Some(Value::Array(branches)) = object.get(keyword) {
-            return branches
-                .iter()
-                .any(|branch| schema_accepts_any_type(branch, expected));
-        }
-    }
-    if let Some(Value::Array(branches)) = object.get("allOf") {
-        return branches
-            .iter()
-            .all(|branch| schema_accepts_any_type(branch, expected));
-    }
-
-    // With no local primitive constraint, a `$ref`, `const`, or other schema
-    // keyword may still admit the required type. Do not invent a mismatch.
-    true
-}
-
-fn is_redacted_secret_literal(value: &Value) -> bool {
-    matches!(value, Value::Null) || matches!(value, Value::String(s) if s == "***")
-}
-
-/// Every suffix `spec/registry.json` defines, by category.
-///
-/// Kept in step with the registry by `registry_suffixes_match_the_table`
-/// rather than by hand — a suffix added there and missed here would silently
-/// turn correctly-named fields into warnings.
-const REGISTERED_SUFFIXES: &[(&str, &[&str])] = &[
-    (
-        "duration",
-        &["_ns", "_us", "_ms", "_s", "_minutes", "_hours", "_days"],
-    ),
-    (
-        "timestamp",
-        &["_epoch_s", "_epoch_ms", "_epoch_ns", "_rfc3339"],
-    ),
-    (
-        "strict_string",
-        &["_rfc3339_date", "_rfc3339_time", "_bcp47", "_utc_offset"],
-    ),
-    ("size", &["_bytes"]),
-    ("percentage", &["_percent"]),
-    (
-        "currency",
-        &[
-            "_msats",
-            "_sats",
-            "_usd_cents",
-            "_eur_cents",
-            "_jpy",
-            "_{code}_cents",
-            "_{code}_micro",
-        ],
-    ),
-    ("sensitive", &["_secret", "_url"]),
-];
-
-/// Field-name stems that name a dimension the convention has a suffix for.
-///
-/// Matched against the whole key or its trailing `_`-separated tail, so
-/// `request_timeout` counts and `timeout_ms` does not (it already carries one).
-const UNSUFFIXED_STEMS: &[(&str, &str)] = &[
-    ("timeout", "duration"),
-    ("elapsed", "duration"),
-    ("duration", "duration"),
-    ("ttl", "duration"),
-    ("interval", "duration"),
-    ("latency", "duration"),
-    ("delay", "duration"),
-    ("uptime", "duration"),
-    ("price", "currency"),
-    ("amount", "currency"),
-    ("cost", "currency"),
-    ("fee", "currency"),
-    ("balance", "currency"),
-    ("subtotal", "currency"),
-    ("revenue", "currency"),
-    ("created", "timestamp"),
-    ("updated", "timestamp"),
-    ("modified", "timestamp"),
-    ("expires", "timestamp"),
-    ("issued", "timestamp"),
-    ("timestamp", "timestamp"),
-    ("apikey", "sensitive"),
-    ("api_key", "sensitive"),
-    ("token", "sensitive"),
-    ("password", "sensitive"),
-    ("passwd", "sensitive"),
-    ("secret", "sensitive"),
-    ("credential", "sensitive"),
-    ("credentials", "sensitive"),
-];
-
-fn has_registered_suffix(key: &str) -> bool {
-    let lower = key.to_ascii_lowercase();
-    REGISTERED_SUFFIXES
-        .iter()
-        .flat_map(|(_, suffixes)| suffixes.iter())
-        .any(|suffix| match suffix.strip_prefix("_{code}") {
-            // `_{code}_cents` / `_{code}_micro` are templated on a currency
-            // code, so match the shape rather than the literal.
-            Some(tail) => lower
-                .strip_suffix(tail)
-                .and_then(|rest| rest.rsplit_once('_'))
-                .is_some_and(|(_, code)| {
-                    code.len() == 3 && code.chars().all(|c| c.is_ascii_alphabetic())
-                }),
-            None => lower.ends_with(suffix),
-        })
-}
-
-/// Flag a field whose name announces a dimension but carries no unit.
-///
-/// This is the question the convention exists to answer — is `timeout` seconds
-/// or milliseconds, is `price` dollars or cents, is `created` an id or a date,
-/// does `api_key` get redacted — and until now `lint` only checked fields that
-/// had already answered it, so a document made entirely of these passed clean.
-fn lint_missing_suffix(key: &str, value: &Value, pointer: &str, findings: &mut Vec<Finding>) {
-    if value.is_null() || has_registered_suffix(key) {
-        return;
-    }
-    let lower = key.to_ascii_lowercase();
-    // `_at` is the common spelling for "this is a time", and it names no unit.
-    let category = if lower.ends_with("_at") {
-        Some("timestamp")
-    } else {
-        UNSUFFIXED_STEMS
-            .iter()
-            .find(|(stem, _)| lower == *stem || lower.ends_with(&format!("_{stem}")))
-            .map(|(_, category)| *category)
-    };
-    let Some(category) = category else {
-        return;
-    };
-    // Only complain where the value could actually carry the dimension: a
-    // `timeout` object is a config block, not an unlabelled number.
-    let plausible = match category {
-        "duration" | "currency" | "size" | "percentage" => value.is_number(),
-        "timestamp" => value.is_number() || value.is_string(),
-        _ => value.is_string(),
-    };
-    if !plausible {
-        return;
-    }
-    let suffixes = REGISTERED_SUFFIXES
-        .iter()
-        .find(|(name, _)| *name == category)
-        .map(|(_, suffixes)| suffixes.join(", "))
-        .unwrap_or_default();
-    let message = if category == "sensitive" {
-        format!(
-            "`{key}` looks like a credential but is not marked, so it is printed and logged in \
-             the clear. Rename it with one of: {suffixes}"
-        )
-    } else {
-        format!(
-            "`{key}` names a {category} but carries no unit, so a reader cannot tell what it \
-             means without asking. Rename it with one of: {suffixes}"
-        )
-    };
-    findings.push(Finding::warning(
-        "missing_suffix",
-        pointer.to_string(),
-        message,
-    ));
-}
-
-fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<Finding>) {
-    // `null` means the field is absent/unset, not present-with-the-wrong-type:
-    // the suffix type constraint below applies only to present, non-null
-    // values. Absence may be expressed by omitting the key entirely or by an
-    // explicit `null`; both are valid. This mirrors `is_redacted_secret_literal`,
-    // which already treats `Value::Null` as a valid absent literal for
-    // `_secret` schema properties.
-    if value.is_null() {
-        return;
-    }
-    let normalized = key.to_ascii_lowercase();
-    let message = if normalized.ends_with("_bytes") {
-        if is_non_negative_integer(value) {
-            None
-        } else {
-            Some(format!("{key:?} must be a non-negative integer byte count"))
-        }
-    } else if normalized.ends_with("_epoch_s") || normalized.ends_with("_epoch_ms") {
-        if is_integer(value) {
-            None
-        } else {
-            Some(format!("{key:?} must be an integer epoch timestamp"))
-        }
-    } else if normalized.ends_with("_epoch_ns") {
-        if is_decimal_integer_string(value) {
-            None
-        } else {
-            Some(format!("{key:?} must be a decimal integer string"))
-        }
-    } else if normalized.ends_with("_sats") || normalized.ends_with("_msats") {
-        if is_integer(value) || is_decimal_integer_string(value) {
-            None
-        } else {
-            Some(format!(
-                "{key:?} must be an integer or decimal integer string"
-            ))
-        }
-    } else if normalized.ends_with("_percent") {
-        if value.is_number() {
-            None
-        } else {
-            Some(format!("{key:?} must be numeric"))
-        }
-    } else if is_duration_suffix(&normalized) {
-        if value.is_number() {
-            None
-        } else {
-            Some(format!("{key:?} must be a numeric duration"))
-        }
-    } else if is_currency_minor_unit_suffix(&normalized) {
-        if is_integer(value) {
-            None
-        } else {
-            Some(format!("{key:?} must be an integer currency amount"))
-        }
-    } else if normalized.ends_with("_rfc3339") {
-        if value.as_str().is_some_and(is_valid_rfc3339) {
-            None
-        } else if value.is_string() {
-            Some(format!(
-                "{key:?} must be an RFC 3339 date-time with a mandatory offset (e.g. 2026-02-14T10:30:00Z)"
-            ))
-        } else {
-            Some(format!("{key:?} must be a string"))
-        }
-    } else if normalized.ends_with("_url") {
-        if value.as_str().is_some_and(is_wellformed_url_field) {
-            None
-        } else if value.is_string() {
-            Some(format!(
-                "{key:?} must be a single URL (no internal whitespace or bare credentials)"
-            ))
-        } else {
-            Some(format!("{key:?} must be a string"))
-        }
-    } else if normalized.ends_with("_bcp47") {
-        if value.as_str().is_some_and(is_valid_bcp47) {
-            None
-        } else if value.is_string() {
-            Some(format!("{key:?} must be a well-formed BCP 47 language tag"))
-        } else {
-            Some(format!("{key:?} must be a string"))
-        }
-    } else if normalized.ends_with("_rfc3339_date") {
-        if value.as_str().is_some_and(is_valid_rfc3339_date) {
-            None
-        } else if value.is_string() {
-            Some(format!(
-                "{key:?} must be an RFC 3339 full-date (YYYY-MM-DD)"
-            ))
-        } else {
-            Some(format!("{key:?} must be a string"))
-        }
-    } else if normalized.ends_with("_rfc3339_time") {
-        if value.as_str().is_some_and(is_valid_rfc3339_time) {
-            None
-        } else if value.is_string() {
-            Some(format!(
-                "{key:?} must be an RFC 3339 partial-time (HH:MM:SS[.fraction], no Z or offset)"
-            ))
-        } else {
-            Some(format!("{key:?} must be a string"))
-        }
-    } else if normalized.ends_with("_utc_offset") {
-        if value.as_str().and_then(normalize_utc_offset).is_some() {
-            None
-        } else if value.is_string() {
-            Some(format!(
-                "{key:?} must be a fixed UTC offset (\"UTC\" or ±HH:MM)"
-            ))
-        } else {
-            Some(format!("{key:?} must be a string"))
-        }
-    } else {
-        None
-    };
-    if let Some(message) = message {
-        findings.push(Finding::error(
-            "suffix_type_mismatch",
-            pointer.to_string(),
-            message,
-        ));
-    }
-}
-
-fn lint_unsafe_integer(value: &Value, pointer: &str, findings: &mut Vec<Finding>) {
-    let Value::Number(number) = value else {
-        return;
-    };
-    if number.is_i64() {
-        let Some(value) = number.as_i64() else {
-            return;
-        };
-        if value.unsigned_abs() > MAX_SAFE_INTEGER {
-            findings.push(unsafe_integer_finding(pointer));
-        }
-    } else if number.is_u64() {
-        let Some(value) = number.as_u64() else {
-            return;
-        };
-        if value > MAX_SAFE_INTEGER {
-            findings.push(unsafe_integer_finding(pointer));
-        }
-    }
-}
-
-fn unsafe_integer_finding(pointer: &str) -> Finding {
-    Finding::error(
-        "unsafe_integer",
-        pointer.to_string(),
-        "integer exceeds JavaScript safe integer range ±(2^53-1)".to_string(),
-    )
-}
-
-fn is_integer(value: &Value) -> bool {
-    matches!(value, Value::Number(number) if number.is_i64() || number.is_u64())
-}
-
-fn is_non_negative_integer(value: &Value) -> bool {
-    matches!(value, Value::Number(number) if number.as_u64().is_some())
-}
-
-fn is_decimal_integer_string(value: &Value) -> bool {
-    let Value::String(text) = value else {
-        return false;
-    };
-    let digits = text.strip_prefix('-').unwrap_or(text);
-    !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
-}
-
-/// A numeric duration suffix (`timeout_s`, `retry_after_ms`, `ttl_minutes`, …).
-/// The epoch suffixes (`_epoch_s`/`_epoch_ms`/`_epoch_ns`) are matched earlier in
-/// the chain, so they never reach here.
-fn is_duration_suffix(key: &str) -> bool {
-    key.ends_with("_ns")
-        || key.ends_with("_us")
-        || key.ends_with("_ms")
-        || key.ends_with("_s")
-        || key.ends_with("_minutes")
-        || key.ends_with("_hours")
-        || key.ends_with("_days")
-}
-
-/// An integer minor-unit currency suffix (`price_usd_cents`, `fee_jpy`,
-/// `budget_btc_micro`, …). `_sats`/`_msats` allow a decimal-string form and are
-/// matched earlier in the chain.
-fn is_currency_minor_unit_suffix(key: &str) -> bool {
-    key.ends_with("_cents") || key.ends_with("_micro") || key.ends_with("_jpy")
-}
-
-/// True when a `_url` field value is a single URL: a scheme-prefixed absolute URL,
-/// or a schemeless relative reference with no internal whitespace and no bare `@`
-/// credential sigil. This mirrors the redaction gate in the library's
-/// `redaction.rs`: a value this rejects is exactly one redaction would blanket-
-/// redact (internal whitespace, or a schemeless `user:pass@host` connection
-/// string) rather than surgically clean.
-fn is_wellformed_url_field(s: &str) -> bool {
-    if is_scheme_prefixed_url(s) || is_scheme_prefixed_url(s.trim()) {
-        return true;
-    }
-    !s.chars().any(char::is_whitespace) && !s.contains('@')
-}
-
-/// True when `s` begins with a URL scheme (`ALPHA *(ALPHA / DIGIT / "+" / "-" /
-/// ".") "://"`) and contains no ASCII whitespace — a single bare absolute URL.
-fn is_scheme_prefixed_url(s: &str) -> bool {
-    if s.bytes().any(|b| b.is_ascii_whitespace()) {
-        return false;
-    }
-    let bytes = s.as_bytes();
-    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
-        return false;
-    }
-    let mut i = 1;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.') {
-            i += 1;
-        } else {
-            break;
-        }
-    }
-    s[i..].starts_with("://")
-}
-
-fn join_pointer(base: &str, token: &str) -> String {
-    let escaped = token.replace('~', "~0").replace('/', "~1");
-    if base.is_empty() {
-        format!("/{escaped}")
-    } else {
-        format!("{base}/{escaped}")
-    }
-}
-
 #[cfg(test)]
 mod cli_registry_tests {
     use super::*;
-
-    /// The missing-suffix heuristic decides a field is unlabelled by *not*
-    /// finding a registered suffix on it. A suffix added to the registry and
-    /// missed here would start warning about correctly-named fields, so the two
-    /// are compared rather than trusted.
-    #[test]
-    fn registry_suffixes_match_the_table() {
-        const REGISTRY: &str =
-            include_str!("../../skills/agent-first-data/references/registry.json");
-        let registry: Value = serde_json::from_str(REGISTRY).unwrap();
-        let mut from_registry: Vec<(String, String)> = registry["suffixes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|entry| {
-                (
-                    entry["category"].as_str().unwrap().to_string(),
-                    entry["suffix"].as_str().unwrap().to_string(),
-                )
-            })
-            .collect();
-        let mut from_table: Vec<(String, String)> = REGISTERED_SUFFIXES
-            .iter()
-            .flat_map(|(category, suffixes)| {
-                suffixes
-                    .iter()
-                    .map(move |suffix| ((*category).to_string(), (*suffix).to_string()))
-            })
-            .collect();
-        from_registry.sort();
-        from_table.sort();
-        assert_eq!(from_table, from_registry);
-    }
-
-    #[test]
-    fn missing_suffix_reads_intent_from_the_name() {
-        let mut findings = Vec::new();
-        lint_missing_suffix("timeout", &json!(5000), "/timeout", &mut findings);
-        lint_missing_suffix(
-            "request_timeout",
-            &json!(1),
-            "/request_timeout",
-            &mut findings,
-        );
-        lint_missing_suffix("expires_at", &json!(1), "/expires_at", &mut findings);
-        assert_eq!(findings.len(), 3);
-        assert!(findings.iter().all(|finding| finding.severity == "warning"));
-
-        // Already labelled, so there is nothing to ask about.
-        let mut clean = Vec::new();
-        lint_missing_suffix("timeout_ms", &json!(5000), "/timeout_ms", &mut clean);
-        lint_missing_suffix("price_gbp_cents", &json!(1), "/price_gbp_cents", &mut clean);
-        lint_missing_suffix(
-            "api_key_secret",
-            &json!("sk"),
-            "/api_key_secret",
-            &mut clean,
-        );
-        // A dimension name over a container is a config block, not a bare number.
-        lint_missing_suffix("timeout", &json!({"connect": 1}), "/timeout", &mut clean);
-        // An unrelated name says nothing about a dimension.
-        lint_missing_suffix("name", &json!("demo"), "/name", &mut clean);
-        assert!(clean.is_empty(), "{clean:?}");
-    }
 
     #[test]
     fn every_registered_afdata_shape_round_trips() {
@@ -3639,7 +3028,7 @@ mod cli_registry_tests {
         assert!(!fixtures.is_empty());
         for fixture in fixtures {
             let outcome = cli.resolve_from(fixture.argv).unwrap();
-            let CliOutcome::Run(invocation) = outcome else {
+            let agent_first_data::CliOutcome::Run(invocation) = outcome else {
                 panic!("synthetic afdata fixture did not resolve to Run");
             };
             assert_eq!(invocation.combination_id(), fixture.combination_id);
@@ -3695,7 +3084,7 @@ mod skill_tests {
         let parsed = cli
             .resolve_from(["afdata", "skill", "validate", "skills/agent-first-data"])
             .unwrap();
-        let CliOutcome::Run(invocation) = parsed else {
+        let agent_first_data::CliOutcome::Run(invocation) = parsed else {
             panic!("expected a resolved skill validation");
         };
         assert_eq!(invocation.action_id(), "skill_validate");
@@ -3728,7 +3117,7 @@ mod skill_tests {
                 "workspace",
             ])
             .unwrap();
-        let CliOutcome::Run(invocation) = parsed else {
+        let agent_first_data::CliOutcome::Run(invocation) = parsed else {
             panic!("expected a resolved skill status");
         };
         assert_eq!(invocation.combination_id(), "skill-status-agent");

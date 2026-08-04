@@ -121,6 +121,27 @@ where
     }
 }
 
+/// Install stdout/stderr redirection from a resolved [`OutputPlan`].
+///
+/// The registry-based counterpart to [`install_from_raw_args`], and the one to
+/// prefer when the application has a `CliSpec`: the plan already carries the
+/// file sinks, so this needs no second pass over argv. `install_from_raw_args`
+/// exists for applications that must install redirection *before* any parser
+/// runs, which a registry application does not.
+///
+/// Returns `Ok(None)` when the plan names no file sink.
+#[cfg(feature = "cli")]
+pub fn install_from_plan(plan: &crate::OutputPlan) -> io::Result<Option<InstalledStreamRedirect>> {
+    let config = StreamRedirectConfig::new(
+        plan.stdout_file().map(std::path::Path::to_path_buf),
+        plan.stderr_file().map(std::path::Path::to_path_buf),
+    )?;
+    match config {
+        Some(config) => install(&config).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// Install stdout/stderr redirection for a resolved config.
 #[cfg(unix)]
 pub fn install(config: &StreamRedirectConfig) -> io::Result<InstalledStreamRedirect> {

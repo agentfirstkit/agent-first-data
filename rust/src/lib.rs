@@ -8,8 +8,9 @@
 //! - Protocol reader: [`decode_protocol_event`] parses and strict-validates one protocol
 //!   line into a typed [`DecodedEvent`]
 //! - Redaction: [`redacted_value`] / [`Redactor::value`] (JSON values), [`redact_url_secrets`] /
-//!   [`Redactor::url`] (URL strings), [`redact_argv`] / [`Redactor::argv`] (command lines) —
-//!   `Redactor` carries custom `secret_names`/`policy`
+//!   [`Redactor::url`] (URL strings), [`redact_urls_in_text`] / [`Redactor::urls_in_text`]
+//!   (explicit prose URL spans), [`redact_argv`] / [`Redactor::argv`] (command lines) —
+//!   `Redactor` carries custom `secret_names`/`url_names`/`policy`
 //! - Output rendering: [`render`] — the single `value × format × options → String` entry point
 //!   for JSON, YAML, and plain (logfmt) output
 //! - Parse utilities: [`normalize_utc_offset`], [`is_valid_rfc3339_date`],
@@ -18,14 +19,23 @@
 //!   [`Combination`], and [`OutputSpec`] generate parsing, typed
 //!   [`ResolvedInvocation`] values, output plans, and help-v2 from one registry.
 //! - Established CLI utilities: [`cli_parse_output`], [`cli_parse_log_filters`]
-//!   (returns [`LogFilters`]), and [`CliEmitter`].
+//!   (returns [`LogFilters`]), [`CliEmitter`], and [`write_raw`].
+//! - Domain errors and validation: [`ErrorSpec`] / [`ErrorCatalog`] declare
+//!   stable public errors; [`lint_value`] and the `assert_*` helpers validate
+//!   real serialized values in tests.
+//! - Documents: [`document::Document`] provides source-preserving in-memory
+//!   edits and typed [`document::Document::decode`]; [`document::DocumentFile`]
+//!   adds capped reads, safe first creation, atomic commits, and
+//!   [`document::DocumentFile::edit_and_validate`].
 //! - (feature `skill`): [`skill::validate_skill`] / [`skill::validate_skill_named`] — strict
 //!   Agent Skills `SKILL.md` front-matter validation
 //! - (feature `skill-admin`): [`skill::run_skill_admin`] — install/uninstall/status a spore's
 //!   embedded Agent Skill across Codex, Claude Code, opencode, and Hermes; returns a typed
 //!   [`skill::SkillReport`]
-//! - (feature `tracing`): [`afdata_tracing::try_init`] initializes an AFDATA stderr logging
-//!   layer with configurable format and redaction; also [`afdata_tracing::LogFormat`]
+//! - (feature `tracing`): [`afdata_tracing::AfdataLayer`] is a composable AFDATA
+//!   logging layer with injectable writers and a nested-value
+//!   [`afdata_tracing::StructuredLogHandle`]; [`afdata_tracing::try_init`] is
+//!   the global-subscriber convenience entry point.
 //!
 //! The shared cross-language contract (which of these exist, under what name, in each of
 //! Rust/Python/TypeScript/Go) is tracked in `spec/api-surface.json` and cross-checked by
@@ -50,6 +60,8 @@ pub mod skill;
 /// block reader).
 pub mod document;
 
+mod error_catalog;
+
 // The closed-world CLI compiler: spec types, build gates, argv resolution, and
 // the help-v2 model. Nothing else in this crate may reference it — only the
 // adapter below does — which `cargo build --no-default-features` proves.
@@ -66,27 +78,39 @@ mod cli;
 mod cli_afdata;
 
 mod formatting;
+mod lint;
+mod output;
 mod protocol;
 mod redaction;
 mod validation;
 
 #[cfg(feature = "cli")]
 pub use cli::{
-    CliEmitter, CliEmitterError, LogFilters, OutputTo, build_cli_version, cli_parse_log_filters,
+    CliEmitter, CliEmitterError, LogFilters, build_cli_version, cli_parse_log_filters,
     cli_parse_output, cli_render_version, write_raw,
 };
 #[cfg(feature = "cli")]
 pub use cli_afdata::{
-    build_afdata_cli, cli_error_event, cli_help_event, cli_version_event, render_cli_reference,
+    build_afdata_cli, cli_error_event, cli_help_event, cli_invocation_invalid_event,
+    cli_version_event, render_cli_reference,
 };
 #[cfg(feature = "cli")]
 pub use cli_spec::{
-    ArgSpec, ArgSyntax, ArgValueType, BoundCliSpec, BuiltCliSpec, CliError, CliErrorRule,
-    CliHelpV2, CliOutcome, CliShape, CliSpec, CliSpecError, CliValue, Combination, CommandSpec,
-    ExitCodeSpec, FixedValue, OutputLifecycle, OutputPlan, OutputSpec, ResolvedDocs, ResolvedHelp,
-    ResolvedInvocation, ResolvedVersion, SyntheticInvocation,
+    ArgSpec, ArgSyntax, ArgValueType, BoundCliSpec, BoundInvocation, BoundOutcome, BuiltCliSpec,
+    CliError, CliErrorRule, CliHelpV2, CliOutcome, CliShape, CliSpec, CliSpecError, CliValue,
+    Combination, CommandSpec, ExitCodeSpec, FixedValue, OutputLifecycle, OutputPlan, OutputSpec,
+    ResolvedDocs, ResolvedHelp, ResolvedInvocation, ResolvedVersion, SyntheticInvocation,
 };
-pub use formatting::{OutputFormat, render};
+pub use error_catalog::{ErrorCatalog, ErrorCatalogError, ErrorSpec};
+pub use formatting::render;
+pub use lint::{
+    LintFinding, LintOptions, LintSeverity, RedactionCanaryError, assert_no_lint_findings,
+    assert_no_lint_findings_with_options, assert_redaction_canary_absent, assert_strict_event,
+    lint_value,
+};
+pub use output::OutputFormat;
+#[cfg(feature = "cli")]
+pub use output::OutputTo;
 pub use protocol::{
     BuildError, DecodedError, DecodedEvent, DecodedLog, DecodedProgress, DecodedResult,
     ErrorBuilder, Event, EventDecodeError, LogBuilder, LogLevel, ProgressBuilder,
@@ -95,7 +119,7 @@ pub use protocol::{
 };
 pub use redaction::{
     OutputOptions, PlainStyle, RedactionPolicy, Redactor, redact_argv, redact_url_secrets,
-    redacted_value,
+    redact_urls_in_text, redacted_value,
 };
 pub use validation::{
     is_valid_bcp47, is_valid_rfc3339, is_valid_rfc3339_date, is_valid_rfc3339_time,

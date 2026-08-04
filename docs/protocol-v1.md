@@ -46,14 +46,24 @@ Diagnostic `log` or `progress` events are opt-in, for example through an
 explicit `--log ...` filter or `--verbose` shorthand. TTY detection,
 redirection, and pipe targets must not change this event policy.
 
-`result` maps to process exit code `0`. `error` maps to a non-zero process exit
-code. AFDATA does not define a global detailed exit-code table.
+Finite commands route by `kind`: `result` goes to stdout, while `error`,
+`progress`, and `log` go to stderr. Ordered event streams keep every kind on
+one selected destination so interleaving is preserved. `--output-to` selects
+between those policies as described in `docs/transport-mappings.md`.
+
+Routing and event meaning are independent from process status. `result` means
+the command intent was fulfilled and always uses the result channel, even when
+a tool-defined condition uses a non-zero exit code. `error` always uses the
+error channel. AFDATA reserves exit 2 for closed-world CLI usage failures but
+does not define a global mapping from every result/error code to process exit
+status.
 
 Cancellation is represented as an ordinary tool-defined `error` event when the
 tool can observe the cancellation and still write a terminal event. For example,
 a tool may use `error.code: "cancelled"`, but AFDATA does not reserve that code.
-If stdout or the transport is already closed and the terminal event cannot be
-written, the outcome is a transport interruption with unknown business result.
+If the selected event destination or transport is already closed and the
+terminal event cannot be written, the outcome is a transport interruption with
+unknown business result.
 
 A CLI resolution failure names itself in `code`, the same way a document
 failure does: `cli_unknown_argument`, `cli_unknown_command`,
@@ -68,9 +78,9 @@ separate `rule` field beside a generic `cli_error`, alongside `command_path`
 and `argument_names`; that asked an agent to learn a second branching key for
 one family of errors while `document_*` already spelled its classification into
 the code, and it cost a closed enum kept in step across four files and four
-mirrored schemas. `message` names the offending argument, `hint` gives the
-command to run next, and neither ever quotes a raw value. Every such error is
-`retryable: false` and exits 2.
+mirrored schemas. `message` identifies the offending argument name or failure
+category, `hint` gives the command to run next, and neither ever quotes a raw
+value. Every such error is `retryable: false` and exits 2.
 
 The machine-readable event schema is:
 

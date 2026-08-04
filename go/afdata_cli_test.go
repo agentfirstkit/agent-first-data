@@ -42,14 +42,15 @@ func TestCliParseOutput_RejectsUnknown(t *testing.T) {
 	}
 }
 
-func TestCliParseOutput_ErrorContainsValue(t *testing.T) {
-	_, err := CliParseOutput("toml")
+func TestCliParseOutput_ErrorOmitsValue(t *testing.T) {
+	canary := "canary-output-secret"
+	_, err := CliParseOutput(canary)
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	msg := err.Error()
-	if !contains(msg, "toml") {
-		t.Errorf("error %q does not contain input value", msg)
+	if contains(msg, canary) {
+		t.Errorf("error %q contains input value", msg)
 	}
 	if !contains(msg, "json") {
 		t.Errorf("error %q does not mention expected values", msg)
@@ -398,12 +399,13 @@ func TestParseOutputTo_RejectsUnknown(t *testing.T) {
 			t.Errorf("ParseOutputTo(%q): expected error, got nil", s)
 		}
 	}
-	_, err := ParseOutputTo("both")
+	canary := "canary-output-to-secret"
+	_, err := ParseOutputTo(canary)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !contains(err.Error(), "both") || !contains(err.Error(), "split") {
-		t.Errorf("error %q should name the bad value and the accepted set", err.Error())
+	if contains(err.Error(), canary) || !contains(err.Error(), "split") {
+		t.Errorf("error %q should omit the bad value and name the accepted set", err.Error())
 	}
 }
 

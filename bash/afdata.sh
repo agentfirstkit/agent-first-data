@@ -412,15 +412,15 @@ _afdata_args_abort() {
 
 _afdata_args_set_output() {
   case "$1" in
-    json|yaml|plain) AFDATA_OUTPUT="$1" ;;
-    *) _afdata_args_abort "invalid --output '$1'; valid values: json, yaml, plain" ;;
+    json|yaml|plain) _afdata_internal_next_output="$1" ;;
+    *) _afdata_args_abort "invalid --output value; valid values: json, yaml, plain" ;;
   esac
 }
 
 _afdata_args_set_output_to() {
   case "$1" in
-    split|stdout|stderr) AFDATA_OUTPUT_TO="$1" ;;
-    *) _afdata_args_abort "invalid --output-to '$1'; valid values: split, stdout, stderr" ;;
+    split|stdout|stderr) _afdata_internal_next_output_to="$1" ;;
+    *) _afdata_args_abort "invalid --output-to value; valid values: split, stdout, stderr" ;;
   esac
 }
 
@@ -441,6 +441,11 @@ afdata_args_parse() {
   local _afdata_internal_scan
   local _afdata_internal_saw_help=false
   local _afdata_internal_saw_output=false
+  # Output selectors become trusted only after the entire argv is valid.
+  # Until then usage errors keep the caller's pre-parse routing instead of
+  # letting a later-invalid argv redirect or reformat its own diagnostic.
+  local _afdata_internal_next_output="$AFDATA_OUTPUT"
+  local _afdata_internal_next_output_to="$AFDATA_OUTPUT_TO"
 
   # Help is raw human text, while output selection promises structured data.
   # Reject the contradictory request before either branch can win by argv
@@ -548,7 +553,7 @@ afdata_args_parse() {
       fi
 
       if [[ "$_afdata_internal_arg" == -* ]]; then
-        _afdata_args_abort "unknown short option '$_afdata_internal_arg'; use long kebab-case flags"
+        _afdata_args_abort "unknown short option; use long kebab-case flags"
       fi
     fi
 
@@ -557,7 +562,7 @@ afdata_args_parse() {
         AFDATA_ARGS_REST[${#AFDATA_ARGS_REST[@]}]="$_afdata_internal_arg"
         continue
       fi
-      _afdata_args_abort "unexpected positional argument '$_afdata_internal_arg'"
+      _afdata_args_abort "unexpected positional argument"
     fi
     _afdata_internal_variable="${_AFDATA_ARGS_POSITIONAL_VARS[_afdata_internal_positional_index]}"
     printf -v "$_afdata_internal_variable" '%s' "$_afdata_internal_arg"
@@ -570,6 +575,9 @@ afdata_args_parse() {
         "missing required argument ${_AFDATA_ARGS_POSITIONAL_NAMES[_afdata_internal_index]}"
     fi
   done
+
+  AFDATA_OUTPUT="$_afdata_internal_next_output"
+  AFDATA_OUTPUT_TO="$_afdata_internal_next_output_to"
 
   # AFDATA-aware child commands inherit the caller's selected event routing.
   export AFDATA_OUTPUT AFDATA_OUTPUT_TO

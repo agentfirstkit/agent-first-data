@@ -73,10 +73,10 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    /// Only the CLI emitter renders a level as text, so without `cli` this is
-    /// dead code — and the `--no-default-features` build is held to
-    /// `-D warnings` like every other.
-    #[cfg(feature = "cli")]
+    /// CLI emission and the optional tracing adapter share the same canonical
+    /// level spelling. Keep the helper out of a core-only build so that
+    /// `--no-default-features` remains free of dead code.
+    #[cfg(any(feature = "cli", feature = "tracing"))]
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Debug => "debug",

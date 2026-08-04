@@ -22,7 +22,7 @@ It is a convention, not a framework — a small set of name endings, plus a tiny
 
 - **Names carry meaning.** Endings like `_ms`, `_bytes`, `_secret`, `_usd_cents`, and `_percent` put units and intent directly into the field name.
 - **One set of data, three ways to show it.** The same fields render as JSON or YAML — both keep original keys and types, for machines — or as a single human log line with units formatted for scanning. Secrets are removed in every form.
-- **Structured secrets are redacted.** Anything ending in `_secret` is hidden when a structured value passes through an AFDATA redactor or renderer. A `_url` field keeps its address but scrubs the userinfo password and secret-named query parameters. Legacy names like `api_key` can be protected by passing an explicit secret-name list.
+- **Structured secrets are redacted.** Anything ending in `_secret` is hidden when a structured value passes through an AFDATA redactor or renderer. A `_url` field keeps its address but scrubs the userinfo password and secret-named query parameters. Legacy secret and URL fields can be protected with exact `secret_names` and `url_names` lists.
 - **Logging agents can read.** Structured logs that follow the same rules, with request-scoped fields.
 - **One contract in four languages.** Rust, Go, Python, and TypeScript share
   wire behavior and fixtures while keeping idiomatic native API shapes.
@@ -67,6 +67,9 @@ kind=log log.args.api_key=*** log.args.timeout=30s log.db_url="postgres://user:*
 | Strict strings | `_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time` |
 | Other | `_percent`, `_secret`, `_url` |
 
+Fiat suffixes use signed integer units: negative values represent refunds,
+credits, reversals, or deltas and receive the same Plain currency formatting.
+
 JSON and YAML keep suffixes and raw values; Plain strips duration/size/currency/timestamp suffixes after formatting the value, and never strips `_url`/`_bcp47`/`_utc_offset`/`_rfc3339_date`/`_rfc3339_time`.
 
 ## Redaction boundary
@@ -76,7 +79,8 @@ AFDATA redaction is intentionally field-name based:
 - `_secret` / `_SECRET` redacts the whole value or subtree to `***`.
 - Legacy names such as `api_key` are redacted only when the caller passes an explicit `secret_names` list; matching is exact field-name equality.
 - `_url` fields scrub the userinfo password and query parameters whose names end in `_secret` or appear in `secret_names`; broad names such as `api_key`, `token`, or `password` are not hidden by default.
-- Free-form strings are not scanned for arbitrary secrets. If a secret URL is embedded in prose, redact the URL first with `redact_url_secrets`.
+- Legacy URL fields such as `url` or `relays` receive the same treatment only when listed exactly in `url_names`. Arrays and nested collections under that field are walked recursively; unrelated fields and ordinary non-URL strings are unchanged.
+- Free-form strings are not scanned for arbitrary secrets. Use the explicit `redact_urls_in_text` helper when prose may contain complete scheme URLs; it redacts only those URL spans and leaves the surrounding prose alone.
 
 The suffix protects structured fields only after they pass through an AFDATA
 redactor or renderer. It cannot remove a live secret from process argv, shell
@@ -103,12 +107,21 @@ scalar or incompatible container.
 
 Edits are **source-preserving and atomic**: comments, key order, and formatting
 survive; a write is read back before it lands, so an edit that would leave a
-file its own parser rejects fails instead of succeeding; and a failed write
-leaves the original untouched. Values are **never guessed** — a bare value is
-always a string, and an exact type is asked for, not inferred. A name marks its
-whole subtree, so a `_secret` node stays redacted however you address it, and
-revealing it is an auditable opt-in. Errors carry stable codes and never quote
-the document, because an error event is the thing an agent logs.
+file its own parser rejects fails instead of succeeding; no partial file is
+observable, and failures before atomic installation leave the original
+untouched. A rare parent-directory fsync failure after installation is
+commit-uncertain, so reopen the path before retrying. Values are **never
+guessed** — a bare value is always a string, and an exact type is asked for,
+not inferred. A name marks its whole subtree, so a `_secret` node stays
+redacted however you address it, and revealing it is an auditable opt-in.
+Errors carry stable codes and never quote the document, because an error event
+is the thing an agent logs.
+
+TOML edits support scalars, arrays, array elements, inline tables, and ordinary
+tables while preserving surrounding decor, comments, order, trailing commas,
+and untouched datetime syntax. Arrays of tables are refused because this editor
+does not define an element-identity policy; afdata never guesses which repeated
+table an object should replace.
 
 A Markdown file has three valid readings, none of them guessed at: name
 `toml-frontmatter` or `yaml-frontmatter` to edit its metadata block with the body
@@ -145,6 +158,11 @@ Flags and exit codes are in [`docs/cli.md`](docs/cli.md) and `afdata <command>
 --help`; the error codes and recovery rules are in the
 [skill reference](skills/agent-first-data/references/documents.md). The Rust
 library is `agent_first_data::document` (`Document` / `DocumentFile`).
+`DocumentFile::open_capped` limits bytes read from one verified file handle;
+`create_atomic` safely performs a first no-clobber commit; `decode` and
+`edit_and_validate` put typed serde validation on the same transaction boundary.
+On Unix, the default-on `libc` feature adds nonblocking special-file rejection
+and atomic `SymlinkPolicy::NoFollow`; `stream-redirect` enables it automatically.
 
 ## Token-efficient CLI discovery
 
@@ -210,16 +228,23 @@ The shared core surface ships in Rust, Go, Python, and TypeScript (each in its o
 
 - **Protocol builders** `json_result` / `json_error` / `json_progress` / `json_log` → `.build()` → an event; **reader** `decode_protocol_event(text)` → a typed decoded event.
 - **Output** `render(value, format, options)` — the single value × format × options → string entry point.
-- **Redaction** `redacted_value` / `redact_url_secrets` for paths that bypass `render`.
+- **Redaction** `redacted_value` / `redact_url_secrets` / `redact_urls_in_text` for paths that bypass `render`; output options accept exact legacy `secret_names` and `url_names`.
 - **CLI primitives** `cli_parse_output`, `cli_parse_log_filters`, `build_cli_error`, `build_cli_version`, and the `CliEmitter`.
 
 The Rust crate is the reference implementation of `CliSpec`, closed-world
 combination resolution, version, and help-v2; the whole CLI surface sits behind
 the default-on `cli` feature. Argv is only ever parsed through a registry —
-there is no raw pre-parser. Skill admin, stream redirection, and tracing
-initialization are also Rust-only. The shared surface is
-enumerated in [`spec/api-surface.json`](spec/api-surface.json); other SDK
-compilers consume the same serialized CLI spec and fixtures as they migrate.
+there is no raw pre-parser. A resolved `OutputPlan` carries typed
+`OutputFormat` / `OutputTo` values; applications retain control of command
+lifetime and output policy while using `CliEmitter`, `write_raw`, and the
+optional stream-redirection module.
+
+Rust also provides `ErrorSpec` / `ErrorCatalog` for stable public domain errors,
+in-process `lint_value` and assertion helpers, and a composable
+`afdata_tracing::AfdataLayer` with an injectable writer and
+`StructuredLogHandle` for nested JSON. The shared surface is enumerated in
+[`spec/api-surface.json`](spec/api-surface.json); other SDK compilers consume
+the same serialized CLI spec and fixtures as they migrate.
 
 ## Adopt it: hand the convention to your coding agent
 

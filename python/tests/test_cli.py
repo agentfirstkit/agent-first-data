@@ -39,11 +39,13 @@ def test_parse_output_rejects_unknown():
         cli_parse_output("")
 
 
-def test_parse_output_error_contains_value():
-    with pytest.raises(ValueError, match="toml"):
-        cli_parse_output("toml")
-    with pytest.raises(ValueError, match="json"):
-        cli_parse_output("toml")
+def test_parse_output_error_omits_value():
+    canary = "canary-output-secret"
+    with pytest.raises(ValueError) as raised:
+        cli_parse_output(canary)
+    assert canary not in str(raised.value)
+    assert "json" in str(raised.value)
+    assert raised.value.__suppress_context__ is True
 
 
 # ── cli_parse_log_filters ─────────────────────────────────────────────────────
@@ -267,13 +269,14 @@ def test_output_to_parse_all_variants():
 
 
 def test_output_to_parse_rejects_unknown():
-    with pytest.raises(ValueError, match="unsupported --output-to"):
-        OutputTo.parse("xml")
-    # The offending value and the accepted set are named in the message.
-    with pytest.raises(ValueError, match="xml"):
-        OutputTo.parse("xml")
-    with pytest.raises(ValueError, match="split, stdout, or stderr"):
-        OutputTo.parse("both")
+    canary = "canary-output-to-secret"
+    with pytest.raises(ValueError) as raised:
+        OutputTo.parse(canary)
+    message = str(raised.value)
+    assert "unsupported --output-to" in message
+    assert canary not in message
+    assert "split, stdout, or stderr" in message
+    assert raised.value.__suppress_context__ is True
 
 
 def test_output_to_parse_is_case_sensitive():

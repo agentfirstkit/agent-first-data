@@ -32,6 +32,13 @@
     "about": {
       "$ref": "#/$defs/nonEmpty"
     },
+    "shared_arguments": {
+      "description": "Arguments every command accepts, declared once. Spliced into each command and into every combination's optional set when the registry is built, so a resolved spec behaves as if each command declared them.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/argument"
+      }
+    },
     "lifecycle_output": {
       "$ref": "#/$defs/output"
     },
@@ -164,7 +171,8 @@
             "i64",
             "finite_f64",
             "enum",
-            "json"
+            "json",
+            "uuid"
           ]
         },
         "value_name": {
@@ -177,6 +185,15 @@
           "items": {
             "$ref": "#/$defs/nonEmpty"
           }
+        },
+        "range": {
+          "description": "Inclusive [minimum, maximum] bounds for an I64 argument, checked when the value is parsed so an out-of-range value is a usage error.",
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 2,
+          "maxItems": 2
         },
         "default": true,
         "repeatable": {

@@ -1,0 +1,174 @@
+[
+  {
+    "name": "two urls and surrounding punctuation",
+    "input": "connect (https://u:pw@h/?token_secret=one), then wss://h/?token_secret=two.",
+    "options": {},
+    "expected": "connect (https://u:***@h/?token_secret=***), then wss://h/?token_secret=***."
+  },
+  {
+    "name": "custom query secret name",
+    "input": "see https://h/cb?token=abc&page=2",
+    "options": {
+      "secret_names": [
+        "token"
+      ]
+    },
+    "expected": "see https://h/cb?token=***&page=2"
+  },
+  {
+    "name": "schemeless and free text stay untouched",
+    "input": "api_key_secret=visible and user:pw@host/db stay untouched",
+    "options": {},
+    "expected": "api_key_secret=visible and user:pw@host/db stay untouched"
+  },
+  {
+    "name": "off policy leaves embedded url untouched",
+    "input": "see https://u:pw@h/?token_secret=abc",
+    "options": {
+      "policy": "Off"
+    },
+    "expected": "see https://u:pw@h/?token_secret=abc"
+  },
+  {
+    "name": "quoted and angle-delimited urls",
+    "input": "open \"https://u:pw@one/\" or <https://u:pw@two/>",
+    "options": {},
+    "expected": "open \"https://u:***@one/\" or <https://u:***@two/>"
+  },
+  {
+    "name": "unicode prose is preserved",
+    "input": "请访问 https://h/?code_secret=机密，然后继续",
+    "options": {},
+    "expected": "请访问 https://h/?code_secret=***，然后继续"
+  },
+  {
+    "name": "ascii space ends the span",
+    "input": "see https://h/?token_secret=leak rest",
+    "options": {},
+    "expected": "see https://h/?token_secret=*** rest"
+  },
+  {
+    "name": "newline ends the span",
+    "input": "one https://a/?token_secret=leak\ntwo https://b/?token_secret=leak",
+    "options": {},
+    "expected": "one https://a/?token_secret=***\ntwo https://b/?token_secret=***"
+  },
+  {
+    "name": "vertical tab ends the span",
+    "input": "see https://h/?token_secret=leak\u000brest",
+    "options": {},
+    "expected": "see https://h/?token_secret=***\u000brest"
+  },
+  {
+    "name": "form feed ends the span",
+    "input": "see https://h/?token_secret=leak\frest",
+    "options": {},
+    "expected": "see https://h/?token_secret=***\frest"
+  },
+  {
+    "name": "u+feff does not cut the span short",
+    "input": "https://h/x\ufeff?token_secret=leak",
+    "options": {},
+    "expected": "https://h/x\ufeff?token_secret=***"
+  },
+  {
+    "name": "u+0085 ends the span and both urls are redacted",
+    "input": "https://h/?token_secret=a\u0085https://x/?token_secret=b",
+    "options": {},
+    "expected": "https://h/?token_secret=***\u0085https://x/?token_secret=***"
+  },
+  {
+    "name": "u+001f is inside the span, not a terminator",
+    "input": "https://h/?token_secret=a\u001ftail",
+    "options": {},
+    "expected": "https://h/?token_secret=***"
+  },
+  {
+    "name": "u+00a0 ends the span and the prose after it survives",
+    "input": "see https://h/?token_secret=abc\u00a0next line",
+    "options": {},
+    "expected": "see https://h/?token_secret=***\u00a0next line"
+  },
+  {
+    "name": "u+2028 ends the span and the prose after it survives",
+    "input": "see https://h/?token_secret=abc\u2028next line",
+    "options": {},
+    "expected": "see https://h/?token_secret=***\u2028next line"
+  },
+  {
+    "name": "digit glued to the scheme still redacts",
+    "input": "2https://h/?token_secret=leak",
+    "options": {},
+    "expected": "2https://h/?token_secret=***"
+  },
+  {
+    "name": "digit run glued to the scheme still redacts",
+    "input": "12345https://h/?token_secret=leak",
+    "options": {},
+    "expected": "12345https://h/?token_secret=***"
+  },
+  {
+    "name": "version prefix retries from the first letter of the run",
+    "input": "v1.2.3https://h/?token_secret=leak",
+    "options": {},
+    "expected": "v1.2.3https://h/?token_secret=***"
+  },
+  {
+    "name": "letter-initial scheme run keeps its whole prefix",
+    "input": "foo-https://h/?token_secret=leak and word.https://h/?token_secret=leak",
+    "options": {},
+    "expected": "foo-https://h/?token_secret=*** and word.https://h/?token_secret=***"
+  },
+  {
+    "name": "digit glued scheme honors custom secret names",
+    "input": "see 7https://h/cb?token=abc",
+    "options": {
+      "secret_names": [
+        "token"
+      ]
+    },
+    "expected": "see 7https://h/cb?token=***"
+  },
+  {
+    "name": "a scheme separator with nothing after it is not a span",
+    "input": "see https:// and https://h/?token_secret=leak",
+    "options": {},
+    "expected": "see https:// and https://h/?token_secret=***"
+  },
+  {
+    "name": "a bare scheme separator in prose is not a span",
+    "input": "see s:// nothing here",
+    "options": {},
+    "expected": "see s:// nothing here"
+  },
+  {
+    "name": "uppercase and mixed-case schemes are recognized",
+    "input": "see HTTPS://h/?token_secret=leak and HtTpS://h/?token_secret=leak",
+    "options": {},
+    "expected": "see HTTPS://h/?token_secret=*** and HtTpS://h/?token_secret=***"
+  },
+  {
+    "name": "markdown link parentheses delimit the span",
+    "input": "[docs](https://h/?token_secret=leak) and <https://h/?token_secret=leak>",
+    "options": {},
+    "expected": "[docs](https://h/?token_secret=***) and <https://h/?token_secret=***>"
+  },
+  {
+    "name": "trailing sentence punctuation is trimmed off the span",
+    "input": "see https://h/?token_secret=leak).",
+    "options": {},
+    "expected": "see https://h/?token_secret=***)."
+  },
+  {
+    "name": "ideographic space ends the span",
+    "input": "看 https://h/?code_secret=abc\u3000下一步",
+    "options": {},
+    "expected": "看 https://h/?code_secret=***\u3000下一步"
+  },
+  {
+    "name": "u+200b is not white_space and does not end the span",
+    "input": "https://h/x\u200b?token_secret=leak",
+    "options": {},
+    "expected": "https://h/x\u200b?token_secret=***"
+  }
+]

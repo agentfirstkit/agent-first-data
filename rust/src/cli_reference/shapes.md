@@ -1,0 +1,1 @@
+A **shape** is one legal set of arguments that may appear together, under a stable id. Where a command has more than one, each id is a heading below. `--help` returns them all at once, so discovering a command costs one call; there is no recursive mode across commands, and this document is that view.

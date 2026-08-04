@@ -32,6 +32,11 @@ Every event uses `kind`, one same-named payload, and top-level `trace`:
 Resolved output plans, emitters, and raw sinks come from AFDATA. Do not write
 diagnostics ad hoc or reparse output flags in the application.
 
+In Rust, `OutputFormat`, `OutputTo`, and
+`afdata_tracing::LogFormat` are closed enums with `FromStr`, `Display`, and
+serde support. Keep them typed in configuration; an unknown value must fail
+parsing rather than silently selecting a fallback.
+
 ## Closed-world CLI implementation
 
 Build one `CliSpec` and register:
@@ -46,6 +51,11 @@ required, and optional sets are disjoint. A combination's optional arguments
 may appear in any subset; conditional optional relationships require separate
 combinations. `CliSpec::build()` rejects overlap, invalid defaults, uncovered
 arguments, invalid output contracts, and duplicate identities.
+
+`ResolvedInvocation::required` returns `Option` so a misspelled caller-side id
+cannot masquerade as a valid flag value. `BoundCliSpec::execute` likewise
+returns `None` for an invocation resolved by an independently built registry;
+never dispatch an invocation through a different binding.
 
 An invocation must match exactly one combination. Known arguments in an
 unregistered mixture return:
@@ -64,8 +74,8 @@ branch on `error.code`, never on message text.
 `cli_invalid_utf8`. A CLI not compiled from a registry reports the generic
 `cli_error`.
 
-`message` names the offending argument and `hint` gives the command to run
-next; neither ever carries a raw value.
+`message` identifies a safe argument spelling or the failure category and
+`hint` gives the command to run next; neither ever carries a raw value.
 
 The full command path comes first. There are no application globals, shorts,
 abbreviations, optional-value options, compatibility no-ops, rule priorities,
@@ -77,6 +87,13 @@ only, so a subcommand may declare its own (`tool release --version 1.2.0`).
 Output tokens do not select or distinguish business combinations. Select one
 application shape first, then validate output against only that combination.
 Parse/match errors do not trust unresolved output tokens.
+
+After `CliSpec::build()` and `bind_actions`, resolve argv to `CliOutcome` and
+dispatch the selected `action_id`. The application owns its process lifecycle:
+finite commands, long-running event streams, raw bytes, custom redaction, and
+pre-resolution security checks do not share one execution host. Use the
+resolved `OutputPlan` with AFDATA emitters and sinks rather than reparsing
+output flags.
 
 ## Version
 
@@ -125,14 +142,32 @@ A `CliEmitter` owns one logical finite invocation or ordered event stream. A
 multiplex transport owns one emitter/lifecycle state per request; AFDATA does
 not provide a global keyed-emitter registry.
 
+## Public domain errors
+
+Declare caller-safe Rust errors with `ErrorSpec` and collect them in an
+`ErrorCatalog` when lookup by code is useful. The declaration contains only
+stable `code`, `message`, optional `hint`, and `retryable`. Parser, database,
+network, or other third-party diagnostics must be logged separately; no catalog
+API accepts or automatically formats a diagnostic into the public event.
+
 ## Logging
 
 One-shot programs emit `kind:"log"` through the same emitter. Long-running
-Rust services use `afdata_tracing::try_init`; other runtimes emit events
-explicitly or integrate their structured logger.
+Rust services compose `afdata_tracing::AfdataLayer::new(format, redactor)` into
+their subscriber and may inject a test or application sink with `with_writer`.
+Keep its `StructuredLogHandle` when a nested `serde_json::Value` must retain
+objects and arrays; ordinary tracing and direct nested events then share the
+same writer, redactor, format, lock, and order. `try_init` remains the convenient
+global-subscriber shortcut, not the only integration path. Other runtimes emit
+events explicitly or integrate their structured logger.
 
 Redaction depends on field names. Log `api_key_secret` as a structured field;
 do not hide it inside Debug output or interpolated prose.
+
+For in-process Rust tests, run `lint_value` on the real serialized value and
+combine `assert_no_lint_findings`, `assert_strict_event`, and
+`assert_redaction_canary_absent` as appropriate. This tests the boundary
+without temporary files or an `afdata` subprocess.
 
 ## Review checklist
 
@@ -145,3 +180,6 @@ do not hide it inside Debug output or interpolated prose.
 6. Help examples and detail usage are generated from the registry and validate
    against help-v2.
 7. Version values appear only in version output.
+8. Public errors contain catalogued fields only; runtime diagnostics stay in logs.
+9. Transport bodies claiming AFDATA protocol compatibility are redacted and
+   strict before serialization.

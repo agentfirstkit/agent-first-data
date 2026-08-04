@@ -210,6 +210,56 @@ fi
 [ "$(afdata_cli value --input-format json "$TEST_TMP/args.stderr" error.code)" = cli_error ] \
   || fail "argument error was not structured"
 
+# Parser failures identify argument names and categories without copying raw
+# values into the structured error message.
+for leak_case in output short positional; do
+  case "$leak_case" in
+    output) leak_value="output-canary-secret" ;;
+    short) leak_value="-short-canary-secret" ;;
+    positional) leak_value="positional-canary-secret" ;;
+  esac
+  if AFDATA_BIN="$AFDATA_BIN" AFDATA_OUTPUT=json AFDATA_OUTPUT_TO=split bash -c '
+    set -euo pipefail
+    source "$1"
+    afdata_args_begin "demo.sh [OPTIONS]"
+    case "$2" in
+      output) afdata_args_parse --output "$3" ;;
+      short|positional) afdata_args_parse "$3" ;;
+    esac
+  ' bash "$ROOTPATH/bash/afdata.sh" "$leak_case" "$leak_value" \
+    > "$TEST_TMP/leak-$leak_case.stdout" 2> "$TEST_TMP/leak-$leak_case.stderr"; then
+    fail "$leak_case raw-value case returned success"
+  else
+    leak_status=$?
+  fi
+  [ "$leak_status" -eq 2 ] || fail "$leak_case raw-value case did not exit 2"
+  if grep -q 'canary-secret' "$TEST_TMP/leak-$leak_case.stderr"; then
+    fail "$leak_case raw value entered the structured error"
+  fi
+done
+
+# A later parser failure must not trust output selectors from the same invalid
+# argv: the diagnostic stays strict JSON on stderr.
+if AFDATA_BIN="$AFDATA_BIN" AFDATA_OUTPUT=json AFDATA_OUTPUT_TO=split bash -c '
+  set -euo pipefail
+  source "$1"
+  afdata_args_begin "demo.sh [OPTIONS]"
+  afdata_args_parse --output yaml --output-to stdout positional-canary-secret
+' bash "$ROOTPATH/bash/afdata.sh" \
+  > "$TEST_TMP/unresolved-output.stdout" 2> "$TEST_TMP/unresolved-output.stderr"; then
+  fail "unresolved output selector case returned success"
+else
+  unresolved_output_status=$?
+fi
+[ "$unresolved_output_status" -eq 2 ] || fail "unresolved output selector case did not exit 2"
+[ ! -s "$TEST_TMP/unresolved-output.stdout" ] \
+  || fail "unresolved output selector redirected its own parser error"
+[ "$(afdata_cli value --input-format json "$TEST_TMP/unresolved-output.stderr" error.code)" = cli_error ] \
+  || fail "unresolved output selector reformatted its own parser error"
+if grep -q 'positional-canary-secret' "$TEST_TMP/unresolved-output.stderr"; then
+  fail "unresolved output selector error copied the raw positional value"
+fi
+
 AFDATA_OUTPUT=json
 if afdata_run bash -c '
   printf "child stdout\n"

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 const maxSafeInteger = uint64(9007199254740991)
@@ -545,6 +546,9 @@ type Redactor struct {
 	// Matching is exact field-name equality at any nesting level. The same list
 	// also matches URL query-parameter names inside _url fields (see URL).
 	SecretNames []string
+	// URLNames are exact legacy field names whose string leaves receive
+	// URL-aware redaction in addition to _url/_URL fields.
+	URLNames []string
 	// Policy controls where redaction is applied. Empty means default full redaction.
 	Policy RedactionPolicy
 }
@@ -579,6 +583,15 @@ func (r Redactor) URL(rawURL string) string {
 		return redacted
 	}
 	return rawURL
+}
+
+// URLsInText redacts complete scheme-prefixed URL spans embedded in prose.
+// Surrounding text is never scanned for secret-looking names or values.
+func (r Redactor) URLsInText(text string) string {
+	if !r.Policy.redactsUnscopedInput() {
+		return text
+	}
+	return redactURLsInTextWithContext(text, newRedactionContext(r))
 }
 
 // Argv redacts secret values out of a command line, using the redactor's
@@ -734,6 +747,13 @@ func RedactedValue(value any) any {
 // For extra secret names, use Redactor.URL.
 func RedactURLSecrets(rawURL string) string {
 	return Redactor{}.URL(rawURL)
+}
+
+// RedactURLsInText redacts complete scheme-prefixed URL spans embedded in
+// prose, using default secret-name rules. It is opt-in; structured redaction
+// never scans arbitrary prose.
+func RedactURLsInText(text string) string {
+	return Redactor{}.URLsInText(text)
 }
 
 // RedactArgv redacts secret values out of a command line, using default
@@ -1007,6 +1027,7 @@ const redactedMarker = "***"
 
 type redactionContext struct {
 	secretNames map[string]struct{}
+	urlNames    map[string]struct{}
 }
 
 func newRedactionContext(r Redactor) redactionContext {
@@ -1014,7 +1035,22 @@ func newRedactionContext(r Redactor) redactionContext {
 	for _, name := range r.SecretNames {
 		names[name] = struct{}{}
 	}
-	return redactionContext{secretNames: names}
+	urlNames := make(map[string]struct{}, len(r.URLNames))
+	for _, name := range r.URLNames {
+		urlNames[name] = struct{}{}
+	}
+	return redactionContext{secretNames: names, urlNames: urlNames}
+}
+
+func (c redactionContext) isURLKey(key string) bool {
+	if keyHasURLSuffix(key) {
+		return true
+	}
+	if len(c.urlNames) == 0 {
+		return false
+	}
+	_, ok := c.urlNames[key]
+	return ok
 }
 
 func (c redactionContext) isSecretKey(key string) bool {
@@ -1064,12 +1100,8 @@ func redactSecretsWithContextDepth(value any, context redactionContext, depth in
 				if v[k] != nil {
 					v[k] = redactedMarker
 				}
-			case keyHasURLSuffix(k):
-				if s, ok := v[k].(string); ok {
-					v[k] = redactURLFieldValue(s, context)
-				} else {
-					v[k] = redactSecretsWithContextDepth(v[k], context, depth+1)
-				}
+			case context.isURLKey(k):
+				v[k] = redactURLValueDepth(v[k], context, depth+1)
 			default:
 				v[k] = redactSecretsWithContextDepth(v[k], context, depth+1)
 			}
@@ -1078,6 +1110,34 @@ func redactSecretsWithContextDepth(value any, context redactionContext, depth in
 	case []any:
 		for i, item := range v {
 			v[i] = redactSecretsWithContextDepth(item, context, depth+1)
+		}
+		return v
+	default:
+		return value
+	}
+}
+
+func redactURLValueDepth(value any, context redactionContext, depth int) any {
+	if depth >= maxDepth {
+		return maxDepthMarker
+	}
+	switch v := value.(type) {
+	case string:
+		return redactURLFieldValue(v, context)
+	case []any:
+		for i, item := range v {
+			v[i] = redactURLValueDepth(item, context, depth+1)
+		}
+		return v
+	case map[string]any:
+		for key, item := range v {
+			if context.isSecretKey(key) {
+				if item != nil {
+					v[key] = redactedMarker
+				}
+			} else {
+				v[key] = redactURLValueDepth(item, context, depth+1)
+			}
 		}
 		return v
 	default:
@@ -1180,6 +1240,133 @@ func redactURLInStr(s string, context redactionContext) (string, bool) {
 	}
 
 	return scheme + "://" + newAuthority + newBeforeFragment + newFragment, true
+}
+
+func redactURLsInTextWithContext(text string, context redactionContext) string {
+	var output strings.Builder
+	output.Grow(len(text))
+	copiedThrough := 0
+	searchFrom := 0
+	found := false
+	for {
+		start, end, ok := nextSchemeURLSpan(text, searchFrom)
+		if !ok {
+			break
+		}
+		found = true
+		output.WriteString(text[copiedThrough:start])
+		rawURL := text[start:end]
+		if redacted, processable := redactURLInStr(rawURL, context); processable {
+			output.WriteString(redacted)
+		} else {
+			output.WriteString(rawURL)
+		}
+		copiedThrough = end
+		searchFrom = end
+	}
+	if !found {
+		return text
+	}
+	output.WriteString(text[copiedThrough:])
+	return output.String()
+}
+
+func nextSchemeURLSpan(text string, startAt int) (int, int, bool) {
+	for start := startAt; start < len(text); start++ {
+		// Only consider the head of a maximal scheme-byte run: a scheme cannot
+		// begin mid-run, so a position whose predecessor is a scheme byte was
+		// already covered by the run that contains it.
+		if start > 0 && isSchemeByte(text[start-1]) {
+			continue
+		}
+		schemeEnd := start
+		for schemeEnd < len(text) && isSchemeByte(text[schemeEnd]) {
+			schemeEnd++
+		}
+		// A scheme must start with a letter, but the run need not: prose like
+		// "2https://h/?token_secret=x" glues a digit onto the URL. Retry from the
+		// first letter *inside* the run instead of abandoning the span — giving
+		// up there fails open and leaks the whole query.
+		schemeStart := -1
+		for i := start; i < schemeEnd; i++ {
+			if isASCIIAlpha(text[i]) {
+				schemeStart = i
+				break
+			}
+		}
+		if schemeStart < 0 || !strings.HasPrefix(text[schemeEnd:], "://") {
+			continue
+		}
+		end := schemeEnd + 3
+		for end < len(text) {
+			character, size := utf8.DecodeRuneInString(text[end:])
+			if isSpanTerminatorWhitespace(character) || isTextURLDelimiter(character) {
+				break
+			}
+			end += size
+		}
+		for end > schemeEnd+3 {
+			character, size := utf8.DecodeLastRuneInString(text[:end])
+			if !isTrailingTextURLPunctuation(character) {
+				break
+			}
+			end -= size
+		}
+		if end > schemeEnd+3 {
+			return schemeStart, end, true
+		}
+	}
+	return 0, 0, false
+}
+
+func isSchemeByte(value byte) bool {
+	return isASCIIAlphanumeric(value) || value == '+' || value == '-' || value == '.'
+}
+
+// isSpanTerminatorWhitespace reports whether a rune ends a URL span in prose:
+// the Unicode White_Space property, written out here instead of delegated to
+// unicode.IsSpace.
+//
+// The four AFDATA implementations must cut the span at the same byte, and each
+// language's native predicate covers a different set — JS \s counts U+FEFF but
+// not U+0085, Python's str.isspace() counts U+001C–U+001F, Go and Rust count
+// neither. Divergence is a defect in both directions: ending a span early leaves
+// the rest of the query readable, and ending it late pulls the following prose
+// into the URL, where redacting the parameter it lands in deletes it. So the set
+// is enumerated, and it is generous — a redaction helper exists to keep a log
+// line readable, so anything a human reads as a space must end the URL.
+//
+// Two exclusions are deliberate, not oversights:
+//   - U+FEFF (zero-width no-break space) is not White_Space. Treating it as one
+//     would cut a URL carrying it short and leave the secret after it in the
+//     clear — the exact leak JS \s used to cause here.
+//   - U+001C–U+001F (the file/group/record/unit separators) are not White_Space
+//     either; only Python's str.isspace() counted them.
+//
+// This is a different question from isSingleURL, which asks whether a whole
+// string is one URL and stays ASCII-only. A span this scanner produces contains
+// no whitespace at all, so it satisfies that stricter gate either way.
+func isSpanTerminatorWhitespace(character rune) bool {
+	switch character {
+	// TAB, LF, VT, FF, CR, SPACE
+	case '\u0009', '\u000a', '\u000b', '\u000c', '\u000d', '\u0020',
+		// NEL, NBSP, OGHAM SPACE MARK
+		'\u0085', '\u00a0', '\u1680',
+		// LINE SEPARATOR, PARAGRAPH SEPARATOR, NARROW NO-BREAK SPACE,
+		// MEDIUM MATHEMATICAL SPACE, IDEOGRAPHIC SPACE
+		'\u2028', '\u2029', '\u202f', '\u205f', '\u3000':
+		return true
+	}
+	// EN QUAD .. HAIR SPACE
+	return character >= '\u2000' && character <= '\u200a'
+}
+
+func isTextURLDelimiter(character rune) bool {
+	return strings.ContainsRune("\"'<>`，。；！？）》】」』", character)
+}
+
+func isTrailingTextURLPunctuation(character rune) bool {
+	return strings.ContainsRune(".,;!)]}，。；！）》】", character)
 }
 
 // redactUserinfoPassword replaces the userinfo password (user:pass@) with "***",
@@ -1363,26 +1550,30 @@ func tryProcessField(key string, value any) (string, string, bool) {
 
 	// Group 2: compound currency suffixes
 	if stripped, ok := stripSuffixCI(key, "_usd_cents"); ok {
-		if n, ok := asNonNegInt64(value); ok {
-			return stripped, fmt.Sprintf("$%d.%02d", n/100, n%100), true
+		if n, ok := asInt64(value); ok {
+			sign, magnitude := signedMagnitude(n)
+			return stripped, fmt.Sprintf("%s$%d.%02d", sign, magnitude/100, magnitude%100), true
 		}
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_eur_cents"); ok {
-		if n, ok := asNonNegInt64(value); ok {
-			return stripped, fmt.Sprintf("\u20ac%d.%02d", n/100, n%100), true
+		if n, ok := asInt64(value); ok {
+			sign, magnitude := signedMagnitude(n)
+			return stripped, fmt.Sprintf("%s\u20ac%d.%02d", sign, magnitude/100, magnitude%100), true
 		}
 		return "", "", false
 	}
 	if stripped, code, ok := tryStripGenericCents(key); ok {
-		if n, ok := asNonNegInt64(value); ok {
-			return stripped, fmt.Sprintf("%d.%02d %s", n/100, n%100, strings.ToUpper(code)), true
+		if n, ok := asInt64(value); ok {
+			sign, magnitude := signedMagnitude(n)
+			return stripped, fmt.Sprintf("%s%d.%02d %s", sign, magnitude/100, magnitude%100, strings.ToUpper(code)), true
 		}
 		return "", "", false
 	}
 	if stripped, code, ok := tryStripGenericMicro(key); ok {
-		if n, ok := asNonNegInt64(value); ok {
-			return stripped, fmt.Sprintf("%d.%06d %s", n/1_000_000, n%1_000_000, strings.ToUpper(code)), true
+		if n, ok := asInt64(value); ok {
+			sign, magnitude := signedMagnitude(n)
+			return stripped, fmt.Sprintf("%s%d.%06d %s", sign, magnitude/1_000_000, magnitude%1_000_000, strings.ToUpper(code)), true
 		}
 		return "", "", false
 	}
@@ -1440,8 +1631,9 @@ func tryProcessField(key string, value any) (string, string, bool) {
 	}
 	// Group 5: short suffixes (last to avoid false positives)
 	if stripped, ok := stripSuffixCI(key, "_jpy"); ok {
-		if n, ok := asNonNegInt64(value); ok {
-			return stripped, fmt.Sprintf("\u00a5%s", formatWithCommas(uint64(n))), true
+		if n, ok := asInt64(value); ok {
+			sign, magnitude := signedMagnitude(n)
+			return stripped, fmt.Sprintf("%s\u00a5%s", sign, formatWithCommas(magnitude)), true
 		}
 		return "", "", false
 	}
@@ -2057,6 +2249,13 @@ func asNonNegInt64(value any) (int64, bool) {
 		return n, true
 	}
 	return 0, false
+}
+
+func signedMagnitude(value int64) (string, uint64) {
+	if value < 0 {
+		return "-", uint64(-(value + 1)) + 1
+	}
+	return "", uint64(value)
 }
 
 func asDecimalInt64(value any) (int64, bool) {

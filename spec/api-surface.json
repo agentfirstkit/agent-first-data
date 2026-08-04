@@ -51,6 +51,33 @@
       "go": "JSONErrorBuilder"
     },
     {
+      "id": "error_spec",
+      "kind": "type",
+      "rust": "ErrorSpec",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only stable public domain-error declaration. It deliberately has no runtime diagnostic field."
+    },
+    {
+      "id": "error_catalog",
+      "kind": "type",
+      "rust": "ErrorCatalog",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only validated lookup table that builds protocol error events from ErrorSpec by stable code."
+    },
+    {
+      "id": "error_catalog_error",
+      "kind": "type",
+      "rust": "ErrorCatalogError",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only duplicate/unknown/invalid catalog error."
+    },
+    {
       "id": "progress_builder",
       "kind": "type",
       "rust": "ProgressBuilder",
@@ -190,6 +217,87 @@
       "note": "The single value × format × options → String entry point. Replaces the former output_json/output_yaml/output_plain (+ _with_options) and cli_output/cli_output_with_options families. Rust/Go take an explicit OutputOptions argument (OutputOptions: Default); Python/TS keep it an optional keyword/parameter."
     },
     {
+      "id": "lint_value",
+      "kind": "fn",
+      "rust": "lint_value",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only in-process equivalent of `afdata lint` over a serialized JSON value."
+    },
+    {
+      "id": "lint_finding",
+      "kind": "type",
+      "rust": "LintFinding",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only typed lint finding."
+    },
+    {
+      "id": "lint_options",
+      "kind": "type",
+      "rust": "LintOptions",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only lint severity filter."
+    },
+    {
+      "id": "lint_severity",
+      "kind": "type",
+      "rust": "LintSeverity",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only warning/error lint severity enum."
+    },
+    {
+      "id": "assert_strict_event",
+      "kind": "fn",
+      "rust": "assert_strict_event",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only test helper returning the strict protocol validation result."
+    },
+    {
+      "id": "assert_no_lint_findings",
+      "kind": "fn",
+      "rust": "assert_no_lint_findings",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only test helper returning all default lint findings as Err."
+    },
+    {
+      "id": "assert_no_lint_findings_with_options",
+      "kind": "fn",
+      "rust": "assert_no_lint_findings_with_options",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only configurable lint assertion helper."
+    },
+    {
+      "id": "assert_redaction_canary_absent",
+      "kind": "fn",
+      "rust": "assert_redaction_canary_absent",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only test helper that checks a unique canary is absent from final serialized output."
+    },
+    {
+      "id": "redaction_canary_error",
+      "kind": "type",
+      "rust": "RedactionCanaryError",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only empty/exposed canary error."
+    },
+    {
       "id": "redacted_value",
       "kind": "fn",
       "rust": "redacted_value",
@@ -204,6 +312,15 @@
       "python": "redact_url_secrets",
       "typescript": "redactUrlSecrets",
       "go": "RedactURLSecrets"
+    },
+    {
+      "id": "redact_urls_in_text",
+      "kind": "fn",
+      "rust": "redact_urls_in_text",
+      "python": "redact_urls_in_text",
+      "typescript": "redactUrlsInText",
+      "go": "RedactURLsInText",
+      "note": "Explicit URL-only prose helper. It recognizes complete scheme-prefixed URL spans and delegates URL redaction; ordinary structured redaction never scans arbitrary prose."
     },
     {
       "id": "redact_argv",
@@ -487,6 +604,24 @@
       "note": "Rust-only registry with exact action-handler coverage."
     },
     {
+      "id": "bound_outcome",
+      "kind": "type",
+      "rust": "BoundOutcome",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only. What an argv resolved to, with the run branch already carrying its handler so dispatch cannot fail."
+    },
+    {
+      "id": "bound_invocation",
+      "kind": "type",
+      "rust": "BoundInvocation",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only. A resolved invocation plus its handler. `run` is infallible because the handler was bound during resolution by the registry that owns it, which is why no caller branches on a dispatch miss."
+    },
+    {
       "id": "command_spec",
       "kind": "type",
       "rust": "CommandSpec",
@@ -701,6 +836,15 @@
       "typescript": null,
       "go": null,
       "note": "AFDATA adapter for the Rust reference compiler: the only place a cli-spec outcome becomes a protocol event. Rust-only for the same reason the compiler is."
+    },
+    {
+      "id": "cli_invocation_invalid_event",
+      "kind": "fn",
+      "rust": "cli_invocation_invalid_event",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only. The event for a program that misread its own resolved invocation (an argument id its combination does not declare). Dispatch itself cannot fail; `BoundCliSpec::resolve_from` binds the handler while resolving."
     },
     {
       "id": "cli_shape",

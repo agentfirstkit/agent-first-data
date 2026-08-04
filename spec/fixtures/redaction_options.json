@@ -245,5 +245,73 @@
     "expected": {
       "final_url": "***"
     }
+  },
+  {
+    "name": "legacy url names recurse through collections",
+    "input": {
+      "url": "https://u:pw@h/?token=one",
+      "relays": [
+        "wss://relay.example/?token=two",
+        {
+          "nested": "https://u:pw@nested.example/"
+        }
+      ],
+      "synapse_selector": "user:pass@host/db",
+      "other": "https://u:visible@h/?token=three"
+    },
+    "options": {
+      "secret_names": [
+        "token"
+      ],
+      "url_names": [
+        "url",
+        "relays",
+        "synapse_selector"
+      ]
+    },
+    "expected": {
+      "url": "https://u:***@h/?token=***",
+      "relays": [
+        "wss://relay.example/?token=***",
+        {
+          "nested": "https://u:***@nested.example/"
+        }
+      ],
+      "synapse_selector": "***",
+      "other": "https://u:visible@h/?token=three"
+    }
+  },
+  {
+    "name": "legacy url names are exact",
+    "input": {
+      "url": "https://u:pw@h/",
+      "URL": "https://u:visible@h/",
+      " url ": "https://u:visible@h/"
+    },
+    "options": {
+      "url_names": [
+        "url"
+      ]
+    },
+    "expected": {
+      "url": "https://u:***@h/",
+      "URL": "https://u:visible@h/",
+      " url ": "https://u:visible@h/"
+    }
+  },
+  {
+    "name": "off disables legacy url names",
+    "input": {
+      "url": "https://u:pw@h/?token_secret=one"
+    },
+    "options": {
+      "policy": "Off",
+      "url_names": [
+        "url"
+      ]
+    },
+    "expected": {
+      "url": "https://u:pw@h/?token_secret=one"
+    }
   }
 ]

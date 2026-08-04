@@ -18,6 +18,11 @@
 //! - perform process I/O, install file sinks, or write to stdout/stderr;
 //! - hardcode an AFDATA naming convention such as the `_secret` suffix.
 //!
+//! The core does share the crate's pure [`OutputFormat`](super::OutputFormat)
+//! and [`OutputTo`](super::OutputTo) enums. They carry only the closed value
+//! sets already validated by [`OutputSpec`]; rendering and process I/O remain
+//! outside this module.
+//!
 //! `crate::cli_afdata` is the adapter that turns [`ResolvedHelp`],
 //! [`ResolvedVersion`] and [`CliError`] into AFDATA events and owns the
 //! `_secret` policy. `scripts/validate_cli_core_boundary.py` enforces the
@@ -31,11 +36,14 @@ mod spec;
 #[cfg(test)]
 mod tests;
 
+use super::output::{OutputFormat, OutputTo};
+
 pub use error::{CliError, CliErrorRule};
 pub(crate) use help::argument_key;
 pub use help::{CliHelpV2, CliShape, ResolvedDocs, ResolvedHelp, ResolvedVersion};
 pub use resolve::{
-    BoundCliSpec, BuiltCliSpec, CliOutcome, OutputPlan, ResolvedInvocation, SyntheticInvocation,
+    BoundCliSpec, BoundInvocation, BoundOutcome, BuiltCliSpec, CliOutcome, OutputPlan,
+    ResolvedInvocation, SyntheticInvocation,
 };
 pub use spec::{
     ArgSpec, ArgSyntax, ArgValueType, CliSpec, CliSpecError, CliValue, Combination, CommandSpec,

@@ -491,6 +491,11 @@ export type OutputOptions = {
      * Matching is exact field-name equality at any nesting level.
      */
     secretNames?: readonly string[];
+    /**
+     * Exact legacy field names whose string leaves receive URL-aware
+     * redaction in addition to _url/_URL fields.
+     */
+    urlNames?: readonly string[];
   };
   /** Rendering style for plain (logfmt) output only. Omitted means readable.
    * JSON and YAML are structure-preserving and ignore this setting. */
@@ -573,7 +578,14 @@ export function formatPlainValue(value: JsonValue | Event, options: OutputOption
 // ═══════════════════════════════════════════
 
 /** Return a JSON-safe copy with redaction options applied (default: full _secret redaction). */
-export function redactedValue(value: unknown, options?: { policy?: RedactionPolicy; secretNames?: readonly string[] }): JsonValue {
+export function redactedValue(
+  value: unknown,
+  options?: {
+    policy?: RedactionPolicy;
+    secretNames?: readonly string[];
+    urlNames?: readonly string[];
+  },
+): JsonValue {
   const v = sanitizeForJson(value);
   applyRedactionOptions(v, options ?? {});
   return v;
@@ -602,6 +614,20 @@ export function redactUrlSecrets(
   if (!redactsUnscopedInput(options?.policy)) return url;
   const redacted = redactUrlInStr(url, secretNameSet(options ?? {}));
   return redacted ?? url;
+}
+
+/**
+ * Redact complete scheme-prefixed URL spans embedded in prose.
+ *
+ * This helper is explicit and URL-only: surrounding text is never scanned for
+ * secret-looking names or values.
+ */
+export function redactUrlsInText(
+  text: string,
+  options?: { secretNames?: readonly string[]; policy?: RedactionPolicy },
+): string {
+  if (!redactsUnscopedInput(options?.policy)) return text;
+  return redactUrlsInTextWithContext(text, contextFromOptions(options ?? {}));
 }
 
 /**
@@ -824,14 +850,17 @@ function isRedacted(value: JsonValue): boolean {
 type RedactionOpts = {
   policy?: RedactionPolicy;
   secretNames?: readonly string[];
+  urlNames?: readonly string[];
 };
 
 type RedactionContext = {
   secretNames: ReadonlySet<string>;
+  urlNames: ReadonlySet<string>;
 };
 
 const DEFAULT_CONTEXT: RedactionContext = {
   secretNames: new Set<string>(),
+  urlNames: new Set<string>(),
 };
 
 function secretNameSet(redactionOptions: RedactionOpts): ReadonlySet<string> {
@@ -839,7 +868,10 @@ function secretNameSet(redactionOptions: RedactionOpts): ReadonlySet<string> {
 }
 
 function contextFromOptions(redactionOptions: RedactionOpts): RedactionContext {
-  return { secretNames: secretNameSet(redactionOptions) };
+  return {
+    secretNames: secretNameSet(redactionOptions),
+    urlNames: new Set(redactionOptions.urlNames ?? []),
+  };
 }
 
 function keyHasSecretSuffix(key: string): boolean {
@@ -852,6 +884,10 @@ function keyHasUrlSuffix(key: string): boolean {
 
 function isSecretKey(key: string, secretNames: ReadonlySet<string>): boolean {
   return keyHasSecretSuffix(key) || secretNames.has(key);
+}
+
+function isUrlKey(key: string, context: RedactionContext): boolean {
+  return keyHasUrlSuffix(key) || context.urlNames.has(key);
 }
 
 const MAX_DEPTH = 256;
@@ -870,12 +906,8 @@ function redactSecrets(value: JsonValue, context: RedactionContext = DEFAULT_CON
         if (v !== null) {
           value[k] = REDACTED_MARKER;
         }
-      } else if (keyHasUrlSuffix(k)) {
-        if (typeof v === "string") {
-          value[k] = redactUrlFieldValue(v, context.secretNames);
-        } else {
-          value[k] = depth + 1 >= MAX_DEPTH ? MAX_DEPTH_MARKER : (redactSecrets(v, context, depth + 1), v);
-        }
+      } else if (isUrlKey(k, context)) {
+        value[k] = redactUrlValue(v, context, depth + 1);
       } else {
         value[k] = depth + 1 >= MAX_DEPTH ? MAX_DEPTH_MARKER : (redactSecrets(v, context, depth + 1), v);
       }
@@ -886,6 +918,30 @@ function redactSecrets(value: JsonValue, context: RedactionContext = DEFAULT_CON
       else redactSecrets(value[i], context, depth + 1);
     }
   }
+}
+
+function redactUrlValue(value: JsonValue, context: RedactionContext, depth: number): JsonValue {
+  if (depth >= MAX_DEPTH) return MAX_DEPTH_MARKER;
+  if (typeof value === "string") {
+    return redactUrlFieldValue(value, context.secretNames);
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index++) {
+      value[index] = redactUrlValue(value[index], context, depth + 1);
+    }
+    return value;
+  }
+  if (isObject(value)) {
+    for (const key of Object.keys(value)) {
+      const item = value[key];
+      if (isSecretKey(key, context.secretNames)) {
+        if (item !== null) value[key] = REDACTED_MARKER;
+      } else {
+        value[key] = redactUrlValue(item, context, depth + 1);
+      }
+    }
+  }
+  return value;
 }
 
 function applyRedactionOptions(value: JsonValue, redactionOptions: RedactionOpts): void {
@@ -968,6 +1024,128 @@ function redactUrlInStr(s: string, secretNames: ReadonlySet<string>): string | n
   const newFragment = fragment === null ? "" : `#${redactQuery(fragment, secretNames)}`;
 
   return `${scheme}://${newAuthority}${newBeforeFragment}${newFragment}`;
+}
+
+function redactUrlsInTextWithContext(text: string, context: RedactionContext): string {
+  const output: string[] = [];
+  let copiedThrough = 0;
+  let searchFrom = 0;
+  while (true) {
+    const span = nextSchemeUrlSpan(text, searchFrom);
+    if (span === null) break;
+    const [start, end] = span;
+    output.push(text.slice(copiedThrough, start));
+    const url = text.slice(start, end);
+    output.push(redactUrlInStr(url, context.secretNames) ?? url);
+    copiedThrough = end;
+    searchFrom = end;
+  }
+  if (output.length === 0) return text;
+  output.push(text.slice(copiedThrough));
+  return output.join("");
+}
+
+function nextSchemeUrlSpan(text: string, startAt: number): [number, number] | null {
+  let start = startAt;
+  while (start < text.length) {
+    // Only consider the head of a maximal scheme-byte run: a scheme cannot begin
+    // mid-run, so a position whose predecessor is a scheme byte was already
+    // covered by the run that contains it.
+    const atRunHead = start === 0 || !isSchemeCodeUnit(text.charCodeAt(start - 1));
+    if (atRunHead) {
+      let schemeEnd = start;
+      while (schemeEnd < text.length && isSchemeCodeUnit(text.charCodeAt(schemeEnd))) {
+        schemeEnd += 1;
+      }
+      // A scheme must start with a letter, but the run need not: prose like
+      // "2https://h/?token_secret=x" glues a digit onto the URL. Retry from the
+      // first letter *inside* the run instead of abandoning the span — giving up
+      // there fails open and leaks the whole query.
+      let schemeStart = -1;
+      for (let i = start; i < schemeEnd; i++) {
+        if (isAsciiAlpha(text.charCodeAt(i))) {
+          schemeStart = i;
+          break;
+        }
+      }
+      if (schemeStart >= 0 && text.startsWith("://", schemeEnd)) {
+        let end = schemeEnd + 3;
+        while (
+          end < text.length
+          && !isSpanTerminatorWhitespace(text.charCodeAt(end))
+          && !isTextUrlDelimiter(text[end])
+        ) {
+          end += 1;
+        }
+        while (
+          end > schemeEnd + 3
+          && isTrailingTextUrlPunctuation(text[end - 1])
+        ) {
+          end -= 1;
+        }
+        if (end > schemeEnd + 3) return [schemeStart, end];
+      }
+    }
+    start += 1;
+  }
+  return null;
+}
+
+function isSchemeCodeUnit(code: number): boolean {
+  return isAsciiAlphanumeric(code) || code === 0x2b || code === 0x2d || code === 0x2e;
+}
+
+/**
+ * True for a code unit that ends a URL span in prose: the Unicode `White_Space`
+ * property, written out here instead of delegated to `/\s/u`.
+ *
+ * The four AFDATA implementations must cut the span at the same byte, and each
+ * language's native predicate covers a different set — `\s` counts U+FEFF but
+ * not U+0085, Python's `str.isspace()` counts U+001C–U+001F, Rust and Go count
+ * neither. Divergence is a defect in both directions: ending a span early leaves
+ * the rest of the query readable, and ending it late pulls the following prose
+ * into the URL, where redacting the parameter it lands in deletes it. So the set
+ * is enumerated, and it is generous — a redaction helper exists to keep a log
+ * line readable, so anything a human reads as a space must end the URL.
+ *
+ * Two exclusions are deliberate, not oversights:
+ * - **U+FEFF** (zero-width no-break space) is not `White_Space`. `\s` counts it,
+ *   which is what used to cut a URL carrying it short and leave the secret after
+ *   it in the clear. It must not creep back in.
+ * - **U+001C–U+001F** (the file/group/record/unit separators) are not
+ *   `White_Space` either; only Python's `str.isspace()` counted them.
+ *
+ * This is a different question from `isSingleUrl`, which asks whether a whole
+ * string is one URL and stays ASCII-only. A span this scanner produces contains
+ * no whitespace at all, so it satisfies that stricter gate either way.
+ */
+function isSpanTerminatorWhitespace(code: number): boolean {
+  return (
+    // TAB, LF, VT, FF, CR, SPACE
+    (code >= 0x09 && code <= 0x0d)
+    || code === 0x20
+    // NEL, NBSP, OGHAM SPACE MARK
+    || code === 0x85
+    || code === 0xa0
+    || code === 0x1680
+    // EN QUAD .. HAIR SPACE
+    || (code >= 0x2000 && code <= 0x200a)
+    // LINE SEPARATOR, PARAGRAPH SEPARATOR, NARROW NO-BREAK SPACE,
+    // MEDIUM MATHEMATICAL SPACE, IDEOGRAPHIC SPACE
+    || code === 0x2028
+    || code === 0x2029
+    || code === 0x202f
+    || code === 0x205f
+    || code === 0x3000
+  );
+}
+
+function isTextUrlDelimiter(character: string): boolean {
+  return "\"'<>`，。；！？）》】」』".includes(character);
+}
+
+function isTrailingTextUrlPunctuation(character: string): boolean {
+  return ".,;!)]}，。；！）》】".includes(character);
 }
 
 function redactUrlFieldValue(s: string, secretNames: ReadonlySet<string>): string {
@@ -1110,9 +1288,10 @@ function decimalIntText(value: JsonValue): string | null {
   return null;
 }
 
+const MIN_I64 = -9_223_372_036_854_775_808n;
 const MAX_I64 = 9_223_372_036_854_775_807n;
 
-function nonNegativeI64(value: JsonValue): bigint | null {
+function signedI64(value: JsonValue): bigint | null {
   let text: string | null = null;
   if (typeof value === "bigint") {
     text = value.toString();
@@ -1125,14 +1304,16 @@ function nonNegativeI64(value: JsonValue): bigint | null {
   if (text === null) return null;
   try {
     const integer = BigInt(text);
-    return integer >= 0n && integer <= MAX_I64 ? integer : null;
+    return integer >= MIN_I64 && integer <= MAX_I64 ? integer : null;
   } catch {
     return null;
   }
 }
 
 function formatCents(value: bigint, symbol: string): string {
-  return `${symbol}${value / 100n}.${String(value % 100n).padStart(2, "0")}`;
+  const sign = value < 0n ? "-" : "";
+  const magnitude = value < 0n ? -value : value;
+  return `${sign}${symbol}${magnitude / 100n}.${String(magnitude % 100n).padStart(2, "0")}`;
 }
 
 function epochNsToMs(value: JsonValue): number | null {
@@ -1193,31 +1374,35 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   // Group 2: compound currency suffixes
   stripped = stripSuffixCI(key, "_usd_cents");
   if (stripped !== null) {
-    const integer = nonNegativeI64(value);
+    const integer = signedI64(value);
     if (integer !== null) return [stripped, formatCents(integer, "$")];
     return null;
   }
   stripped = stripSuffixCI(key, "_eur_cents");
   if (stripped !== null) {
-    const integer = nonNegativeI64(value);
+    const integer = signedI64(value);
     if (integer !== null) return [stripped, formatCents(integer, "\u20ac")];
     return null;
   }
   const gc = tryStripGenericCents(key);
   if (gc !== null) {
     const [gcStripped, code] = gc;
-    const integer = nonNegativeI64(value);
+    const integer = signedI64(value);
     if (integer !== null) {
-      return [gcStripped, `${integer / 100n}.${String(integer % 100n).padStart(2, "0")} ${code.toUpperCase()}`];
+      const sign = integer < 0n ? "-" : "";
+      const magnitude = integer < 0n ? -integer : integer;
+      return [gcStripped, `${sign}${magnitude / 100n}.${String(magnitude % 100n).padStart(2, "0")} ${code.toUpperCase()}`];
     }
     return null;
   }
   const gm = tryStripGenericMicro(key);
   if (gm !== null) {
     const [gmStripped, code] = gm;
-    const integer = nonNegativeI64(value);
+    const integer = signedI64(value);
     if (integer !== null) {
-      return [gmStripped, `${integer / 1_000_000n}.${String(integer % 1_000_000n).padStart(6, "0")} ${code.toUpperCase()}`];
+      const sign = integer < 0n ? "-" : "";
+      const magnitude = integer < 0n ? -integer : integer;
+      return [gmStripped, `${sign}${magnitude / 1_000_000n}.${String(magnitude % 1_000_000n).padStart(6, "0")} ${code.toUpperCase()}`];
     }
     return null;
   }
@@ -1270,8 +1455,12 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   // Group 5: short suffixes (last to avoid false positives)
   stripped = stripSuffixCI(key, "_jpy");
   if (stripped !== null) {
-    const integer = nonNegativeI64(value);
-    if (integer !== null) return [stripped, `\u00a5${formatWithCommas(integer)}`];
+    const integer = signedI64(value);
+    if (integer !== null) {
+      const sign = integer < 0n ? "-" : "";
+      const magnitude = integer < 0n ? -integer : integer;
+      return [stripped, `${sign}\u00a5${formatWithCommas(magnitude)}`];
+    }
     return null;
   }
   stripped = stripSuffixCI(key, "_ns");

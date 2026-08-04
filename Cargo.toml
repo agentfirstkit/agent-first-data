@@ -1,6 +1,6 @@
 [package]
 name = "agent-first-data"
-version = "0.30.0"
+version = "0.31.0"
 edition = "2024"
 description = "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents."
 license = "MIT"
@@ -27,13 +27,15 @@ path = "rust/examples/afdata_bench.rs"
 [features]
 # Batteries included by default, for both the binary and the library:
 # `cargo install agent-first-data` gets the full CLI (closed-world help-v2,
-# skill management, stream redirection) and `cargo add agent-first-data` gets every helper
-# including tracing. Consumers that want only the core formatting/redaction/
-# protocol/document surface opt out with `default-features = false`.
+# skill management, stream redirection) and `cargo add agent-first-data` gets
+# the general-purpose helpers including tracing. Consumers that want only the
+# core formatting/redaction/protocol/document surface opt out with
+# `default-features = false`.
 default = [
     "cli",
     "tracing",
     "skill-admin",
+    "libc",
     "stream-redirect",
     "yaml",
     "toml",
@@ -46,12 +48,18 @@ default = [
 # the emitter and version payloads (`cli`), and the `afdata` binary. With it
 # off nothing CLI-shaped is linked, which is exactly what `scripts/test.sh
 # static` builds to prove the data surface stands alone. `OutputFormat` is the
-# deliberate exception: `render` takes it, so it lives in `formatting`.
+# deliberate exception: `render` takes it, so it lives in the feature-neutral
+# `output` module.
 cli = []
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
 skill = ["dep:noyalib"]
 skill-admin = ["skill"]
-stream-redirect = ["dep:libc"]
+# Unix hardened document opens: `O_NONBLOCK` keeps special-file rejection from
+# blocking, and `O_NOFOLLOW` implements `SymlinkPolicy::NoFollow` atomically.
+libc = ["dep:libc"]
+# File-descriptor redirection is Unix-specific and uses libc directly, so
+# selecting it also selects the Unix support it requires.
+stream-redirect = ["libc"]
 yaml = ["dep:noyalib"]
 toml = ["dep:toml", "dep:toml_edit"]
 dotenv = []
@@ -75,6 +83,8 @@ chrono = "0.4"
 url = "2"
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"], optional = true }
+# Used by the `libc` feature for hardened document opens and by
+# `stream-redirect`, which enables that feature.
 libc = { version = "0.2", optional = true }
 noyalib = { version = "0.0.18", features = ["lossless-u64"], optional = true }
 toml = { version = "1", optional = true }

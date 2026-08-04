@@ -31,6 +31,7 @@ export {
   redactedValue,
   redactArgv,
   redactUrlSecrets,
+  redactUrlsInText,
   normalizeUtcOffset,
   isValidRfc3339Date,
   isValidRfc3339Time,

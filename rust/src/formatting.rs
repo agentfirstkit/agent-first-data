@@ -1,15 +1,4 @@
-// `OutputFormat` lives here rather than in `cli` because `render` takes it and
-// `render` is part of the crate's base surface: a consumer with the `cli`
-// feature off still formats values, it just has no emitter or CLI compiler.
-/// Output format for CLI and pipe/MCP modes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OutputFormat {
-    Json,
-    /// Structure-preserving YAML (same semantics as [`OutputFormat::Json`]).
-    Yaml,
-    Plain,
-}
-
+use crate::output::OutputFormat;
 use crate::redaction::{OutputOptions, PlainStyle, REDACTED_MARKER};
 use serde_json::Value;
 
@@ -74,8 +63,16 @@ pub(crate) fn render_plain(value: &Value, output_options: &OutputOptions) -> Str
 // Suffix Processing
 // ═══════════════════════════════════════════
 
+/// Whether a key carries `suffix_lower` under the AFDATA matching rule.
+///
+/// Shared with the linter on purpose: a linter that recognizes a suffix the
+/// renderer does not will certify a field as handled that nothing handles.
+pub(crate) fn has_suffix_ci(key: &str, suffix_lower: &str) -> bool {
+    strip_suffix_ci(key, suffix_lower).is_some()
+}
+
 /// Strip a suffix matching exact lowercase or exact uppercase only.
-fn strip_suffix_ci(key: &str, suffix_lower: &str) -> Option<String> {
+pub(crate) fn strip_suffix_ci(key: &str, suffix_lower: &str) -> Option<String> {
     if let Some(s) = key.strip_suffix(suffix_lower) {
         return Some(s.to_string());
     }
@@ -111,8 +108,6 @@ fn try_strip_generic_micro(key: &str) -> Option<(String, String)> {
     Some((stripped.to_string(), code.to_string()))
 }
 
-/// Try suffix-driven processing. Returns Some((stripped_key, formatted_value))
-/// when suffix matches and type is valid. None for no match or type mismatch.
 /// Accept an integer value, including an integral-valued float (`3.0` → `3`).
 /// Non-integral floats and out-of-range values return `None`. This keeps the
 /// four language implementations consistent: JS/TS cannot distinguish `3` from
@@ -125,12 +120,31 @@ fn as_int(value: &Value) -> Option<i64> {
     if value.is_u64() {
         return value.as_u64()?.try_into().ok();
     }
+    // An integer literal that neither `as_i64` nor `as_u64` accepted is out of
+    // i64 range, and must not reach the float path below: the nearest double to
+    // `i64::MIN - 1` is `i64::MIN` itself, so rounding would clamp it and
+    // format a plausible but wrong amount — worst of all on a money field. The
+    // positive side is already refused by the `is_u64` check above; this is its
+    // missing negative counterpart.
+    if let Value::Number(number) = value
+        && number_is_integer_literal(number)
+    {
+        return None;
+    }
     let f = value.as_f64()?;
     let upper_exclusive = -(i64::MIN as f64);
     if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f < upper_exclusive {
         return Some(f as i64);
     }
     None
+}
+
+/// Whether the producer wrote this number as an integer literal.
+///
+/// Shared with the linter: both need to tell "the author wrote an integer" from
+/// "the value happens to be integral", and they must not answer it differently.
+pub(crate) fn number_is_integer_literal(number: &serde_json::Number) -> bool {
+    !number.to_string().contains(['.', 'e', 'E'])
 }
 
 /// Like [`as_int`] but for non-negative integers (rejects negatives).
@@ -167,6 +181,9 @@ fn epoch_ns_to_ms(value: &Value) -> Option<i64> {
     ns.div_euclid(1_000_000).try_into().ok()
 }
 
+/// Try suffix-driven processing. Returns `Some((stripped_key, formatted_value))`
+/// when the suffix matches and the type is valid; `None` for no match or a type
+/// mismatch.
 fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
     // Group 1: compound timestamp suffixes
     if let Some(stripped) = strip_suffix_ci(key, "_epoch_ms") {
@@ -185,31 +202,46 @@ fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
 
     // Group 2: compound currency suffixes
     if let Some(stripped) = strip_suffix_ci(key, "_usd_cents") {
-        return as_int(value)
-            .filter(|n| *n >= 0)
-            .map(|n| (stripped, format!("${}.{:02}", n / 100, n % 100)));
-    }
-    if let Some(stripped) = strip_suffix_ci(key, "_eur_cents") {
-        return as_int(value)
-            .filter(|n| *n >= 0)
-            .map(|n| (stripped, format!("€{}.{:02}", n / 100, n % 100)));
-    }
-    if let Some((stripped, code)) = try_strip_generic_cents(key) {
-        return as_int(value).filter(|n| *n >= 0).map(|n| {
+        return as_int(value).map(|n| {
+            let (sign, magnitude) = signed_magnitude(n);
             (
                 stripped,
-                format!("{}.{:02} {}", n / 100, n % 100, code.to_uppercase()),
+                format!("{sign}${}.{:02}", magnitude / 100, magnitude % 100),
+            )
+        });
+    }
+    if let Some(stripped) = strip_suffix_ci(key, "_eur_cents") {
+        return as_int(value).map(|n| {
+            let (sign, magnitude) = signed_magnitude(n);
+            (
+                stripped,
+                format!("{sign}€{}.{:02}", magnitude / 100, magnitude % 100),
+            )
+        });
+    }
+    if let Some((stripped, code)) = try_strip_generic_cents(key) {
+        return as_int(value).map(|n| {
+            let (sign, magnitude) = signed_magnitude(n);
+            (
+                stripped,
+                format!(
+                    "{sign}{}.{:02} {}",
+                    magnitude / 100,
+                    magnitude % 100,
+                    code.to_uppercase()
+                ),
             )
         });
     }
     if let Some((stripped, code)) = try_strip_generic_micro(key) {
-        return as_int(value).filter(|n| *n >= 0).map(|n| {
+        return as_int(value).map(|n| {
+            let (sign, magnitude) = signed_magnitude(n);
             (
                 stripped,
                 format!(
-                    "{}.{:06} {}",
-                    n / 1_000_000,
-                    n % 1_000_000,
+                    "{sign}{}.{:06} {}",
+                    magnitude / 1_000_000,
+                    magnitude % 1_000_000,
                     code.to_uppercase()
                 ),
             )
@@ -253,9 +285,13 @@ fn try_process_field(key: &str, value: &Value) -> Option<(String, String)> {
     }
     // Group 5: short suffixes (last to avoid false positives)
     if let Some(stripped) = strip_suffix_ci(key, "_jpy") {
-        return as_int(value)
-            .filter(|n| *n >= 0)
-            .map(|n| (stripped, format!("¥{}", format_with_commas(n as u64))));
+        return as_int(value).map(|n| {
+            let (sign, magnitude) = signed_magnitude(n);
+            (
+                stripped,
+                format!("{sign}¥{}", format_with_commas(magnitude)),
+            )
+        });
     }
     if let Some(stripped) = strip_suffix_ci(key, "_ns") {
         return value
@@ -393,7 +429,21 @@ fn format_ms_as_seconds(ms: f64) -> String {
     }
 }
 
-/// Format `_ms` value: < 1000 → `{n}ms`, ≥ 1000 → seconds.
+/// Split a signed integer into its sign text and magnitude.
+///
+/// Taking the magnitude before dividing keeps currency formatting identical
+/// across the four languages: Rust and Go truncate toward zero while Python
+/// floors toward negative infinity, so `-499 / 100` does not agree, but
+/// `-(499 / 100)` does.
+fn signed_magnitude(value: i64) -> (&'static str, u64) {
+    if value < 0 {
+        ("-", value.unsigned_abs())
+    } else {
+        ("", value as u64)
+    }
+}
+
+/// Format `_ms` value: < 1000 → `{n}ms`, >= 1000 → seconds.
 fn format_ms_value(value: &Value) -> Option<String> {
     let n = value.as_f64()?;
     if n.abs() >= 1000.0 {
@@ -465,7 +515,7 @@ pub(crate) fn extract_currency_code(key: &str) -> Option<&str> {
 }
 
 /// Extract currency code from a `_{code}_micro` / `_{CODE}_MICRO` suffix.
-fn extract_currency_code_micro(key: &str) -> Option<&str> {
+pub(crate) fn extract_currency_code_micro(key: &str) -> Option<&str> {
     let without_micro = key
         .strip_suffix("_micro")
         .or_else(|| key.strip_suffix("_MICRO"))?;

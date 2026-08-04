@@ -165,6 +165,25 @@
     "expected_plain": "created_at=2025-02-07T00:00:00.000Z fee=\u00a51,500 file_size=5.0MiB price=$9.99"
   },
   {
+    "name": "signed_fiat_amounts_are_formatted",
+    "input": {
+      "adjustment_eur_cents": -850,
+      "chargeback_usd_cents": -499,
+      "correction_thb_cents": -15050,
+      "credit_usd_micro": -170000,
+      "refund_jpy": -1500
+    },
+    "expected_json": {
+      "adjustment_eur_cents": -850,
+      "chargeback_usd_cents": -499,
+      "correction_thb_cents": -15050,
+      "credit_usd_micro": -170000,
+      "refund_jpy": -1500
+    },
+    "expected_yaml": "---\nadjustment_eur_cents: -850\nchargeback_usd_cents: -499\ncorrection_thb_cents: -15050\ncredit_usd_micro: -170000\nrefund_jpy: -1500",
+    "expected_plain": "adjustment=-\u20ac8.50 chargeback=-$4.99 correction=\"-150.50 THB\" credit=\"-0.170000 USD\" refund=-\u00a51,500"
+  },
+  {
     "name": "fractional_floats_render_shortest_round_trip",
     "input": {
       "ratio_percent": 99.9,

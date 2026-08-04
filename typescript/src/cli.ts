@@ -19,7 +19,8 @@ export type OutputFormat = "json" | "yaml" | "plain";
 
 /**
  * Parse the --output flag value into an OutputFormat.
- * Throws on unknown values; catch and pass message to buildCliError.
+ * Throws a value-safe message on unknown values; catch and pass it to
+ * buildCliError.
  *
  * @example
  * cliParseOutput("json") // → "json"
@@ -29,7 +30,7 @@ export function cliParseOutput(s: string): OutputFormat {
   if (s === "json" || s === "yaml" || s === "plain") {
     return s;
   }
-  throw new Error(`invalid --output format '${s}': expected json, yaml, or plain`);
+  throw new Error("invalid --output format: expected json, yaml, or plain");
 }
 
 /**
@@ -130,8 +131,8 @@ export type OutputTo = "split" | "stdout" | "stderr";
 
 /**
  * Parse an `--output-to` value into an OutputTo: "split" (default), "stdout", or
- * "stderr". Throws on unknown values; catch and pass the message to
- * buildCliError.
+ * "stderr". Throws a value-safe message on unknown values; catch and pass it
+ * to buildCliError.
  *
  * @example
  * parseOutputTo("split") // → "split"
@@ -141,7 +142,7 @@ export function parseOutputTo(value: string): OutputTo {
   if (value === "split" || value === "stdout" || value === "stderr") {
     return value;
   }
-  throw new Error(`invalid --output-to '${value}': expected split, stdout, or stderr`);
+  throw new Error("invalid --output-to: expected split, stdout, or stderr");
 }
 
 /** Event writer bound to the process stdout stream. */

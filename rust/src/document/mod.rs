@@ -14,6 +14,7 @@
 //! - **ini**: Enable INI Core v1 format support
 //! - **markdown**: Enable the read-only CommonMark block reader
 //! - **schema**: Enable the `CliSchema` trait and documentation rendering
+//! - **libc**: Enable nonblocking and atomic no-follow document opens on unix
 //!
 //! This module never redacts values on decode/encode/save — it returns and
 //! saves raw values as-is; redaction is the caller's responsibility.
@@ -37,7 +38,7 @@ pub use coerce::{
     guard_bare_overwrite, scalar_kind, value_from_type, value_matches_type,
 };
 pub use error::{DocumentError, DocumentResult};
-pub use file::{Document, DocumentFile};
+pub use file::{CreateMode, CreateOptions, Document, DocumentFile, SymlinkPolicy};
 pub use keyed::{Addressing, ArrayRule, KeyedList, MatchKind, add_keyed, remove_keyed};
 pub use path::{PatternSegment, join_path, parse_path, parse_path_pattern};
 pub(crate) use traverse::keyed_prefix_matches;

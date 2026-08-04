@@ -6,7 +6,8 @@ mapping when their protocol requires it.
 
 ## CLI
 
-Structured stdout uses AFDATA protocol v1 events.
+Structured CLI output uses AFDATA protocol v1 events. Finite commands split
+result data from diagnostics; ordered event streams keep all events together.
 
 JSON multi-event output is JSONL/NDJSON: one complete event per line.
 Plain multi-event output is one display event per line. YAML multi-event output
@@ -19,15 +20,28 @@ Finite CLI executions follow:
 (log | progress)* -> exactly one (result | error) -> end
 ```
 
-`result` maps to exit code `0`. `error` maps to a non-zero exit code. AFDATA
-does not define a global detailed exit-code table.
+The default finite routing is:
 
-If a finite CLI observes cancellation before completion and stdout is still
-writable, it may emit a tool-defined `error` event such as
-`error.code: "cancelled"` and exit non-zero. If stdout is closed first, including
-broken pipes, the CLI cannot reliably send a terminal AFDATA event; classify the
-run as transport interruption with unknown business result. Broken pipes should
-not produce panic, traceback, or stack diagnostics.
+- `result` → stdout
+- `error`, `log`, and `progress` → stderr
+
+An ordered event stream routes every kind to one destination (stdout by
+default), because splitting would lose order. `--output-to split|stdout|stderr`
+selects finite split routing or a collapsed destination; an event-stream
+command rejects `split`.
+
+Routing follows `kind`, not process status. A `result` remains on the result
+channel when a tool-defined condition uses a non-zero exit code, and an `error`
+remains on the error channel. AFDATA reserves exit 2 for closed-world CLI usage
+failures but does not define a global detailed exit-code table.
+
+If a finite CLI observes cancellation before completion and its error
+destination is still writable, it may emit a tool-defined `error` event such
+as `error.code: "cancelled"` and exit non-zero. If the selected destination is
+closed first, including a broken pipe on a collapsed stdout stream, the CLI
+cannot reliably send a terminal AFDATA event; classify the run as transport
+interruption with unknown business result. Broken pipes should not produce
+panic, traceback, or stack diagnostics.
 
 ## HTTP
 

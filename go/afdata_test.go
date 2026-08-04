@@ -58,6 +58,11 @@ func redactorFromCase(tc map[string]any) Redactor {
 			redactor.SecretNames = append(redactor.SecretNames, name.(string))
 		}
 	}
+	if names, ok := opts["url_names"].([]any); ok {
+		for _, name := range names {
+			redactor.URLNames = append(redactor.URLNames, name.(string))
+		}
+	}
 	return redactor
 }
 
@@ -77,6 +82,20 @@ func TestRedactURLFixtures(t *testing.T) {
 			expected := tc["expected"].(string)
 			options := redactorFromCase(tc)
 			got := options.URL(input)
+			if got != expected {
+				t.Errorf("got %q, want %q", got, expected)
+			}
+		})
+	}
+}
+
+func TestRedactURLsInTextFixtures(t *testing.T) {
+	for _, tc := range loadFixture("redact_urls_in_text.json") {
+		name := tc["name"].(string)
+		t.Run(name, func(t *testing.T) {
+			input := tc["input"].(string)
+			expected := tc["expected"].(string)
+			got := redactorFromCase(tc).URLsInText(input)
 			if got != expected {
 				t.Errorf("got %q, want %q", got, expected)
 			}
@@ -1315,9 +1334,49 @@ func TestInt64BoundaryStillFormats(t *testing.T) {
 	if got != "amount=¥9,223,372,036,854,775,807" {
 		t.Errorf("MaxInt64 should format: got %q", got)
 	}
+	got = Render(map[string]any{"amount_usd_cents": int64(math.MinInt64)}, OutputFormatPlain, OutputOptions{})
+	if got != "amount=-$92233720368547758.08" {
+		t.Errorf("MinInt64 signed fiat should format without overflow: got %q", got)
+	}
 	// The nearest float64 at or above 2^63 is 2^63 exactly, which is out of range.
 	got = Render(map[string]any{"amount_jpy": 9223372036854775808.0}, OutputFormatPlain, OutputOptions{})
 	if !strings.HasPrefix(got, "amount_jpy=") {
 		t.Errorf("2^63 should fall through: got %q", got)
+	}
+}
+
+// An out-of-range integer literal must reach Render as a json.Number, not a
+// float64. Decoded as a float64 it rounds to exactly -2^63 and would format as
+// a plausible but wrong amount, so this pins the decoder setting the whole
+// number-fidelity path depends on rather than the formatter it protects.
+func TestOutOfRangeFiatLiteralSurvivesDecodeAsRawValue(t *testing.T) {
+	for _, literal := range []string{
+		"-9223372036854775809",
+		"-9223372036854776832",
+		"9223372036854775808",
+	} {
+		line := `{"chargeback_usd_cents": ` + literal + `}`
+		dec := json.NewDecoder(strings.NewReader(line))
+		dec.UseNumber()
+		var decoded map[string]any
+		if err := dec.Decode(&decoded); err != nil {
+			t.Fatalf("decode %s: %v", literal, err)
+		}
+		got := Render(decoded, OutputFormatPlain, OutputOptions{})
+		want := "chargeback_usd_cents=" + literal
+		if got != want {
+			t.Errorf("out-of-range %s must fall through: got %q want %q", literal, got, want)
+		}
+	}
+
+	// The in-range boundary still formats through the same path.
+	dec := json.NewDecoder(strings.NewReader(`{"chargeback_usd_cents": -9223372036854775808}`))
+	dec.UseNumber()
+	var decoded map[string]any
+	if err := dec.Decode(&decoded); err != nil {
+		t.Fatalf("decode boundary: %v", err)
+	}
+	if got := Render(decoded, OutputFormatPlain, OutputOptions{}); got != "chargeback=-$92233720368547758.08" {
+		t.Errorf("i64::MIN should format: got %q", got)
 	}
 }

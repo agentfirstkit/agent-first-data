@@ -6,9 +6,9 @@
 //! `cargo run --example agent_cli -- ping --host example.com`
 
 use agent_first_data::{
-    ArgSpec, CliOutcome, CliSpec, Combination, CommandSpec, Event, OutputFormat, OutputPlan,
-    OutputSpec, OutputTo, ResolvedInvocation, cli_error_event, cli_help_event, cli_version_event,
-    json_error, json_result, render,
+    ArgSpec, BoundOutcome, CliEmitter, CliSpec, Combination, CommandSpec, Event, OutputFormat,
+    OutputPlan, OutputSpec, OutputTo, ResolvedInvocation, build_cli_error, cli_error_event,
+    cli_help_event, cli_version_event, json_error, json_result, render_cli_reference,
 };
 use serde_json::json;
 use std::process::ExitCode;
@@ -72,64 +72,58 @@ fn cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data::CliSpe
 }
 
 fn echo(invocation: &ResolvedInvocation) -> Event {
+    let Some(message) = invocation.required("message").as_str() else {
+        return build_cli_error("resolved echo invocation is missing `message`", None);
+    };
     json_result(json!({
         "code": "echo",
-        "message": invocation.required("message").as_str(),
+        "message": message,
         "dry_run": invocation.optional("dry_run").and_then(|value| value.as_bool()).unwrap_or(false),
     }))
     .build()
 }
 
 fn ping(invocation: &ResolvedInvocation) -> Event {
+    let Some(host) = invocation.required("host").as_str() else {
+        return build_cli_error("resolved ping invocation is missing `host`", None);
+    };
     json_result(json!({
         "code": "ping",
-        "host": invocation.required("host").as_str(),
+        "host": host,
     }))
     .build()
 }
 
 fn release(invocation: &ResolvedInvocation) -> Event {
+    let Some(version) = invocation.required("version").as_str() else {
+        return build_cli_error("resolved release invocation is missing `version`", None);
+    };
     json_result(json!({
         "code": "release",
-        "version": invocation.required("version").as_str(),
+        "version": version,
     }))
     .build()
 }
 
-fn output_format(plan: &OutputPlan) -> OutputFormat {
-    match plan.format() {
-        Some("yaml") => OutputFormat::Yaml,
-        Some("plain") => OutputFormat::Plain,
-        _ => OutputFormat::Json,
-    }
+fn plan_format(plan: &OutputPlan) -> OutputFormat {
+    plan.output_format().unwrap_or(OutputFormat::Json)
 }
 
-// Routing, and the rule that a broken pipe is not a failure, belong to AFDATA:
-// `--docs` and plain help are injected into every registry, so a CLI that
-// hand-rolled this write would be reimplementing a decision it does not own.
-fn write_text(text: &str, stderr: bool, code: u8) -> ExitCode {
-    let selector = if stderr {
-        OutputTo::Stderr
-    } else {
-        OutputTo::Stdout
-    };
-    match agent_first_data::write_raw(text, selector) {
-        Ok(()) => ExitCode::from(code),
-        Err(_) => ExitCode::FAILURE,
-    }
+fn plan_destination(plan: &OutputPlan) -> OutputTo {
+    plan.output_to().unwrap_or(OutputTo::Stdout)
 }
 
-fn write_event(event: &Event, plan: &OutputPlan, is_error: bool) -> ExitCode {
-    let mut text = render(
-        event.as_value(),
-        output_format(plan),
-        &agent_first_data::OutputOptions::default(),
-    );
-    if !text.ends_with('\n') {
-        text.push('\n');
+fn emit_event(event: Event, plan: &OutputPlan, success_code: u8) -> ExitCode {
+    let mut emitter = CliEmitter::from_output_to(plan_destination(plan), plan_format(plan))
+        .with_strict_protocol();
+    ExitCode::from(emitter.finish(event, success_code))
+}
+
+fn write_text(text: &str, plan: &OutputPlan) -> ExitCode {
+    match agent_first_data::write_raw(text, plan_destination(plan)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(_) => ExitCode::from(4),
     }
-    let stderr = is_error || plan.destination() == Some("stderr");
-    write_text(&text, stderr, if is_error { 2 } else { 0 })
 }
 
 fn write_startup_error(code: &str, message: &str) -> ExitCode {
@@ -137,13 +131,9 @@ fn write_startup_error(code: &str, message: &str) -> ExitCode {
         Ok(event) => event,
         Err(_) => return ExitCode::FAILURE,
     };
-    let mut text = render(
-        event.as_value(),
-        OutputFormat::Json,
-        &agent_first_data::OutputOptions::default(),
-    );
-    text.push('\n');
-    write_text(&text, true, 1)
+    let mut emitter =
+        CliEmitter::from_output_to(OutputTo::Stderr, OutputFormat::Json).with_strict_protocol();
+    ExitCode::from(emitter.finish(event, 1))
 }
 
 fn main() -> ExitCode {
@@ -162,36 +152,34 @@ fn main() -> ExitCode {
     let outcome = match app.resolve_from(std::env::args_os()) {
         Ok(outcome) => outcome,
         Err(error) => {
-            let plan = OutputPlan::Protocol {
-                lifecycle: agent_first_data::OutputLifecycle::Finite,
-                format: "json".to_string(),
-                destination: "stderr".to_string(),
-                stdout_file: None,
-                stderr_file: None,
-            };
-            return write_event(&cli_error_event(&error), &plan, true);
+            let mut emitter = CliEmitter::from_output_to(OutputTo::Stderr, OutputFormat::Json)
+                .with_strict_protocol();
+            return ExitCode::from(emitter.finish(cli_error_event(&error), error.exit_code()));
         }
     };
     match outcome {
-        CliOutcome::Run(invocation) => {
-            let event = app.execute(&invocation);
-            write_event(&event, invocation.output_plan(), false)
+        BoundOutcome::Run(invocation) => {
+            // `run` consumes the invocation, so take the plan first — it is
+            // readable before the handler runs precisely so a caller can set up
+            // its output before anything is emitted.
+            let plan = invocation.output_plan().clone();
+            let event = invocation.run();
+            let exit_code = if event.as_value()["kind"].as_str() == Some("error") {
+                1
+            } else {
+                0
+            };
+            emit_event(event, &plan, exit_code)
         }
-        // Injected into every registry: an offline reference without registering
-        // a command, and without a line of the agent's discovery surface.
-        CliOutcome::Docs(docs) => write_text(
-            &agent_first_data::render_cli_reference(&cli),
-            docs.output_plan().destination() == Some("stderr"),
-            0,
-        ),
-        CliOutcome::Help(help) if help.output_plan().format() == Some("plain") => write_text(
-            &help.plain(),
-            help.output_plan().destination() == Some("stderr"),
-            0,
-        ),
-        CliOutcome::Help(help) => write_event(&cli_help_event(&help), help.output_plan(), false),
-        CliOutcome::Version(version) => {
-            write_event(&cli_version_event(&version), version.output_plan(), false)
+        BoundOutcome::Docs(docs) => write_text(&render_cli_reference(&cli), docs.output_plan()),
+        BoundOutcome::Help(help)
+            if help.output_plan().output_format() == Some(OutputFormat::Plain) =>
+        {
+            write_text(&help.plain(), help.output_plan())
+        }
+        BoundOutcome::Help(help) => emit_event(cli_help_event(&help), help.output_plan(), 0),
+        BoundOutcome::Version(version) => {
+            emit_event(cli_version_event(&version), version.output_plan(), 0)
         }
     }
 }
@@ -199,6 +187,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_first_data::CliOutcome;
 
     #[test]
     fn help_comes_from_registered_combinations() {

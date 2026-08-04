@@ -79,6 +79,20 @@ pub fn cli_version_event(version: &ResolvedVersion) -> Event {
     )
 }
 
+/// Static prose for the generated CLI reference.
+///
+/// Kept as Markdown files rather than escaped Rust string literals: these are
+/// paragraphs, and as `\`-continued literals they cannot be read as prose in a
+/// diff, need every backtick and quote escaped, and turn a wording change into
+/// an exercise in line continuations. The surrounding structure — headings,
+/// tables, per-command sections — stays in code, because that part is generated
+/// from the registry and is not prose.
+///
+/// This reference is emitted by every spore's `--docs`, not just afdata's, so
+/// the text is shared library data and belongs beside the generator.
+const SHAPES_PROSE: &str = include_str!("cli_reference/shapes.md");
+const CLI_ERRORS_PROSE: &str = include_str!("cli_reference/cli-errors.md");
+
 /// Render an offline Markdown reference for a whole registry.
 ///
 /// help-v2 is deliberately lossy: it answers "how do I call this" one command
@@ -184,12 +198,8 @@ pub fn render_cli_reference(cli: &BuiltCliSpec) -> String {
              **Output** line says otherwise.\n\n",
         );
     }
-    out.push_str(
-        "A **shape** is one legal set of arguments that may appear together, under a stable id. \
-         Where a command has more than one, each id is a heading below. `--help` returns them \
-         all at once, so discovering a command costs one call; there is no recursive mode across \
-         commands, and this document is that view.\n\n",
-    );
+    out.push_str(SHAPES_PROSE);
+    out.push('\n');
 
     out.push_str("## Commands\n\n");
     for command in &commands {
@@ -278,20 +288,7 @@ pub fn render_cli_reference(cli: &BuiltCliSpec) -> String {
     );
 
     out.push_str("## CLI errors\n\n");
-    out.push_str(
-        "Every structural failure emits one strict JSON `kind:\"error\"` event on stderr, leaves \
-         stdout empty, and exits 2. The `code` names the failure — `cli_unknown_argument` for an \
-         unknown spelling, `cli_unregistered_combination` for registered arguments in a mixture \
-         that is not, and one each for `cli_unknown_command`, `cli_missing_argument_value`, \
-         `cli_invalid_argument_value`, `cli_duplicate_argument`, `cli_unexpected_positional`, and \
-         `cli_invalid_utf8`. `message` names the offending argument and `hint` gives the command \
-         to run next; neither ever quotes a raw value, including secrets. These are decided \
-         before any config, secret source, filesystem, network, or domain I/O.\n\n\
-         Domain failures (exit 1) carry their own stable `error.code` instead, drawn from \
-         whatever this tool defines rather than from the `cli_*` set. No error message quotes a \
-         raw value it was given — an error event is routinely logged, and the input may hold \
-         secrets.\n",
-    );
+    out.push_str(CLI_ERRORS_PROSE);
     out
 }
 
@@ -434,6 +431,36 @@ pub fn cli_error_event(error: &CliError) -> Event {
     }
 }
 
+/// The standard event for a program that misread its own resolved invocation.
+///
+/// Dispatch itself cannot fail — [`BoundCliSpec::resolve_from`] binds the
+/// handler while resolving, so there is no undispatchable invocation to report.
+/// What remains is a handler reading an argument the selected combination does
+/// not supply: an id it does not declare, or one whose type does not match the
+/// accessor. [`BoundCliSpec::call_every_combination`] catches the first from a
+/// test; this is for a program that also wants to say something at runtime.
+///
+/// It is a defect in the program, never in what the user typed, and the code
+/// and exit status have to say so. Reporting it as a usage error tells the
+/// caller to fix their command line and retry, and retrying cannot help — a
+/// mistake that has already been made in the wild, as
+/// `cli_invalid_argument_value` at exit 2. Emit this and exit 1; the
+/// application still owns the exit.
+pub fn cli_invocation_invalid_event(detail: &str) -> Event {
+    let builder = json_error("cli_invocation_invalid", detail)
+        .hint("this is a defect in the program, not in the command; report it");
+    match builder.build() {
+        Ok(event) => event,
+        Err(_) => json_error("cli_invocation_invalid", "invocation cannot be dispatched")
+            .build()
+            .unwrap_or_else(|_| {
+                // The literals above are valid, so this is unreachable; it
+                // keeps the path panic-free the way `cli_error_event` does.
+                json_result(serde_json::json!({"code":"internal_cli_error"})).build()
+            }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,6 +587,26 @@ mod tests {
         // The command to run next reaches the caller through `hint`, which is
         // the channel every error event already has.
         assert!(serialized.contains("run `demo --help`"));
+    }
+
+    /// The point of shipping this helper is that every consumer reports the
+    /// same thing. Pin the code, so a consumer branching on it keeps working,
+    /// and pin that it is not a `cli_*` usage code — a caller must not be told
+    /// to fix their command line for a defect in the program.
+    #[test]
+    fn invocation_invalid_event_is_a_program_defect_not_a_usage_error() {
+        let event = cli_invocation_invalid_event("no handler for this registry's invocation");
+        let serialized = serde_json::to_string(event.as_value()).unwrap();
+
+        assert!(serialized.contains("\"code\":\"cli_invocation_invalid\""));
+        assert!(serialized.contains("no handler for this registry's invocation"));
+        // The hint has to say who should act. A usage hint here would send the
+        // caller to debug their own arguments for a dispatch-table bug.
+        assert!(serialized.contains("defect in the program"));
+        assert!(
+            crate::validate_protocol_event(event.as_value(), true).is_ok(),
+            "the helper must emit a strict event: {serialized}"
+        );
     }
 
     #[test]

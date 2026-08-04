@@ -42,8 +42,11 @@ protocol fields, or help fields.
   of argv; use `redact_argv` before recording an invocation.
 - Name whole URL values `_url`; scrub userinfo passwords and explicitly
   secret-named query parameters.
+- Configure exact `url_names` for legacy URL fields; collection values recurse
+  without guessing unrelated field names.
 - Do not scan arbitrary prose for secrets. Rename the field or configure an
-  exact secret name at the serialization boundary.
+  exact secret name at the serialization boundary; use the explicit
+  `redact_urls_in_text` helper only for complete scheme URLs embedded in prose.
 - Keep JSON and YAML schema-preserving. Use plain output only as the lossy,
   human-readable form.
 - Register legal invocation combinations; do not infer legality from parser
@@ -61,8 +64,8 @@ protocol fields, or help fields.
 3. Use the runtime library instead of reimplementing suffix formatting,
    redaction, event envelopes, or CLI errors.
 4. Redact before serialization. For HTTP/MCP/SSE paths that bypass `render`,
-   call `redacted_value`; use `redact_url_secrets` before embedding a URL in
-   prose.
+   call `redacted_value`; use `redact_url_secrets` for one URL or
+   `redact_urls_in_text` for scheme URLs already embedded in prose.
 5. For new CLIs, construct one `CliSpec`, register every executable
    `Combination`, resolve to `CliOutcome`, and dispatch only by `action_id`.
    Parser, combination matching, typed values, output planning, and help must

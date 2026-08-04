@@ -43,6 +43,10 @@ Use `afdata_args_option`, `afdata_args_flag`, `afdata_args_positional`, and
 structured output routing — never redeclare `--output`, `--output-to`, or
 `--help`. `afdata_args_rest` takes only a display name and a description;
 trailing arguments always land in `AFDATA_ARGS_REST`, never a variable you name.
+Usage errors name the option or argument category but never echo a supplied
+value. Output selectors from an argv are committed only after that whole argv
+parses successfully, so a malformed call cannot redirect or reformat its own
+usage error. Preserve both properties in wrapper diagnostics.
 
 ## Config and events
 

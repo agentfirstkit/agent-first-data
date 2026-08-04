@@ -140,7 +140,7 @@ Bitcoin:
 
 AFDATA does not define a floating `_btc` suffix. Use integer `_sats` or `_msats` instead.
 
-Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` for currencies without (JPY). Always integers:
+Fiat — `_{iso4217}_cents` for currencies with 1/100 subdivision, `_{iso4217}` for currencies without (JPY). Always signed integers: positive and negative values represent amounts in the same unit, so refunds, credits, reversals, and deltas do not need a second suffix:
 
 | Suffix | Unit | Example |
 |:-------|:-----|:--------|
@@ -157,7 +157,7 @@ Sub-cent precision — `_{code}_micro` for integer micro-units, one millionth (1
 |:-------|:-----|:--------|
 | `_{code}_micro` | millionths of one major unit | `cost_usd_micro: 170000` (= $0.17) |
 
-`_{code}_micro` is the fiat analog of `_msats`: when cents are too coarse (per-token LLM pricing, metered API costs, unit-economics accounting), do not switch to decimal cents — move to a smaller integer unit. Values are always integers. Use `_{code}_cents` for user-facing amounts and `_{code}_micro` for high-precision internal accounting.
+`_{code}_micro` is the fiat analog of `_msats`: when cents are too coarse (per-token LLM pricing, metered API costs, unit-economics accounting), do not switch to decimal cents — move to a smaller integer unit. Values are always signed integers. Use `_{code}_cents` for user-facing amounts and `_{code}_micro` for high-precision internal accounting.
 
 ### Sensitive
 
@@ -168,6 +168,15 @@ Sub-cent precision — `_{code}_micro` for integer micro-units, one millionth (1
 
 All CLI output formats (JSON, YAML, Plain) automatically redact `_secret` fields. Any `_secret` value — scalar, object, or array — becomes the scalar string `***`, so a secret-marked container never leaks through JSON, YAML, Plain, or collision fallback. The one exception is `null`, which is preserved: a null secret is an *absent* secret, and masking it would manufacture the appearance of a configured credential — a reader cannot tell `***`-because-set from `***`-because-null, so a tool showing its own config would report every unset secret as configured. Redaction hides a value that exists; it does not invent one. (An empty string is a value and is still redacted; only `null` is absence.) Matching recognizes `_secret` and `_SECRET` only. Config files always store the real value. For legacy payloads that cannot rename fields to `_secret`, use `OutputOptions.redaction.secret_names` (a configured `Redactor` in Rust/Go, keyword arguments in Python/TS) at serialization time; names match exact field names at any nesting level, with no trim, case folding, hyphen/underscore normalization, globs, regex, or substring matching. Secret-name lists only affect redaction; formatting suffix stripping is a Plain-only concern, controlled by AFDATA suffixes in Plain's default readable style. AFDATA does not define named redaction profiles; use the default `All`, `secret_names`, `TraceOnly`, or `Off` deliberately at the serialization boundary. YAML is always schema-preserving, regardless of style. Callers that need schema-preserving Plain rendering can use `OutputOptions` with `PlainStyle::Raw`.
 
+Legacy URL fields that cannot be renamed use an explicit `url_names` list at
+the same boundary (`Redactor::url_names` / `Redactor.URLNames`,
+`OutputOptions.url_names`, or `OutputOptions.redaction.urlNames` in native
+casing). Matching is the same exact field-name equality as `secret_names`.
+A matching string receives `_url` treatment; arrays and nested objects recurse
+into every string leaf. A secret-named child still redacts its whole value
+first. Benign non-URL strings remain unchanged, while malformed
+credential-looking leaves retain the normal `_url` fail-closed behavior.
+
 **Guarantee boundary.** `_secret` protects a structured field only when that
 value passes through an AFDATA redactor or renderer. It does not scrub process
 argv, shell history, `/proc`, a parent process, free-form prose, or third-party
@@ -175,13 +184,16 @@ logs. Keep live secrets out of argv. A CLI that records its invocation must
 call `redact_argv` before logging argv, but that only protects the resulting
 structured log; it cannot retroactively protect the process boundary.
 
-The marker `***` has exactly one meaning in AFDATA output: a value was redacted because its field name, URL query parameter name, or explicit `secret_names` entry made it sensitive. It is not used for serialization failures, truncation, unsupported types, or arbitrary “maybe secret” guesses.
+The marker `***` has exactly one meaning in AFDATA output: a value was redacted because its field name, URL query parameter name, explicit `secret_names` entry, or exact `url_names` URL context made it sensitive. It is not used for serialization failures, truncation, unsupported types, or arbitrary “maybe secret” guesses.
 
 #### Secrets inside URLs
 
-Key-based redaction cannot reach a secret embedded **inside** a URL string — `token` in `wss://host/cdp?token=abc` is not its own field, and the URL often lives in a free-form `error` or log message that must stay readable. Implementations expose a URL-aware helper for this:
+Key-based redaction cannot reach a secret embedded **inside** a URL string —
+`token` in `wss://host/cdp?token=abc` is not its own field. Implementations
+therefore expose two explicit URL-aware helpers:
 
 - `redact_url_secrets(url, *, secret_names=())` (Python) / `redactUrlSecrets(url, options?)` (TS) / `redact_url_secrets(url)` with `Redactor{secret_names}.url(url)` for custom names (Rust/Go) — returns `url` with its secret components redacted to `***`.
+- `redact_urls_in_text(text, ...)` (Rust/Python) / `redactUrlsInText(text, options?)` (TS) / `RedactURLsInText(text)` or `Redactor.URLsInText(text)` (Go) — recognizes complete scheme-prefixed URL spans inside prose and applies the same URL redactor to those spans only.
 
 The same secret decision as everywhere else applies, **to the URL's query-parameter names**: a parameter is redacted iff its (form-decoded) name ends in `_secret`/`_SECRET`, or matches an exact entry in `secret_names`. No built-in list of "sensitive" parameter names exists — a legacy parameter such as `?token=` is redacted only when the caller passes `secret_names: ["token"]`, exactly as for legacy field names. Consumers that own the URL should instead rename the parameter to follow the suffix convention (`?token_secret=`).
 
@@ -191,11 +203,83 @@ Independently of the parameter convention, the **userinfo password** component i
 
 **Input must be a single URL.** The standalone helper processes a string iff it begins with a scheme (`^[A-Za-z][A-Za-z0-9+.-]*://`) and contains no whitespace; any other string — including a URL embedded in surrounding prose — is returned unchanged. Callers that build messages around a URL redact the URL **before** interpolating it: `format("connect {}: {}", redact_url_secrets(url), err)`.
 
-**Surgical replacement.** Only the secret spans (a secret parameter's value bytes after `=` up to the next `&`/`#`/end; the password bytes after the first `:` in userinfo up to the authority's last `@`) are replaced with the literal `***`. Every other byte — scheme, host, path, benign parameters, percent-encoding, ordering — is preserved exactly. Implementations parse with their URL library but must not re-serialize the whole URL (normalization differs across libraries and would break cross-language parity); output equals input outside the redacted spans.
+**Prose scanning is explicit and URL-only.** `redact_urls_in_text` exists for a
+message that already contains URLs. It recognizes only structurally complete
+scheme URL spans, delegates each span to the standalone URL redactor, and
+preserves the surrounding text and punctuation. Structured redaction never
+calls it by default, and it never scans arbitrary prose for secret-looking
+names or values.
+
+**The span grammar.** Where a span begins and ends is part of the contract, not
+an implementation detail: four languages must cut the same bytes out of the same
+message. Spans are found left to right, and the scan for the next one resumes at
+the end of the previous one.
+
+- *Scheme start.* Candidate schemes are looked for at the head of a maximal run
+  of scheme bytes (`A`–`Z`, `a`–`z`, `0`–`9`, `+`, `-`, `.`) — a scheme cannot
+  begin in the middle of such a run, so the `https` inside `foo-https://h/` is not
+  a second candidate and the span starts at `f`. A run that does *not* begin with
+  an ASCII letter is retried from its first ASCII letter rather than abandoned:
+  `2https://h/?token_secret=x` is a URL with a digit glued to its front, and
+  giving up on it fails open, leaving the whole query readable.
+- *Span end.* The span runs from the scheme start to the first whitespace
+  character, the first text delimiter
+  (`"` `'` `<` `>` `` ` `` `，` `。` `；` `！` `？` `）` `》` `】` `」` `』`), or the
+  end of the text. Whitespace here is the Unicode `White_Space` property,
+  enumerated rather than delegated to each language's native predicate:
+  `U+0009`–`U+000D`, `U+0020`, `U+0085`, `U+00A0`, `U+1680`, `U+2000`–`U+200A`,
+  `U+2028`, `U+2029`, `U+202F`, `U+205F`, `U+3000`. The enumeration is the point.
+  Each language's own predicate covers a different set — JavaScript's `\s` counts
+  `U+FEFF` but not `U+0085`, Python's `str.isspace()` counts `U+001C`–`U+001F`,
+  Rust and Go count neither — and disagreement is a defect in both directions:
+  ending a span early leaves the rest of the query in the clear, while ending it
+  late pulls the following prose into the URL, where redacting the parameter it
+  landed in deletes it. The set is deliberately generous, because this helper
+  exists to keep a message readable while removing the secret: anything a reader
+  sees as a space ends the URL.
+  Two exclusions are equally deliberate. `U+FEFF` (zero-width no-break space) is
+  not `White_Space`; treating it as one would cut
+  `https://h/x<U+FEFF>?token_secret=leak` short and leave the secret in the clear.
+  `U+001C`–`U+001F` (the file, group, record, and unit separators) are not
+  `White_Space` either. Both are ordinary URL bytes here, and a span containing
+  them stays one span. Note this is a different question from the single-URL
+  gate above — *is this whole string one URL?* — which stays ASCII-only; a span
+  the scanner produces contains no whitespace at all, so it satisfies the
+  stricter gate either way.
+- *Trailing trim.* Sentence punctuation is then trimmed back off the end of the
+  span (`.` `,` `;` `!` `)` `]` `}` `，` `。` `；` `！` `）` `》` `】`), so
+  `see https://h/?token_secret=abc).` keeps its `).` outside the URL.
+- *Minimum.* At least one character must survive after `://` once that trim is
+  done. A bare `https://` in prose, or `s://` with nothing attached, is not a
+  span and nothing is replaced.
+
+Each surviving span is handed to the single-URL redactor and every byte outside
+the spans is copied through unchanged.
+
+**Surgical replacement.** Only the secret spans (a secret parameter's value bytes after `=` up to the next `&`/`#`/end; the password bytes after the first `:` in userinfo up to the authority's last `@`) are replaced with the literal `***`. Every other byte — scheme, host, path, benign parameters, percent-encoding, ordering — is preserved exactly. Implementations locate the scheme, authority, query, and fragment spans structurally and form-decode parameter names only; they deliberately do not require a URL library to accept the whole input, because malformed-but-credential-bearing URLs must still be scrubbed and cross-language parsers disagree about them. Output equals input outside the redacted spans.
 
 **The fragment is parameters too, when it holds them.** A fragment written as `k=v(&k=v)*` is subject to the same secret-parameter rule as the query — the OAuth implicit flow returns tokens there, so a fragment is a routine place for a credential to be, and treating it as opaque text means `?token_secret=` is redacted while `#token_secret=` is not. A fragment whose segments contain no `=` carries no parameters and is preserved byte for byte (`#section`, `#`, `#a/b?c`). `secret_names` applies inside the fragment as well.
 
-**Automatic application via the `_url` suffix.** Redaction applies `redact_url_secrets` to the string value of any field whose name ends in `_url`/`_URL` — and **only** those fields. No payload string is scanned: the trigger is the field name, exactly like `_secret`. So `final_url` and `callback_url` are scrubbed automatically, while a free-form `error` or `message` field is never touched even if it contains a URL (redact such a URL with the helper before interpolating it). `Off` disables it along with all other redaction; `TraceOnly` scopes it to the `trace` subtree. A `_url` value with surrounding whitespace is trimmed before URL redaction. A `_url` value that cannot be parsed as a clean scheme-prefixed URL is replaced with `***` rather than silently passing through a likely malformed secret-bearing value when it carries either internal whitespace or an `@` credential sigil — for example a schemeless connection string `user:pass@host:5432/db`, which has no scheme anchor for the surgical span logic. A schemeless, `@`-free, whitespace-free value (e.g. a relative URL `/cb?page=2`) still passes through unchanged. The `secret_names` list applies to query-parameter names inside `_url` values as well. (A field carrying both meanings, e.g. `token_url_secret`, ends in `_secret` and so its whole value is redacted to `***`.)
+**Automatic application via `_url` or `url_names`.** Redaction applies URL
+treatment to any field whose name ends in `_url`/`_URL`, and to an exact legacy
+field name explicitly listed in `url_names`. No unrelated payload string is
+scanned: the trigger is still the field name, exactly like `_secret`. A
+configured legacy URL collection recursively applies the treatment to its
+string leaves. So `final_url`, `callback_url`, and a configured legacy `relays`
+field are scrubbed, while a free-form `error` or `message` field is never
+touched even if it contains a URL (use the explicit prose helper there).
+`Off` disables this along with all other redaction; `TraceOnly` scopes it to the
+`trace` subtree. A URL-context value with surrounding whitespace is trimmed
+before URL redaction. One that cannot be parsed as a clean scheme-prefixed URL
+is replaced with `***` rather than silently passing through a likely malformed
+secret-bearing value when it carries either internal whitespace or an `@`
+credential sigil — for example a schemeless connection string
+`user:pass@host:5432/db`, which has no scheme anchor for the surgical span
+logic. A schemeless, `@`-free, whitespace-free value (e.g. a relative URL
+`/cb?page=2`) still passes through unchanged. The `secret_names` list applies
+to query-parameter names inside these values as well. (A field carrying both
+meanings, e.g. `token_url_secret`, ends in `_secret` and so its whole value is
+redacted to `***`.)
 
 ### No suffix needed
 
@@ -340,8 +424,9 @@ then validates output only against that combination's closed `raw` or
 arguments: stdout remains empty, stderr receives one strict JSON error event,
 and the process exits 2. The failure is named by `error.code` — one
 `cli_*` code per failure kind, beside the `document_*` codes and read the same
-way — with the offending argument in `message` and the next command to run in
-`hint`. Neither ever carries a raw value. A CLI not compiled from a registry
+way — with a safe argument spelling or the failure category in `message` and
+the next command to run in `hint`. Neither ever carries a raw value. A CLI not
+compiled from a registry
 reports the generic `cli_error`; see
 [`protocol-v1.schema.json`](protocol-v1.schema.json).
 
@@ -601,18 +686,18 @@ Strict string suffixes (`_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time
 - `_percent` → append `%` (`85` → `85%`, `99.9` → `99.9%`)
 - `_msats` → append unit (`2056msats`)
 - `_sats` → append unit (`1234sats`)
-- `_usd_cents` → dollars (`999` → `$9.99`), negative falls through
-- `_eur_cents` → euros (`850` → `€8.50`), negative falls through
-- other `_{code}_cents` → major unit with code (`15050` → `150.50 THB`), where `code` is 3-4 ASCII letters; negative falls through
-- `_{code}_micro` → major unit with six decimals and code (`170000` → `0.170000 USD`), where `code` is 3-4 ASCII letters; negative falls through
-- `_jpy` → yen (`1500` → `¥1,500`), negative falls through
+- `_usd_cents` → dollars (`999` → `$9.99`, `-499` → `-$4.99`)
+- `_eur_cents` → euros (`850` → `€8.50`, `-850` → `-€8.50`)
+- other `_{code}_cents` → major unit with code (`15050` → `150.50 THB`, `-15050` → `-150.50 THB`), where `code` is 3-4 ASCII letters
+- `_{code}_micro` → major unit with six decimals and code (`170000` → `0.170000 USD`, `-170000` → `-0.170000 USD`), where `code` is 3-4 ASCII letters
+- `_jpy` → yen (`1500` → `¥1,500`, `-1500` → `-¥1,500`)
 - `_secret` → `***` (already applied by the redaction phase; the formatter does not perform a second, divergent redaction pass)
 
 Strict string fields such as `_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc3339_time` are not value-formatting suffixes; their string values pass through unchanged.
 
 A `_url` field value is preserved byte-for-byte in Plain output except for the redacted secret spans (userinfo password, `_secret`-suffixed/`secret_names` query parameters): the `_url` key is not stripped, and formatting suffixes that appear *inside* the URL — `?timeout_ms=5000`, `?size_bytes=1048576` — are **not** reformatted (`5s`, `1.0MiB`) or stripped, because the URL must round-trip to its server exactly. URL key-stripping/value-formatting applies to JSON object keys, never to query parameters inside a string value. YAML never strips or reformats any key/value in the first place, so a `_url` field renders there exactly like any other field. This is pinned by the `url_params_redacted_not_reformatted` case in [`spec/fixtures/output_formats.json`](fixtures/output_formats.json).
 
-**Type constraints**: `_bytes` and `_epoch_*` require integer values. `_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents`, and `_{code}_micro` require non-negative integers. Duration, Bitcoin, and `_percent` suffixes accept any number. When the value type doesn't match, formatting falls through to the raw value with the original key preserved. An **integral-valued float** counts as an integer for the integer-required suffixes (`3.0` is treated as `3`): a JSON number's value, not its lexical form, decides, because JavaScript cannot distinguish `3` from `3.0` after parsing.
+**Type constraints**: `_bytes` requires a non-negative integer; `_epoch_*` and fiat suffixes (`_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents`, `_{code}_micro`) require integers, with fiat explicitly allowing either sign. Duration, Bitcoin, and `_percent` suffixes accept any number. When the value type doesn't match, formatting falls through to the raw value with the original key preserved. An **integral-valued float** counts as an integer for the integer-required suffixes (`3.0` is treated as `3`): a JSON number's value, not its lexical form, decides, because JavaScript cannot distinguish `3` from `3.0` after parsing.
 
 **Number rendering**: a number is rendered for YAML/plain by the shared fixture-defined decimal form: integral-valued floats drop their trailing `.0` (`3.0` → `3`), exponent markers use lowercase `e`, and exponent signs/leading zeroes are normalized (`1e-07` → `1e-7`). Integers beyond 2⁵³ are preserved exactly by Rust, Go, and Python; JavaScript loses precision on them (see the `_epoch_ns` precision note above).
 
@@ -1103,6 +1188,6 @@ kind=result result.backup_url=https://storage.example.com/backup.tar.gz result.c
    - Plain: single-line logfmt, formatting suffixes stripped, values formatted, for compact scanning
    - All formats protect secrets automatically
 
-3. **Part 3 (Protocol)**: Consistent structure across all output — `code` identifies message type, `trace` provides execution context, other fields flexible
+3. **Part 3 (Protocol)**: Consistent structure across all output — `kind` identifies the event type and its same-named payload, `trace` provides execution context, and payload fields remain tool-defined
 
 **Key insight**: The same naming convention flows from CLI flag (`--timeout-s 30`) to JSON/YAML field (`timeout_s: 30`) to Plain's human-formatted output (`timeout: 30s`). An agent reading `--help`, JSON, or YAML sees the same self-describing field name; Plain trades the field name for a human-formatted value. No documentation needed at any layer.

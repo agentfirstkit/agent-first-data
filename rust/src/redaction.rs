@@ -52,13 +52,15 @@ pub enum PlainStyle {
 
 /// Configurable redaction builder for secrets and legacy field names.
 ///
-/// `Redactor` encapsulates redaction policy and custom secret field names.
+/// `Redactor` encapsulates redaction policy, custom secret field names, and
+/// exact legacy URL field names.
 /// Build with [`Redactor::new()`], configure via builder methods, then pass to
 /// redaction functions like [`redacted_value`] or [`redact_url_secrets`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Redactor {
     policy: RedactionPolicy,
     secret_names: Vec<String>,
+    url_names: Vec<String>,
 }
 
 impl Redactor {
@@ -74,6 +76,18 @@ impl Redactor {
     /// Builder style: returns `self`.
     pub fn secret_names<I: IntoIterator<Item = S>, S: Into<String>>(mut self, names: I) -> Self {
         self.secret_names = names.into_iter().map(|s| s.into()).collect();
+        self
+    }
+
+    /// Set exact legacy field names whose values should receive URL-aware
+    /// redaction in addition to `_url`/`_URL` suffixed fields.
+    ///
+    /// A matching string is handled like an `_url` value. Arrays and nested
+    /// collections recursively apply that treatment to every string leaf.
+    /// Matching is exact and does not normalize case, whitespace, or spelling.
+    #[must_use]
+    pub fn url_names<I: IntoIterator<Item = S>, S: Into<String>>(mut self, names: I) -> Self {
+        self.url_names = names.into_iter().map(Into::into).collect();
         self
     }
 
@@ -115,6 +129,19 @@ impl Redactor {
         }
         let context = RedactionContext::from_redactor(self);
         redact_url_in_str(url, &context).unwrap_or_else(|| url.to_string())
+    }
+
+    /// Redact complete scheme-prefixed URLs embedded in prose.
+    ///
+    /// This is deliberately explicit and independent from structured field
+    /// redaction. It recognizes URL spans only; it never scans surrounding text
+    /// for secret-looking names or values.
+    pub fn urls_in_text(&self, text: &str) -> String {
+        if !self.policy.redacts_unscoped_input() {
+            return text.to_string();
+        }
+        let context = RedactionContext::from_redactor(self);
+        redact_urls_in_text_with_context(text, &context)
     }
 
     /// Redact `value` in place, using this redactor's policy and secret names.
@@ -189,6 +216,18 @@ impl Redactor {
     pub fn is_secret_name(&self, name: &str) -> bool {
         RedactionContext::from_redactor(self).is_secret_key(name)
     }
+
+    /// True when `name` receives URL-aware structured-field redaction: an
+    /// exact `_url`/`_URL` suffix or an exact configured `url_names` entry.
+    ///
+    /// The counterpart to [`Redactor::is_secret_name`], for the same targeted
+    /// single-field case. Kept even with no in-tree caller: a consumer that
+    /// gates on one name has to ask both questions, and an API that answers
+    /// only half of a symmetric pair sends the caller back to reimplementing
+    /// the suffix rule — which is exactly how the rule drifts.
+    pub fn is_url_name(&self, name: &str) -> bool {
+        RedactionContext::from_redactor(self).is_url_key(name)
+    }
 }
 
 impl From<RedactionPolicy> for Redactor {
@@ -196,6 +235,7 @@ impl From<RedactionPolicy> for Redactor {
         Self {
             policy,
             secret_names: Vec::new(),
+            url_names: Vec::new(),
         }
     }
 }
@@ -248,6 +288,14 @@ pub fn redact_url_secrets(url: &str) -> String {
     Redactor::new().url(url)
 }
 
+/// Redact complete scheme-prefixed URLs embedded in prose, using default
+/// secret-name rules.
+///
+/// This helper is opt-in. Ordinary structured redaction never scans prose.
+pub fn redact_urls_in_text(text: &str) -> String {
+    Redactor::new().urls_in_text(text)
+}
+
 // ═══════════════════════════════════════════
 // Secret Redaction
 // ═══════════════════════════════════════════
@@ -259,16 +307,25 @@ pub(crate) const REDACTED_MARKER: &str = "***";
 #[derive(Default)]
 pub(crate) struct RedactionContext {
     secret_names: HashSet<String>,
+    url_names: HashSet<String>,
 }
 
 impl RedactionContext {
     fn from_redactor(redactor: &Redactor) -> Self {
         let secret_names = redactor.secret_names.iter().cloned().collect();
-        Self { secret_names }
+        let url_names = redactor.url_names.iter().cloned().collect();
+        Self {
+            secret_names,
+            url_names,
+        }
     }
 
     fn is_secret_key(&self, key: &str) -> bool {
         key_has_secret_suffix(key) || self.secret_names.contains(key)
+    }
+
+    fn is_url_key(&self, key: &str) -> bool {
+        key_has_url_suffix(key) || self.url_names.contains(key)
     }
 }
 
@@ -315,11 +372,9 @@ fn redact_secrets_with_context_depth(value: &mut Value, context: &RedactionConte
                     if !map.get(&key).is_some_and(Value::is_null) {
                         map.insert(key, Value::String(REDACTED_MARKER.into()));
                     }
-                } else if key_has_url_suffix(&key) {
-                    if let Some(Value::String(s)) = map.get_mut(&key) {
-                        *s = redact_url_field_value(s, context);
-                    } else if let Some(v) = map.get_mut(&key) {
-                        redact_secrets_with_context_depth(v, context, depth + 1);
+                } else if context.is_url_key(&key) {
+                    if let Some(v) = map.get_mut(&key) {
+                        redact_url_value_depth(v, context, depth + 1);
                     }
                 } else if let Some(v) = map.get_mut(&key) {
                     redact_secrets_with_context_depth(v, context, depth + 1);
@@ -329,6 +384,36 @@ fn redact_secrets_with_context_depth(value: &mut Value, context: &RedactionConte
         Value::Array(arr) => {
             for v in arr {
                 redact_secrets_with_context_depth(v, context, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_url_value_depth(value: &mut Value, context: &RedactionContext, depth: usize) {
+    if depth >= MAX_DEPTH {
+        *value = Value::String(MAX_DEPTH_MARKER.into());
+        return;
+    }
+    match value {
+        Value::String(text) => {
+            *text = redact_url_field_value(text, context);
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_url_value_depth(value, context, depth + 1);
+            }
+        }
+        Value::Object(values) => {
+            let keys = values.keys().cloned().collect::<Vec<_>>();
+            for key in keys {
+                if context.is_secret_key(&key) {
+                    if !values.get(&key).is_some_and(Value::is_null) {
+                        values.insert(key, Value::String(REDACTED_MARKER.into()));
+                    }
+                } else if let Some(value) = values.get_mut(&key) {
+                    redact_url_value_depth(value, context, depth + 1);
+                }
             }
         }
         _ => {}
@@ -382,6 +467,146 @@ fn redact_url_in_str(s: &str, context: &RedactionContext) -> Option<String> {
     Some(format!(
         "{scheme}://{new_authority}{new_before_fragment}{new_fragment}"
     ))
+}
+
+fn redact_urls_in_text_with_context(text: &str, context: &RedactionContext) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut copied_through = 0;
+    let mut search_from = 0;
+    let mut found = false;
+    while let Some((start, end)) = next_scheme_url_span(text, search_from) {
+        found = true;
+        output.push_str(&text[copied_through..start]);
+        let url = &text[start..end];
+        output.push_str(&redact_url_in_str(url, context).unwrap_or_else(|| url.to_string()));
+        copied_through = end;
+        search_from = end;
+    }
+    if !found {
+        return text.to_string();
+    }
+    output.push_str(&text[copied_through..]);
+    output
+}
+
+fn next_scheme_url_span(text: &str, from: usize) -> Option<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut start = from;
+    while start < bytes.len() {
+        // Only consider the head of a maximal scheme-byte run: a scheme cannot
+        // begin mid-run, so a position whose predecessor is a scheme byte was
+        // already covered by the run that contains it.
+        if start == 0 || !is_scheme_byte(bytes[start - 1]) {
+            let mut scheme_end = start;
+            while scheme_end < bytes.len() && is_scheme_byte(bytes[scheme_end]) {
+                scheme_end += 1;
+            }
+            // A scheme must start with a letter, but the run need not: prose
+            // like `2https://h/?token_secret=x` glues a digit onto the URL. Retry
+            // from the first letter *inside* the run instead of abandoning the
+            // span — giving up there fails open and leaks the whole query.
+            let scheme_start = (start..scheme_end).find(|&i| bytes[i].is_ascii_alphabetic());
+            if let Some(scheme_start) = scheme_start
+                && bytes
+                    .get(scheme_end..scheme_end.saturating_add(3))
+                    .is_some_and(|separator| separator == b"://")
+            {
+                let mut end = scheme_end + 3;
+                while end < bytes.len() {
+                    let Some(character) = text[end..].chars().next() else {
+                        break;
+                    };
+                    if is_span_terminator_whitespace(character) || is_text_url_delimiter(character)
+                    {
+                        break;
+                    }
+                    end += character.len_utf8();
+                }
+                while end > scheme_end + 3 {
+                    let Some(character) = text[..end].chars().next_back() else {
+                        break;
+                    };
+                    if !is_trailing_text_url_punctuation(character) {
+                        break;
+                    }
+                    end -= character.len_utf8();
+                }
+                if end > scheme_end + 3 {
+                    return Some((scheme_start, end));
+                }
+            }
+        }
+        start += 1;
+    }
+    None
+}
+
+fn is_scheme_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
+}
+
+/// Whitespace that ends a URL span in prose: the Unicode `White_Space`
+/// property, written out here instead of delegated to `char::is_whitespace`.
+///
+/// The four AFDATA implementations must cut the span at the same byte, and each
+/// language's native predicate covers a different set — JS `\s` counts U+FEFF
+/// but not U+0085, Python's `str.isspace()` counts U+001C–U+001F, Rust and Go
+/// count neither. Divergence is a defect in both directions: ending a span early
+/// leaves the rest of the query readable, and ending it late pulls the following
+/// prose into the URL, where redacting the parameter it lands in deletes it. So
+/// the set is enumerated, and it is generous — a redaction helper exists to keep
+/// a log line readable, so anything a human reads as a space must end the URL.
+///
+/// Two exclusions are deliberate, not oversights:
+/// * **U+FEFF** (zero-width no-break space) is not `White_Space`. Treating it as
+///   one would cut `https://h/x\u{feff}?token_secret=leak` short and leave the
+///   secret in the clear — the exact leak JS `\s` used to cause here.
+/// * **U+001C–U+001F** (the file/group/record/unit separators) are not
+///   `White_Space` either; only Python's `str.isspace()` counted them.
+///
+/// This is a different question from [`is_single_url`], which asks whether a
+/// whole string is one URL and stays ASCII-only. A span this scanner produces
+/// contains no whitespace at all, so it satisfies that stricter gate either way.
+fn is_span_terminator_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        // TAB, LF, VT, FF, CR, SPACE
+        '\u{0009}'..='\u{000d}' | '\u{0020}'
+            // NEL, NBSP, OGHAM SPACE MARK
+            | '\u{0085}' | '\u{00a0}' | '\u{1680}'
+            // EN QUAD .. HAIR SPACE
+            | '\u{2000}'..='\u{200a}'
+            // LINE SEPARATOR, PARAGRAPH SEPARATOR, NARROW NBSP,
+            // MEDIUM MATHEMATICAL SPACE, IDEOGRAPHIC SPACE
+            | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+    )
+}
+
+fn is_text_url_delimiter(character: char) -> bool {
+    matches!(
+        character,
+        '"' | '\''
+            | '<'
+            | '>'
+            | '`'
+            | '，'
+            | '。'
+            | '；'
+            | '！'
+            | '？'
+            | '）'
+            | '》'
+            | '】'
+            | '」'
+            | '』'
+    )
+}
+
+fn is_trailing_text_url_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '.' | ',' | ';' | '!' | ')' | ']' | '}' | '，' | '。' | '；' | '！' | '）' | '》' | '】'
+    )
 }
 
 fn redact_url_field_value(s: &str, context: &RedactionContext) -> String {
@@ -529,6 +754,70 @@ mod tests {
         assert_eq!(
             redactor.url("https://h/cb#token=abc&page=2"),
             "https://h/cb#token=***&page=2"
+        );
+    }
+
+    #[test]
+    fn url_names_are_exact_and_recurse_through_collections() {
+        let redactor = Redactor::new().secret_names(["token"]).url_names([
+            "url",
+            "relays",
+            "synapse_selector",
+        ]);
+        let input = json!({
+            "url": "https://u:pw@h/?token=one",
+            "URL": "https://u:visible@h/?token=two",
+            "relays": [
+                "wss://relay.example/?token=three",
+                {"nested": "https://u:pw@nested.example/"}
+            ],
+            "synapse_selector": "user:pass@host/db",
+            "other": "https://u:visible@h/?token=four"
+        });
+
+        assert_eq!(
+            redactor.value(&input),
+            json!({
+                "url": "https://u:***@h/?token=***",
+                "URL": "https://u:visible@h/?token=two",
+                "relays": [
+                    "wss://relay.example/?token=***",
+                    {"nested": "https://u:***@nested.example/"}
+                ],
+                "synapse_selector": "***",
+                "other": "https://u:visible@h/?token=four"
+            })
+        );
+        assert!(redactor.is_url_name("url"));
+        assert!(!redactor.is_url_name("URL"));
+    }
+
+    #[test]
+    fn prose_url_redaction_is_explicit_and_preserves_punctuation() {
+        let message = "connect (https://u:pw@h/?token_secret=one), then wss://h/?token_secret=two. bare user:pw@h stays";
+        assert_eq!(
+            redact_urls_in_text(message),
+            "connect (https://u:***@h/?token_secret=***), then wss://h/?token_secret=***. bare user:pw@h stays"
+        );
+        assert_eq!(
+            redacted_value(&json!({"message": message})),
+            json!({"message": message})
+        );
+    }
+
+    #[test]
+    fn prose_url_redaction_honors_policy_and_secret_names() {
+        let text = "see https://h/?token=abc";
+        assert_eq!(
+            Redactor::new().secret_names(["token"]).urls_in_text(text),
+            "see https://h/?token=***"
+        );
+        assert_eq!(
+            Redactor::new()
+                .policy(RedactionPolicy::Off)
+                .secret_names(["token"])
+                .urls_in_text(text),
+            text
         );
     }
 

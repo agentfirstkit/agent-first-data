@@ -22,6 +22,7 @@ import {
   outputOptionsForPolicy,
   redactArgv,
   redactUrlSecrets,
+  redactUrlsInText,
   type JsonValue,
   normalizeUtcOffset,
   isValidRfc3339Date,
@@ -80,11 +81,16 @@ describe("builder contract fixtures", () => {
   }
 });
 
-function redactionOptions(tc: any): { policy?: RedactionPolicy; secretNames?: readonly string[] } {
+function redactionOptions(tc: any): {
+  policy?: RedactionPolicy;
+  secretNames?: readonly string[];
+  urlNames?: readonly string[];
+} {
   const opts = tc.options ?? {};
   return {
     policy: opts.policy as RedactionPolicy | undefined,
     secretNames: opts.secret_names ?? [],
+    urlNames: opts.url_names ?? [],
   };
 }
 
@@ -95,6 +101,15 @@ describe("redact_url fixtures", () => {
     it(tc.name, () => {
       const options = redactionOptions(tc);
       assert.equal(redactUrlSecrets(tc.input, options), tc.expected);
+    });
+  }
+});
+
+describe("redact_urls_in_text fixtures", () => {
+  for (const tc of load("redact_urls_in_text.json")) {
+    it(tc.name, () => {
+      const options = redactionOptions(tc);
+      assert.equal(redactUrlsInText(tc.input, options), tc.expected);
     });
   }
 });
@@ -492,6 +507,10 @@ describe("number fidelity fixtures", () => {
 
   it("renders native bigint exactly and marks unsafe native integers", () => {
     assert.equal(render({ amount: 9_007_199_254_740_993n }, "json"), '{"amount":9007199254740993}');
+    assert.equal(
+      render({ adjustment_usd_cents: -9_223_372_036_854_775_808n }, "plain"),
+      "adjustment=-$92233720368547758.08",
+    );
     assert.equal(
       render({ fee_jpy: 1_000_000_000_000_000_000_000n }, "plain"),
       "fee_jpy=1000000000000000000000",

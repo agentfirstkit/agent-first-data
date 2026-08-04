@@ -72,6 +72,32 @@ fn write_temp(dir: &TempDir, name: &str, contents: &str) -> String {
     path.to_str().unwrap().to_string()
 }
 
+#[test]
+fn bare_relative_document_mutation_commits_and_reports_success() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.json"), r#"{"port":993}"#).unwrap();
+
+    let output = afdata()
+        .current_dir(dir.path())
+        .args([
+            "set",
+            "config.json",
+            "port",
+            "1024",
+            "--value-type",
+            "number",
+        ])
+        .output()
+        .expect("failed to run afdata");
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("config.json")).unwrap(),
+        r#"{"port":1024}"#
+    );
+}
+
 // ═══════════════════════════════════════════
 // Shell authoring kit and scalar event emission
 // ═══════════════════════════════════════════

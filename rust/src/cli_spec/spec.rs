@@ -18,6 +18,14 @@ pub struct CliSpec {
     pub build: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub about: Option<String>,
+    /// Arguments every command accepts, declared once.
+    ///
+    /// Spliced into each command at build time and added to every combination's
+    /// optional set, so nothing downstream — resolution, help, `--docs` — needs
+    /// to know they were shared. Serialized as their own list so a consumer in
+    /// another language reads the same declaration rather than N copies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_arguments: Vec<ArgSpec>,
     pub lifecycle_output: OutputSpec,
     /// Exit codes this CLI returns beyond the 0/1/2 AFDATA defines, rendered
     /// into the reference's exit-code table. Without this the published
@@ -47,6 +55,7 @@ impl CliSpec {
             display_name: None,
             build: None,
             about: None,
+            shared_arguments: Vec::new(),
             lifecycle_output: OutputSpec::protocol_finite(
                 ["json", "yaml", "plain"],
                 ["split", "stdout", "stderr"],
@@ -95,10 +104,89 @@ impl CliSpec {
         self
     }
 
+    /// Declare an argument every command accepts, once.
+    ///
+    /// AFDATA already parses `--output`, `--stdout-file` and friends at every
+    /// command; this is the same capability for an argument the application
+    /// owns, so a `--config` needed by six commands is written once instead of
+    /// six times and cannot drift between them.
+    ///
+    /// It does **not** change where the argument may appear. The command path
+    /// is still matched against the leading tokens of argv, so `tool --config x
+    /// sub` remains an error and `tool sub --config x` is the accepted form.
+    /// This is only about declaration, not position — a caller migrating from a
+    /// parser with interleaved global flags has to move them after the path.
+    ///
+    /// A command with no combinations is skipped: it exists to carry help for
+    /// its children, accepts nothing itself, and would otherwise fail the
+    /// build for declaring an argument no combination covers.
+    #[must_use]
+    pub fn shared_arg(mut self, argument: ArgSpec) -> Self {
+        self.shared_arguments.push(argument);
+        self
+    }
+
     /// Validate and compile the registry.
-    pub fn build(self) -> Result<BuiltCliSpec, CliSpecError> {
+    pub fn build(mut self) -> Result<BuiltCliSpec, CliSpecError> {
+        self.splice_shared_arguments()?;
         validate_spec(&self)?;
         Ok(BuiltCliSpec { spec: self })
+    }
+
+    /// Copy the shared arguments into every command, and into every
+    /// combination's optional set.
+    ///
+    /// Done before validation so a shared argument is held to exactly the same
+    /// rules as a declared one — reserved names, canonical spelling, and the
+    /// id/flag agreement all report against it normally.
+    fn splice_shared_arguments(&mut self) -> Result<(), CliSpecError> {
+        if self.shared_arguments.is_empty() {
+            return Ok(());
+        }
+        for shared in &self.shared_arguments {
+            for command in &self.commands {
+                if command
+                    .arguments
+                    .iter()
+                    .any(|argument| argument.argument_id == shared.argument_id)
+                {
+                    return Err(CliSpecError::new(
+                        "shared_argument_redeclared",
+                        format!(
+                            "argument `{}` is shared by every command, so `{}` must not declare \
+                             it again",
+                            shared.argument_id,
+                            if command.command_path.is_empty() {
+                                "the root command".to_string()
+                            } else {
+                                command.command_path.join(" ")
+                            }
+                        ),
+                    ));
+                }
+            }
+        }
+        let shared = self.shared_arguments.clone();
+        for command in &mut self.commands {
+            // A combination-less command is a help-only path node (`tool
+            // analysis --help` listing its children). It accepts no arguments
+            // of its own, so splicing one in would leave an argument no
+            // combination covers and fail validation.
+            if command.combinations.is_empty() {
+                continue;
+            }
+            for argument in &shared {
+                command.arguments.push(argument.clone());
+                for combination in &mut command.combinations {
+                    // Shared arguments are never required and never fixed: a
+                    // combination that needs one must declare its own.
+                    if !combination.optional.contains(&argument.argument_id) {
+                        combination.optional.push(argument.argument_id.clone());
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -164,6 +252,15 @@ pub enum ArgValueType {
     FiniteF64,
     Enum,
     Json,
+    /// A canonical RFC 4122 UUID, kept as its string form.
+    ///
+    /// Declarative on purpose: the registry serializes to `cli-spec-v1`, so a
+    /// value type has to be something another language can implement from the
+    /// spec alone. A host-supplied parser could not survive that trip; this
+    /// can. The value stays a `String` so the core takes no UUID dependency —
+    /// what it buys is that a malformed one is a *usage* error, rejected before
+    /// the command runs, instead of a domain failure the handler has to invent.
+    Uuid,
 }
 
 /// A typed value produced by a built CLI registry.
@@ -240,6 +337,14 @@ pub struct ArgSpec {
     pub value_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enum_values: Vec<String>,
+    /// Inclusive bounds for an `I64` argument.
+    ///
+    /// Lets a registry say `1..=1000` without a host-supplied parser, so a
+    /// count that must fit an `i32`, a `usize`, or a `NonZero` is rejected at
+    /// exit 2 with the other usage errors rather than checked again inside the
+    /// handler — where the only honest report left is a domain failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<[i64; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<CliValue>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -287,6 +392,28 @@ impl ArgSpec {
         spec
     }
 
+    /// Read this argument as a canonical RFC 4122 UUID.
+    ///
+    /// The resolved value is still a `CliValue::String`; what changes is that a
+    /// malformed one is rejected as a usage error before the command runs.
+    #[must_use]
+    pub fn uuid(mut self) -> Self {
+        self.value_type = ArgValueType::Uuid;
+        self
+    }
+
+    /// Constrain an `I64` argument to an inclusive range.
+    ///
+    /// Use it for a count that must fit a narrower integer than `i64` — the
+    /// check then reports as a usage error, beside the other argument
+    /// failures, rather than as a domain failure from inside the handler.
+    #[must_use]
+    pub fn range(mut self, minimum: i64, maximum: i64) -> Self {
+        self.value_type = ArgValueType::I64;
+        self.range = Some([minimum, maximum]);
+        self
+    }
+
     pub fn positional(
         argument_id: impl Into<String>,
         index: usize,
@@ -298,6 +425,7 @@ impl ArgSpec {
             value_type: ArgValueType::String,
             value_name: nonempty(value_name.into()),
             enum_values: Vec::new(),
+            range: None,
             default: None,
             repeatable: false,
             sensitive: false,
@@ -346,6 +474,7 @@ impl ArgSpec {
             value_type,
             value_name: value_name.and_then(nonempty),
             enum_values: Vec::new(),
+            range: None,
             default: None,
             repeatable: false,
             sensitive: false,

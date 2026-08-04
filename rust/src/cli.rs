@@ -1,4 +1,4 @@
-use crate::formatting::OutputFormat;
+use crate::output::{OutputFormat, OutputTo};
 use crate::protocol::{
     BuildError, Event, LogLevel, ProtocolViolation, json_error, json_log, json_progress,
     json_result, validate_protocol_event,
@@ -71,7 +71,8 @@ impl LogFilters {
 
 /// Parse `--output` flag value into [`OutputFormat`].
 ///
-/// Returns `Err` with a message suitable for passing to [`build_cli_error`] on unknown values.
+/// Returns `Err` with a value-safe message suitable for passing to
+/// [`build_cli_error`] on unknown values.
 ///
 /// ```
 /// use agent_first_data::{cli_parse_output, OutputFormat};
@@ -79,14 +80,8 @@ impl LogFilters {
 /// assert!(cli_parse_output("xml").is_err());
 /// ```
 pub fn cli_parse_output(s: &str) -> Result<OutputFormat, String> {
-    match s {
-        "json" => Ok(OutputFormat::Json),
-        "yaml" => Ok(OutputFormat::Yaml),
-        "plain" => Ok(OutputFormat::Plain),
-        _ => Err(format!(
-            "invalid --output format '{s}': expected json, yaml, or plain"
-        )),
-    }
+    s.parse()
+        .map_err(|_| "invalid --output format: expected json, yaml, or plain".to_string())
 }
 
 /// Normalize `--log` flag entries: trim, lowercase, deduplicate, remove empty.
@@ -180,30 +175,6 @@ impl From<BuildError> for CliEmitterError {
 /// would strand the caller's data on the diagnostic stream. If a
 /// `kind:"progress"` event carries a payload the caller must read, the command
 /// is an event stream that has not declared itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OutputTo {
-    /// Finite one-shot: `result` → stdout, `error`/`progress`/`log` → stderr.
-    Split,
-    /// Event stream: every event onto stdout.
-    Stdout,
-    /// Event stream: every event onto stderr.
-    Stderr,
-}
-
-impl OutputTo {
-    /// Parse an `--output-to` value: `split` (default), `stdout`, or `stderr`.
-    pub fn parse(value: &str) -> Result<Self, String> {
-        match value {
-            "split" => Ok(Self::Split),
-            "stdout" => Ok(Self::Stdout),
-            "stderr" => Ok(Self::Stderr),
-            other => Err(format!(
-                "unsupported --output-to `{other}`; expected split, stdout, or stderr"
-            )),
-        }
-    }
-}
-
 /// Stateful emitter for structured CLI executions.
 ///
 /// The output format, redaction policy, and stream routing are fixed when the

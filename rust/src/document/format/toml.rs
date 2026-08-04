@@ -2,9 +2,14 @@
 
 use crate::document::{DocumentError, DocumentResult, Value};
 
-/// Edit an existing scalar item in a TOML document without reserializing the
-/// surrounding document. Comments, ordering, whitespace, and datetime syntax
-/// outside the target remain owned by `toml_edit::DocumentMut`.
+/// Edit an existing TOML item without reserializing the surrounding document.
+///
+/// Scalars, arrays, inline tables, and ordinary tables are supported. Existing
+/// collection nodes are updated in place so their outer decor, element/key
+/// decor, ordering, multiline layout, comments, and trailing-comma style stay
+/// attached to the target wherever the replacement still has a corresponding
+/// element or key. Arrays of tables remain deliberately unsupported because
+/// replacing one safely requires an explicit identity policy.
 pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
     let segments = crate::document::parse_path(path)?;
     if segments.iter().any(|segment| segment.contains(['.', '\\'])) {
@@ -22,10 +27,31 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
                 format: "TOML".to_string(),
                 detail: error.to_string(),
             })?;
-    let item = toml_item(value)?;
     let (last, parents) = segments.split_last().ok_or(DocumentError::EmptyPath)?;
     let mut current = document.as_item_mut();
     for parent in parents {
+        if current.is_array_of_tables() {
+            return Err(collection_refusal(
+                "editing an array of tables requires an explicit element identity",
+            ));
+        }
+        if current
+            .as_value()
+            .and_then(toml_edit::Value::as_array)
+            .is_some()
+        {
+            let index = parent
+                .parse::<usize>()
+                .map_err(|_| DocumentError::UnregisteredArray {
+                    path: path.to_string(),
+                })?;
+            current = current
+                .get_mut(index)
+                .ok_or_else(|| DocumentError::PathNotFound {
+                    path: path.to_string(),
+                })?;
+            continue;
+        }
         // Auto-create a missing intermediate table so a sparse config can grow
         // (`set imap.host` when `[imap]` is absent), matching `set_path`.
         // toml_edit returns `Some(Item::None)` for absent keys, so treat that as
@@ -52,33 +78,37 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
                 path: path.to_string(),
             })?;
     }
-    let table = current
-        .as_table_like_mut()
-        .ok_or_else(|| DocumentError::UnsupportedOperation {
-            format: "TOML".to_string(),
-            operation: "set".to_string(),
-            detail: "cannot address a key inside a non-table TOML value".to_string(),
-        })?;
-    match table.get_mut(last).filter(|item| !item.is_none()) {
-        Some(target) => {
-            if !target.is_value() {
-                return Err(DocumentError::UnsupportedOperation {
+    if current
+        .as_value()
+        .and_then(toml_edit::Value::as_array)
+        .is_some()
+    {
+        let index = last
+            .parse::<usize>()
+            .map_err(|_| DocumentError::UnregisteredArray {
+                path: path.to_string(),
+            })?;
+        let target = current
+            .get_mut(index)
+            .ok_or_else(|| DocumentError::PathNotFound {
+                path: path.to_string(),
+            })?;
+        replace_item_preserving(target, value)?;
+    } else {
+        let table =
+            current
+                .as_table_like_mut()
+                .ok_or_else(|| DocumentError::UnsupportedOperation {
                     format: "TOML".to_string(),
                     operation: "set".to_string(),
-                    detail: "only existing scalar TOML values are supported by the document editor"
-                        .to_string(),
-                });
+                    detail: "cannot address a key inside a non-table TOML value".to_string(),
+                })?;
+        match table.get_mut(last).filter(|item| !item.is_none()) {
+            Some(target) => replace_item_preserving(target, value)?,
+            // New leaf: append into the existing parent table.
+            None => {
+                table.insert(last, toml_item(value)?);
             }
-            let decor = target.as_value().map(|value| value.decor().clone());
-            *target = item;
-            if let (Some(decor), Some(value)) = (decor, target.as_value_mut()) {
-                *value.decor_mut() = decor;
-            }
-        }
-        // New leaf: append into the (existing) parent table. Intermediate parent
-        // tables are not auto-created — a missing parent fails above.
-        None => {
-            table.insert(last, item);
         }
     }
     Ok(document.to_string())
@@ -151,22 +181,29 @@ pub fn unset_preserving(content: &str, path: &str) -> DocumentResult<String> {
 }
 
 fn toml_item(value: &Value) -> DocumentResult<toml_edit::Item> {
-    match value {
+    toml_value(value, None).map(toml_edit::Item::Value)
+}
+
+fn toml_value(
+    value: &Value,
+    existing: Option<&toml_edit::Value>,
+) -> DocumentResult<toml_edit::Value> {
+    let mut converted = match value {
         Value::Null => Err(DocumentError::UnsupportedOperation {
             format: "TOML".to_string(),
             operation: "set".to_string(),
             detail: "TOML has no null value".to_string(),
         }),
-        Value::Bool(value) => Ok(toml_edit::value(*value)),
-        Value::Integer(value) => Ok(toml_edit::value(*value)),
-        Value::Unsigned(value) => i64::try_from(*value).map(toml_edit::value).map_err(|_| {
-            DocumentError::UnsupportedOperation {
+        Value::Bool(value) => Ok(toml_edit::Value::from(*value)),
+        Value::Integer(value) => Ok(toml_edit::Value::from(*value)),
+        Value::Unsigned(value) => i64::try_from(*value)
+            .map(toml_edit::Value::from)
+            .map_err(|_| DocumentError::UnsupportedOperation {
                 format: "TOML".to_string(),
                 operation: "set".to_string(),
                 detail: "unsigned integer exceeds TOML i64 range".to_string(),
-            }
-        }),
-        Value::Float(value) if value.is_finite() => Ok(toml_edit::value(*value)),
+            }),
+        Value::Float(value) if value.is_finite() => Ok(toml_edit::Value::from(*value)),
         Value::Float(_) => Err(DocumentError::UnsupportedOperation {
             format: "TOML".to_string(),
             operation: "set".to_string(),
@@ -184,7 +221,7 @@ fn toml_item(value: &Value) -> DocumentResult<toml_edit::Item> {
             .parse::<f64>()
             .ok()
             .filter(|value| value.is_finite())
-            .map(toml_edit::value)
+            .map(toml_edit::Value::from)
             .ok_or_else(|| DocumentError::UnsupportedOperation {
                 format: "TOML".to_string(),
                 operation: "set".to_string(),
@@ -195,12 +232,220 @@ fn toml_item(value: &Value) -> DocumentResult<toml_edit::Item> {
             operation: "set".to_string(),
             detail: format!("integer literal `{text}` exceeds TOML's 64-bit integer range"),
         }),
-        Value::String(value) => Ok(toml_edit::value(value.clone())),
-        Value::Array(_) | Value::Object(_) => Err(DocumentError::UnsupportedOperation {
-            format: "TOML".to_string(),
-            operation: "set".to_string(),
-            detail: "collection mutation requires a dedicated TOML editor".to_string(),
-        }),
+        Value::String(value) => {
+            if let Some(existing) = existing.filter(|item| {
+                item.as_datetime()
+                    .is_some_and(|datetime| datetime.to_string() == *value)
+            }) {
+                Ok(existing.clone())
+            } else {
+                Ok(toml_edit::Value::from(value.clone()))
+            }
+        }
+        Value::Array(values) => array_value(values, existing.and_then(toml_edit::Value::as_array)),
+        Value::Object(values) => {
+            inline_table_value(values, existing.and_then(toml_edit::Value::as_inline_table))
+        }
+    }?;
+    if let Some(existing) = existing {
+        *converted.decor_mut() = existing.decor().clone();
+    }
+    Ok(converted)
+}
+
+/// Keep a decor's layout (newlines and indentation) and drop its comments.
+///
+/// An element's prefix decor holds whatever followed the previous element's
+/// comma, which in a multiline array is that element's trailing comment. Copying
+/// it verbatim onto an appended element would reproduce a comment beside a value
+/// the author never wrote it for — inventing content in the one module whose
+/// promise is that it preserves the author's bytes. The indentation is safe to
+/// reuse; the prose is not.
+fn layout_without_comments(decor: &str) -> String {
+    let mut kept = String::with_capacity(decor.len());
+    let mut rest = decor;
+    while let Some(hash) = rest.find('#') {
+        // Also drop the spaces that separated the comment from the value, or
+        // removing it leaves a ragged trailing run behind.
+        kept.push_str(rest[..hash].trim_end_matches([' ', '\t']));
+        match rest[hash..].find('\n') {
+            // Drop the comment body, keep the newline that ends it.
+            Some(newline) => rest = &rest[hash + newline..],
+            // A trailing comment with no newline ends the decor.
+            None => return kept,
+        }
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// The first comment in a decor string, without its leading whitespace.
+fn first_comment(decor: &str) -> Option<&str> {
+    let start = decor.find('#')?;
+    let end = decor[start..]
+        .find('\n')
+        .map_or(decor.len(), |newline| start + newline);
+    Some(&decor[start..end])
+}
+
+/// Rewrite a decor's first comment, or remove it when `replacement` is `None`.
+fn with_first_comment(decor: &str, replacement: Option<&str>) -> String {
+    let Some(start) = decor.find('#') else {
+        return decor.to_string();
+    };
+    let end = decor[start..]
+        .find('\n')
+        .map_or(decor.len(), |newline| start + newline);
+    let mut out = String::with_capacity(decor.len());
+    match replacement {
+        Some(comment) => {
+            out.push_str(&decor[..start]);
+            out.push_str(comment);
+        }
+        None => out.push_str(decor[..start].trim_end_matches([' ', '\t'])),
+    }
+    out.push_str(&decor[end..]);
+    out
+}
+
+fn array_value(
+    values: &[Value],
+    existing: Option<&toml_edit::Array>,
+) -> DocumentResult<toml_edit::Value> {
+    let existing_values = existing
+        .map(|array| array.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut array = existing.cloned().unwrap_or_default();
+    if array.len() > values.len() {
+        // The comment written after element N-1's comma is stored in element
+        // N's *prefix*, and the last element's trailing comment lives in the
+        // array's trailing decor. Truncating therefore deletes the comment that
+        // documented the last surviving element while keeping the one that
+        // documented a value being removed — leaving a comment attached to the
+        // wrong element. Carry the surviving element's own comment across.
+        let surviving_comment = existing_values
+            .get(values.len())
+            .and_then(|item| item.decor().prefix())
+            .and_then(toml_edit::RawString::as_str)
+            .and_then(first_comment)
+            .map(str::to_string);
+        while array.len() > values.len() {
+            let last = array.len() - 1;
+            array.remove(last);
+        }
+        let trailing = array.trailing().as_str().unwrap_or_default().to_string();
+        if first_comment(&trailing).is_some() {
+            array.set_trailing(with_first_comment(&trailing, surviving_comment.as_deref()));
+        }
+    }
+    let length_before_append = array.len();
+    for (index, value) in values.iter().enumerate() {
+        let hint = existing_values.get(index);
+        let mut converted = toml_value(value, hint)?;
+        if index < array.len() {
+            array.replace_formatted(index, converted);
+        } else {
+            if let Some(prefix) = existing_values
+                .last()
+                .and_then(|item| item.decor().prefix())
+                .and_then(toml_edit::RawString::as_str)
+            {
+                converted
+                    .decor_mut()
+                    .set_prefix(layout_without_comments(prefix));
+            }
+            array.push_formatted(converted);
+        }
+    }
+    // Appending to a single-line array: the previously-last element's suffix is
+    // the space that sat before `]`. Left where it is, it ends up before the new
+    // comma (`[ "one" , "two"]`), so move it to the array's trailing decor where
+    // it goes on separating the last value from the bracket. Done after the
+    // element loop, which restores each replaced element's original decor.
+    if values.len() > length_before_append
+        && let Some(last_index) = length_before_append.checked_sub(1)
+    {
+        let suffix = array
+            .get(last_index)
+            .and_then(|item| item.decor().suffix())
+            .and_then(toml_edit::RawString::as_str)
+            .filter(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c == ' ' || c == '\t'))
+            .map(str::to_string);
+        let trailing_is_empty = array.trailing().as_str().is_none_or(str::is_empty);
+        if let Some(suffix) = suffix
+            && trailing_is_empty
+        {
+            if let Some(item) = array.get_mut(last_index) {
+                item.decor_mut().set_suffix("");
+            }
+            array.set_trailing(suffix);
+        }
+    }
+    if values.is_empty() {
+        array.set_trailing_comma(false);
+    }
+    if existing.is_none() {
+        array.fmt();
+    }
+    Ok(toml_edit::Value::Array(array))
+}
+
+fn inline_table_value(
+    values: &std::collections::BTreeMap<String, Value>,
+    existing: Option<&toml_edit::InlineTable>,
+) -> DocumentResult<toml_edit::Value> {
+    let mut table = existing.cloned().unwrap_or_default();
+    table.retain(|key, _| values.contains_key(key));
+    for (key, value) in values {
+        if let Some(current) = table.get_mut(key) {
+            *current = toml_value(value, Some(current))?;
+        } else {
+            table.insert(key, toml_value(value, None)?);
+        }
+    }
+    if values.is_empty() {
+        table.set_trailing_comma(false);
+    }
+    if existing.is_none() {
+        table.fmt();
+    }
+    Ok(toml_edit::Value::InlineTable(table))
+}
+
+fn replace_item_preserving(target: &mut toml_edit::Item, value: &Value) -> DocumentResult<()> {
+    if target.is_array_of_tables() {
+        return Err(collection_refusal(
+            "editing an array of tables requires an explicit element identity",
+        ));
+    }
+    if let (Some(table), Value::Object(values)) = (target.as_table_mut(), value) {
+        return sync_table(table, values);
+    }
+    let converted = toml_value(value, target.as_value())?;
+    *target = toml_edit::Item::Value(converted);
+    Ok(())
+}
+
+fn sync_table(
+    table: &mut toml_edit::Table,
+    values: &std::collections::BTreeMap<String, Value>,
+) -> DocumentResult<()> {
+    table.retain(|key, _| values.contains_key(key));
+    for (key, value) in values {
+        if let Some(current) = table.get_mut(key) {
+            replace_item_preserving(current, value)?;
+        } else {
+            table.insert(key, toml_item(value)?);
+        }
+    }
+    Ok(())
+}
+
+fn collection_refusal(detail: &str) -> DocumentError {
+    DocumentError::UnsupportedOperation {
+        format: "TOML".to_string(),
+        operation: "set".to_string(),
+        detail: detail.to_string(),
     }
 }
 

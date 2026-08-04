@@ -17,12 +17,15 @@ console.log(render(event.toJSON(), "json"));
 console.log(render(event.toJSON(), "plain"));
 ```
 
-Useful names use TypeScript casing: `render`, `outputOptionsForPolicy`, `redactedValue`, `redactUrlSecrets`, `redactArgv`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `isValidRfc3339`, `isValidBcp47`, `decodeProtocolEvent`, `cliParseOutput`, `cliParseLogFilters`, `buildCliError`, and `buildCliVersion`.
+Useful names use TypeScript casing: `render`, `outputOptionsForPolicy`, `redactedValue`, `redactUrlSecrets`, `redactUrlsInText`, `redactArgv`, `normalizeUtcOffset`, `isValidRfc3339Date`, `isValidRfc3339Time`, `isValidRfc3339`, `isValidBcp47`, `decodeProtocolEvent`, `cliParseOutput`, `cliParseLogFilters`, `buildCliError`, and `buildCliVersion`.
 
 ## Behavior Notes
 
 - Default redaction replaces every `_secret` or configured secret-name subtree with `***`, including objects and arrays.
 - `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed and internal whitespace redacts the whole field.
+- `OutputOptions.redaction.urlNames` applies URL treatment to exact legacy field names
+  and recurses through collections. `redactUrlsInText` is explicit and scans
+  only complete scheme URLs, never arbitrary prose secrets.
 - YAML keeps original keys and values (structure-preserving, like JSON), sorting keys by UTF-16 code unit order and quoting/escaping unsafe keys and string scalars. Plain strips formatting suffixes, formats values, sorts the same way, and renders nested objects/arrays as canonical JSON.
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - `buildCliError(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.

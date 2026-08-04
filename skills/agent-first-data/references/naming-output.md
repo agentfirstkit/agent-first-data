@@ -51,8 +51,9 @@ exception: use `_url` so embedded credentials can be scrubbed.
 - `_bytes` is a non-negative integer. Do not write unit-bearing strings such as
   `"10MiB"`.
 - `_percent` is in percent units: `85` means 85%, not 0.85.
-- Fiat suffixes carry integer minor units. Use `_{code}_micro` for millionths;
-  never use floating cents.
+- Fiat suffixes carry signed integer minor units, so refunds, credits, and
+  deltas may be negative. Use `_{code}_micro` for millionths; never use
+  floating cents.
 - `null` means absent/unset and is exempt from suffix type checks.
 
 Do not put magic values such as `"auto"` in strict-format fields. Define such
@@ -79,8 +80,16 @@ It does not automatically scrub generic `access_token`, `api_key`, `code`, or
 A schemeless credential-looking or internally whitespace-containing URL fails
 closed to `***`.
 
-AFDATA never scans arbitrary prose. Before interpolating a URL into a message,
-call `redact_url_secrets`.
+For legacy URL fields that cannot be renamed, configure exact `url_names` at
+the output boundary. Matching does not case-fold or guess. A matching string is
+handled like `_url`; arrays and nested collections recurse into string leaves,
+while ordinary non-URL strings stay unchanged. Secret-named children still
+redact as secrets, and URL query names continue to use the same `secret_names`.
+
+AFDATA never scans arbitrary prose by default. Use `redact_url_secrets` for one
+standalone URL. Use the separate, explicit `redact_urls_in_text` helper when a
+message may contain complete scheme URLs; it only recognizes those URL spans
+and never scans the surrounding text for secret-looking values.
 
 A CLI that records its own invocation (startup diagnostics, audit trail, crash
 report) must pass argv through `redact_argv` first, or a `--*-secret` flag's

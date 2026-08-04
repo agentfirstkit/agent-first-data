@@ -31,13 +31,14 @@ describe("cliParseOutput", () => {
     assert.throws(() => cliParseOutput(""));
   });
 
-  it("error message contains the invalid value", () => {
+  it("error message omits the invalid value", () => {
+    const canary = "canary-output-secret";
     try {
-      cliParseOutput("toml");
+      cliParseOutput(canary);
       assert.fail("expected throw");
     } catch (e) {
       assert.ok(e instanceof Error);
-      assert.ok(e.message.includes("toml"));
+      assert.ok(!e.message.includes(canary));
       assert.ok(e.message.includes("json"));
     }
   });
@@ -58,13 +59,14 @@ describe("parseOutputTo", () => {
     assert.throws(() => parseOutputTo(""));
   });
 
-  it("error message contains the invalid value and the valid choices", () => {
+  it("error message omits the invalid value and includes the valid choices", () => {
+    const canary = "canary-output-to-secret";
     try {
-      parseOutputTo("file");
+      parseOutputTo(canary);
       assert.fail("expected throw");
     } catch (e) {
       assert.ok(e instanceof Error);
-      assert.ok(e.message.includes("file"));
+      assert.ok(!e.message.includes(canary));
       assert.ok(e.message.includes("split"));
       assert.ok(e.message.includes("stdout"));
       assert.ok(e.message.includes("stderr"));
