@@ -476,7 +476,7 @@ fn violation(
 ///
 /// `strict` additionally enforces the recommended strict profile: `trace` is
 /// required, and kind-specific payload shapes are checked (see
-/// [`validate_protocol_event_strict_payload`]).
+/// `validate_protocol_event_strict_payload`).
 ///
 /// Returns the first [`ProtocolViolation`] found, or `Ok(())`.
 pub fn validate_protocol_event(event: &Value, strict: bool) -> Result<(), ProtocolViolation> {

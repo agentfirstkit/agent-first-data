@@ -30,7 +30,7 @@ pub fn load(content: &str) -> DocumentResult<Value> {
 /// quoting. Collections cannot: noyalib's `set_value` refuses to grow a scalar
 /// site into a sequence or mapping under any circumstances, so a collection is
 /// emitted as a block fragment and spliced over the value's span — see
-/// [`replace_collection_in_place`], which also documents what that costs.
+/// `replace_collection_in_place`, which also documents what that costs.
 pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
     let segments = crate::document::parse_path(path)?;
     let yaml_path = cst_path(&segments, "set")?;

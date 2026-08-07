@@ -49,7 +49,7 @@
 //! - **No dialects.** No GFM tables, footnotes, task lists, or strikethrough.
 //!   A table's rows parse as a paragraph, which is the specification's answer,
 //!   not a defect. (A leading `+++`/`---` metadata block *is* recognised, as
-//!   its own block kind — see [`options`] for why that is not a dialect.)
+//!   its own block kind — see `options` for why that is not a dialect.)
 //! - **No parsing or copying of frontmatter fields.** It is reported as one
 //!   block with `format: "toml"|"yaml"` and empty `text`;
 //!   `--input-format toml-frontmatter` is the reading that turns it into

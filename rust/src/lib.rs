@@ -60,6 +60,14 @@ pub mod skill;
 /// block reader).
 pub mod document;
 
+/// Reading a value that named where it is — an environment variable, an
+/// address inside a config file, a stream, a terminal prompt — and the policy
+/// that separates a printable value from a credential. The grammar itself is
+/// [`cli_spec::SourceSet`]; what may be done with the result is carried by the
+/// return type, [`value_source::SecretString`].
+#[cfg(feature = "cli")]
+pub mod value_source;
+
 mod error_catalog;
 
 // The closed-world CLI compiler: spec types, build gates, argv resolution, and
@@ -98,8 +106,9 @@ pub use cli_afdata::{
 pub use cli_spec::{
     ArgSpec, ArgSyntax, ArgValueType, BoundCliSpec, BoundInvocation, BoundOutcome, BuiltCliSpec,
     CliError, CliErrorRule, CliHelpV2, CliOutcome, CliShape, CliSpec, CliSpecError, CliValue,
-    Combination, CommandSpec, ExitCodeSpec, FixedValue, OutputLifecycle, OutputPlan, OutputSpec,
-    ResolvedDocs, ResolvedHelp, ResolvedInvocation, ResolvedVersion, SyntheticInvocation,
+    Combination, CommandSpec, ExitCodeSpec, FixedValue, HostScheme, OutputLifecycle, OutputPlan,
+    OutputSpec, ResolvedDocs, ResolvedHelp, ResolvedInvocation, ResolvedVersion, SourceError,
+    SourceScheme, SourceSet, SyntheticInvocation, ValueSource,
 };
 pub use error_catalog::{ErrorCatalog, ErrorCatalogError, ErrorSpec};
 pub use formatting::render;

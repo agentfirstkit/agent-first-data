@@ -1,6 +1,6 @@
 ---
 name: agent-first-data
-description: Apply and review Agent-First Data (AFDATA) for structured field names, unit suffixes, secret and URL redaction, JSON/YAML/plain rendering, protocol events, logs, agent-facing CLI output and help, safe dot-path edits to JSON/TOML/YAML/dotenv/INI or Markdown frontmatter, read-only Markdown structure, and AFDATA-style Bash scripts. Use proactively for configs, logs, transport payloads, database or wire fields, public/persistent names, CLI design, and structured-data shell work.
+description: Apply and review Agent-First Data (AFDATA) for structured field names, unit suffixes, secret and URL redaction, JSON/YAML/plain rendering, protocol events, logs, agent-facing CLI output, help, and value sources, safe dot-path edits to JSON/TOML/YAML/dotenv/INI or Markdown frontmatter, read-only Markdown structure, and AFDATA-style Bash scripts. Use proactively for configs, logs, transport payloads, database or wire fields, public/persistent names, CLI design, and structured-data shell work.
 ---
 
 <!-- Canonical source: skills/agent-first-data/SKILL.md. -->
@@ -17,7 +17,7 @@ Read only the route needed for the task:
 | Task | Read |
 |---|---|
 | Name or review fields, configs, logs, database columns, wire/API data, redaction, or rendering | [naming-output.md](references/naming-output.md), then use [registry.json](references/registry.json) for exact suffix metadata |
-| Build or review protocol events, CLI output, logging, version/help behavior, or stream routing | [cli-protocol.md](references/cli-protocol.md) and [protocol-v1.schema.json](references/protocol-v1.schema.json) |
+| Build or review protocol events, CLI output, logging, version/help behavior, value-source declarations, or stream routing | [cli-protocol.md](references/cli-protocol.md) and [protocol-v1.schema.json](references/protocol-v1.schema.json) |
 | Build or validate a closed-world CLI or structured help | [cli-protocol.md](references/cli-protocol.md), [cli-spec-v1.schema.json](references/cli-spec-v1.schema.json), and [cli-help-v2.schema.json](references/cli-help-v2.schema.json) |
 | Read or safely mutate JSON/TOML/YAML/dotenv/INI or Markdown frontmatter, or read a Markdown file's heading sections | [documents.md](references/documents.md) |
 | Author an AFDATA-style Bash 3.2+ executable | [bash.md](references/bash.md) |
@@ -51,6 +51,9 @@ protocol fields, or help fields.
   human-readable form.
 - Register legal invocation combinations; do not infer legality from parser
   permissiveness, output differences, or post-parse ignored flags.
+- Declare accepted value sources on the argument. Classify them before domain
+  I/O, read credentials through `read_secret()`, and keep host schemes distinct
+  from the built-in grammar.
 - Use one protocol envelope shape across CLI, HTTP, MCP, SSE, and logs when
   claiming AFDATA protocol compatibility.
 - Before renaming a public API, wire, database, or persistent field, explain
@@ -103,6 +106,8 @@ afdata skill validate skills/example-skill
 - Finite output and event streams use the correct channel policy.
 - Every application argument belongs to at least one combination, combinations
   do not overlap, and unregistered mixtures fail before domain I/O.
+- Value-source sets are non-empty and unambiguous, malformed or unaccepted
+  sources fail before I/O, and credential reads return a redacting type.
 - Structured help validates against help-v2, gives one minimal generated
   template per combination, and contains no embedded version values or
   long-form Markdown.

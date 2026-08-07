@@ -140,7 +140,7 @@
       "python": null,
       "typescript": null,
       "go": null,
-      "note": "Rust-only typed protocol-validation error (stable rule slug + JSON pointer + message) returned by validate_protocol_event/validate_protocol_stream. Python/TS/Go SDKs still surface validation failures as a plain message (ValueError / Error / error), not yet upgraded to the typed violation — a tracked cross-SDK gap."
+      "note": "Rust-only typed protocol-validation error (stable rule slug + JSON pointer + message) returned by validate_protocol_event/validate_protocol_stream. Python/TS/Go SDKs still surface validation failures as a plain message (ValueError / Error / error), not yet upgraded to the typed violation \u2014 a tracked cross-SDK gap."
     },
     {
       "id": "build_cli_error",
@@ -214,7 +214,7 @@
       "python": "render",
       "typescript": "render",
       "go": "Render",
-      "note": "The single value × format × options → String entry point. Replaces the former output_json/output_yaml/output_plain (+ _with_options) and cli_output/cli_output_with_options families. Rust/Go take an explicit OutputOptions argument (OutputOptions: Default); Python/TS keep it an optional keyword/parameter."
+      "note": "The single value \u00d7 format \u00d7 options \u2192 String entry point. Replaces the former output_json/output_yaml/output_plain (+ _with_options) and cli_output/cli_output_with_options families. Rust/Go take an explicit OutputOptions argument (OutputOptions: Default); Python/TS keep it an optional keyword/parameter."
     },
     {
       "id": "lint_value",
@@ -638,6 +638,51 @@
       "typescript": null,
       "go": null,
       "note": "Rust reference cli-spec-v1 argument declaration."
+    },
+    {
+      "id": "source_set",
+      "kind": "type",
+      "rust": "SourceSet",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference declaration of the value sources one cli-spec-v1 argument accepts."
+    },
+    {
+      "id": "source_scheme",
+      "kind": "type",
+      "rust": "SourceScheme",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference value-source scheme (env, file, stdin, fd, prompt)."
+    },
+    {
+      "id": "host_scheme",
+      "kind": "type",
+      "rust": "HostScheme",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference declaration of a value-source scheme the host parses and reads itself."
+    },
+    {
+      "id": "value_source",
+      "kind": "type",
+      "rust": "ValueSource",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference classified value source, read through the value_source module."
+    },
+    {
+      "id": "source_error",
+      "kind": "type",
+      "rust": "SourceError",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust reference value-source failure: an unacceptable or malformed source, or one that could not be read."
     },
     {
       "id": "arg_syntax",

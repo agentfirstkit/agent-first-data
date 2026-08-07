@@ -6,6 +6,7 @@
 //! resolved outcome into a protocol event and owns AFDATA's `_secret` naming
 //! convention.
 
+use crate::cli_spec::SourceScheme;
 use crate::cli_spec::{
     ArgValueType, BuiltCliSpec, CliError, CliSpec, CliSpecError, ResolvedHelp, ResolvedVersion,
 };
@@ -50,6 +51,25 @@ pub fn build_afdata_cli(mut spec: CliSpec) -> Result<BuiltCliSpec, CliSpecError>
             // that structurally cannot leak, which reads as a real credential
             // to anything downstream that trusts the bit.
             argument.sensitive = suffixed && !is_flag;
+
+            // A prompt suppresses terminal echo and blocks until a person
+            // types — the first only means something for a secret, and the
+            // second is a hang in the agent-run case this CLI is for. So the
+            // source is available exactly where it earns its cost.
+            if let Some(sources) = &argument.sources
+                && sources.accepts(SourceScheme::Prompt)
+                && !argument.sensitive
+            {
+                return Err(CliSpecError {
+                    rule: "prompt_source_without_secret",
+                    message: format!(
+                        "argument `{}` accepts the `prompt` source; rename it to `{}_secret`, or \
+                         drop the source — prompting blocks on a terminal for a value that is not \
+                         a credential",
+                        argument.argument_id, argument.argument_id
+                    ),
+                });
+            }
         }
     }
     spec.build()
@@ -240,10 +260,10 @@ pub fn render_cli_reference(cli: &BuiltCliSpec) -> String {
             out.push_str(&render_output(&contracts));
         }
 
-        let documented: Vec<&crate::cli_spec::ArgSpec> = command
+        let documented: Vec<(&crate::cli_spec::ArgSpec, String)> = command
             .arguments
             .iter()
-            .filter(|argument| argument.about.is_some())
+            .filter_map(|argument| Some((argument, argument.rendered_about()?)))
             .collect();
         if !documented.is_empty() {
             if model.shapes.len() > 1 {
@@ -253,8 +273,7 @@ pub fn render_cli_reference(cli: &BuiltCliSpec) -> String {
                 out.push_str("Arguments across every shape above:\n\n");
             }
             out.push_str("| Argument | Meaning |\n|---|---|\n");
-            for argument in documented {
-                let about = argument.about.as_deref().unwrap_or_default();
+            for (argument, about) in documented {
                 // The same spelling the usage line above uses, so the table can
                 // be read against it without translating ids back to flags.
                 out.push_str(&format!(
@@ -433,12 +452,14 @@ pub fn cli_error_event(error: &CliError) -> Event {
 
 /// The standard event for a program that misread its own resolved invocation.
 ///
-/// Dispatch itself cannot fail — [`BoundCliSpec::resolve_from`] binds the
-/// handler while resolving, so there is no undispatchable invocation to report.
-/// What remains is a handler reading an argument the selected combination does
-/// not supply: an id it does not declare, or one whose type does not match the
-/// accessor. [`BoundCliSpec::call_every_combination`] catches the first from a
-/// test; this is for a program that also wants to say something at runtime.
+/// Dispatch itself cannot fail —
+/// [`crate::cli_spec::BoundCliSpec::resolve_from`] binds the handler while
+/// resolving, so there is no undispatchable invocation to report. What remains
+/// is a handler reading an argument the selected combination does not supply:
+/// an id it does not declare, or one whose type does not match the accessor.
+/// [`crate::cli_spec::BoundCliSpec::call_every_combination`] catches the first
+/// from a test; this is for a program that also wants to say something at
+/// runtime.
 ///
 /// It is a defect in the program, never in what the user typed, and the code
 /// and exit status have to say so. Reporting it as a usage error tells the
@@ -464,6 +485,7 @@ pub fn cli_invocation_invalid_event(detail: &str) -> Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_spec::SourceSet;
     use crate::cli_spec::{ArgSpec, CliOutcome, Combination, CommandSpec, OutputSpec};
 
     fn output() -> OutputSpec {
@@ -501,6 +523,89 @@ mod tests {
         let write_failed = table.find("| 4 | The output could not be written. |");
         assert!(partial.is_some() && write_failed.is_some(), "{table}");
         assert!(partial < write_failed, "{table}");
+    }
+
+    /// The syntax lives in the declaration, so help and `--docs` render it and
+    /// no `about` string repeats it. This is the duplication the declaration
+    /// exists to remove.
+    #[test]
+    fn a_declared_source_set_renders_itself_into_help_and_docs() {
+        let built = build_afdata_cli(spec_with(
+            ArgSpec::option("--token-secret", "SOURCE")
+                .about("Token this host requires")
+                .sources(SourceSet::config().host_scheme("container", "container:NAME")),
+        ))
+        .expect("registry builds");
+
+        let reference = render_cli_reference(&built);
+        assert!(
+            reference.contains(
+                "Token this host requires (the value, or where to read it: env:NAME, \
+                 file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE)"
+            ),
+            "{reference}"
+        );
+
+        let CliOutcome::Help(help) = built
+            .resolve_from(vec!["demo", "--help"])
+            .expect("help resolves")
+        else {
+            panic!("--help must resolve to help");
+        };
+        let model = serde_json::to_value(help.model()).expect("help serializes");
+        let note = model["notes"]["--token-secret"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(note.contains("file[+FORMAT]:PATH#DOT_PATH"), "{model}");
+    }
+
+    /// A value naming a scheme the argument does not accept is a usage error,
+    /// beside the other argv rejections — and nothing was opened to find out.
+    #[test]
+    fn an_unaccepted_scheme_is_an_argv_rejection() {
+        let built = build_afdata_cli(spec_with(
+            ArgSpec::option("--token-secret", "SOURCE").sources(SourceSet::config()),
+        ))
+        .expect("registry builds");
+        let error = built
+            .resolve_from(vec!["demo", "--token-secret", "prompt"])
+            .expect_err("prompt is not in config()");
+        assert_eq!(
+            error.rule,
+            crate::cli_spec::CliErrorRule::InvalidArgumentValue
+        );
+        assert!(error.message.contains("env:NAME"), "{}", error.message);
+
+        // …and one it does accept resolves to the raw string, unread.
+        let outcome = built
+            .resolve_from(vec!["demo", "--token-secret", "env:NAME"])
+            .expect("env is accepted");
+        let CliOutcome::Run(invocation) = outcome else {
+            panic!("must resolve to a run");
+        };
+        assert_eq!(
+            invocation.required("token_secret").as_str(),
+            Some("env:NAME")
+        );
+    }
+
+    /// Prompting suppresses echo and blocks on a terminal. Both only make sense
+    /// for a credential, so the source is refused anywhere else.
+    #[test]
+    fn the_prompt_source_is_refused_on_a_non_secret_argument() {
+        let error = build_afdata_cli(spec_with(
+            ArgSpec::option("--label", "LABEL").sources(SourceSet::stream()),
+        ))
+        .expect_err("prompt on a non-secret argument");
+        assert_eq!(error.rule, "prompt_source_without_secret");
+        // The same set is fine once the name says it carries a credential.
+        assert!(
+            build_afdata_cli(spec_with(
+                ArgSpec::option("--token-secret", "SOURCE").sources(SourceSet::stream())
+            ))
+            .is_ok()
+        );
     }
 
     #[test]

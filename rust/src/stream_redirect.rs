@@ -121,7 +121,7 @@ where
     }
 }
 
-/// Install stdout/stderr redirection from a resolved [`OutputPlan`].
+/// Install stdout/stderr redirection from a resolved [`crate::OutputPlan`].
 ///
 /// The registry-based counterpart to [`install_from_raw_args`], and the one to
 /// prefer when the application has a `CliSpec`: the plan already carries the

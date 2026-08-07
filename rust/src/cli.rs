@@ -72,7 +72,7 @@ impl LogFilters {
 /// Parse `--output` flag value into [`OutputFormat`].
 ///
 /// Returns `Err` with a value-safe message suitable for passing to
-/// [`build_cli_error`] on unknown values.
+/// [`crate::build_cli_error`] on unknown values.
 ///
 /// ```
 /// use agent_first_data::{cli_parse_output, OutputFormat};

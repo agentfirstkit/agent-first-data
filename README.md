@@ -123,6 +123,12 @@ and untouched datetime syntax. Arrays of tables are refused because this editor
 does not define an element-identity policy; afdata never guesses which repeated
 table an object should replace.
 
+INI accepts both section entries (`section.key`) and flat `key=value` entries
+before the first section header (addressed as a bare `key`). A root key and a
+section cannot share a name. When a config filename such as `phoenix.conf`
+does not identify its parser, a Rust value source can say so explicitly:
+`file+ini:PATH#DOT_PATH`.
+
 A Markdown file has three valid readings, none of them guessed at: name
 `toml-frontmatter` or `yaml-frontmatter` to edit its metadata block with the body
 frozen, or `markdown` to read the body as a tree of heading sections. The last is
@@ -238,6 +244,12 @@ there is no raw pre-parser. A resolved `OutputPlan` carries typed
 `OutputFormat` / `OutputTo` values; applications retain control of command
 lifetime and output policy while using `CliEmitter`, `write_raw`, and the
 optional stream-redirection module.
+
+Rust arguments may also declare `SourceSet::config()` or
+`SourceSet::stream()`, so help, validation, and the host agree on
+`env:`/`file:`/`stdin`/`fd:`/`prompt` value sources. `ValueSource::read_secret`
+returns a `SecretString` that redacts under `Debug` and `Display`; the host must
+call `expose_secret` only where the credential is consumed.
 
 Rust also provides `ErrorSpec` / `ErrorCatalog` for stable public domain errors,
 in-process `lint_value` and assertion helpers, and a composable

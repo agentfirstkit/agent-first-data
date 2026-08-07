@@ -203,6 +203,10 @@
           "type": "boolean",
           "description": "This argument's value must never be echoed back in help, errors, or logs."
         },
+        "sources": {
+          "description": "Sources this string argument accepts beside a literal value. The core validates that a value names only a listed scheme and renders env/file/file+FORMAT/stream syntax into help; reading the source is the host's, at the moment it chooses.",
+          "$ref": "#/$defs/sourceSet"
+        },
         "about": {
           "$ref": "#/$defs/nonEmpty"
         }
@@ -368,6 +372,71 @@
           }
         }
       ]
+    },
+    "sourceSet": {
+      "type": "object",
+      "required": [
+        "schemes"
+      ],
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "properties": {
+            "schemes": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "host_schemes"
+          ],
+          "properties": {
+            "host_schemes": {
+              "minItems": 1
+            }
+          }
+        }
+      ],
+      "properties": {
+        "schemes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "env",
+              "file",
+              "stdin",
+              "fd",
+              "prompt"
+            ]
+          }
+        },
+        "host_schemes": {
+          "description": "Schemes the host parses and reads itself, declared so help and validation know they exist. Names must not collide with each other or the built-in/reserved grammar; CliSpec::build validates that each syntax begins with its own name and a colon.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "syntax"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]*$"
+              },
+              "syntax": {
+                "$ref": "#/$defs/nonEmpty",
+                "description": "Displayed source syntax beginning with the exact host scheme name, a colon, and a non-empty value placeholder."
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

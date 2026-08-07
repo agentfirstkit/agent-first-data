@@ -52,6 +52,32 @@ may appear in any subset; conditional optional relationships require separate
 combinations. `CliSpec::build()` rejects overlap, invalid defaults, uncovered
 arguments, invalid output contracts, and duplicate identities.
 
+An argument whose value should not be typed on the command line declares where
+it may come from instead: `ArgSpec::sources(SourceSet::config())` accepts
+`env:NAME` and `file:PATH#DOT_PATH`; use
+`file+FORMAT:PATH#DOT_PATH` when the filename cannot identify any document
+format enabled in the build. `SourceSet::stream()` adds `stdin`, `fd:N`, and
+`prompt`, and `host_scheme` declares one the application reads itself. A bare
+value is still the value, including an empty string, and `literal:` is the
+escape hatch for one that starts with a prefix. Declare it rather than
+describing it in `about`: help and `--docs` render the syntax from the
+declaration, and argv naming a scheme the argument does not accept is rejected
+as `cli_invalid_argument_value` before anything is opened.
+
+A host scheme uses a lowercase `name`, documents syntax beginning with that
+exact `name:`, and cannot collide with another host scheme or
+`env`/`file`/`stdin`/`fd`/`prompt`/`literal`. A host-only set is valid.
+
+Reading is the application's, at the moment it chooses:
+`sources.parse(raw)?` then
+`read()` for a value, or `read_secret()` for a credential. The second answers a
+`SecretString`, whose `Debug` and `Display` render `***` — put it in a struct
+and the whole struct is safe to log. Do not reach for `read()` on a credential
+to avoid `expose_secret`; its errors are allowed to quote the file it read.
+Reads are capped, empty strings remain values, and an `fd:N` read never closes
+the caller-owned descriptor. Prompting is refused on an argument whose id does
+not end in `_secret`.
+
 `ResolvedInvocation::required` returns `Option` so a misspelled caller-side id
 cannot masquerade as a valid flag value. `BoundCliSpec::execute` likewise
 returns `None` for an invocation resolved by an independently built registry;

@@ -1788,6 +1788,27 @@ fn test_secret_from_env_unset_is_runtime_not_usage_error() {
 }
 
 #[test]
+fn test_secret_from_env_preserves_an_explicit_empty_value() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = write_temp(&temp_dir, "secrets.json", "{\"password_secret\":\"old\"}\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_afdata"))
+        .env("AFDATA_TEST_EMPTY_SECRET", "")
+        .args([
+            "set",
+            &config_path,
+            "password_secret",
+            "--secret-from",
+            "env:AFDATA_TEST_EMPTY_SECRET",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let document: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(document["password_secret"], "");
+}
+
+#[test]
 fn test_secret_from_stdin_oversized_and_invalid_utf8() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = write_temp(&temp_dir, "secrets.json", "{\"password_secret\":\"old\"}\n");
@@ -1882,6 +1903,41 @@ fn test_secret_from_fd_rejects_low_and_non_numeric_descriptors() {
     assert_eq!(error.status.code(), Some(2));
     assert!(error.stdout.is_empty());
     assert!(String::from_utf8_lossy(&error.stderr).contains("numeric descriptor"));
+}
+
+#[test]
+fn test_invalid_secret_source_is_rejected_before_target_io_without_echoing_it() {
+    let temp_dir = TempDir::new().unwrap();
+    let missing = temp_dir.path().join("missing.json");
+    let canary = "AFDATA_SECRET_SOURCE_CANARY";
+    let output = run(&[
+        "set",
+        missing.to_str().unwrap(),
+        "password_secret",
+        "--secret-from",
+        canary,
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains(canary), "{stderr}");
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "document_usage_error"
+    );
+
+    let invalid_fd = run(&[
+        "set",
+        missing.to_str().unwrap(),
+        "password_secret",
+        "--secret-from",
+        "fd:nope",
+    ]);
+    assert_eq!(invalid_fd.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&invalid_fd.stderr).contains("numeric descriptor"),
+        "{invalid_fd:?}"
+    );
 }
 
 // ═══════════════════════════════════════════

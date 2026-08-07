@@ -190,8 +190,8 @@ pub(super) fn combination_usage(
         parts.push(token);
         if detail {
             let key = argument_key(argument);
-            if let Some(about) = &argument.about {
-                notes.insert(key.clone(), about.clone());
+            if let Some(about) = argument.rendered_about() {
+                notes.insert(key.clone(), about);
             }
             // A default is only worth stating where leaving the argument out is
             // legal; on a required argument it describes nothing the caller can

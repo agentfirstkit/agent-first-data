@@ -29,7 +29,7 @@ pub struct KeyedList<'a> {
 ///   than to one named path.
 ///
 /// With neither, a non-numeric segment against an array is
-/// [`DocumentError::UnregisteredArray`](crate::document::DocumentError::UnregisteredArray)
+/// [`DocumentError::UnregisteredArray`]
 /// — afdata will not scan an array it was told nothing about.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Addressing<'a> {
@@ -82,7 +82,7 @@ pub enum MatchKind {
     /// position or its full text.
     ///
     /// Exactly one element must match. Several is
-    /// [`DocumentError::AmbiguousMatch`](crate::document::DocumentError::AmbiguousMatch),
+    /// [`DocumentError::AmbiguousMatch`],
     /// never the first one.
     Contains,
 }

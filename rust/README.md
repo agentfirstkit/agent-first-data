@@ -29,8 +29,9 @@ Useful names use Rust casing: `render` (the single
 `OutputOptions`, `Redactor`, `redacted_value`, `redact_url_secrets`,
 `redact_urls_in_text`, `redact_argv`, `normalize_utc_offset`, `is_valid_rfc3339_date`,
 `is_valid_rfc3339_time`, `is_valid_rfc3339`, `is_valid_bcp47`, `CliSpec`,
-`CommandSpec`, `ArgSpec`, `Combination`, `OutputSpec`, `ErrorSpec`,
-`lint_value`, `build_afdata_cli`, and `decode_protocol_event`.
+`CommandSpec`, `ArgSpec`, `Combination`, `OutputSpec`, `SourceSet`,
+`SourceScheme`, `ValueSource`, `ErrorSpec`, `lint_value`,
+`build_afdata_cli`, and `decode_protocol_event`.
 
 The general-purpose features below are on by default; `--no-default-features`
 opts out. Tracing integration is behind `tracing`:
@@ -63,6 +64,18 @@ execution and output policies. Use the resolved `OutputPlan` with
 `CliEmitter::finish`, `write_raw`, and, when enabled, `stream_redirect`.
 [`rust/examples/agent_cli.rs`](examples/agent_cli.rs) shows the finite-command
 case.
+
+An `ArgSpec` can declare indirect values with
+`sources(SourceSet::config())` (`env:NAME`, `file:PATH#DOT_PATH`, or
+`file+FORMAT:PATH#DOT_PATH`) or `SourceSet::stream()` (also `stdin`, `fd:N`,
+and `prompt`). Parse the resolved string with that same set, then call
+`ValueSource::read()` for an ordinary value or `read_secret()` for a
+credential. The latter returns
+`agent_first_data::value_source::SecretString`; its `Debug` and `Display`
+render `***`, and only `expose_secret()` reveals it at the boundary that needs
+the credential. Host-only schemes are declared with `host_scheme` and read by
+the host. Empty strings remain values, reads are capped, and an `fd:N` read
+does not close the caller-owned descriptor.
 
 Canonical flags are `--stdout-file` and `--stderr-file`. They redirect the corresponding stream to an append-only file; stdout keeps the selected AFDATA output format, and stderr keeps native diagnostics such as panics and backtraces.
 

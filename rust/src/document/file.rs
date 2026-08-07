@@ -285,9 +285,10 @@ impl Document {
 /// read from.
 ///
 /// All reads and source-preserving edits come from [`Document`] through
-/// [`Deref`]/[`DerefMut`]; `DocumentFile` adds only the file boundary — reading
-/// on [`open`](DocumentFile::open) and an atomic, symlink-guarded commit on
-/// [`save`](DocumentFile::save) / [`edit`](DocumentFile::edit).
+/// [`std::ops::Deref`]/[`std::ops::DerefMut`]; `DocumentFile` adds only the file
+/// boundary — reading on [`open`](DocumentFile::open) and an atomic,
+/// symlink-guarded commit on [`save`](DocumentFile::save) /
+/// [`edit`](DocumentFile::edit).
 #[derive(Debug, Clone)]
 pub struct DocumentFile {
     doc: Document,

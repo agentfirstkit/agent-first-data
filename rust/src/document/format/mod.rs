@@ -169,6 +169,35 @@ impl Format {
         }
     }
 
+    /// The format a caller named, when this build can read it.
+    ///
+    /// The inverse of [`Format::cli_name`], plus the spellings a person is
+    /// likely to type for the same thing (`yml`, `env`). `None` covers both an
+    /// unknown name and a known one this build lacks a parser for — the caller
+    /// says which, since only it knows whether that distinction is worth a
+    /// different message.
+    #[must_use]
+    pub fn from_cli_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "json" => Some(Self::Json),
+            #[cfg(feature = "toml")]
+            "toml" => Some(Self::Toml),
+            #[cfg(feature = "yaml")]
+            "yaml" | "yml" => Some(Self::Yaml),
+            #[cfg(feature = "dotenv")]
+            "dotenv" | "env" => Some(Self::Dotenv),
+            #[cfg(feature = "ini")]
+            "ini" => Some(Self::Ini),
+            #[cfg(feature = "toml")]
+            "toml-frontmatter" => Some(Self::TomlFrontmatter),
+            #[cfg(feature = "yaml")]
+            "yaml-frontmatter" => Some(Self::YamlFrontmatter),
+            #[cfg(feature = "markdown")]
+            "markdown" => Some(Self::Markdown),
+            _ => None,
+        }
+    }
+
     /// Detect format from file extension, when this build can read it.
     pub fn detect(path: &Path) -> Option<Self> {
         match Self::extension_kind(path)? {

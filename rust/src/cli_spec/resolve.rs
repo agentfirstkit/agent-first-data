@@ -962,6 +962,15 @@ fn parse_value(argument: &ArgSpec, raw: &str) -> Result<CliValue, String> {
                     argument.enum_values.join(", ")
                 ));
             }
+            // An argument that accepts sources is checked for a *legal source*,
+            // never read: a misspelled scheme joins the other usage errors at
+            // exit 2, before the command runs, and nothing is opened to find
+            // out. The message quotes the accepted syntax, not the value.
+            if let Some(sources) = &argument.sources {
+                sources
+                    .parse(raw)
+                    .map_err(|error| error.message().to_string())?;
+            }
             Ok(CliValue::String(raw.to_string()))
         }
         ArgValueType::I64 => {

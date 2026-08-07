@@ -46,6 +46,110 @@ fn sample_spec() -> Result<BuiltCliSpec, CliSpecError> {
         .build()
 }
 
+/// The source declaration is a registry fact, so its own rules are enforced
+/// where every other argument rule is: at build time, before a host can ship a
+/// flag that promises a source it could never read.
+#[test]
+fn a_source_set_must_belong_to_a_string_argument_with_no_default() {
+    let spec = |argument: ArgSpec| {
+        let id = argument.argument_id.clone();
+        CliSpec::new("demo", "1.0.0")
+            .lifecycle_output(protocol())
+            .command(
+                CommandSpec::root().arg(argument).combination(
+                    Combination::new("only")
+                        .action("only")
+                        .required([id])
+                        .output(protocol()),
+                ),
+            )
+            .build()
+    };
+
+    // A flag carries no value, and an enum's values are already known.
+    let error = spec(ArgSpec::flag("--verbose").sources(SourceSet::config()))
+        .expect_err("a flag cannot take a source");
+    assert_eq!(error.rule, "sources_value_type");
+    let error = spec(ArgSpec::option_enum("--mode", ["a", "b"]).sources(SourceSet::config()))
+        .expect_err("an enum cannot take a source");
+    assert_eq!(error.rule, "sources_value_type");
+
+    let error = spec(ArgSpec::option("--token", "SOURCE").sources(SourceSet::new([])))
+        .expect_err("an empty set says nothing");
+    assert_eq!(error.rule, "sources_empty");
+
+    // A default that is a source would be read from the host's environment
+    // without anyone asking, which is not what a default means here.
+    let error = spec(
+        ArgSpec::option("--token", "SOURCE")
+            .sources(SourceSet::config())
+            .default("env:TOKEN"),
+    )
+    .expect_err("a sourced argument cannot default");
+    assert_eq!(error.rule, "sources_default");
+
+    assert!(spec(ArgSpec::option("--token", "SOURCE").sources(SourceSet::config())).is_ok());
+}
+
+#[test]
+fn source_sets_reject_ambiguous_host_grammars_and_deserialized_duplicates() {
+    let spec = |sources: SourceSet| {
+        CliSpec::new("demo", "1.0.0")
+            .lifecycle_output(protocol())
+            .command(
+                CommandSpec::root()
+                    .arg(ArgSpec::option("--token", "SOURCE").sources(sources))
+                    .combination(
+                        Combination::new("only")
+                            .action("only")
+                            .required(["token"])
+                            .output(protocol()),
+                    ),
+            )
+            .build()
+    };
+
+    let duplicate_built_in: SourceSet =
+        serde_json::from_value(serde_json::json!({"schemes": ["env", "env"]})).unwrap();
+    assert_eq!(
+        spec(duplicate_built_in).unwrap_err().rule,
+        "sources_duplicate_scheme"
+    );
+
+    let duplicate_host = SourceSet::new([])
+        .host_scheme("container", "container:NAME")
+        .host_scheme("container", "container:ID");
+    assert_eq!(
+        spec(duplicate_host).unwrap_err().rule,
+        "host_source_duplicate"
+    );
+
+    for (sources, rule) in [
+        (
+            SourceSet::new([]).host_scheme("env", "env:NAME"),
+            "host_source_name_reserved",
+        ),
+        (
+            SourceSet::new([]).host_scheme("Container", "Container:NAME"),
+            "host_source_name_invalid",
+        ),
+        (
+            SourceSet::new([]).host_scheme("container", "vault:NAME"),
+            "host_source_syntax_invalid",
+        ),
+        (
+            SourceSet::new([]).host_scheme("container", "container:"),
+            "host_source_syntax_invalid",
+        ),
+    ] {
+        assert_eq!(spec(sources).unwrap_err().rule, rule);
+    }
+
+    // A host is allowed to be the only source. The serialized schema must
+    // therefore allow an empty built-in list when host_schemes is non-empty.
+    assert!(spec(SourceSet::new([]).host_scheme("container", "container:NAME")).is_ok());
+}
+
 #[test]
 fn resolves_one_registered_combination() {
     let spec = sample_spec().unwrap();

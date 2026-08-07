@@ -389,6 +389,32 @@ path is fixed before that command's arguments are parsed, so the two spellings
 are never ambiguous. Where a subcommand declares neither, `--version` and
 `--docs` past the root stay an unregistered combination.
 
+**Declared value sources.** A string argument MAY declare a non-empty `sources`
+set when its value can be supplied indirectly. The built-in schemes are
+`env:NAME`, `file:PATH#DOT_PATH`, `stdin`, `fd:N`, and `prompt`;
+`file+FORMAT:PATH#DOT_PATH` names any document format the build supports when
+the filename does not. A bare argument remains the literal value, and
+`literal:VALUE` escapes a value beginning with a recognized prefix. Source
+arguments cannot declare defaults: a default is a value, never an instruction
+to read the host's environment or filesystem.
+
+The registry classifies sources but does not read them. It MUST reject a
+recognized scheme outside the argument's declared set as
+`cli_invalid_argument_value` before config, filesystem, terminal, network, or
+domain I/O. The application reads the classified source only when its command
+needs the value. In the Rust reference, `ValueSource::read()` returns a
+`String`; `read_secret()` returns a `SecretString` whose `Debug` and `Display`
+are `***` and whose value is available only through the explicit
+`expose_secret()` boundary. Empty strings are values, not missing sources.
+
+A host MAY add a source it reads itself by declaring a `host_scheme`. Its name
+uses lowercase ASCII letters, digits, and hyphens, begins with a letter, and
+must not duplicate another host source or the reserved `env`, `file`, `stdin`,
+`fd`, `prompt`, or `literal` names. Its displayed syntax begins with that exact
+`name:` and a value placeholder. A host-only source set is valid. The AFDATA
+Rust adapter additionally refuses `prompt` unless the argument id ends in
+`_secret`, because prompting blocks and suppresses terminal echo.
+
 **Help scope and output.** Help is generated directly from the same registry
 and answers in **one** round trip: `myapp [command] --help` returns every
 registered shape of that command, each complete, plus the next-level

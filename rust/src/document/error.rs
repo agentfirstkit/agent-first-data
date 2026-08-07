@@ -354,7 +354,7 @@ impl DocumentError {
     ///   [`Self::from_serde`] those carry serde's rendering of the offending
     ///   value, which is document content.
     ///
-    /// Every other variant renders the same as its [`Display`], carrying only
+    /// Every other variant renders the same as its [`std::fmt::Display`], carrying only
     /// structural context: paths, requested slugs, indices, and type or format
     /// names. In particular, [`Self::AmbiguousMatch`] carries candidate indices
     /// rather than matched field values.

@@ -8,10 +8,11 @@ use agent_first_data::document::{
 use agent_first_data::{
     ArgSpec, BoundOutcome, CliSpec, Combination, CommandSpec, ErrorBuilder, Event, LintFinding,
     LintOptions, LintSeverity, OutputFormat, OutputOptions, OutputPlan, OutputSpec, OutputTo,
-    PlainStyle, Redactor, ResolvedInvocation, build_afdata_cli, build_cli_error, cli_error_event,
-    cli_help_event, cli_invocation_invalid_event, cli_version_event, json_error, json_log,
-    json_result, lint_value as lint_serialized_value, render, render_cli_reference,
-    validate_protocol_event, validate_protocol_stream,
+    PlainStyle, Redactor, ResolvedInvocation, SourceScheme, SourceSet, ValueSource,
+    build_afdata_cli, build_cli_error, cli_error_event, cli_help_event,
+    cli_invocation_invalid_event, cli_version_event, json_error, json_log, json_result,
+    lint_value as lint_serialized_value, render, render_cli_reference, validate_protocol_event,
+    validate_protocol_stream,
 };
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -2183,27 +2184,12 @@ fn document_output_options(ctx: &DocumentContext<'_>) -> OutputOptions {
 
 /// Parse an explicit `--input-format` value into a [`DocumentFormat`].
 fn parse_document_format(name: &str) -> Result<DocumentFormat, String> {
-    match name.to_ascii_lowercase().as_str() {
-        "json" => Ok(DocumentFormat::Json),
-        #[cfg(feature = "toml")]
-        "toml" => Ok(DocumentFormat::Toml),
-        #[cfg(feature = "yaml")]
-        "yaml" | "yml" => Ok(DocumentFormat::Yaml),
-        #[cfg(feature = "dotenv")]
-        "dotenv" | "env" => Ok(DocumentFormat::Dotenv),
-        #[cfg(feature = "ini")]
-        "ini" => Ok(DocumentFormat::Ini),
-        #[cfg(feature = "toml")]
-        "toml-frontmatter" => Ok(DocumentFormat::TomlFrontmatter),
-        #[cfg(feature = "yaml")]
-        "yaml-frontmatter" => Ok(DocumentFormat::YamlFrontmatter),
-        #[cfg(feature = "markdown")]
-        "markdown" => Ok(DocumentFormat::Markdown),
-        other => Err(format!(
-            "unsupported --input-format `{other}`; expected json, toml, yaml, yml, dotenv, env, ini, \
-             toml-frontmatter, yaml-frontmatter, or markdown"
-        )),
-    }
+    DocumentFormat::from_cli_name(name).ok_or_else(|| {
+        format!(
+            "unsupported --input-format `{name}`; expected json, toml, yaml, yml, dotenv, env, \
+             ini, toml-frontmatter, yaml-frontmatter, or markdown"
+        )
+    })
 }
 
 /// Resolve an optional `--input-format` string into an optional
@@ -2657,6 +2643,11 @@ fn compute_set(
     ctx: &DocumentContext<'_>,
 ) -> Result<Value, CliDocError> {
     reject_mutation_dash(file)?;
+    // Classify the source before opening the target. A malformed `fd:` or
+    // unknown source is an invocation error and must win over filesystem I/O;
+    // the value itself is still read only after the target passes mutation
+    // safety checks below.
+    let secret_source = secret_from.map(parse_secret_from).transpose()?;
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
     let mut doc = DocumentFile::open(file, input_format)?;
     // Guard the target before consuming a `--secret-from stdin`/`prompt`/`fd:N`
@@ -2664,9 +2655,8 @@ fn compute_set(
     // rejected before the secret is read, not after.
     doc.ensure_mutable("set")?;
 
-    let new_value = if let Some(secret_from) = secret_from {
-        let source = parse_secret_from(secret_from).map_err(CliDocError::Usage)?;
-        DocumentValue::String(read_secret_from(source)?)
+    let new_value = if let Some(secret_source) = secret_source.as_ref() {
+        DocumentValue::String(read_secret_from(secret_source)?)
     } else if let Some(type_name) = value_type {
         let parsed_type = ValueType::parse(type_name).ok_or_else(|| {
             CliDocError::Usage(format!(
@@ -2837,184 +2827,47 @@ fn compute_unset(file: &Path, key: &str, ctx: &DocumentContext<'_>) -> Result<Va
 // D4: --secret-from stdin|prompt|fd:<N>|env:<VAR>
 // ═══════════════════════════════════════════
 
-enum SecretSource {
-    Stdin,
-    Prompt,
-    Fd(i32),
-    Env(String),
+/// The sources `--secret-from` names.
+///
+/// `file:` is deliberately absent: `set` is already pointed at a document, and
+/// a second document address in the same call reads as an operation on that
+/// file rather than a source for the value. What this flag is for is the value
+/// that must not appear on argv at all.
+fn secret_from_sources() -> SourceSet {
+    SourceSet::new([
+        SourceScheme::Stdin,
+        SourceScheme::Prompt,
+        SourceScheme::Fd,
+        SourceScheme::Env,
+    ])
 }
 
-/// Parse a `--secret-from` flag value. Descriptor/name shape problems
-/// (non-numeric `fd:`, `fd:` below 3, empty `env:` name, an unrecognized
-/// source keyword) are usage errors (R2) caught here, before anything is
-/// read; a failure actually *reading* the source is a separate runtime
-/// concern (see [`read_secret_from`]).
-fn parse_secret_from(spec: &str) -> Result<SecretSource, String> {
-    match spec {
-        "stdin" => Ok(SecretSource::Stdin),
-        "prompt" => Ok(SecretSource::Prompt),
-        other => {
-            if let Some(fd) = other.strip_prefix("fd:") {
-                let number = fd.parse::<i32>().map_err(|_| {
-                    format!("invalid --secret-from `{spec}`; fd: requires a numeric descriptor")
-                })?;
-                if number < 3 {
-                    return Err(format!(
-                        "invalid --secret-from `{spec}`; fd: requires a descriptor >= 3"
-                    ));
-                }
-                Ok(SecretSource::Fd(number))
-            } else if let Some(var) = other.strip_prefix("env:") {
-                if var.is_empty() {
-                    return Err(format!(
-                        "invalid --secret-from `{spec}`; env: requires a variable name"
-                    ));
-                }
-                Ok(SecretSource::Env(var.to_string()))
-            } else {
-                Err(format!(
-                    "invalid --secret-from `{spec}`; expected stdin, prompt, fd:<N>, or env:<VAR>"
-                ))
-            }
-        }
-    }
-}
-
-const MAX_VALUE_SECRET_BYTES: usize = 1024 * 1024;
-
-fn read_secret_from(source: SecretSource) -> Result<String, CliDocError> {
-    match source {
-        SecretSource::Stdin => read_secret_reader(std::io::stdin().lock(), "stdin"),
-        SecretSource::Prompt => {
-            #[cfg(unix)]
-            {
-                read_secret_prompt()
-            }
-            #[cfg(not(unix))]
-            {
-                Err(CliDocError::runtime(
-                    "document_secret_source_failed",
-                    "prompt secret input is unsupported on this platform",
-                ))
-            }
-        }
-        SecretSource::Fd(number) => {
-            #[cfg(unix)]
-            {
-                use std::os::unix::io::FromRawFd;
-                // SAFETY: ownership is transferred exactly once and the descriptor is closed on drop.
-                let file = unsafe { std::fs::File::from_raw_fd(number) };
-                read_secret_reader(file, "file descriptor")
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = number;
-                Err(CliDocError::runtime(
-                    "document_secret_source_failed",
-                    "raw file descriptors are unsupported on this platform",
-                ))
-            }
-        }
-        SecretSource::Env(name) => std::env::var(&name).map_err(|_| {
-            CliDocError::runtime(
-                "document_secret_source_failed",
-                format!("environment variable `{name}` is not set"),
-            )
-        }),
-    }
-}
-
-fn read_secret_reader<R: std::io::Read>(reader: R, source: &str) -> Result<String, CliDocError> {
-    let mut bytes = Vec::new();
-    reader
-        .take((MAX_VALUE_SECRET_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            CliDocError::runtime(
-                "document_secret_source_failed",
-                format!("read secret from {source}: {error}"),
-            )
-        })?;
-    if bytes.len() > MAX_VALUE_SECRET_BYTES {
-        return Err(CliDocError::runtime(
-            "document_secret_source_failed",
-            format!("secret exceeds {MAX_VALUE_SECRET_BYTES} bytes"),
+/// Classify the secret source without reading it.
+///
+/// Shape problems (an unrecognized keyword, a non-numeric `fd:`, an empty
+/// `env:` name) are usage errors caught before target or source I/O.
+fn parse_secret_from(spec: &str) -> Result<ValueSource, CliDocError> {
+    let source = secret_from_sources()
+        .parse(spec)
+        .map_err(|error| CliDocError::Usage(format!("invalid --secret-from; {error}")))?;
+    // A bare word that is not a source keyword would otherwise be taken as the
+    // secret itself, which is the one thing this flag exists to avoid.
+    if matches!(source, ValueSource::Literal(_)) {
+        return Err(CliDocError::Usage(
+            "invalid --secret-from; expected stdin, prompt, fd:<N>, or env:<VAR>".to_string(),
         ));
     }
-    String::from_utf8(bytes).map_err(|_| {
-        CliDocError::runtime(
-            "document_secret_source_failed",
-            "secret input must be valid UTF-8",
-        )
-    })
+    Ok(source)
 }
 
-#[cfg(unix)]
-fn read_secret_prompt() -> Result<String, CliDocError> {
-    use std::io::BufRead;
-    let mut tty = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
+/// Read a source that already passed invocation validation.
+fn read_secret_from(source: &ValueSource) -> Result<String, CliDocError> {
+    source
+        .read_secret()
+        .map(|secret| secret.expose_secret().to_string())
         .map_err(|error| {
-            CliDocError::runtime(
-                "document_secret_source_failed",
-                format!("open controlling terminal: {error}"),
-            )
-        })?;
-    let status = std::process::Command::new("stty")
-        .args(["-echo"])
-        .status()
-        .map_err(|error| {
-            CliDocError::runtime(
-                "document_secret_source_failed",
-                format!("disable terminal echo: {error}"),
-            )
-        })?;
-    if !status.success() {
-        return Err(CliDocError::runtime(
-            "document_secret_source_failed",
-            "disable terminal echo failed",
-        ));
-    }
-    let _echo_guard = TerminalEchoGuard;
-    write!(tty, "Secret: ").map_err(|error| {
-        CliDocError::runtime(
-            "document_secret_source_failed",
-            format!("write prompt: {error}"),
-        )
-    })?;
-    let mut value = String::new();
-    let result = {
-        let mut reader = std::io::BufReader::new(&mut tty);
-        reader.read_line(&mut value)
-    }
-    .map_err(|error| {
-        CliDocError::runtime(
-            "document_secret_source_failed",
-            format!("read secret from prompt: {error}"),
-        )
-    });
-    let _ = writeln!(tty);
-    result?;
-    let value = value.trim_end_matches(['\n', '\r']);
-    if value.len() > MAX_VALUE_SECRET_BYTES {
-        return Err(CliDocError::runtime(
-            "document_secret_source_failed",
-            format!("secret exceeds {MAX_VALUE_SECRET_BYTES} bytes"),
-        ));
-    }
-    Ok(value.to_string())
-}
-
-#[cfg(unix)]
-struct TerminalEchoGuard;
-
-#[cfg(unix)]
-impl Drop for TerminalEchoGuard {
-    fn drop(&mut self) {
-        let _ = std::process::Command::new("stty").arg("echo").status();
-    }
+            CliDocError::runtime("document_secret_source_failed", error.message().to_string())
+        })
 }
 
 #[cfg(test)]

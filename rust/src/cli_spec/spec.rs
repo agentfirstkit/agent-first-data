@@ -357,6 +357,16 @@ pub struct ArgSpec {
     /// derives it from AFDATA's `_secret` suffix.
     #[serde(default, skip_serializing_if = "is_false")]
     pub sensitive: bool,
+    /// The sources this argument accepts beside a literal value.
+    ///
+    /// Declared rather than assumed: a source turns an argument into a reader
+    /// of files and environment variables, which is right for a credential and
+    /// wrong for most everything else. The core validates that a value names
+    /// only a scheme in this set, and renders the syntax into help so no host
+    /// repeats it in an `about` string. Reading happens in the host, when it
+    /// chooses — see [`crate::value_source`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources: Option<SourceSet>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub about: Option<String>,
 }
@@ -429,6 +439,7 @@ impl ArgSpec {
             default: None,
             repeatable: false,
             sensitive: false,
+            sources: None,
             about: None,
         }
     }
@@ -478,6 +489,7 @@ impl ArgSpec {
             default: None,
             repeatable: false,
             sensitive: false,
+            sources: None,
             about: None,
         }
     }
@@ -513,9 +525,40 @@ impl ArgSpec {
         self
     }
 
+    /// Accept the value indirectly, from any source in `sources`.
+    ///
+    /// The help text follows from the set, so `about` should say what the value
+    /// *is* and leave the syntax to this. Reading is the host's, at the moment
+    /// it chooses: [`crate::cli_spec::SourceSet::parse`] on the resolved
+    /// string, then `read` or `read_secret`.
+    #[must_use]
+    pub fn sources(mut self, sources: SourceSet) -> Self {
+        self.sources = Some(sources);
+        self
+    }
+
     pub fn about(mut self, about: impl Into<String>) -> Self {
         self.about = nonempty(about.into());
         self
+    }
+
+    /// What a reader is told about this argument: what the value means, plus
+    /// how it may be sourced.
+    ///
+    /// Hosts declare those separately — `about` says what the value *is*, the
+    /// source set says where it may come from — and every rendering path joins
+    /// them here. That is the whole reason the set is declared rather than
+    /// written into prose: one afhttp flag's syntax was repeated across nine
+    /// rows of its generated reference, and one afpsql flag's across forty-eight,
+    /// each a place to forget when a source is added.
+    #[must_use]
+    pub fn rendered_about(&self) -> Option<String> {
+        match (&self.about, &self.sources) {
+            (Some(about), Some(sources)) => Some(format!("{about} ({})", sources.syntax_summary())),
+            (Some(about), None) => Some(about.clone()),
+            (None, Some(sources)) => Some(sources.syntax_summary()),
+            (None, None) => None,
+        }
     }
 }
 

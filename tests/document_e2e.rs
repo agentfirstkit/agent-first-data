@@ -1167,7 +1167,6 @@ fn test_ini_fixtures_and_source_editor() {
             .as_str(),
         Some("value # literal")
     );
-    assert!(Format::Ini.load("root=value\n").is_err());
     assert!(Format::Ini.load("[s]\na: b\n").is_err());
     let edited = agent_first_data::document::format::ini::set_preserving(
         source,
@@ -1190,6 +1189,104 @@ fn test_ini_fixtures_and_source_editor() {
     )
     .unwrap();
     assert_eq!(edited, "[section]\r\nkey = new");
+}
+
+/// A flat `key=value` file — phoenixd's `phoenix.conf`, most of `/etc/*.conf`,
+/// php.ini's preamble — is the shape a caller most often needs one value out
+/// of. Entries before the first header are the document root, addressed bare.
+#[cfg(feature = "ini")]
+#[test]
+fn test_ini_root_entries_are_addressed_bare() {
+    let source = "http-password=abc123\nauto-liquidity=2m\n\n[extra]\nk=v\n";
+    let value = Format::Ini.load(source).unwrap();
+    assert_eq!(
+        get_path(&value, "http-password", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_str(),
+        Some("abc123")
+    );
+    // Sections keep working beside them, at their own address.
+    assert_eq!(
+        get_path(&value, "extra.k", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_str(),
+        Some("v")
+    );
+
+    // The one ambiguity is refused rather than resolved: a root key and a
+    // section of the same name would both address the same top-level name.
+    assert!(Format::Ini.load("name=x\n[name]\nk=v\n").is_err());
+    // Duplicates are caught at the root as they are inside a section.
+    assert!(Format::Ini.load("a=1\na=2\n").is_err());
+
+    // The source editor refuses to create the same collision itself. Returning
+    // source that this parser rejects would make a direct library call unsafe
+    // even though DocumentFile's final save also has a read-back guard.
+    assert!(
+        agent_first_data::document::format::ini::set_preserving(
+            "[same]\nk=v\n",
+            "same",
+            &Value::String("root".to_string()),
+        )
+        .is_err()
+    );
+    assert!(
+        agent_first_data::document::format::ini::set_preserving(
+            "same=v\n",
+            "same.k",
+            &Value::String("nested".to_string()),
+        )
+        .is_err()
+    );
+
+    // Editing a root entry rewrites it in place…
+    let edited = agent_first_data::document::format::ini::set_preserving(
+        source,
+        "http-password",
+        &Value::String("changed".to_string()),
+    )
+    .unwrap();
+    assert!(edited.starts_with("http-password=changed\n"), "{edited}");
+    assert!(edited.contains("[extra]\nk=v\n"), "{edited}");
+
+    // …and a new one lands before the first header. At end of file it would
+    // join whatever section closes the document, which is a `set` that writes
+    // to a different key than the one asked for.
+    let added = agent_first_data::document::format::ini::set_preserving(
+        source,
+        "new-key",
+        &Value::String("v".to_string()),
+    )
+    .unwrap();
+    let added_at = added.find("new-key=v").expect("the new entry");
+    assert!(
+        added_at < added.find("[extra]").expect("the header"),
+        "{added}"
+    );
+    assert_eq!(
+        get_path(
+            &Format::Ini.load(&added).expect("the edit reparses"),
+            "new-key",
+            Addressing::INDEX_ONLY
+        )
+        .unwrap()
+        .as_str(),
+        Some("v")
+    );
+
+    let removed =
+        agent_first_data::document::format::ini::unset_preserving(source, "auto-liquidity")
+            .unwrap();
+    assert!(!removed.contains("auto-liquidity"), "{removed}");
+    assert!(Format::Ini.load(&removed).is_ok());
+
+    // `save` writes root entries first for the same reason.
+    let rendered = Format::Ini.save(&value).unwrap();
+    assert!(
+        rendered.find("http-password=").unwrap() < rendered.find("[extra]").unwrap(),
+        "{rendered}"
+    );
+    assert_eq!(Format::Ini.load(&rendered).unwrap(), value);
 }
 
 #[cfg(feature = "dotenv")]

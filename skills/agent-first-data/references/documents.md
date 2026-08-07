@@ -110,6 +110,12 @@ order, trailing-comma style, and untouched datetime syntax. Arrays of tables
 are explicitly refused because this editor has no caller-declared element
 identity policy; do not fall back to a generic TOML reserializer.
 
+INI entries before the first `[section]` header are document-root strings and
+use a bare path (`http-password`); section entries use `section.key`. A root key
+and section cannot share a name, because both would occupy the same top-level
+address. For an extensionless or `.conf` file used as a value source, name the
+format explicitly: `file+ini:PATH#DOT_PATH`.
+
 In Rust, `Document::decode<T>()` deserializes the complete document, and
 `DocumentFile::edit_and_validate<T>(...)` stages edits on a clone, decodes the
 typed model, then commits once. An edit or type failure rolls back both the

@@ -281,6 +281,42 @@ fn validate_argument(argument: &ArgSpec) -> Result<(), CliSpecError> {
             ),
         ));
     }
+    if let Some(sources) = &argument.sources {
+        // A flag has no value, and an enum's whole point is that the legal
+        // values are known at build time; both would make a source unreadable
+        // in one case and meaningless in the other.
+        if !matches!(argument.value_type, ArgValueType::String) {
+            return Err(CliSpecError::new(
+                "sources_value_type",
+                format!(
+                    "argument `{}` accepts value sources, so its value type must be string",
+                    argument.argument_id
+                ),
+            ));
+        }
+        if sources.is_empty() {
+            return Err(CliSpecError::new(
+                "sources_empty",
+                format!(
+                    "argument `{}` declares an empty source set; drop the declaration instead",
+                    argument.argument_id
+                ),
+            ));
+        }
+        // A default is a value this argument takes when argv is silent. Spelled
+        // as a source it would be read — quietly, from the host's environment —
+        // which is not what a default means anywhere else in the registry.
+        if argument.default.is_some() {
+            return Err(CliSpecError::new(
+                "sources_default",
+                format!(
+                    "argument `{}` accepts value sources, so it cannot declare a default",
+                    argument.argument_id
+                ),
+            ));
+        }
+        validate_source_set(&argument.argument_id, sources)?;
+    }
     if argument.value_type == ArgValueType::Json && argument.default.is_some() {
         return Err(CliSpecError::new(
             "json_default",
@@ -325,6 +361,78 @@ fn validate_argument(argument: &ArgSpec) -> Result<(), CliSpecError> {
         })?;
     }
     Ok(())
+}
+
+fn validate_source_set(argument_id: &str, sources: &SourceSet) -> Result<(), CliSpecError> {
+    let mut built_in = BTreeSet::new();
+    for scheme in sources.schemes() {
+        if !built_in.insert(*scheme) {
+            return Err(CliSpecError::new(
+                "sources_duplicate_scheme",
+                format!(
+                    "argument `{argument_id}` declares the `{}` source more than once",
+                    scheme.name()
+                ),
+            ));
+        }
+    }
+
+    let mut host_names = BTreeSet::new();
+    for host in sources.host_schemes() {
+        if !valid_host_scheme_name(&host.name) {
+            return Err(CliSpecError::new(
+                "host_source_name_invalid",
+                format!(
+                    "argument `{argument_id}` has invalid host source name `{}`; use lowercase \
+                     ASCII letters, digits, and hyphens, starting with a letter",
+                    host.name
+                ),
+            ));
+        }
+        if matches!(
+            host.name.as_str(),
+            "env" | "file" | "stdin" | "fd" | "prompt" | "literal"
+        ) {
+            return Err(CliSpecError::new(
+                "host_source_name_reserved",
+                format!(
+                    "argument `{argument_id}` uses reserved host source name `{}`",
+                    host.name
+                ),
+            ));
+        }
+        if !host_names.insert(host.name.as_str()) {
+            return Err(CliSpecError::new(
+                "host_source_duplicate",
+                format!(
+                    "argument `{argument_id}` declares host source `{}` more than once",
+                    host.name
+                ),
+            ));
+        }
+        let prefix = format!("{}:", host.name);
+        if !host.syntax.starts_with(&prefix) || host.syntax.len() == prefix.len() {
+            return Err(CliSpecError::new(
+                "host_source_syntax_invalid",
+                format!(
+                    "argument `{argument_id}` host source `{}` must document syntax beginning \
+                     with `{prefix}` and a value placeholder",
+                    host.name
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_host_scheme_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|character| character.is_ascii_lowercase())
+        && chars.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
 }
 
 fn validate_combination(

@@ -32,6 +32,7 @@ mod build;
 mod error;
 mod help;
 mod resolve;
+mod sources;
 mod spec;
 #[cfg(test)]
 mod tests;
@@ -45,6 +46,7 @@ pub use resolve::{
     BoundCliSpec, BoundInvocation, BoundOutcome, BuiltCliSpec, CliOutcome, OutputPlan,
     ResolvedInvocation, SyntheticInvocation,
 };
+pub use sources::{HostScheme, SourceError, SourceScheme, SourceSet, ValueSource};
 pub use spec::{
     ArgSpec, ArgSyntax, ArgValueType, CliSpec, CliSpecError, CliValue, Combination, CommandSpec,
     ExitCodeSpec, FixedValue, OutputLifecycle, OutputSpec,
