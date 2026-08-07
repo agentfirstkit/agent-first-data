@@ -548,9 +548,9 @@ impl ArgSpec {
     /// Hosts declare those separately — `about` says what the value *is*, the
     /// source set says where it may come from — and every rendering path joins
     /// them here. That is the whole reason the set is declared rather than
-    /// written into prose: one afhttp flag's syntax was repeated across nine
-    /// rows of its generated reference, and one afpsql flag's across forty-eight,
-    /// each a place to forget when a source is added.
+    /// written into prose: a single flag's syntax is otherwise repeated across
+    /// every row of a generated reference that mentions it — dozens, for a
+    /// widely-used one — each a place to forget when a source is added.
     #[must_use]
     pub fn rendered_about(&self) -> Option<String> {
         match (&self.about, &self.sources) {

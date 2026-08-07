@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.32.0",
+  "version": "0.32.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,15 +13,7 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Add a declared value-source grammar so any string argument can accept its value indirectly — env:NAME, file:PATH#DOT_PATH, stdin, fd:N, prompt — with literal: as the escape for a value that begins with a recognized prefix",
-    "Return credentials from a value source as SecretString, which renders as *** under Debug and Display and exposes the value only through an explicit expose_secret boundary",
-    "Classify and reject a malformed or unaccepted value source in the CLI registry as cli_invalid_argument_value, before any config, filesystem, terminal, network, or domain I/O",
-    "Let a host declare its own source scheme, validated against the reserved built-in names, so a host-read source appears in help and validation beside the built-ins",
-    "Reject the prompt source on an argument whose id does not end in _secret, because prompting blocks on a terminal and suppresses echo",
-    "Retire the afdata CLI's private --secret-from reader in favor of the shared value-source library, keeping the flag's opt-in shape and its released error wording",
-    "Read INI entries appearing before the first section header as document root keys addressed by bare name, refusing a document where a root key and a section share a name",
-    "Add file+FORMAT:PATH#DOT_PATH so a source can name its document parser when the filename cannot, with the format before the colon so a Windows drive letter is never mistaken for it",
-    "Share one Format::from_cli_name table between value sources and the afdata CLI's --input-format instead of maintaining two"
+    "Rewrite the source documentation that explained a host-scheme value source and a declared source set by naming consumer programs, so the published crate describes the shape of the problem rather than programs its readers do not have"
   ],
   "bonds": [],
   "tree": {

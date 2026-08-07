@@ -133,8 +133,8 @@ impl SourceScheme {
 /// know about it.
 ///
 /// The reading is the host's own — [`SourceSet::parse`] answers
-/// [`ValueSource::Host`] and leaves the rest to it. `afhttp`'s
-/// `container:NAME`, which reads a token out of a container it manages, is one:
+/// [`ValueSource::Host`] and leaves the rest to it. A `container:NAME` scheme
+/// that reads a token out of a container the host manages is one:
 /// nothing about it belongs in this crate, but everything about *documenting*
 /// it does.
 ///
@@ -506,10 +506,10 @@ mod tests {
     fn a_host_scheme_parses_here_and_is_read_elsewhere() {
         let set = SourceSet::config().host_scheme("container", "container:NAME");
         assert_eq!(
-            set.parse("container:afhttp-host").expect("host scheme"),
+            set.parse("container:app-host").expect("host scheme"),
             ValueSource::Host {
                 scheme: "container".to_string(),
-                value: "afhttp-host".to_string(),
+                value: "app-host".to_string(),
             }
         );
         assert!(set.parse("container:").is_err());

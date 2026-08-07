@@ -1463,7 +1463,7 @@ fn test_document_file_stages_edits_until_save() {
     fs::write(&path, initial).unwrap();
 
     let mut doc = DocumentFile::open(&path, Some(Format::Json)).unwrap();
-    // Two staged edits in afmail's config-set shape: replace a scalar and clear
+    // Two staged edits in a config-set shape: replace a scalar and clear
     // a mutually-exclusive sibling.
     doc.set("imap.host", Value::String("new".to_string()))
         .unwrap();
