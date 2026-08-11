@@ -171,6 +171,53 @@ afdata emit result "Build complete"
 afdata emit error build_failed "Build failed" --hint "Inspect compiler output"
 ```
 
+## Destructive operands
+
+`afdata_remove TYPE VALUE [--under ROOT]` removes a path, but only after
+`afdata guard` has approved it. `TYPE` and `--under` are forwarded to the guard
+untouched, so the call reads as the guard it wraps:
+
+```bash
+afdata_remove tmp_path "$work_dir"
+afdata_remove path "$out_dir/$name" --under "$out_dir"
+```
+
+It exists because the inline spelling cannot be made to fail. In an argument
+position a command substitution's exit status is discarded, and `rm -f` is
+defined to exit 0 when its operand names nothing, so
+`rm -rf -- "$(afdata guard tmp_path "$dir")"` leaves the target untouched — the
+guard working — while the script continues as though the cleanup had happened.
+As a command, `afdata_remove` returns the guard's own status, so `errexit`
+stops on a rejection. Removing a path that does not exist succeeds, matching
+`rm -rf`, so repeated cleanup stays idempotent. In an `EXIT` trap that cleans
+several paths, `errexit` makes the first rejection abort the trap and the later
+paths are never reached; append `|| :` per call when every path must be tried.
+
+`afdata_trash TYPE VALUE [--under ROOT]` has the same shape but moves the entry
+to the platform's trash instead of deleting it. Which of the two to use is a
+decision made in the source, not guessed at runtime: build output and `mktemp`
+scratch belong to `afdata_remove`, because trashing every run's scratch fills a
+person's trash with things nobody will restore; a person's own files belong to
+`afdata_trash`, where the system owns expiry and restore.
+
+```bash
+afdata_trash path "$document" --under "$library"
+```
+
+It never falls back to deleting. When the entry cannot be made reversible it
+fails with `trash_unavailable` and touches nothing — no trash on the host, or a
+target on a network location, on a volume whose trash is switched off, or one
+too large for the trash to hold. Work that must proceed there wanted
+`afdata_remove` and should say so. Two rarer codes mean something else:
+`trash_not_reversible` says the entry is gone and cannot be restored, and
+`trash_incomplete` says the run stopped somewhere unknown, so the target's state
+has to be checked. Neither is a retry.
+
+The trash entry point is the platform's own — `trash`, `gio trash`,
+`trash-put`, or on Windows the shell operation Explorer performs. Placement,
+naming collisions, expiry and the "put back" record stay that platform's
+contract; this library adds no state of its own.
+
 ## Child processes
 
 `afdata_run [--quiet] COMMAND [ARG ...]` emits a start log, runs the command,

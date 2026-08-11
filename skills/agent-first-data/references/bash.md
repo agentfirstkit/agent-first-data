@@ -11,6 +11,7 @@ custom long-option parsing or ad hoc JSON.
 - [Load](#load)
 - [Declare arguments](#declare-arguments)
 - [Config and events](#config-and-events)
+- [Destructive operands](#destructive-operands)
 - [Child processes](#child-processes)
 - [Forwarding trailing arguments](#forwarding-trailing-arguments)
 - [Minimal pattern](#minimal-pattern)
@@ -57,6 +58,87 @@ usage error. Preserve both properties in wrapper diagnostics.
 
 Keep secret values in `_secret`-named structured fields. Never interpolate a
 secret into a free-form message or child-command description.
+
+## Destructive operands
+
+A variable flowing into a verb that deletes or overwrites is validated with
+`afdata guard <TYPE> <VALUE> [--under ROOT]`. It prints the normalized absolute
+path and fails closed to blank stdout. Quoting rules govern how a string is
+passed along; they never judge whether the value is a disaster, because `/`,
+`$HOME`, and a project root are all non-empty strings.
+
+**Never place a guard call in an argument position.** There the guard's exit
+status is discarded, and `rm -f` is defined to exit 0 when its operand names
+nothing — so a rejected value leaves the target untouched while the script runs
+on as though the cleanup had succeeded. Use the kit function for removal, or
+assign first and use the variable:
+
+```bash
+afdata_remove tmp_path "$work_dir"                 # removal: one command
+afdata_trash path "$doc" --under "$library"        # reversible removal
+target="$(afdata_cli guard path "$out_dir/$name" --under "$out_dir")"
+printf '%s\n' "$rendered" > "$target"              # any other verb: two steps
+```
+
+Put the guard ahead of the first command that touches the filesystem, including
+the `mkdir -p` that creates the directory about to be written. It accepts a path
+that does not exist yet, so the order costs nothing, while the reverse order
+lets the least informative failure win: an unset value dies as
+`mkdir: : No such file or directory` instead of as `guard_empty_value`.
+
+Choose between the two removals in the source, never at runtime. Build output,
+staging directories, and `mktemp` scratch go to `afdata_remove`: they are meant
+to disappear, and trashing every run's scratch space fills a person's trash with
+things nobody will restore. Files a person owns go to `afdata_trash`, where the
+desktop keeps expiry and restore.
+
+`afdata_trash` fails with `trash_unavailable` rather than deleting whenever this
+target cannot be made reversible — no trash on the host, or a target on a
+network location, on a volume whose trash is switched off, or too large for the
+trash to hold. Nothing is touched in that case, so work that must proceed anyway
+wanted `afdata_remove` and should say so. Two rarer codes do not mean that:
+`trash_not_reversible` says the entry is already gone and cannot be restored,
+and `trash_incomplete` says the run stopped somewhere unknown and the target's
+state has to be checked. Neither is a retry; both want a person to look.
+
+```bash
+rm -rf -- "$(afdata_cli guard tmp_path "$work_dir")"   # never: cannot stop
+```
+
+Submit the operand the verb will actually receive, not a prefix of it. A suffix
+holding a variable must be part of the guarded value, since an empty or `..`
+suffix is exactly what containment exists to catch. A suffix written literally
+at the call site is exempt — it can be neither empty nor traversal — so guard
+the directory once and write literal names beneath it. The exemption is about
+containment only: verbs that follow a final symlink (`>`, `cp`, `chmod`) are
+governed per path, so guard the full path when the directory holds entries this
+script did not create.
+
+Choose `--under ROOT` as the directory whose entire contents you would accept
+losing, not as a sandbox boundary. A checkout root reads as safe and is the
+wrong answer: it leaves every sibling directory reachable. `VALUE` carrying a
+`..` segment is refused outright (`guard_traversal_segment`) rather than
+normalized away.
+
+The root belongs to the call site, not to the function being called. A helper
+shared by callers that legitimately write all over a checkout cannot name one,
+and the checkout root is not the fallback — it reads as protection while leaving
+every sibling reachable. Use `path` there, which still refuses an unset value,
+`/`, `$HOME` and the current directory, and give the root in the callers that
+have a tight one. Saying "no honest root exists here" is a real answer; a wide
+root that looks like compliance is not.
+
+Never assign a guard's output back over its own input — `dir="$(afdata_cli
+guard tmp_path "$dir")"` reads as normalization and protects no verb. To assert
+the environment up front, discard stdout and keep the status:
+
+```bash
+afdata_cli guard tmp_path "$work_dir" >/dev/null || exit 1
+```
+
+When stating what a rejection guarantees, say the target is not touched. Do not
+say the verb will report an error: `-f` suppresses exactly that, on every
+platform.
 
 ## Child processes
 

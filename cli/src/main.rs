@@ -1,5 +1,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod guard;
+
 use agent_first_data::document::{
     Addressing, ArrayRule, BareOverwrite, Document, DocumentError, DocumentFile,
     Format as DocumentFormat, MatchKind, PatternSegment, Value as DocumentValue, ValueType,
@@ -437,6 +439,39 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .output(raw.clone()),
                 ),
         )
+        .command(
+            CommandSpec::new(["guard"])
+                .about(
+                    "Validate a value against a destructive-verb operand type and print its \
+                     normalized absolute path as raw stdout bytes",
+                )
+                .arg(
+                    ArgSpec::positional_enum("type", 0, "TYPE", ["path", "tmp_path", "cwd_path"])
+                        .about(
+                            "path: no containment beyond the shared reject set; tmp_path: must \
+                             sit strictly under the system temp area; cwd_path: must sit \
+                             strictly under the current directory",
+                        ),
+                )
+                .arg(positional(
+                    "value",
+                    1,
+                    "VALUE",
+                    "Value to validate, e.g. the contents of a shell variable",
+                ))
+                .arg(ArgSpec::option("--under", "ROOT").about(
+                    "Additional containment root VALUE must sit strictly under, for a target \
+                     anchored to a directory the caller knows and the TYPE vocabulary cannot \
+                     name",
+                ))
+                .combination(
+                    Combination::new("guard")
+                        .action("guard")
+                        .required(["type", "value"])
+                        .optional(["under"])
+                        .output(raw.clone()),
+                ),
+        )
         .command(enumerate_command(
             "paths",
             "paths",
@@ -732,6 +767,7 @@ fn closed_world_main() -> ExitCode {
         ("shell_bash", dispatch_invocation),
         ("get", dispatch_invocation),
         ("value", dispatch_invocation),
+        ("guard", dispatch_invocation),
         ("paths", dispatch_invocation),
         ("keys", dispatch_invocation),
         ("set", dispatch_invocation),
@@ -1029,6 +1065,7 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
         "get" => dispatch_get(invocation, format),
         "value" => dispatch_value(invocation, format),
         "values" => dispatch_values(invocation, format),
+        "guard" => dispatch_guard(invocation),
         "paths" | "keys" => dispatch_enumerate(invocation, format),
         "set" => dispatch_set(invocation, format),
         "unset" => dispatch_unset(invocation, format),
@@ -1107,6 +1144,44 @@ fn dispatch_value(invocation: &ResolvedInvocation, format: OutputFormat) -> Exit
             format,
         },
     )
+}
+
+/// `guard`: the registry already restricts `type` to exactly the three
+/// registered spellings and `value` to exactly one positional, so the only
+/// failures possible here are the value-validation ones `guard::evaluate`
+/// itself reports.
+fn dispatch_guard(invocation: &ResolvedInvocation) -> ExitCode {
+    let type_name = required_string!(invocation, "type");
+    let Some(guard_type) = guard::GuardType::parse(&type_name) else {
+        return emit_invocation_error("resolved invocation has an unregistered guard TYPE");
+    };
+    let value = required_string!(invocation, "value");
+    let under = invocation_optional_string(invocation, "under");
+    finish_guard(guard::guard_from_environment(
+        guard_type,
+        &value,
+        under.as_deref(),
+    ))
+}
+
+/// Finish a `guard` invocation: like [`finish_raw`], success writes the
+/// normalized path as raw bytes with no envelope and failure writes a
+/// structured event to stderr, leaving stdout empty — `guard` has no
+/// document to redact through, so this skips [`DocumentContext`] entirely.
+fn finish_guard(result: Result<PathBuf, guard::GuardError>) -> ExitCode {
+    match result {
+        Ok(path) => write_raw_exit(path.as_os_str().as_encoded_bytes()),
+        Err(err) => {
+            let event = build_error_event(json_error(err.code(), &err.to_string()));
+            emit_event_to(
+                event,
+                OutputFormat::Json,
+                &OutputOptions::default(),
+                1,
+                error_stream(output_to()),
+            )
+        }
+    }
 }
 
 fn dispatch_enumerate(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
@@ -2912,11 +2987,14 @@ mod cli_registry_tests {
     #[test]
     fn raw_commands_reject_protocol_output_arguments() {
         let cli = afdata_cli_spec().unwrap();
-        for command in ["value", "paths", "keys"] {
-            let mut argv = vec!["afdata", command, "data.json"];
-            if command == "value" {
-                argv.push("key");
-            }
+        for (command, rest) in [
+            ("value", &["data.json", "key"][..]),
+            ("paths", &["data.json"][..]),
+            ("keys", &["data.json"][..]),
+            ("guard", &["path", "/tmp"][..]),
+        ] {
+            let mut argv = vec!["afdata", command];
+            argv.extend(rest);
             argv.extend(["--output", "json"]);
             let error = cli.resolve_from(argv).unwrap_err();
             assert_eq!(

@@ -186,6 +186,40 @@ run_package() {
   else
     afdata_bin="$rust_smoke/cargo-root/bin/afdata"
   fi
+  # Preflight the guard dogfood below, once, here — where the failure can name
+  # its own cause. `mktemp -d` follows $TMPDIR; `guard tmp_path` deliberately
+  # refuses to read it and accepts only the platform's own temp area. On a
+  # machine where those two disagree, every guarded cleanup below fails, and
+  # the first one to do so is several steps away from the reason.
+  if ! "$afdata_bin" guard tmp_path "$rust_smoke" >/dev/null 2>&1; then
+    echo "afdata guard tmp_path rejected this step's own mktemp -d directory:" >&2
+    echo "  $rust_smoke" >&2
+    echo "TMPDIR=${TMPDIR:-<unset>} resolves outside the platform temp area that" >&2
+    echo "guard tmp_path recognizes, so the guard dogfood cannot run here." >&2
+    echo "Unset TMPDIR (or point it back inside the system temp area) and rerun." >&2
+    exit 1
+  fi
+  # Dogfood the guard this package step's own `mktemp -d` scratch directories
+  # through: every one of them is created bare above and removed unguarded
+  # below otherwise, which is exactly the destructive-operand-guard's target
+  # shape. `$afdata_bin` (installed just above) stays alive for this whole
+  # function, so every later cleanup site can reuse it too.
+  guarded_rm_rf_tmp() {
+    local target
+    target="$("$afdata_bin" guard tmp_path "$1")"
+    rm -rf -- "$target"
+  }
+  # The checkout-relative counterpart, for build artifacts under $ROOTPATH: no
+  # TYPE in the vocabulary names that root on its own — `cwd_path` would only
+  # match if this script were always invoked from the repo root, and it is not
+  # (`bash /path/to/scripts/test.sh` from anywhere is supported). $ROOTPATH is
+  # resolved from BASH_SOURCE, so the anchor exists; `--under` is how it gets
+  # handed to the guard.
+  guarded_rm_rf_in_checkout() {
+    local target
+    target="$("$afdata_bin" guard path "$1" --under "$ROOTPATH")"
+    rm -rf -- "$target"
+  }
   "$afdata_bin" --version >/dev/null
   "$afdata_bin" shell bash > "$rust_smoke/afdata.sh"
   cmp "$ROOTPATH/bash/afdata.sh" "$rust_smoke/afdata.sh"
@@ -230,7 +264,9 @@ pub fn smoke() {
 }
 RS
   (cd "$rust_smoke/lib" && cargo check --quiet)
-  rm -rf "$rust_smoke"
+  # `$rust_smoke` (which houses `$afdata_bin` itself) is removed at the end of
+  # this function instead of here, so the later Python/TypeScript/Go cleanups
+  # below can keep reusing the same installed binary to guard themselves.
 
   echo ""
   echo "[package] Python"
@@ -276,9 +312,19 @@ assert (assets / "protocol-v1.schema.json").is_file()
 assert (assets / "cli-help-v2.schema.json").is_file()
 assert (assets / "cli-spec-v1.schema.json").is_file()
 PY
-  rm -rf "$py_out"
-  [ "$had_py_build" -eq 0 ] && rm -rf "$ROOTPATH/python/build"
-  [ "$had_py_egg" -eq 0 ] && rm -rf "$ROOTPATH/python"/*.egg-info
+  guarded_rm_rf_tmp "$py_out"
+  if [ "$had_py_build" -eq 0 ]; then
+    guarded_rm_rf_in_checkout "$ROOTPATH/python/build"
+  fi
+  if [ "$had_py_egg" -eq 0 ]; then
+    # One guarded call per match: the guard takes exactly one VALUE, which is
+    # what makes an unquoted or word-split operand a rejection instead of a
+    # partially-read one.
+    for egg_info in "$ROOTPATH/python"/*.egg-info; do
+      [ -e "$egg_info" ] || continue
+      guarded_rm_rf_in_checkout "$egg_info"
+    done
+  fi
 
   echo ""
   echo "[package] TypeScript"
@@ -328,8 +374,10 @@ for (const file of [
 }
 JS
   )
-  rm -rf "$ts_smoke"
-  [ "$had_ts_dist" -eq 0 ] && rm -rf "$ROOTPATH/typescript/dist"
+  guarded_rm_rf_tmp "$ts_smoke"
+  if [ "$had_ts_dist" -eq 0 ]; then
+    guarded_rm_rf_in_checkout "$ROOTPATH/typescript/dist"
+  fi
 
   echo ""
   echo "[package] Go"
@@ -359,7 +407,8 @@ GO
   test -f "$ROOTPATH/go/assets/protocol-v1.schema.json"
   test -f "$ROOTPATH/go/assets/cli-help-v2.schema.json"
   test -f "$ROOTPATH/go/assets/cli-spec-v1.schema.json"
-  rm -rf "$go_smoke"
+  guarded_rm_rf_tmp "$go_smoke"
+  guarded_rm_rf_tmp "$rust_smoke"
   return 0
 }
 

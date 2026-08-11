@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.32.1",
+  "version": "0.33.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,7 +13,14 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Rewrite the source documentation that explained a host-scheme value source and a declared source set by naming consumer programs, so the published crate describes the shape of the problem rather than programs its readers do not have"
+    "Add an `afdata guard` subcommand that validates a value against a destructive-verb operand type (path, tmp_path, cwd_path) and prints its normalized absolute path as raw bytes, failing closed to empty stdout so a rejection cannot become a wrong target",
+    "Derive tmp_path's containment root from platform-fixed structure or a system API rather than TMPDIR/TMP/TEMP, so a redirected environment cannot make the guard structurally trust the wrong directory",
+    "Add --under ROOT, an additional containment root that intersects with the operand type, for a target anchored to a directory the type vocabulary cannot name",
+    "Decide containment on a final symlink's target while still printing the link itself, and canonicalize $HOME in the reject set so a home reached through a symlink is no longer silently dropped",
+    "Add afdata_remove and afdata_trash to the Bash kit (API version 2), which put the guard's exit status in a command position where set -e acts on it, unlike the inline substitution that rm -f silently swallows",
+    "Give afdata_trash a Windows entry point that drives IFileOperation and refuses up front every condition under which Windows would delete permanently while reporting success, never falling back to deletion",
+    "Print the drive-form path on Windows instead of canonicalization's \\\\?\\ verbatim spelling, which the shell's own item API and .NET refuse",
+    "Extend the Bash skill reference with the rules the dogfood rounds produced: the containment root belongs to the call site, and the guard goes ahead of the first command that touches the filesystem"
   ],
   "bonds": [],
   "tree": {

@@ -30,6 +30,7 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 - [`afdata emit log`](#afdata-emit-log) — Emit a diagnostic log event
 - [`afdata emit result`](#afdata-emit-result) — Emit a terminal result event
 - [`afdata get`](#afdata-get) — Read a document or one value as an AFDATA result
+- [`afdata guard`](#afdata-guard) — Validate a value against a destructive-verb operand type and print its normalized absolute path as raw stdout bytes
 - [`afdata keys`](#afdata-keys) — List child names as raw lines, without their parent path
 - [`afdata lint`](#afdata-lint) — Lint structured data for deterministic AFDATA issues
 - [`afdata paths`](#afdata-paths) — List each child's full dot-path as raw lines
@@ -128,6 +129,22 @@ Arguments across every shape above:
 | `--input-format` | Document format override |
 | `--slug-field` | Field naming each element of an array on the path |
 | `--secret-name` | Extra exact field name to redact |
+
+### `afdata guard`
+
+Validate a value against a destructive-verb operand type and print its normalized absolute path as raw stdout bytes
+
+```
+afdata guard <path|tmp_path|cwd_path> <VALUE> [--under <ROOT>]
+```
+
+Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
+
+| Argument | Meaning |
+|---|---|
+| `TYPE` | path: no containment beyond the shared reject set; tmp_path: must sit strictly under the system temp area; cwd_path: must sit strictly under the current directory |
+| `VALUE` | Value to validate, e.g. the contents of a shell variable |
+| `--under` | Additional containment root VALUE must sit strictly under, for a target anchored to a directory the caller knows and the TYPE vocabulary cannot name |
 
 ### `afdata keys`
 
