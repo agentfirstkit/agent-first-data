@@ -687,8 +687,9 @@ PATH="$trash_stub_dir:$PATH" afdata_trash tmp_path "$trash_victim"
 # text: on Windows the guard hands over a native `C:\…` path, which is the right
 # operand spelled in a way no POSIX string built here would match.
 trash_logged_operand="$(tail -n 1 "$AFDATA_TRASH_STUB_LOG")"
-[ -n "$trash_logged_operand" ] && [ -e "$trash_logged_operand/marker" ] \
-  || fail "afdata_trash did not hand the guarded path to the trash entry point"
+if [ -z "$trash_logged_operand" ] || [ ! -e "$trash_logged_operand/marker" ]; then
+  fail "afdata_trash did not hand the guarded path to the trash entry point"
+fi
 if [ "$trash_stub_name" = trash ]; then
   grep -qxF -- '--' "$AFDATA_TRASH_STUB_LOG" \
     || fail "afdata_trash did not pass -- before the operand"
