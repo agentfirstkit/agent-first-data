@@ -58,6 +58,79 @@ venv_python() {
   fi
 }
 
+# Every Bash file in the checkout, so a script is covered by existing rather
+# than by someone remembering to add it to a list here. Naming two files by
+# hand is how this project's own scripts/ went unchecked while the kit and its
+# e2e were checked.
+bash_sources() {
+  find "$ROOTPATH" -name '*.sh' \
+    -not -path "$ROOTPATH/target/*" \
+    -not -path '*/node_modules/*' \
+    -not -path '*/.venv/*' \
+    -print | LC_ALL=C sort
+}
+
+# ShellCheck, at exactly the pinned version or not at all.
+#
+# Skipping when it is absent, which is what this used to do, makes a missing
+# tool and a clean tree print the same thing. Accepting whatever version is
+# present is the subtler half of the same bug: 0.9.0 and 0.11.0 disagree about
+# real code, so a gate that takes either one cannot promise that CI will agree
+# with it.
+run_shellcheck() {
+  local expected binary found files script
+  expected="$("$SCRIPT_DIR/install-shellcheck.sh" --print-version)"
+
+  # CI provisions the pin; a developer machine uses its own package manager's
+  # build and is told when that has drifted from the pin.
+  binary="$("$SCRIPT_DIR/install-shellcheck.sh" --print-path)"
+  if [ ! -x "$binary" ]; then
+    if command -v shellcheck >/dev/null 2>&1; then
+      binary=shellcheck
+    else
+      # Upstream publishes no build for every platform this suite runs on.
+      # Shell scripts are platform-independent text and the Linux and macOS
+      # legs read every byte of them, so the coverage is complete without this
+      # platform — but say so, rather than printing nothing and looking clean.
+      case "$(uname -s)" in
+        Linux | Darwin)
+          echo "ShellCheck $expected is required and was not found." >&2
+          echo "  install it (e.g. brew install shellcheck), or run" >&2
+          echo "  scripts/install-shellcheck.sh --install to fetch the pinned build." >&2
+          return 1
+          ;;
+        *)
+          echo "ShellCheck: skipped on $(uname -s); the Linux and macOS legs check the same files"
+          return 0
+          ;;
+      esac
+    fi
+  fi
+
+  found="$("$binary" --version | awk '/^version:/ { print $2 }')"
+  if [ "$found" != "$expected" ]; then
+    echo "ShellCheck $found is installed, but this project's checks are defined against $expected." >&2
+    echo "  Its rules differ between releases, so a tree that passes here would not" >&2
+    echo "  necessarily pass CI. Upgrade to $expected, or, if $found is the newer one," >&2
+    echo "  move the pin in scripts/install-shellcheck.sh and re-run." >&2
+    return 1
+  fi
+
+  # Collected into one argument list rather than checked in a loop: shellcheck
+  # reads stdin, so a `while read` loop feeding it filenames has its remaining
+  # input swallowed by the first call and silently checks one file.
+  files=()
+  while IFS= read -r script; do
+    files+=("$script")
+  done < <(bash_sources)
+  if [ "${#files[@]}" -eq 0 ]; then
+    echo "ShellCheck: no Bash sources found, which cannot be right" >&2
+    return 1
+  fi
+  "$binary" -x "${files[@]}"
+  echo "ShellCheck $expected clean: ${#files[@]} script(s)"
+}
+
 run_static() {
   echo "[1/6] Rust (fmt + clippy)"
   (cd "$ROOTPATH" && cargo fmt --all --check)
@@ -70,17 +143,18 @@ run_static() {
   (cd "$ROOTPATH" && cargo clippy --quiet --no-default-features -- -D warnings)
 
   echo ""
-  echo "[2/6] Bash (syntax + optional ShellCheck)"
+  echo "[2/6] Bash (syntax + ShellCheck)"
   # The kit advertises Bash 3.2+, so check it against the oldest bash present
   # rather than whichever one is first on PATH. On macOS /bin/bash is 3.2 while
   # a Homebrew bash 5 usually shadows it, and 5 accepts constructs 3.2 rejects —
   # so a plain `bash -n` certifies a file the shebang's interpreter refuses.
   # (On Linux /bin/bash is normally 5.x too; there the check is no weaker than
   # it was, and the macOS side is where the claim actually gets tested.)
-  "${OLDEST_BASH:-/bin/bash}" -n "$ROOTPATH/bash/afdata.sh" "$ROOTPATH/tests/bash_e2e.sh"
-  if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck -x "$ROOTPATH/bash/afdata.sh" "$ROOTPATH/tests/bash_e2e.sh"
-  fi
+  local script
+  while IFS= read -r script; do
+    "${OLDEST_BASH:-/bin/bash}" -n "$script"
+  done < <(bash_sources)
+  run_shellcheck
 
   echo ""
   echo "[3/6] Spec registry"

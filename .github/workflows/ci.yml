@@ -51,6 +51,15 @@ jobs:
           cache: npm
           cache-dependency-path: typescript/package-lock.json
 
+      # The runner images ship whatever ShellCheck their distribution packages
+      # — Ubuntu 24.04's is 0.9.0, two majors behind — and its rules differ
+      # from the pinned one's on real code. Provision the pin so this leg
+      # judges the tree by the same rules the local gate does.
+      - name: Setup ShellCheck
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./scripts/install-shellcheck.sh --install
+
       - name: Fixed project checks
         shell: bash
         run: ./scripts/test.sh all
