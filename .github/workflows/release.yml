@@ -82,7 +82,19 @@ jobs:
           fi
           "$BIN_DIR/afdata" --version | grep -q "\"version\":\"${TAG#v}\""
           echo "TAG=$TAG" >> "$GITHUB_ENV"
-          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256" 2>/dev/null || shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
+          # Take the digest and write the line, rather than letting each
+          # platform's tool spell it. Git Bash's sha256sum treats an archive as
+          # binary and writes `<digest> *<name>`, where GNU coreutils on Linux
+          # and shasum on macOS write `<digest>  <name>`. This file is published
+          # for people and read by the package channels, so one spelling on
+          # every platform is the point — and it is the spelling
+          # release-assets.sh verifies the upload against.
+          if command -v sha256sum >/dev/null 2>&1; then
+            DIGEST="$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+          else
+            DIGEST="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
+          fi
+          printf '%s  %s\n' "$DIGEST" "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       - name: Upload immutable release assets
