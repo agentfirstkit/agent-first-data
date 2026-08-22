@@ -85,6 +85,8 @@ mod cli;
 #[cfg(feature = "cli")]
 mod cli_afdata;
 
+// The one atomic file installation every writer in this crate goes through.
+mod atomic_file;
 mod formatting;
 mod lint;
 mod output;

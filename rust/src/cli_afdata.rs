@@ -283,6 +283,12 @@ pub fn render_cli_reference(cli: &BuiltCliSpec) -> String {
             }
             out.push('\n');
         }
+
+        // After the table, because it is the paragraph the table cannot hold.
+        if let Some(note) = &command.reference_note {
+            out.push_str(note.trim_end());
+            out.push_str("\n\n");
+        }
     }
 
     out.push_str("## Exit codes\n\n");

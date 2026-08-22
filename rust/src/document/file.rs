@@ -21,7 +21,7 @@
 //! redaction is the caller's responsibility.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use crate::document::{Addressing, DocumentError, DocumentResult, Format, KeyedList, Value};
@@ -1026,183 +1026,25 @@ fn guard_mutation(path: &Path, operation: &str) -> DocumentResult<fs::Metadata> 
     Ok(metadata)
 }
 
-/// Compose a temporary file name that stays within one path component's limit.
-///
-/// The marker, pid, and attempt add about 35 bytes. A target whose own name is
-/// close to `NAME_MAX` would push the composed name past it, and the failure
-/// would surface at `save()` — after the caller had already made their edits, on
-/// a file they opened successfully. Truncating the stem keeps the write
-/// possible; uniqueness still comes from the pid and attempt, with `create_new`
-/// retrying the rare collision.
-fn temp_file_name(file_name: &str, pid: u32, attempt: u32) -> String {
-    // The smallest NAME_MAX across the platforms this runs on.
-    const MAX_NAME_BYTES: usize = 255;
-    let suffix = format!(".afdata-document.{pid}.{attempt}.tmp");
-    // One byte for the leading dot that hides the temporary file.
-    let budget = MAX_NAME_BYTES.saturating_sub(suffix.len() + 1);
-    let mut stem = file_name;
-    if stem.len() > budget {
-        let mut cut = budget;
-        while cut > 0 && !stem.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        stem = &stem[..cut];
+/// Turn a failed atomic installation into this module's error type. The step
+/// names the failure; `operation` names what the caller was doing when it
+/// happened, so a `save` and a `create` read differently for the same fault.
+fn document_io_error(operation: &str, error: crate::atomic_file::AtomicError) -> DocumentError {
+    DocumentError::IoError {
+        detail: format!("{operation} {error}"),
     }
-    format!(".{stem}{suffix}")
-}
-
-fn allocate_private_temp(
-    parent: &Path,
-    file_name: &str,
-    operation: &str,
-) -> DocumentResult<(PathBuf, File)> {
-    let pid = std::process::id();
-    for attempt in 0..32_u32 {
-        let candidate = parent.join(temp_file_name(file_name, pid, attempt));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        match options.open(&candidate) {
-            Ok(file) => return Ok((candidate, file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(DocumentError::IoError {
-                    detail: format!(
-                        "{operation} temporary file in `{}`: {error}",
-                        parent.display()
-                    ),
-                });
-            }
-        }
-    }
-    Err(DocumentError::IoError {
-        detail: format!(
-            "{operation} could not allocate temporary file in `{}`",
-            parent.display()
-        ),
-    })
-}
-
-fn atomic_parent_and_name<'a>(
-    path: &'a Path,
-    operation: &str,
-) -> DocumentResult<(&'a Path, String)> {
-    let parent = match path.parent() {
-        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
-        Some(parent) => parent,
-        None => {
-            return Err(DocumentError::IoError {
-                detail: format!(
-                    "{operation} has no parent directory for `{}`",
-                    path.display()
-                ),
-            });
-        }
-    };
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| DocumentError::IoError {
-            detail: format!("{operation} path is not valid UTF-8: `{}`", path.display()),
-        })?
-        .to_string();
-    Ok((parent, file_name))
-}
-
-#[cfg(unix)]
-fn sync_parent(parent: &Path, operation: &str) -> DocumentResult<()> {
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| DocumentError::IoError {
-            detail: format!(
-                "{operation} fsync parent directory `{}`: {error}",
-                parent.display()
-            ),
-        })
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_parent: &Path, _operation: &str) -> DocumentResult<()> {
-    // Rust does not expose a portable directory handle on non-unix targets.
-    // The file itself is still synced before its atomic installation.
-    Ok(())
-}
-
-fn write_temp_bytes(
-    mut temp_file: File,
-    temp_path: &Path,
-    target_path: &Path,
-    bytes: &[u8],
-    operation: &str,
-    permissions: Option<fs::Permissions>,
-    unix_mode: Option<u32>,
-) -> DocumentResult<()> {
-    temp_file
-        .write_all(bytes)
-        .map_err(|error| DocumentError::IoError {
-            detail: format!("{operation} write `{}`: {error}", target_path.display()),
-        })?;
-    if let Some(permissions) = permissions {
-        temp_file
-            .set_permissions(permissions)
-            .map_err(|error| DocumentError::IoError {
-                detail: format!(
-                    "{operation} preserve permissions `{}`: {error}",
-                    target_path.display()
-                ),
-            })?;
-    }
-    #[cfg(unix)]
-    if let Some(unix_mode) = unix_mode {
-        use std::os::unix::fs::PermissionsExt as _;
-        temp_file
-            .set_permissions(fs::Permissions::from_mode(unix_mode))
-            .map_err(|error| DocumentError::IoError {
-                detail: format!(
-                    "{operation} set permissions on `{}`: {error}",
-                    target_path.display()
-                ),
-            })?;
-    }
-    #[cfg(not(unix))]
-    let _ = unix_mode;
-    temp_file
-        .sync_all()
-        .map_err(|error| DocumentError::IoError {
-            detail: format!("{operation} fsync `{}`: {error}", temp_path.display()),
-        })
 }
 
 /// Write `bytes` to `path` atomically: guard, same-directory temp file,
 /// fsync, permission preservation, then rename over the target.
 fn write_atomic(path: &Path, bytes: &[u8], operation: &str) -> DocumentResult<()> {
     let metadata = guard_mutation(path, operation)?;
-    let (parent, file_name) = atomic_parent_and_name(path, operation)?;
-    let (temp_path, temp_file) = allocate_private_temp(parent, &file_name, operation)?;
-    let result = (|| -> DocumentResult<()> {
-        write_temp_bytes(
-            temp_file,
-            &temp_path,
-            path,
-            bytes,
-            operation,
-            Some(metadata.permissions()),
-            None,
-        )?;
-        fs::rename(&temp_path, path).map_err(|error| DocumentError::IoError {
-            detail: format!("{operation} atomic replace `{}`: {error}", path.display()),
-        })?;
-        sync_parent(parent, operation)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
-    result
+    crate::atomic_file::install(
+        path,
+        crate::atomic_file::AtomicInstall::replacing(bytes)
+            .with_permissions(Some(metadata.permissions())),
+    )
+    .map_err(|error| document_io_error(operation, error))
 }
 
 fn write_atomic_create(path: &Path, bytes: &[u8], options: CreateOptions) -> DocumentResult<()> {
@@ -1228,53 +1070,29 @@ fn write_atomic_create(path: &Path, bytes: &[u8], options: CreateOptions) -> Doc
         }
     }
 
-    let (parent, file_name) = atomic_parent_and_name(path, operation)?;
-    let (temp_path, temp_file) = allocate_private_temp(parent, &file_name, operation)?;
-    let result = (|| -> DocumentResult<()> {
-        // A replace with no explicit mode keeps the target's own permissions,
-        // exactly as `save()` does; only a first creation falls back to 0o600.
-        let unix_mode = options.effective_unix_mode(existing_permissions.is_some());
-        let preserved = unix_mode
-            .is_none()
-            .then(|| existing_permissions.clone())
-            .flatten();
-        write_temp_bytes(
-            temp_file, &temp_path, path, bytes, operation, preserved, unix_mode,
-        )?;
-        match options.mode {
-            CreateMode::NewOnly => match fs::hard_link(&temp_path, path) {
-                Ok(()) => {
-                    // The document is installed from here on. Failing to unlink
-                    // the temporary link leaves a stray file, but reporting an
-                    // error would tell the caller the commit did not happen —
-                    // and a retry would then get `document_target_exists` for a
-                    // write that in fact succeeded.
-                    let _ = fs::remove_file(&temp_path);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    return Err(DocumentError::AlreadyExists {
-                        path: path.display().to_string(),
-                    });
-                }
-                Err(error) => {
-                    return Err(DocumentError::IoError {
-                        detail: format!("create install `{}`: {error}", path.display()),
-                    });
-                }
-            },
-            CreateMode::Replace => {
-                fs::rename(&temp_path, path).map_err(|error| DocumentError::IoError {
-                    detail: format!("create atomic replace `{}`: {error}", path.display()),
-                })?;
-            }
-        }
-        sync_parent(parent, operation)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path);
+    // A replace with no explicit mode keeps the target's own permissions,
+    // exactly as `save()` does; only a first creation falls back to 0o600.
+    let unix_mode = options.effective_unix_mode(existing_permissions.is_some());
+    let preserved = unix_mode
+        .is_none()
+        .then(|| existing_permissions.clone())
+        .flatten();
+    let mut request = crate::atomic_file::AtomicInstall::replacing(bytes)
+        .with_permissions(preserved)
+        .with_unix_mode(unix_mode);
+    if options.mode == CreateMode::NewOnly {
+        request = request.new_only();
     }
-    result
+    crate::atomic_file::install(path, request).map_err(|error| {
+        // `NewOnly` installs with a link, so losing the race for a name that
+        // was absent at preflight is the same answer as finding it there.
+        if error.target_exists() {
+            return DocumentError::AlreadyExists {
+                path: path.display().to_string(),
+            };
+        }
+        document_io_error(operation, error)
+    })
 }
 
 #[cfg(test)]
@@ -1367,6 +1185,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn capped_read_rechecks_the_actual_bytes_after_metadata() {
+        use std::io::Write as _;
+
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(dir.path(), "config.json", "{}");
         let handle = open_read_handle(&path, SymlinkPolicy::Follow).unwrap();
@@ -1489,15 +1309,6 @@ mod tests {
             !path.exists(),
             "nothing may be written when the check fails"
         );
-    }
-
-    #[test]
-    fn bare_relative_atomic_paths_use_the_current_directory() {
-        let (parent, file_name) =
-            atomic_parent_and_name(Path::new("config.json"), "write").unwrap();
-
-        assert_eq!(parent, Path::new("."));
-        assert_eq!(file_name, "config.json");
     }
 
     #[cfg(unix)]

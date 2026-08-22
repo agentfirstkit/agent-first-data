@@ -100,6 +100,10 @@
         "about": {
           "$ref": "#/$defs/nonEmpty"
         },
+        "reference_note": {
+          "description": "Prose for the generated CLI reference, rendered after this command's argument table. For the paragraph that belongs to no single argument — where a default is read from, what two options mean together — which would otherwise be hand-written into a file whose header says it is generated.",
+          "$ref": "#/$defs/nonEmpty"
+        },
         "arguments": {
           "type": "array",
           "items": {

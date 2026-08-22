@@ -411,12 +411,10 @@ guard_nested_expected="$(guard_form "$(cd "$guard_nested_root/output" && pwd -P)
   || fail "nested afdata value | afdata guard cwd_path did not resolve the documented value"
 
 # Unquoted inline call: the guard rejecting collapses to zero shell words, so
-# a downstream verb given no operand at all cannot act on any guessed or
-# leftover value. BSD `rm -f` (macOS) silently no-ops on zero operands rather
-# than erroring the way GNU `rm` does — a real, prototype-stage difference
-# from the design's assumed "missing operand" diagnostic — so this only
-# asserts the safety property every platform actually guarantees: nothing
-# named by the sentinel is ever touched.
+# a downstream `rm -f` given no operand exits successfully on the supported
+# GNU and BSD implementations and cannot act on any guessed or leftover value.
+# This asserts the cross-platform safety property: nothing named by the
+# sentinel is ever touched.
 unquoted_guard_dir="$TEST_TMP/guard-unquoted"
 mkdir -p "$unquoted_guard_dir"
 touch "$unquoted_guard_dir/keep-me"

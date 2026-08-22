@@ -70,65 +70,16 @@ bash_sources() {
     -print | LC_ALL=C sort
 }
 
-# ShellCheck, at exactly the pinned version or not at all.
+# ShellCheck, at exactly the pinned version or not at all — from the installer
+# rather than from a second copy of the same logic here.
 #
-# Skipping when it is absent, which is what this used to do, makes a missing
-# tool and a clean tree print the same thing. Accepting whatever version is
-# present is the subtler half of the same bug: 0.9.0 and 0.11.0 disagree about
-# real code, so a gate that takes either one cannot promise that CI will agree
-# with it.
+# This function used to reimplement `install-shellcheck.sh --check`: the same
+# version pin, the same platform skip, the same one-argument-list call. Two
+# copies means a fix reaches one of them, and the one it missed was this: the
+# analyzer inherited the caller's stdin, so `-x` following a script's
+# `source=/dev/stdin` waits on a terminal that never closes.
 run_shellcheck() {
-  local expected binary found files script
-  expected="$("$SCRIPT_DIR/install-shellcheck.sh" --print-version)"
-
-  # CI provisions the pin; a developer machine uses its own package manager's
-  # build and is told when that has drifted from the pin.
-  binary="$("$SCRIPT_DIR/install-shellcheck.sh" --print-path)"
-  if [ ! -x "$binary" ]; then
-    if command -v shellcheck >/dev/null 2>&1; then
-      binary=shellcheck
-    else
-      # Upstream publishes no build for every platform this suite runs on.
-      # Shell scripts are platform-independent text and the Linux and macOS
-      # legs read every byte of them, so the coverage is complete without this
-      # platform — but say so, rather than printing nothing and looking clean.
-      case "$(uname -s)" in
-        Linux | Darwin)
-          echo "ShellCheck $expected is required and was not found." >&2
-          echo "  install it (e.g. brew install shellcheck), or run" >&2
-          echo "  scripts/install-shellcheck.sh --install to fetch the pinned build." >&2
-          return 1
-          ;;
-        *)
-          echo "ShellCheck: skipped on $(uname -s); the Linux and macOS legs check the same files"
-          return 0
-          ;;
-      esac
-    fi
-  fi
-
-  found="$("$binary" --version | awk '/^version:/ { print $2 }')"
-  if [ "$found" != "$expected" ]; then
-    echo "ShellCheck $found is installed, but this project's checks are defined against $expected." >&2
-    echo "  Its rules differ between releases, so a tree that passes here would not" >&2
-    echo "  necessarily pass CI. Upgrade to $expected, or, if $found is the newer one," >&2
-    echo "  move the pin in scripts/install-shellcheck.sh and re-run." >&2
-    return 1
-  fi
-
-  # Collected into one argument list rather than checked in a loop: shellcheck
-  # reads stdin, so a `while read` loop feeding it filenames has its remaining
-  # input swallowed by the first call and silently checks one file.
-  files=()
-  while IFS= read -r script; do
-    files+=("$script")
-  done < <(bash_sources)
-  if [ "${#files[@]}" -eq 0 ]; then
-    echo "ShellCheck: no Bash sources found, which cannot be right" >&2
-    return 1
-  fi
-  "$binary" -x "${files[@]}"
-  echo "ShellCheck $expected clean: ${#files[@]} script(s)"
+  "$SCRIPT_DIR/install-shellcheck.sh" --check "$ROOTPATH"
 }
 
 run_static() {
@@ -155,6 +106,10 @@ run_static() {
     "${OLDEST_BASH:-/bin/bash}" -n "$script"
   done < <(bash_sources)
   run_shellcheck
+  # The gate must finish even when its caller keeps stdin open, which is what a
+  # terminal does. Scripts here declare `source=/dev/stdin` for the generated
+  # Bash kit, and ShellCheck follows that under `-x`.
+  (cd "$ROOTPATH" && python3 scripts/validate_shellcheck_stdin.py)
 
   echo ""
   echo "[3/6] Spec registry"

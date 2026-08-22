@@ -10,7 +10,6 @@
 //! Requires the `skill-admin` feature.
 
 use serde::Serialize;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const SKILL_FILE_NAME: &str = "SKILL.md";
@@ -155,8 +154,17 @@ pub struct SkillUninstallStatus {
     pub skill_dir: PathBuf,
     /// Full path to the target `SKILL.md`.
     pub skill_path: PathBuf,
-    /// Whether a file was removed (false if nothing was installed).
+    /// Whether the skill file itself was removed (false if nothing was installed).
     pub removed: bool,
+    /// Bundled asset paths, relative to the skill directory, that were removed
+    /// with it. Empty for a single-file skill, and for a target that had
+    /// nothing installed.
+    pub assets_removed: Vec<String>,
+    /// Whether the skill's own directory outlived the uninstall — which happens
+    /// when it holds files this tool did not install. They are left untouched,
+    /// and saying so is the difference between a clean removal and one that
+    /// left something behind.
+    pub directory_retained: bool,
 }
 
 /// The result of a skill action. Serializes to the protocol shape, carrying a `code`
@@ -238,6 +246,22 @@ impl SkillError {
         }
     }
 
+    /// A failed atomic installation, which names the step it failed at.
+    fn write_failed(action: &str, err: crate::atomic_file::AtomicError) -> Self {
+        // Only the closing directory fsync can fail with the new file already
+        // in place. Saying so is the difference between "nothing happened" and
+        // "it happened but may not survive a crash", and only the second one
+        // asks the operator to re-run.
+        let hint = err.commit_uncertain().then(|| {
+            "the file is installed but its durability is unconfirmed; re-run to be sure".to_string()
+        });
+        Self {
+            message: format!("{action} failed: {err}"),
+            hint,
+            partial_report: None,
+        }
+    }
+
     fn with_partial_report(mut self, report: SkillReport) -> Self {
         self.partial_report = Some(report);
         self
@@ -300,7 +324,15 @@ fn preflight_install_targets(
     targets: &[SkillTarget],
 ) -> Result<(), SkillError> {
     let mut failures = Vec::new();
+    let mut escaped = false;
     for target in targets {
+        // Before anything about the file itself: nothing on the way down to it
+        // may be a link out of the skills directory.
+        if let Err(err) = containment_failure(spec, target) {
+            failures.push(err);
+            escaped = true;
+            continue;
+        }
         if let Some(kind) = skill_path_file_type(&target.skill_path)? {
             if kind.is_symlink() {
                 if !options.force {
@@ -329,11 +361,18 @@ fn preflight_install_targets(
     if failures.is_empty() {
         return Ok(());
     }
-    Err(SkillError::invalid_request(
-        failures.join("; "),
-        Some("pass --force to replace unmanaged files or symlinks".to_string()),
+    // `--force` replaces an unmanaged file inside the skills directory. It is
+    // not permission to write outside it, so a containment failure must not be
+    // answered with a hint that reads like one.
+    let hint = if escaped {
+        "--force does not permit writing outside the skills directory"
+    } else {
+        "pass --force to replace unmanaged files or symlinks"
+    };
+    Err(
+        SkillError::invalid_request(failures.join("; "), Some(hint.to_string()))
+            .with_partial_report(install_report_lossy(spec, targets, false)),
     )
-    .with_partial_report(install_report_lossy(spec, targets, false)))
 }
 
 fn install_targets(
@@ -386,14 +425,32 @@ fn uninstall(spec: &SkillSpec, options: &SkillOptions) -> Result<SkillReport, Sk
             );
             return Err(err.with_partial_report(uninstall_report_lossy(spec, &targets, &removed)));
         }
+        if let Err(err) = ensure_no_symlinked_dirs(&target.skills_dir, &target.skill_path) {
+            return Err(err.with_partial_report(uninstall_report_lossy(spec, &targets, &removed)));
+        }
         if let Err(err) =
             std::fs::remove_file(&target.skill_path).map_err(|e| SkillError::io("remove skill", e))
         {
             return Err(err.with_partial_report(uninstall_report_lossy(spec, &targets, &removed)));
         }
-        remove_target_assets(spec, target);
+        // The skill file is gone from here on, so a target that fails below is
+        // half-removed. Reporting that precisely is the point: the next
+        // `status` reads `SKILL.md`, finds nothing, and would otherwise call
+        // this target uninstalled while its references sat there.
+        let assets_removed = match remove_target_assets(spec, target) {
+            Ok(assets_removed) => assets_removed,
+            Err(err) => {
+                removed.push(target_uninstall_status(target, true));
+                return Err(
+                    err.with_partial_report(uninstall_report_lossy(spec, &targets, &removed))
+                );
+            }
+        };
         let _ = std::fs::remove_dir(&target.skill_dir);
-        removed.push(target_uninstall_status(target, true));
+        removed.push(SkillUninstallStatus {
+            assets_removed,
+            ..target_uninstall_status(target, true)
+        });
     }
     Ok(SkillReport::Uninstall {
         skill: spec.name.to_string(),
@@ -408,7 +465,27 @@ fn preflight_uninstall_targets(
     targets: &[SkillTarget],
 ) -> Result<(), SkillError> {
     let mut failures = Vec::new();
+    let mut escaped = false;
     for target in targets {
+        if let Err(err) = containment_failure(spec, target) {
+            failures.push(err);
+            escaped = true;
+            continue;
+        }
+        // A managed asset path now holding a directory is checked here rather
+        // than discovered halfway through: by then the skill file is gone and
+        // the target is half-removed.
+        for asset in spec.assets {
+            let dest = asset_target_path(&target.skill_dir, asset.path);
+            if let Some(kind) = skill_path_file_type(&dest)?
+                && kind.is_dir()
+            {
+                failures.push(format!(
+                    "refusing to remove bundled asset {} because it is a directory",
+                    dest.display()
+                ));
+            }
+        }
         let Some(kind) = skill_path_file_type(&target.skill_path)? else {
             continue;
         };
@@ -438,14 +515,16 @@ fn preflight_uninstall_targets(
     if failures.is_empty() {
         return Ok(());
     }
-    Err(SkillError::invalid_request(
-        failures.join("; "),
-        Some(format!(
+    let hint = if escaped {
+        "--force does not permit removing files outside the skills directory".to_string()
+    } else {
+        format!(
             "only skills generated by {} skill install can be removed without --force",
             spec.marker_slug
-        )),
-    )
-    .with_partial_report(uninstall_report_lossy(spec, targets, &[])))
+        )
+    };
+    Err(SkillError::invalid_request(failures.join("; "), Some(hint))
+        .with_partial_report(uninstall_report_lossy(spec, targets, &[])))
 }
 
 struct SkillTarget {
@@ -573,6 +652,23 @@ fn workspace_skills_dir(agent_dir: &str) -> Result<PathBuf, SkillError> {
 }
 
 fn target_status(spec: &SkillSpec, target: &SkillTarget) -> Result<SkillTargetStatus, SkillError> {
+    // Reported rather than raised: one target reachable only through a link
+    // must not cost the operator the status of every other target. Nothing is
+    // read through it, so this says what is wrong without following it.
+    if let Err(message) = containment_failure(spec, target) {
+        return Ok(SkillTargetStatus {
+            agent: target.agent,
+            scope: target.scope,
+            skills_dir: target.skills_dir.clone(),
+            skill_dir: target.skill_dir.clone(),
+            skill_path: target.skill_path.clone(),
+            installed: false,
+            managed: false,
+            valid: false,
+            current: false,
+            validation_error: Some(message),
+        });
+    }
     let Some(kind) = skill_path_file_type(&target.skill_path)? else {
         return Ok(SkillTargetStatus {
             agent: target.agent,
@@ -629,6 +725,8 @@ fn target_uninstall_status(target: &SkillTarget, removed: bool) -> SkillUninstal
         skill_dir: target.skill_dir.clone(),
         skill_path: target.skill_path.clone(),
         removed,
+        assets_removed: Vec::new(),
+        directory_retained: std::fs::symlink_metadata(&target.skill_dir).is_ok(),
     }
 }
 
@@ -921,65 +1019,115 @@ fn skill_path_file_type(path: &Path) -> Result<Option<std::fs::FileType>, SkillE
     }
 }
 
+/// Refuse to reach `path` through a symbolic link somewhere below `root`.
+///
+/// Everything a skill install writes goes to a fixed name under a skills root
+/// the caller named, and the final file's own type is judged separately — a
+/// symlink there is replaced, never followed. What nothing else judges is the
+/// directories in between. `create_dir_all` walks straight through a link
+/// without complaint, so a workspace that ships `.claude/skills/<name>` as a
+/// link to another directory would silently redirect a fixed-name write, and
+/// the matching uninstall would delete files wherever it pointed.
+///
+/// `--force` does not relax this. It permits replacing an unmanaged file
+/// *inside* the root; it is not permission to write outside it.
+///
+/// `root` itself is deliberately not checked: the caller chose it, and a home
+/// directory that is a link onto another volume is ordinary.
+///
+/// This is a check, so a link swapped in between it and the write that follows
+/// is still possible. Closing that window needs directory-handle-relative
+/// opens, which Rust's standard library does not expose; an attacker able to
+/// win that race can already write inside the tree being installed into.
+fn ensure_no_symlinked_dirs(root: &Path, path: &Path) -> Result<(), SkillError> {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return Err(SkillError::invalid_request(
+            format!(
+                "{} is not inside the skills directory {}",
+                path.display(),
+                root.display()
+            ),
+            Some("pass --skills-dir to install where you mean to".to_string()),
+        ));
+    };
+    let mut current = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        current.push(component);
+        // The last component is the file itself, and installing over it is a
+        // rename that replaces a link rather than following it.
+        if components.peek().is_none() {
+            break;
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(SkillError::invalid_request(
+                    format!(
+                        "refusing to reach {} through the symlinked directory {}",
+                        path.display(),
+                        current.display()
+                    ),
+                    Some(
+                        "replace the link with a real directory, or pass --skills-dir".to_string(),
+                    ),
+                ));
+            }
+            Ok(_) => {}
+            // Nothing exists below here yet, so nothing below here is a link.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Err(err) => return Err(SkillError::io("inspect skill path", err)),
+        }
+    }
+    Ok(())
+}
+
+/// The containment message for a target whose skill file or bundled assets
+/// cannot be reached without following a link out of the skills directory, or
+/// `Ok(())` when every one of them stays inside it.
+fn containment_failure(spec: &SkillSpec, target: &SkillTarget) -> Result<(), String> {
+    let mut paths = vec![target.skill_path.clone()];
+    paths.extend(
+        spec.assets
+            .iter()
+            .map(|asset| asset_target_path(&target.skill_dir, asset.path)),
+    );
+    for path in paths {
+        if let Err(err) = ensure_no_symlinked_dirs(&target.skills_dir, &path) {
+            return Err(err.message);
+        }
+    }
+    Ok(())
+}
+
 fn write_skill_atomic(target: &SkillTarget, content: &str) -> Result<(), SkillError> {
+    ensure_no_symlinked_dirs(&target.skills_dir, &target.skill_path)?;
     write_file_atomic(&target.skill_path, content)
 }
 
-/// Atomically write `content` to `path`: a temp file in the same directory is
-/// synced then renamed over the destination, so a reader never sees a partial
-/// file and a pre-existing symlink at `path` is replaced rather than followed.
+/// Atomically install `content` at `path` through the crate's one atomic file
+/// installation, so a reader never sees a partial file, a pre-existing symlink
+/// is replaced rather than followed, and the new directory entry is synced
+/// before this reports success.
+///
+/// An existing regular file keeps its own permissions; a file created here is
+/// world-readable, which is what a skill an agent must load has to be.
 fn write_file_atomic(path: &Path, content: &str) -> Result<(), SkillError> {
-    let parent = path.parent().ok_or_else(|| {
-        SkillError::io(
-            "resolve skill file parent",
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent"),
-        )
-    })?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(SKILL_FILE_NAME);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    for attempt in 0..16 {
-        let tmp_path = parent.join(format!(
-            ".{file_name}.{}.{}.{}.tmp",
-            std::process::id(),
-            nanos,
-            attempt
-        ));
-        let mut tmp = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-        {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(SkillError::io("create temporary skill", err)),
-        };
-        let result = (|| {
-            tmp.write_all(content.as_bytes())
-                .map_err(|e| SkillError::io("write temporary skill", e))?;
-            tmp.sync_all()
-                .map_err(|e| SkillError::io("sync temporary skill", e))?;
-            drop(tmp);
-            std::fs::rename(&tmp_path, path).map_err(|e| SkillError::io("replace skill", e))?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-        return result;
-    }
-    Err(SkillError::io(
-        "create temporary skill",
-        std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "temporary skill path collision",
-        ),
-    ))
+    let preserved = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Some(metadata.permissions()),
+        _ => None,
+    };
+    let unix_mode = if preserved.is_some() {
+        None
+    } else {
+        Some(0o644)
+    };
+    crate::atomic_file::install(
+        path,
+        crate::atomic_file::AtomicInstall::replacing(content.as_bytes())
+            .with_permissions(preserved)
+            .with_unix_mode(unix_mode),
+    )
+    .map_err(|err| SkillError::write_failed("install skill file", err))
 }
 
 /// Reject an asset path that is absolute or carries a `.`/`..`/empty segment, so
@@ -1017,6 +1165,10 @@ fn asset_target_path(skill_dir: &Path, rel_path: &str) -> PathBuf {
 fn install_target_assets(spec: &SkillSpec, target: &SkillTarget) -> Result<(), SkillError> {
     for asset in spec.assets {
         let dest = asset_target_path(&target.skill_dir, asset.path);
+        // Re-checked here rather than only in the preflight: the asset tree is
+        // several directories deep, and this is the last moment before the
+        // write that could land outside the root.
+        ensure_no_symlinked_dirs(&target.skills_dir, &dest)?;
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| SkillError::io("create skill asset dir", e))?;
@@ -1038,13 +1190,33 @@ fn assets_current(spec: &SkillSpec, skill_dir: &Path) -> bool {
 }
 
 /// Remove the bundled asset files, then their now-empty parent directories,
-/// deepest first. Best-effort: a directory the user added their own files to is
-/// left in place (its `remove_dir` simply fails).
-fn remove_target_assets(spec: &SkillSpec, target: &SkillTarget) {
+/// deepest first.
+///
+/// The two halves are not the same promise, and used to be reported as if they
+/// were. Every managed *file* must go: one that survives is a stale reference
+/// the next `status` cannot see, because that reads `SKILL.md` — which is
+/// already gone — and calls the target uninstalled. So a failed `remove_file`
+/// is returned, not swallowed. A *directory* that refuses to go is the normal
+/// case rather than a fault: `remove_dir` fails exactly when the user put
+/// something of their own in it, and their file is not this tool's to delete.
+/// That outcome is reported instead of raising.
+fn remove_target_assets(spec: &SkillSpec, target: &SkillTarget) -> Result<Vec<String>, SkillError> {
+    let mut removed = Vec::new();
     let mut dirs: Vec<PathBuf> = Vec::new();
     for asset in spec.assets {
         let dest = asset_target_path(&target.skill_dir, asset.path);
-        let _ = std::fs::remove_file(&dest);
+        ensure_no_symlinked_dirs(&target.skills_dir, &dest)?;
+        match std::fs::remove_file(&dest) {
+            Ok(()) => removed.push(asset.path.to_string()),
+            // Already absent: the end state this asked for.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(SkillError::io(
+                    &format!("remove bundled skill asset {}", asset.path),
+                    err,
+                ));
+            }
+        }
         let mut dir = dest.parent().map(Path::to_path_buf);
         while let Some(current) = dir {
             if current == target.skill_dir || !current.starts_with(&target.skill_dir) {
@@ -1060,6 +1232,7 @@ fn remove_target_assets(spec: &SkillSpec, target: &SkillTarget) {
     for dir in dirs {
         let _ = std::fs::remove_dir(&dir);
     }
+    Ok(removed)
 }
 
 fn home_dir() -> Result<PathBuf, SkillError> {
@@ -1599,6 +1772,175 @@ mod tests {
         );
         assert!(skill_path.is_file());
         assert!(!skill_path.is_symlink());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_skill_directory_never_receives_a_write() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_skills_dir("symlink-skill-dir");
+        let outside = temp_skills_dir("symlink-skill-dir-outside");
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        assert!(std::fs::create_dir_all(&outside).is_ok());
+        let sentinel = outside.join(SKILL_FILE_NAME);
+        assert!(std::fs::write(&sentinel, "sentinel").is_ok());
+        // The shape a hostile checkout ships: the skill's own directory is a
+        // link somewhere else, and every path below it is a fixed name.
+        assert!(symlink(&outside, dir.join("agent-first-test")).is_ok());
+
+        for force in [false, true] {
+            let opts = options(SkillAgentSelection::Codex, &dir, force);
+            let err = run_skill_admin(&spec_with_assets(), SkillAction::Install, &opts)
+                .expect_err("install through a symlinked skill directory must fail");
+            assert!(
+                err.message.contains("symlinked directory"),
+                "unexpected message: {}",
+                err.message
+            );
+            assert_eq!(
+                err.hint.as_deref(),
+                Some("--force does not permit writing outside the skills directory"),
+                "--force must not read as permission to escape the root"
+            );
+            assert!(
+                run_skill_admin(&spec_with_assets(), SkillAction::Uninstall, &opts).is_err(),
+                "uninstall must refuse the same path"
+            );
+        }
+
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap_or_default(),
+            "sentinel",
+            "the file outside the skills directory must be untouched"
+        );
+        assert!(!outside.join("references").exists());
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_asset_directory_never_receives_a_write() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_skills_dir("symlink-asset-dir");
+        let outside = temp_skills_dir("symlink-asset-dir-outside");
+        let skill_dir = dir.join("agent-first-test");
+        assert!(std::fs::create_dir_all(&skill_dir).is_ok());
+        assert!(std::fs::create_dir_all(&outside).is_ok());
+        let sentinel = outside.join("guide.md");
+        assert!(std::fs::write(&sentinel, "sentinel").is_ok());
+        // One level deeper than the skill directory: the bundled asset tree's
+        // own parent is the link.
+        assert!(symlink(&outside, skill_dir.join("references")).is_ok());
+
+        let opts = options(SkillAgentSelection::Codex, &dir, true);
+        assert!(run_skill_admin(&spec_with_assets(), SkillAction::Install, &opts).is_err());
+
+        assert_eq!(
+            std::fs::read_to_string(&sentinel).unwrap_or_default(),
+            "sentinel"
+        );
+        assert!(!skill_dir.join(SKILL_FILE_NAME).exists());
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_names_a_symlinked_skill_directory_instead_of_reading_through_it() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_skills_dir("symlink-status");
+        let outside = temp_skills_dir("symlink-status-outside");
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        assert!(std::fs::create_dir_all(&outside).is_ok());
+        assert!(std::fs::write(outside.join(SKILL_FILE_NAME), "sentinel").is_ok());
+        assert!(symlink(&outside, dir.join("agent-first-test")).is_ok());
+
+        let opts = options(SkillAgentSelection::Codex, &dir, false);
+        let report = run_skill_admin(&spec(), SkillAction::Status, &opts)
+            .expect("status must report every target rather than fail outright");
+        let SkillReport::Status { targets, .. } = report else {
+            panic!("expected a status report");
+        };
+        let target = targets.first().expect("one target");
+        assert!(!target.installed, "nothing may be read through the link");
+        assert!(
+            target
+                .validation_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("symlinked directory")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn uninstall_reports_the_assets_it_removed_and_a_directory_the_user_kept() {
+        let dir = temp_skills_dir("uninstall-report");
+        let opts = options(SkillAgentSelection::Codex, &dir, false);
+        assert!(run_skill_admin(&spec_with_assets(), SkillAction::Install, &opts).is_ok());
+        // A file this tool did not install, in the directory it is about to
+        // try to remove.
+        let mine = dir.join("agent-first-test").join("notes.md");
+        assert!(std::fs::write(&mine, "mine").is_ok());
+
+        let report = run_skill_admin(&spec_with_assets(), SkillAction::Uninstall, &opts)
+            .expect("uninstall must succeed");
+        let SkillReport::Uninstall { targets, .. } = report else {
+            panic!("expected an uninstall report");
+        };
+        let target = targets.first().expect("one target");
+        assert!(target.removed);
+        assert_eq!(
+            target.assets_removed,
+            vec![
+                "references/guide.md".to_string(),
+                "references/registry.json".to_string()
+            ]
+        );
+        assert!(
+            target.directory_retained,
+            "a directory holding the user's own file survives, and the report says so"
+        );
+        assert_eq!(std::fs::read_to_string(&mine).unwrap_or_default(), "mine");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn uninstall_reports_a_bundled_asset_it_could_not_remove() {
+        let dir = temp_skills_dir("uninstall-stuck-asset");
+        let opts = options(SkillAgentSelection::Codex, &dir, false);
+        assert!(run_skill_admin(&spec_with_assets(), SkillAction::Install, &opts).is_ok());
+        // A directory where a managed file belongs: `remove_file` cannot take
+        // it, and the old code reported the target removed anyway.
+        let asset = dir
+            .join("agent-first-test")
+            .join("references")
+            .join("guide.md");
+        assert!(std::fs::remove_file(&asset).is_ok());
+        assert!(std::fs::create_dir(&asset).is_ok());
+        assert!(std::fs::write(asset.join("kept.md"), "kept").is_ok());
+
+        let err = run_skill_admin(&spec_with_assets(), SkillAction::Uninstall, &opts)
+            .expect_err("a managed asset that cannot be removed is not a clean uninstall");
+        // The spec spells a bundled asset with `/` because that is one fixed
+        // name for every platform; the message names the file the operator has
+        // to go and look at, which is spelled the local way.
+        let named = Path::new("references").join("guide.md");
+        assert!(
+            err.message.contains(&named.display().to_string()),
+            "unexpected message: {}",
+            err.message
+        );
+        assert!(
+            asset.join("kept.md").exists(),
+            "the user's file must survive the refusal"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

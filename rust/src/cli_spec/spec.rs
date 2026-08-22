@@ -196,6 +196,19 @@ pub struct CommandSpec {
     pub command_path: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub about: Option<String>,
+    /// Prose for the generated reference, after this command's argument table.
+    ///
+    /// An argument's `about` is one table cell and has to stay one — but some
+    /// commands need a paragraph that belongs to no single argument: where a
+    /// default is read from, what two options mean together, what the result
+    /// reports back. Without somewhere to put it, that paragraph ends up
+    /// hand-written into a file whose own header says "generated, do not edit
+    /// by hand", where the next regeneration silently deletes it.
+    ///
+    /// Reference only. `--help` stays the machine-readable shape of a command;
+    /// this is for the document a person reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_note: Option<String>,
     pub arguments: Vec<ArgSpec>,
     pub combinations: Vec<Combination>,
 }
@@ -213,6 +226,7 @@ impl CommandSpec {
         Self {
             command_path: command_path.into_iter().map(Into::into).collect(),
             about: None,
+            reference_note: None,
             arguments: Vec::new(),
             combinations: Vec::new(),
         }
@@ -220,6 +234,13 @@ impl CommandSpec {
 
     pub fn about(mut self, about: impl Into<String>) -> Self {
         self.about = nonempty(about.into());
+        self
+    }
+
+    /// Prose for the generated reference, after this command's argument table.
+    #[must_use]
+    pub fn reference_note(mut self, note: impl Into<String>) -> Self {
+        self.reference_note = nonempty(note.into());
         self
     }
 

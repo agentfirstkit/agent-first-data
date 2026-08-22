@@ -29,12 +29,14 @@ SHELLCHECK_VERSION=0.11.0
 
 usage() {
   cat >&2 <<'EOF'
-Usage: install-shellcheck.sh [--print-version | --print-path | --install]
+Usage: install-shellcheck.sh [--print-version | --print-path | --install | --check [ROOT]]
 
   --print-version  Print the pinned version and exit
   --print-path     Print where --install puts the binary, and exit
   --install        Download the pinned version if it is not already there,
                    then print the binary's path
+  --check [ROOT]   ShellCheck every *.sh under ROOT (default: the current
+                   directory) with the pinned version
 EOF
 }
 
@@ -123,6 +125,77 @@ install() {
   printf '%s\n' "$binary"
 }
 
+# Resolve the binary to check with: the provisioned pin if CI put one there,
+# otherwise the machine's own, which is then held to the same version. Prints
+# the path, or the word `skip` on a platform upstream publishes no build for.
+resolve_for_check() {
+  local binary found
+  binary="$(cache_dir)/shellcheck"
+  if [ ! -x "$binary" ]; then
+    if command -v shellcheck >/dev/null 2>&1; then
+      binary=shellcheck
+    else
+      case "$(uname -s)" in
+        Linux | Darwin)
+          echo "ShellCheck $SHELLCHECK_VERSION is required and was not found." >&2
+          echo "  install it (e.g. brew install shellcheck), or run" >&2
+          echo "  $0 --install to fetch the pinned build." >&2
+          return 1
+          ;;
+        *)
+          printf 'skip\n'
+          return 0
+          ;;
+      esac
+    fi
+  fi
+  found="$("$binary" --version | awk '/^version:/ { print $2 }')"
+  if [ "$found" != "$SHELLCHECK_VERSION" ]; then
+    echo "ShellCheck $found is installed, but these checks are defined against $SHELLCHECK_VERSION." >&2
+    echo "  Its rules differ between releases, so a tree that passes here would not" >&2
+    echo "  necessarily pass CI. Upgrade to $SHELLCHECK_VERSION, or, if $found is the" >&2
+    echo "  newer one, move the pin in this file and re-run." >&2
+    return 1
+  fi
+  printf '%s\n' "$binary"
+}
+
+check() {
+  local root="${1:-.}"
+  local binary files script
+  binary="$(resolve_for_check)" || return 1
+  if [ "$binary" = skip ]; then
+    # Shell scripts are platform-independent text and the Linux and macOS runs
+    # read every byte of them, so coverage is complete without this platform.
+    # Said out loud, because a skip that prints nothing looks like a pass.
+    echo "ShellCheck skipped on $(uname -s): the Linux and macOS runs check the same files"
+    return 0
+  fi
+
+  # One argument list, not a loop: shellcheck reads stdin, so a `while read`
+  # loop feeding it filenames has the rest of its input swallowed by the first
+  # call and silently checks a single file.
+  files=()
+  while IFS= read -r script; do
+    [ -n "$script" ] || continue
+    files+=("$script")
+  done < <(find "$root" \
+    \( -name .git -o -name target -o -name node_modules -o -name .venv \
+      -o -name dist -o -name build -o -name __pycache__ \) -prune -o \
+    -name '*.sh' -type f -print 2>/dev/null | LC_ALL=C sort)
+
+  if [ "${#files[@]}" -eq 0 ]; then
+    echo "ShellCheck: no shell scripts under $root"
+    return 0
+  fi
+  # A checked script may use `source=/dev/stdin` for generated runtime code.
+  # Under `-x`, inheriting an interactive terminal makes ShellCheck wait for
+  # input forever; CI happens to provide EOF, so close stdin explicitly and
+  # keep local and CI behavior identical.
+  "$binary" -x "${files[@]}" </dev/null || return 1
+  echo "ShellCheck $SHELLCHECK_VERSION clean: ${#files[@]} script(s)"
+}
+
 case "${1:---install}" in
   --print-version)
     printf '%s\n' "$SHELLCHECK_VERSION"
@@ -132,6 +205,10 @@ case "${1:---install}" in
     ;;
   --install)
     install
+    ;;
+  --check)
+    shift
+    check "$@"
     ;;
   -h | --help)
     usage
