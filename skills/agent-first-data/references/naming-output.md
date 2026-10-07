@@ -121,8 +121,11 @@ If two Plain keys collide after suffix stripping, keep both original keys and
 raw values. Redaction happens first, so collision fallback never restores a
 secret.
 
-Plain nested keys use dot paths. Quote/escape whitespace, `=`, `"`, and `\` so
-one record remains one physical line. Arrays are comma-joined and null renders
+Plain nested keys use dot paths. A value is quoted when it contains ASCII
+space, tab, newline, carriage return, form feed, vertical tab, NBSP, `=`, `"`,
+or `\`; inside the quotes `\`, `"`, newline, carriage return, tab, form feed,
+and vertical tab are escaped, so one record remains one physical line. That
+set is explicit — other Unicode whitespace is not quoted. Arrays are comma-joined and null renders
 as an empty value.
 
 ## Other naming surfaces

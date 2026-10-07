@@ -58,8 +58,11 @@ fn init_logging() -> Result<(), tracing_subscriber::util::TryInitError> {
 ```
 
 For a closed-world CLI, bind exact action handlers and resolve argv to
-`CliOutcome`. The application owns the process lifecycle because a finite
-command, a long-running event stream, and raw-byte output need different
+`BoundOutcome<R>`. Execute its `BoundOutcome::Run(invocation)` branch with
+`invocation.run()`; the handler is already attached to that invocation. An
+unbound `BuiltCliSpec::resolve_from` still returns `CliOutcome`. The application
+owns the process lifecycle because a finite command, a long-running event
+stream, and raw-byte output need different
 execution and output policies. Use the resolved `OutputPlan` with
 `CliEmitter::finish`, `write_raw`, and, when enabled, `stream_redirect`.
 [`rust/examples/agent_cli.rs`](examples/agent_cli.rs) shows the finite-command
@@ -82,7 +85,7 @@ Canonical flags are `--stdout-file` and `--stderr-file`. They redirect the corre
 ## Behavior Notes
 
 - Default redaction replaces every `_secret` or configured secret-name subtree with `***`, including objects and arrays.
-- `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed and internal whitespace redacts the whole field.
+- `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed, and internal whitespace or a `://` that is not the start of a clean URL redacts the whole field.
 - `Redactor::url_names` applies that URL treatment to exact legacy field names
   and recurses through collections. `redact_urls_in_text` is the explicit
   scheme-URL-only prose helper; ordinary structured redaction never scans prose.
@@ -95,13 +98,16 @@ Canonical flags are `--stdout-file` and `--stderr-file`. They redirect the corre
   event fields.
 - Build new CLIs from one `CliSpec`. Register each command-local argument and
   every legal `Combination`, call `build()`, bind exact `action_id` handlers,
-  and resolve to `CliOutcome`. Parsing, typed values, output planning, and
+  and resolve to `BoundOutcome<R>`. Parsing, typed values, output planning, and
   help-v2 come from the registry; the application retains its command lifetime,
   redaction options, emission strategy, and exit policy.
-- `ResolvedInvocation::required` returns `Option`, and
-  `BoundCliSpec::execute` returns `None` for an invocation produced by another
-  independently built registry. Callers must handle both programming errors
-  without fabricating a value or dispatching the wrong handler.
+- `ResolvedInvocation::required` returns `&CliValue` for a required or fixed
+  argument; its typed accessors return `Option`. The bound run branch owns its
+  handler, so there is no separate dispatch step that can accept an invocation
+  from another registry. `BoundCliSpec::call_every_combination()` checks handler
+  argument ids with synthetic invocations, but actually runs every handler:
+  use it only for pure projections from argv to command values, before carrying
+  out those commands.
 - `CliError` carries a closed rule plus caller-safe `message` and `hint` —
   never raw argument values. `cli_error_event` renders it as a strict protocol
   event; `exit_code()` is the process status.

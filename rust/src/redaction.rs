@@ -613,18 +613,20 @@ fn redact_url_field_value(s: &str, context: &RedactionContext) -> String {
     if let Some(redacted) = redact_url_in_str(s, context) {
         return redacted;
     }
-    let trimmed = s.trim();
+    let trimmed = s.trim_matches(is_span_terminator_whitespace);
     if trimmed != s
         && let Some(redacted) = redact_url_in_str(trimmed, context)
     {
         return redacted;
     }
     // Fail closed: a `_url` value we could not parse as a clean scheme-prefixed
-    // URL, yet which carries a credential sigil (`@` userinfo) or internal
-    // whitespace, is redacted wholesale rather than passed through. A schemeless
-    // connection string like `user:pass@host/db` has no scheme anchor for the
-    // surgical span logic above, so blanket redaction is the safe default.
-    if s.chars().any(char::is_whitespace) || s.contains('@') {
+    // URL, yet which carries a credential sigil (`@` userinfo), internal
+    // whitespace, or a `://` scheme separator, is redacted wholesale rather than
+    // passed through. A schemeless connection string like `user:pass@host/db`
+    // has no scheme anchor for the surgical span logic above, and a URL behind
+    // a non-whitespace prefix (a BOM, a zero-width space, a label) has one the
+    // span logic cannot reach, so blanket redaction is the safe default.
+    if s.chars().any(is_span_terminator_whitespace) || s.contains('@') || s.contains("://") {
         return REDACTED_MARKER.to_string();
     }
     s.to_string()
@@ -676,7 +678,9 @@ fn redact_query(query: &str, context: &RedactionContext) -> String {
 /// ".") "://"`) and contains no ASCII whitespace — i.e. a single bare URL, not
 /// a URL embedded in prose.
 fn is_single_url(s: &str) -> bool {
-    if s.bytes().any(|b| b.is_ascii_whitespace()) {
+    // `u8::is_ascii_whitespace` omits VT (U+000B); the gate counts it, so a
+    // value split by one is not a single URL.
+    if s.bytes().any(|b| b.is_ascii_whitespace() || b == 0x0b) {
         return false;
     }
     let bytes = s.as_bytes();

@@ -192,5 +192,95 @@
         "host": "mail.example.com"
       }
     }
+  },
+  {
+    "name": "url_field_whitespace_ideographic_space",
+    "input": {
+      "callback_url": "\u94fe\u63a5\u3000https://h/?token_secret=x"
+    },
+    "expected": {
+      "callback_url": "***"
+    }
+  },
+  {
+    "name": "url_field_whitespace_nbsp",
+    "input": {
+      "callback_url": "see\u00a0https://h/?token_secret=x"
+    },
+    "expected": {
+      "callback_url": "***"
+    }
+  },
+  {
+    "name": "url_field_bom_prefix_fails_closed",
+    "input": {
+      "callback_url": "\ufeffhttps://h/?token_secret=x"
+    },
+    "expected": {
+      "callback_url": "***"
+    }
+  },
+  {
+    "name": "url_field_whitespace_nel",
+    "input": {
+      "callback_url": "\u0085https://h/?token_secret=x"
+    },
+    "expected": {
+      "callback_url": "https://h/?token_secret=***"
+    }
+  },
+  {
+    "name": "url_field_file_separator_prefix_fails_closed",
+    "input": {
+      "callback_url": "\u001chttps://h/?token_secret=x"
+    },
+    "expected": {
+      "callback_url": "***"
+    }
+  },
+  {
+    "name": "url_field_internal_vertical_tab_is_redacted",
+    "input": {
+      "callback_url": "https://h/a\u000bb?token_secret=x"
+    },
+    "expected": {
+      "callback_url": "***"
+    }
+  },
+  {
+    "name": "url_field_zero_width_space_prefix_fails_closed",
+    "input": {
+      "callback_url": "\u200bhttps://h/?token_secret=x"
+    },
+    "expected": {
+      "callback_url": "***"
+    }
+  },
+  {
+    "name": "url_field_label_prefix_fails_closed",
+    "input": {
+      "callback_url": "\u94fe\u63a5https://h/?token_secret=x"
+    },
+    "expected": {
+      "callback_url": "***"
+    }
+  },
+  {
+    "name": "url_field_angle_bracketed_url_fails_closed",
+    "input": {
+      "callback_url": "<https://h/?token_secret=x>"
+    },
+    "expected": {
+      "callback_url": "***"
+    }
+  },
+  {
+    "name": "url_field_schemeless_relative_url_passes_through",
+    "input": {
+      "callback_url": "/cb?page=2"
+    },
+    "expected": {
+      "callback_url": "/cb?page=2"
+    }
   }
 ]

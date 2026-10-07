@@ -65,6 +65,10 @@ and write verb — `get`/`value`/`set`/`unset` — unchanged. Pass the same
 that cannot resolve it. `keys` emits raw immediate names for external tools.
 They differ when a key contains a dot or space.
 
+CLI document file reads and edits (and `lint`) accept regular files up to
+16 MiB by default. When a `document_too_large` error names a file you mean to
+read, pass `--max-file-bytes BYTES`; stdin (`-`) is not capped.
+
 Consume either line stream with `while IFS= read -r`; never use command
 substitution in a `for` loop. Path grammar escapes a literal dot as `\.` and a
 literal backslash as `\\`. Unknown escapes and empty segments are errors.
@@ -88,10 +92,11 @@ A bare `set` value and each bare `FIELD=VALUE` is always a string. Use:
 ```bash
 afdata set config.toml server.port 8080 --value-type number
 afdata set config.toml feature.enabled true --value-type bool
-afdata set config.toml cache.value ignored --value-type null
+afdata set config.json cache.value --value-type null
 afdata set config.toml routes '[{"path":"/"}]' --value-type json
 ```
 
+`--value-type null` takes no VALUE and is not supported by TOML.
 `--value-type json` is the only way to write an object or array. Overwriting
 anything that is not already a string requires an explicit value type — a
 differently-typed scalar, and also an existing array or object, where a bare
@@ -278,7 +283,9 @@ on Unix, multi-link hardlink targets. No partial file is observable, and every
 failure before atomic installation leaves the original untouched. A
 parent-directory fsync can fail after a complete replacement was installed;
 that error means durability is unconfirmed, so reopen the path to determine
-the committed state before retrying.
+the committed state before retrying. Saves are last-writer-wins: if two handles
+edit the same file, the later save replaces the earlier one. Callers must
+serialize concurrent edits themselves.
 
 For a Rust library caller's first write, use
 `DocumentFile::create_atomic(path, document, CreateOptions::new())`. It accepts
@@ -340,7 +347,8 @@ subsequent call may opt into replacement.
 allowed. It is separate from `document_io_failed` so a size budget can be
 enforced without matching on a message: missing, unreadable, and not-a-regular
 -file stay `document_io_failed`, and only the cap reports this. The file was not
-parsed; raise the cap or refuse the input.
+parsed. Rust callers choose an explicit cap; CLI callers raise the 16 MiB
+default with `--max-file-bytes`.
 
 `create_atomic` also refuses a document whose format disagrees with the path
 (`document_unsupported_operation`), because installing it would produce a file

@@ -30,8 +30,11 @@ use std::path::Path;
 use crate::cli_spec::{SourceError, ValueSource};
 use crate::document::{DocumentFile, Format, Value};
 
-/// A file named by a source is a config file, not a data set.
-const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// 16 MiB read limit for file-backed value sources, and the CLI's default
+/// document budget (`--max-file-bytes`).
+///
+/// Library callers of [`DocumentFile::open_capped`] choose their own budget.
+pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 /// A stream named by a source carries one value, not a document.
 const MAX_STREAM_BYTES: usize = 1024 * 1024;
 

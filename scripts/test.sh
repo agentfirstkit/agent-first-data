@@ -169,6 +169,14 @@ run_unit() {
   (cd "$ROOTPATH" && cargo test --all-features)
   (cd "$ROOTPATH" && cargo test --example agent_cli --no-default-features --features cli)
 
+  # Each document backend is a standalone downstream capability. Check only
+  # its feature boundary rather than expanding the test matrix into combinations.
+  local backend
+  for backend in yaml toml dotenv ini markdown schema; do
+    echo "[Rust backend] $backend"
+    (cd "$ROOTPATH" && cargo check --no-default-features --features "$backend")
+  done
+
   echo ""
   echo "[2/4] Go"
   (cd "$ROOTPATH/go" && go test -v ./...)

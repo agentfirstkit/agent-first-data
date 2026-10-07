@@ -1,5 +1,6 @@
 """Tests for agent_first_data CLI helpers."""
 import json
+import sys
 
 import pytest
 from io import StringIO
@@ -500,3 +501,27 @@ def test_cli_render_version_renders_json():
     assert '"code":"version"' in out
     assert '"name":"agent-cli"' in out
     assert '"version":"1.2.3"' in out
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="closed-pipe writes surface as OSError(EINVAL) on Windows, not "
+    "BrokenPipeError; the reader-closed contract is asserted on POSIX only",
+)
+def test_real_stdout_closed_pipe_has_clean_process_exit():
+    import os
+    import subprocess
+    import sys
+
+    reader, writer = os.pipe()
+    os.close(reader)
+    try:
+        child = subprocess.run(
+            [sys.executable, "-c", "from agent_first_data import CliEmitter, OutputFormat; "
+             "raise SystemExit(CliEmitter.finite(OutputFormat.JSON).finish_result({'ok': True}))"],
+            stdout=writer, stderr=subprocess.PIPE, timeout=10,
+        )
+    finally:
+        os.close(writer)
+    assert child.returncode == 0, child.stderr
+    assert child.stderr == b""

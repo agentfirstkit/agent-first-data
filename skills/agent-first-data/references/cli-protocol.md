@@ -78,10 +78,13 @@ Reads are capped, empty strings remain values, and an `fd:N` read never closes
 the caller-owned descriptor. Prompting is refused on an argument whose id does
 not end in `_secret`.
 
-`ResolvedInvocation::required` returns `Option` so a misspelled caller-side id
-cannot masquerade as a valid flag value. `BoundCliSpec::execute` likewise
-returns `None` for an invocation resolved by an independently built registry;
-never dispatch an invocation through a different binding.
+`ResolvedInvocation::required` returns `&CliValue` for a required or fixed
+argument; its typed accessors return `Option`. A bound invocation already owns
+its handler, so it cannot be dispatched through another registry's binding.
+`BoundCliSpec::call_every_combination()` checks handler argument ids with
+synthetic invocations. It actually runs every handler: use it only when the
+handlers are pure projections from argv to command values, then carry out those
+commands separately.
 
 An invocation must match exactly one combination. Known arguments in an
 unregistered mixture return:
@@ -114,9 +117,11 @@ Output tokens do not select or distinguish business combinations. Select one
 application shape first, then validate output against only that combination.
 Parse/match errors do not trust unresolved output tokens.
 
-After `CliSpec::build()` and `bind_actions`, resolve argv to `CliOutcome` and
-dispatch the selected `action_id`. The application owns its process lifecycle:
-finite commands, long-running event streams, raw bytes, custom redaction, and
+After `CliSpec::build()` and `bind_actions`, resolve argv to `BoundOutcome<R>`
+and execute `BoundOutcome::Run(invocation)` with `invocation.run()`. Unbound
+`BuiltCliSpec::resolve_from` still returns `CliOutcome`. The application owns
+its process lifecycle: finite commands, long-running event streams, raw bytes,
+custom redaction, and
 pre-resolution security checks do not share one execution host. Use the
 resolved `OutputPlan` with AFDATA emitters and sinks rather than reparsing
 output flags.

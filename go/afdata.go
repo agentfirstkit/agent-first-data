@@ -15,6 +15,7 @@ import (
 	"math"
 	"net/url"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1171,21 +1172,21 @@ func redactURLFieldValue(s string, context redactionContext) string {
 	if redacted, ok := redactURLInStr(s, context); ok {
 		return redacted
 	}
-	trimmed := strings.TrimSpace(s)
+	trimmed := strings.TrimFunc(s, isSpanTerminatorWhitespace)
 	if trimmed != s {
 		if redacted, ok := redactURLInStr(trimmed, context); ok {
 			return redacted
 		}
 	}
 	// Fail closed: a _url value we could not parse as a clean scheme-prefixed
-	// URL, yet which carries a credential sigil ('@' userinfo) or internal
-	// whitespace, is redacted wholesale rather than passed through. A schemeless
-	// connection string like user:pass@host/db has no scheme anchor for the
-	// surgical span logic above, so blanket redaction is the safe default.
-	hasWhitespace := strings.IndexFunc(s, func(r rune) bool {
-		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v'
-	}) >= 0
-	if hasWhitespace || strings.Contains(s, "@") {
+	// URL, yet which carries a credential sigil ('@' userinfo), internal
+	// whitespace, or a '://' scheme separator, is redacted wholesale rather than
+	// passed through. A schemeless connection string like user:pass@host/db
+	// has no scheme anchor for the surgical span logic above, and a URL behind
+	// a non-whitespace prefix (a BOM, a zero-width space, a label) has one the
+	// span logic cannot reach, so blanket redaction is the safe default.
+	hasWhitespace := strings.IndexFunc(s, isSpanTerminatorWhitespace) >= 0
+	if hasWhitespace || strings.Contains(s, "@") || strings.Contains(s, "://") {
 		return redactedMarker
 	}
 	return s
@@ -1958,13 +1959,22 @@ func yamlKey(key string) string {
 	return `"` + escapeYamlStr(key) + `"`
 }
 
+var decimalYamlKey = regexp.MustCompile(`^[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$`)
+
 func isAmbiguousYamlKey(key string) bool {
 	switch strings.ToLower(key) {
 	case "true", "false", "null", "~", ".nan", ".inf", "+.inf", "-.inf":
 		return true
 	}
-	_, err := strconv.ParseFloat(key, 64)
-	return err == nil
+	unsigned := key
+	if strings.HasPrefix(key, "+") || strings.HasPrefix(key, "-") {
+		unsigned = key[1:]
+	}
+	switch strings.ToLower(unsigned) {
+	case "inf", "infinity", "nan":
+		return true
+	}
+	return decimalYamlKey.MatchString(key)
 }
 
 func quoteLogfmtKey(key string) string {

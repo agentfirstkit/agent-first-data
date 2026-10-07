@@ -487,5 +487,61 @@
     },
     "expected_yaml": "---\n\"123\": \"number\"\n\"null\": \"null\"\n\"true\": \"boolean\"",
     "expected_plain": "123=number null=null true=boolean"
+  },
+  {
+    "name": "plain_quotes_explicit_whitespace_set",
+    "input": {
+      "ideographic_space": "a\u3000b",
+      "nel": "a\u0085b",
+      "bom": "a\ufeffb",
+      "line_separator": "a\u2028b",
+      "unit_separator": "a\u001fb"
+    },
+    "expected_json": {
+      "ideographic_space": "a\u3000b",
+      "nel": "a\u0085b",
+      "bom": "a\ufeffb",
+      "line_separator": "a\u2028b",
+      "unit_separator": "a\u001fb"
+    },
+    "expected_yaml": "---\nbom: \"a\ufeffb\"\nideographic_space: \"a\u3000b\"\nline_separator: \"a\u2028b\"\nnel: \"a\u0085b\"\nunit_separator: \"a\\u001fb\"",
+    "expected_plain": "bom=a\ufeffb ideographic_space=a\u3000b line_separator=a\u2028b nel=a\u0085b unit_separator=a\u001fb"
+  },
+  {
+    "name": "yaml_numeric_key_grammar",
+    "input": {
+      "inf": "value",
+      "-inf": "value",
+      "+infinity": "value",
+      "nan": "value",
+      "0x1f": "value",
+      "0b1": "value",
+      "1_0": "value",
+      "0x1p-2": "value",
+      "1e3": "value",
+      "1.": "value",
+      ".1": "value",
+      "1e": "value",
+      "1e9999": "value",
+      "--inf": "value"
+    },
+    "expected_json": {
+      "inf": "value",
+      "-inf": "value",
+      "+infinity": "value",
+      "nan": "value",
+      "0x1f": "value",
+      "0b1": "value",
+      "1_0": "value",
+      "0x1p-2": "value",
+      "1e3": "value",
+      "1.": "value",
+      ".1": "value",
+      "1e": "value",
+      "1e9999": "value",
+      "--inf": "value"
+    },
+    "expected_yaml": "---\n\"+infinity\": \"value\"\n--inf: \"value\"\n\"-inf\": \"value\"\n\".1\": \"value\"\n0b1: \"value\"\n0x1f: \"value\"\n0x1p-2: \"value\"\n\"1.\": \"value\"\n1_0: \"value\"\n1e: \"value\"\n\"1e3\": \"value\"\n\"1e9999\": \"value\"\n\"inf\": \"value\"\n\"nan\": \"value\"",
+    "expected_plain": "+infinity=value --inf=value -inf=value .1=value 0b1=value 0x1f=value 0x1p-2=value 1.=value 1_0=value 1e=value 1e3=value 1e9999=value inf=value nan=value"
   }
 ]

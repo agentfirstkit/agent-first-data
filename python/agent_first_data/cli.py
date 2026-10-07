@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import enum
+import os
 import sys
 from typing import Any, Iterator
 
@@ -298,10 +299,27 @@ class CliEmitter:
         # mode (no diagnostic sink) keeps every event on the single writer.
         use_diagnostic = kind != "result" and self._diagnostic is not None
         sink = self._diagnostic if use_diagnostic else self._writer
-        sink.write(render(envelope, self._format, options=self._output_options) + "\n")
-        flush = getattr(sink, "flush", None)
-        if flush is not None:
-            flush()
+        try:
+            sink.write(render(envelope, self._format, options=self._output_options) + "\n")
+            flush = getattr(sink, "flush", None)
+            if flush is not None:
+                flush()
+        except BrokenPipeError:
+            # A failed flush leaves buffered bytes for interpreter shutdown to
+            # retry. Redirect the closed descriptor before finish returns 0.
+            fileno = getattr(sink, "fileno", None)
+            if fileno is not None:
+                try:
+                    descriptor = fileno()
+                except (OSError, ValueError):
+                    descriptor = None
+                if descriptor is not None:
+                    null_descriptor = os.open(os.devnull, os.O_WRONLY)
+                    try:
+                        os.dup2(null_descriptor, descriptor)
+                    finally:
+                        os.close(null_descriptor)
+            raise
         if kind in ("result", "error"):
             self._terminal_emitted = True
 

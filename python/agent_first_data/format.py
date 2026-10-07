@@ -1273,17 +1273,19 @@ def _redact_url_field_value(s: str, context: _RedactionContext) -> str:
     redacted = _redact_url_in_str(s, context)
     if redacted is not None:
         return redacted
-    trimmed = s.strip()
+    trimmed = s.strip("".join(_SPAN_TERMINATOR_WHITESPACE))
     if trimmed != s:
         redacted = _redact_url_in_str(trimmed, context)
         if redacted is not None:
             return redacted
     # Fail closed: a _url value we could not parse as a clean scheme-prefixed
-    # URL, yet which carries a credential sigil ('@' userinfo) or internal
-    # whitespace, is redacted wholesale rather than passed through. A schemeless
-    # connection string like user:pass@host/db has no scheme anchor for the
-    # surgical span logic above, so blanket redaction is the safe default.
-    if any(c.isspace() for c in s) or "@" in s:
+    # URL, yet which carries a credential sigil ('@' userinfo), internal
+    # whitespace, or a '://' scheme separator, is redacted wholesale rather than
+    # passed through. A schemeless connection string like user:pass@host/db
+    # has no scheme anchor for the surgical span logic above, and a URL behind
+    # a non-whitespace prefix (a BOM, a zero-width space, a label) has one the
+    # span logic cannot reach, so blanket redaction is the safe default.
+    if any(_is_span_terminator_whitespace(c) for c in s) or "@" in s or "://" in s:
         return REDACTED_MARKER
     return s
 
@@ -1840,11 +1842,10 @@ def _yaml_key(key: str) -> str:
 def _is_ambiguous_yaml_key(key: str) -> bool:
     if key.lower() in {"true", "false", "null", "~", ".nan", ".inf", "+.inf", "-.inf"}:
         return True
-    try:
-        float(key)
-        return True
-    except ValueError:
-        return False
+    unsigned = key[1:] if key.startswith(("+", "-")) else key
+    return unsigned.lower() in {"inf", "infinity", "nan"} or re.fullmatch(
+        r"[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?", key
+    ) is not None
 
 
 def _yaml_scalar(value: Any) -> str:
@@ -1945,7 +1946,7 @@ def _plain_scalar_raw(value: Any) -> str:
 def _quote_logfmt_value(value: str) -> str:
     if value == "":
         return ""
-    needs_quote = any(c.isspace() or c in '="\\' for c in value)
+    needs_quote = any(c in ' \t\n\r\f\v\u00a0="\\' for c in value)
     if not needs_quote:
         return value
     escaped = (

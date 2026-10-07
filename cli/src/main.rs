@@ -7,6 +7,7 @@ use agent_first_data::document::{
     Format as DocumentFormat, MatchKind, PatternSegment, Value as DocumentValue, ValueType,
     get_path, guard_bare_overwrite, join_path, parse_path, parse_path_pattern, value_from_type,
 };
+use agent_first_data::value_source::MAX_FILE_BYTES;
 use agent_first_data::{
     ArgSpec, BoundOutcome, CliSpec, Combination, CommandSpec, ErrorBuilder, Event, LintFinding,
     LintOptions, LintSeverity, OutputFormat, OutputOptions, OutputPlan, OutputSpec, OutputTo,
@@ -201,6 +202,16 @@ fn read_slug_field_arg() -> ArgSpec {
         .about("Field naming each element of an array on the path")
 }
 
+/// `--max-file-bytes`: the read budget for a document FILE. The default keeps
+/// a stray path from pulling an arbitrary file into memory; a caller that
+/// knows its document is larger states how much it means to read. Stdin
+/// (`-`) is a stream the caller already chose to send, and is not capped.
+fn max_file_bytes_arg() -> ArgSpec {
+    ArgSpec::option_i64("--max-file-bytes", "BYTES")
+        .default_i64(MAX_FILE_BYTES as i64)
+        .about("Largest document file to read, in bytes")
+}
+
 fn secret_name_arg() -> ArgSpec {
     ArgSpec::option("--secret-name", "FIELD")
         .repeatable()
@@ -231,6 +242,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                     "Input file, or - for stdin",
                 ))
                 .arg(authored_input_format_arg())
+                .arg(max_file_bytes_arg())
                 .arg(
                     ArgSpec::option_enum("--min-severity", ["warning", "error"])
                         .value_name("SEVERITY")
@@ -241,7 +253,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                     Combination::new("lint")
                         .action("lint")
                         .required(["input"])
-                        .optional(["input_format", "min_severity"])
+                        .optional(["input_format", "max_file_bytes", "min_severity"])
                         .output(protocol.clone()),
                 ),
         )
@@ -270,6 +282,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
         .command(
             CommandSpec::new(["render"])
                 .about("Render JSON or JSONL through AFDATA redaction and formatting")
+                .reference_note("**Output:** Rendered input values or JSONL, without a `result` envelope. Successful values follow `--output-to`; `split` writes them to stdout.")
                 .arg(positional(
                     "input",
                     0,
@@ -358,6 +371,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                 ))
                 .arg(positional("key", 1, "KEY", "Optional dot-path"))
                 .arg(input_format_arg())
+                .arg(max_file_bytes_arg())
                 .arg(read_slug_field_arg())
                 .arg(secret_name_arg())
                 .combination(
@@ -365,7 +379,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .action("get")
                         .about("Read the entire document")
                         .required(["file"])
-                        .optional(["input_format", "secret_name"])
+                        .optional(["input_format", "max_file_bytes", "secret_name"])
                         .output(protocol.clone()),
                 )
                 .combination(
@@ -373,7 +387,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .action("get")
                         .about("Read one value at KEY")
                         .required(["file", "key"])
-                        .optional(["input_format", "slug_field", "secret_name"])
+                        .optional(["input_format", "max_file_bytes", "slug_field", "secret_name"])
                         .output(protocol.clone()),
                 ),
         )
@@ -390,6 +404,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                 .arg(ArgSpec::flag("--reveal-secret").about("Allow a secret-named leaf"))
                 .arg(ArgSpec::option("--default", "VALUE").about("Fallback for missing or null"))
                 .arg(input_format_arg())
+                .arg(max_file_bytes_arg())
                 .arg(read_slug_field_arg())
                 .arg(secret_name_arg())
                 .combination(
@@ -400,6 +415,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                             "reveal_secret",
                             "default",
                             "input_format",
+                            "max_file_bytes",
                             "slug_field",
                             "secret_name",
                         ])
@@ -423,6 +439,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                 .arg(ArgSpec::flag("--reveal-secret").about("Allow a secret-named leaf"))
                 .arg(ArgSpec::option("--default", "VALUE").about("Fallback for missing or null"))
                 .arg(input_format_arg())
+                .arg(max_file_bytes_arg())
                 .arg(read_slug_field_arg())
                 .arg(secret_name_arg())
                 .combination(
@@ -433,6 +450,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                             "reveal_secret",
                             "default",
                             "input_format",
+                            "max_file_bytes",
                             "slug_field",
                             "secret_name",
                         ])
@@ -504,6 +522,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .about("Read a secret string from stdin, prompt, fd:N, or env:VAR"),
                 )
                 .arg(authored_input_format_arg())
+                .arg(max_file_bytes_arg())
                 .arg(read_slug_field_arg())
                 .combination(
                     Combination::new("set-value")
@@ -511,7 +530,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .about("Set one typed scalar or JSON value")
                         .fixed_one_of("value_type", ["string", "number", "bool", "json"])
                         .required(["file", "key", "value"])
-                        .optional(["input_format", "slug_field"])
+                        .optional(["input_format", "max_file_bytes", "slug_field"])
                         .output(protocol.clone()),
                 )
                 .combination(
@@ -520,7 +539,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .about("Set the key to null; takes no VALUE")
                         .fixed("value_type", "null")
                         .required(["file", "key"])
-                        .optional(["input_format", "slug_field"])
+                        .optional(["input_format", "max_file_bytes", "slug_field"])
                         .output(protocol.clone()),
                 )
                 .combination(
@@ -528,7 +547,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .action("set")
                         .about("Set the key from a secret source, never from argv")
                         .required(["file", "key", "secret_from"])
-                        .optional(["input_format", "slug_field"])
+                        .optional(["input_format", "max_file_bytes", "slug_field"])
                         .output(protocol.clone()),
                 ),
         )
@@ -538,12 +557,13 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                 .arg(positional("file", 0, "FILE", "Document file to mutate"))
                 .arg(positional("key", 1, "KEY", "Dot-path to remove"))
                 .arg(authored_input_format_arg())
+                .arg(max_file_bytes_arg())
                 .arg(read_slug_field_arg())
                 .combination(
                     Combination::new("unset")
                         .action("unset")
                         .required(["file", "key"])
-                        .optional(["input_format", "slug_field"])
+                        .optional(["input_format", "max_file_bytes", "slug_field"])
                         .output(protocol.clone()),
                 ),
         )
@@ -563,11 +583,12 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .about("Field that identifies each list element"),
                 )
                 .arg(authored_input_format_arg())
+                .arg(max_file_bytes_arg())
                 .combination(
                     Combination::new("add")
                         .action("add")
                         .required(["file", "key", "slug", "slug_field"])
-                        .optional(["fields", "input_format"])
+                        .optional(["fields", "input_format", "max_file_bytes"])
                         .output(protocol.clone()),
                 ),
         )
@@ -582,11 +603,12 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .about("Field that identifies each list element"),
                 )
                 .arg(authored_input_format_arg())
+                .arg(max_file_bytes_arg())
                 .combination(
                     Combination::new("remove")
                         .action("remove")
                         .required(["file", "key", "slug", "slug_field"])
-                        .optional(["input_format"])
+                        .optional(["input_format", "max_file_bytes"])
                         .output(protocol.clone()),
                 ),
         );
@@ -650,6 +672,7 @@ fn enumerate_command(name: &str, action: &str, about: &str, output: &OutputSpec)
         ))
         .arg(positional("key", 1, "KEY", "Optional container dot-path"))
         .arg(input_format_arg())
+        .arg(max_file_bytes_arg())
         .arg(read_slug_field_arg())
         .arg(ArgSpec::flag("--missing-ok").about("Succeed with no output when KEY is absent"))
         .arg(ArgSpec::flag("--null").about("Use NUL separators"))
@@ -658,7 +681,7 @@ fn enumerate_command(name: &str, action: &str, about: &str, output: &OutputSpec)
                 .action(action)
                 .about("List the document root's immediate children")
                 .required(["file"])
-                .optional(["input_format", "null"])
+                .optional(["input_format", "max_file_bytes", "null"])
                 .output(output.clone()),
         )
         .combination(
@@ -666,7 +689,13 @@ fn enumerate_command(name: &str, action: &str, about: &str, output: &OutputSpec)
                 .action(action)
                 .about("List one addressed container's immediate children")
                 .required(["file", "key"])
-                .optional(["input_format", "slug_field", "missing_ok", "null"])
+                .optional([
+                    "input_format",
+                    "max_file_bytes",
+                    "slug_field",
+                    "missing_ok",
+                    "null",
+                ])
                 .output(output.clone()),
         )
 }
@@ -962,6 +991,24 @@ fn invocation_strings(invocation: &ResolvedInvocation, id: &str) -> Vec<String> 
         .collect()
 }
 
+/// `--max-file-bytes` as resolved; the registry supplies the default, so a
+/// missing value only comes from a command that does not register it.
+fn invocation_max_file_bytes(invocation: &ResolvedInvocation) -> i64 {
+    invocation
+        .optional("max_file_bytes")
+        .and_then(agent_first_data::CliValue::as_i64)
+        .unwrap_or(MAX_FILE_BYTES as i64)
+}
+
+fn file_cap(max_file_bytes: i64) -> Result<u64, String> {
+    u64::try_from(max_file_bytes)
+        .ok()
+        .filter(|bytes| *bytes > 0)
+        .ok_or_else(|| {
+            format!("--max-file-bytes must be a positive byte count, got {max_file_bytes}")
+        })
+}
+
 fn invocation_flag(invocation: &ResolvedInvocation, id: &str) -> bool {
     invocation
         .optional(id)
@@ -983,6 +1030,7 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
                 Path::new(&input),
                 input_format.as_deref(),
                 &min_severity,
+                invocation_max_file_bytes(invocation),
                 format,
             )
         }
@@ -1001,6 +1049,7 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
                 Path::new(&input),
                 &invocation_strings(invocation, "secret_name"),
                 format,
+                output_to(),
             )
         }
         "emit_log" => run_emit(
@@ -1096,6 +1145,7 @@ fn dispatch_get(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
             slug_field: slug_field.as_deref(),
             secret_names: &secret_names,
             format,
+            max_file_bytes: invocation_max_file_bytes(invocation),
         },
     )
 }
@@ -1112,6 +1162,7 @@ fn dispatch_values(invocation: &ResolvedInvocation, format: OutputFormat) -> Exi
         slug_field: slug_field.as_deref(),
         secret_names: &secret_names,
         format,
+        max_file_bytes: invocation_max_file_bytes(invocation),
     };
     finish_raw(
         compute_values(
@@ -1142,6 +1193,7 @@ fn dispatch_value(invocation: &ResolvedInvocation, format: OutputFormat) -> Exit
             slug_field: slug_field.as_deref(),
             secret_names: &secret_names,
             format,
+            max_file_bytes: invocation_max_file_bytes(invocation),
         },
     )
 }
@@ -1197,6 +1249,7 @@ fn dispatch_enumerate(invocation: &ResolvedInvocation, format: OutputFormat) -> 
             slug_field: slug_field.as_deref(),
             secret_names: &[],
             format,
+            max_file_bytes: invocation_max_file_bytes(invocation),
         },
         invocation_flag(invocation, "missing_ok"),
         invocation_flag(invocation, "null"),
@@ -1230,6 +1283,7 @@ fn dispatch_set(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
             slug_field: slug_field.as_deref(),
             secret_names: &[],
             format,
+            max_file_bytes: invocation_max_file_bytes(invocation),
         },
     )
 }
@@ -1247,6 +1301,7 @@ fn dispatch_unset(invocation: &ResolvedInvocation, format: OutputFormat) -> Exit
             slug_field: slug_field.as_deref(),
             secret_names: &[],
             format,
+            max_file_bytes: invocation_max_file_bytes(invocation),
         },
     )
 }
@@ -1271,6 +1326,7 @@ fn dispatch_add(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
             slug_field: None,
             secret_names: &[],
             format,
+            max_file_bytes: invocation_max_file_bytes(invocation),
         },
     )
 }
@@ -1293,6 +1349,7 @@ fn dispatch_remove(invocation: &ResolvedInvocation, format: OutputFormat) -> Exi
             slug_field: None,
             secret_names: &[],
             format,
+            max_file_bytes: invocation_max_file_bytes(invocation),
         },
     )
 }
@@ -1305,8 +1362,13 @@ fn run_lint(
     input: &Path,
     input_format: Option<&str>,
     min_severity: &str,
+    max_file_bytes: i64,
     format: OutputFormat,
 ) -> ExitCode {
+    let max_bytes = match file_cap(max_file_bytes) {
+        Ok(max_bytes) => max_bytes,
+        Err(message) => return emit_usage_error(&message, format),
+    };
     let options = if min_severity == "error" {
         LintOptions::errors_only()
     } else {
@@ -1334,12 +1396,9 @@ fn run_lint(
 
     let mut findings = Vec::new();
     if effective == DocumentFormat::Json {
-        let text = match read_input_or_stdin(input) {
+        let text = match read_lint_json_input(input, max_bytes) {
             Ok(text) => text,
-            Err(message) => {
-                let event = build_error_event(json_error("read_failed", &message));
-                return emit_event(event, format, 1);
-            }
+            Err(builder) => return emit_event(build_error_event(*builder), format, 1),
         };
         let parsed = match parse_json_or_jsonl(&text) {
             Ok(parsed) => parsed,
@@ -1356,11 +1415,10 @@ fn run_lint(
             }
         }
     } else {
-        let (value, _doc_format) = match read_document_input(input, Some(effective)) {
+        let (value, _doc_format) = match read_document_input(input, Some(effective), max_bytes) {
             Ok(pair) => pair,
             Err(err) => {
-                let event = build_error_event(json_error(err.code(), &err.redacted_message()));
-                return emit_event(event, format, 1);
+                return emit_event(build_error_event(document_error_builder(&err)), format, 1);
             }
         };
         let json_value = match Value::try_from(value) {
@@ -1457,7 +1515,12 @@ fn validate_one_event(value: &Value, strict: bool, pointer: &str, findings: &mut
     }
 }
 
-fn run_render(input: &Path, secret_names: &[String], format: OutputFormat) -> ExitCode {
+fn run_render(
+    input: &Path,
+    secret_names: &[String],
+    format: OutputFormat,
+    destination: OutputTo,
+) -> ExitCode {
     let text = match read_input_or_stdin(input) {
         Ok(text) => text,
         Err(message) => {
@@ -1476,9 +1539,11 @@ fn run_render(input: &Path, secret_names: &[String], format: OutputFormat) -> Ex
         style: PlainStyle::default(),
     };
     match parsed {
-        ParsedInput::Single(value) => {
-            write_text_exit(&format_value(&value, format, false, &output_options), 0)
-        }
+        ParsedInput::Single(value) => write_text_exit_to(
+            &format_value(&value, format, false, &output_options),
+            0,
+            result_stream(destination),
+        ),
         ParsedInput::Lines(values) => {
             let mut out = String::new();
             for (idx, value) in values.iter().enumerate() {
@@ -1490,7 +1555,7 @@ fn run_render(input: &Path, secret_names: &[String], format: OutputFormat) -> Ex
                     out.push('\n');
                 }
             }
-            write_text_exit(&out, 0)
+            write_text_exit_to(&out, 0, result_stream(destination))
         }
     }
 }
@@ -1858,6 +1923,42 @@ fn is_yaml_format(format: OutputFormat) -> bool {
 /// caller passes an explicit path or `-`, so there is no "maybe hangs"
 /// shape left to guard against; reading `-` on an interactive terminal is
 /// the user's explicit request, same as any other Unix tool.
+/// `lint`'s JSON/JSONL input: stdin as sent, or a file under the same
+/// `--max-file-bytes` budget as every other document file the CLI reads. The
+/// JSON path reads text rather than a [`DocumentFile`] because JSONL is not a
+/// document, so the cap is applied here with the same error the document
+/// layer reports.
+fn read_lint_json_input(input: &Path, max_bytes: u64) -> Result<String, Box<ErrorBuilder>> {
+    if input == Path::new("-") {
+        return read_input_or_stdin(input)
+            .map_err(|message| Box::new(json_error("read_failed", &message)));
+    }
+    let read_failed = |err: std::io::Error| {
+        Box::new(json_error(
+            "read_failed",
+            &format!("failed to read {}: {err}", input.display()),
+        ))
+    };
+    let file = std::fs::File::open(input).map_err(read_failed)?;
+    let too_large = || {
+        Box::new(document_error_builder(&DocumentError::TooLarge {
+            path: input.display().to_string(),
+            max_bytes,
+        }))
+    };
+    if file.metadata().map_err(read_failed)?.len() > max_bytes {
+        return Err(too_large());
+    }
+    let mut text = String::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_string(&mut text)
+        .map_err(read_failed)?;
+    if text.len() as u64 > max_bytes {
+        return Err(too_large());
+    }
+    Ok(text)
+}
+
 fn read_input_or_stdin(input: &Path) -> Result<String, String> {
     if input == Path::new("-") {
         let mut text = String::new();
@@ -2108,9 +2209,17 @@ struct DocumentContext<'a> {
     slug_field: Option<&'a str>,
     secret_names: &'a [String],
     format: OutputFormat,
+    /// `--max-file-bytes` as given; [`file_cap`](Self::file_cap) validates it.
+    max_file_bytes: i64,
 }
 
 impl DocumentContext<'_> {
+    /// The read budget for a document FILE, or a usage error when
+    /// `--max-file-bytes` is not a positive byte count.
+    fn file_cap(&self) -> Result<u64, CliDocError> {
+        file_cap(self.max_file_bytes).map_err(CliDocError::Usage)
+    }
+
     /// How a non-numeric segment resolves for this invocation.
     ///
     /// An explicit `--slug-field` wins over the format's own rule: the caller
@@ -2183,6 +2292,19 @@ fn is_addressing_miss(err: &CliDocError) -> bool {
     )
 }
 
+/// The error event body for a document error, carrying the corrective flag
+/// when the error is one a flag can correct.
+fn document_error_builder(err: &DocumentError) -> ErrorBuilder {
+    let builder = json_error(err.code(), &err.redacted_message());
+    if err.code() == "document_too_large" {
+        builder.hint(
+            "raise the limit with --max-file-bytes BYTES, or read the document from stdin with -",
+        )
+    } else {
+        builder
+    }
+}
+
 /// Render `err` into `(event, exit_code)`.
 fn document_error_event(err: &CliDocError) -> (Event, u8) {
     match err {
@@ -2193,10 +2315,7 @@ fn document_error_event(err: &CliDocError) -> (Event, u8) {
         // `redacted_message`, never `Display`: an error event is the thing an
         // agent routinely writes to a log, and `Display` quotes the offending
         // document text — which is how a `_secret` leaf reached stderr verbatim.
-        CliDocError::Document(doc_err) => (
-            build_error_event(json_error(doc_err.code(), &doc_err.redacted_message())),
-            1,
-        ),
+        CliDocError::Document(doc_err) => (build_error_event(document_error_builder(doc_err)), 1),
         CliDocError::Runtime { code, message } => (build_error_event(json_error(code, message)), 1),
     }
 }
@@ -2280,13 +2399,14 @@ fn resolve_input_format(input_format: Option<&str>) -> Result<Option<DocumentFor
 fn read_document_input(
     file: &Path,
     input_format: Option<DocumentFormat>,
+    max_bytes: u64,
 ) -> Result<(DocumentValue, DocumentFormat), DocumentError> {
     if file == Path::new("-") {
         let format = input_format.unwrap_or(DocumentFormat::Json);
         let doc = Document::from_reader(std::io::stdin().lock(), format)?;
         return Ok((doc.value().clone(), doc.format()));
     }
-    let doc = DocumentFile::open(file, input_format)?;
+    let doc = DocumentFile::open_capped(file, input_format, max_bytes)?;
     Ok((doc.value().clone(), doc.format()))
 }
 
@@ -2364,8 +2484,8 @@ fn write_raw_exit(bytes: &[u8]) -> ExitCode {
         }
         return ExitCode::from(1);
     }
-    if stdout.flush().is_err() {
-        return ExitCode::from(1);
+    if let Err(err) = stdout.flush() {
+        return ExitCode::from(u8::from(err.kind() != std::io::ErrorKind::BrokenPipe));
     }
     ExitCode::from(0)
 }
@@ -2382,7 +2502,7 @@ fn compute_get(
     ctx: &DocumentContext<'_>,
 ) -> Result<Value, CliDocError> {
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
-    let (root, doc_format) = read_document_input(file, input_format)?;
+    let (root, doc_format) = read_document_input(file, input_format, ctx.file_cap()?)?;
     let mut payload = serde_json::Map::new();
     payload.insert("code".to_string(), json!("document"));
     payload.insert("format".to_string(), json!(doc_format.cli_name()));
@@ -2433,7 +2553,7 @@ fn compute_value(
     ctx: &DocumentContext<'_>,
 ) -> Result<Vec<u8>, CliDocError> {
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
-    let (root, doc_format) = read_document_input(file, input_format)?;
+    let (root, doc_format) = read_document_input(file, input_format, ctx.file_cap()?)?;
     scalar_bytes_at(
         &root,
         key,
@@ -2463,7 +2583,7 @@ fn compute_values(
     ctx: &DocumentContext<'_>,
 ) -> Result<Vec<u8>, CliDocError> {
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
-    let (root, doc_format) = read_document_input(file, input_format)?;
+    let (root, doc_format) = read_document_input(file, input_format, ctx.file_cap()?)?;
     let addressing = ctx.addressing(doc_format);
     let mut expanded = Vec::new();
     for key in keys {
@@ -2640,7 +2760,7 @@ fn compute_enumerate(
     mode: EnumerateMode,
 ) -> Result<Vec<String>, CliDocError> {
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
-    let (root, doc_format) = read_document_input(file, input_format)?;
+    let (root, doc_format) = read_document_input(file, input_format, ctx.file_cap()?)?;
     let base_segments: Vec<String> = match key {
         Some(key) => parse_path(key)?,
         None => Vec::new(),
@@ -2724,7 +2844,7 @@ fn compute_set(
     // safety checks below.
     let secret_source = secret_from.map(parse_secret_from).transpose()?;
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
-    let mut doc = DocumentFile::open(file, input_format)?;
+    let mut doc = DocumentFile::open_capped(file, input_format, ctx.file_cap()?)?;
     // Guard the target before consuming a `--secret-from stdin`/`prompt`/`fd:N`
     // source: an unsafe target (symlink, or on unix a hardlink) must be
     // rejected before the secret is read, not after.
@@ -2821,7 +2941,7 @@ fn compute_add(
         // zero-coercion rule as set's bare VALUE — no separate type syntax.
         field_pairs.push((name.to_string(), DocumentValue::String(value.to_string())));
     }
-    let mut doc = DocumentFile::open(file, input_format)?;
+    let mut doc = DocumentFile::open_capped(file, input_format, ctx.file_cap()?)?;
     doc.add(key, slug, slug_field, &field_pairs)?;
     doc.save()?;
     Ok(json!({
@@ -2856,7 +2976,7 @@ fn compute_remove(
 ) -> Result<Value, CliDocError> {
     reject_mutation_dash(file)?;
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
-    let mut doc = DocumentFile::open(file, input_format)?;
+    let mut doc = DocumentFile::open_capped(file, input_format, ctx.file_cap()?)?;
     doc.remove(key, slug, slug_field)?;
     doc.save()?;
     Ok(json!({
@@ -2878,7 +2998,7 @@ fn run_unset(file: &Path, key: &str, ctx: &DocumentContext<'_>) -> ExitCode {
 fn compute_unset(file: &Path, key: &str, ctx: &DocumentContext<'_>) -> Result<Value, CliDocError> {
     reject_mutation_dash(file)?;
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
-    let mut doc = DocumentFile::open(file, input_format)?;
+    let mut doc = DocumentFile::open_capped(file, input_format, ctx.file_cap()?)?;
     // `Document::unset` is idempotent, but the `afdata unset` CLI keeps its
     // strict contract: unsetting an absent key is a caught error, so scripts
     // can tell an actual removal from a no-op.

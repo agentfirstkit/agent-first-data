@@ -319,6 +319,8 @@ func (e *CliEmitter) EmitLog(level LogLevel, message string) error {
 // 0 when the write failed because the reader hung up (a broken pipe, i.e.
 // errors.Is(err, syscall.EPIPE) — the conventional clean shutdown when a
 // consumer stops reading); and 4 on any other emit or write failure.
+// For process standard output/error streams, the runtime can terminate with SIGPIPE before the
+// write returns an error; Finish does not override that process signal policy.
 //
 // A library must not call os.Exit itself: Finish returns the code and leaves the
 // decision to the caller (typically os.Exit(code)).

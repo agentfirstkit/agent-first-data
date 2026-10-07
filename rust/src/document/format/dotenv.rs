@@ -206,7 +206,7 @@ fn edit_line(content: &str, key: &str, replacement: Option<&str>) -> DocumentRes
             .is_some_and(|(name, _)| name.trim() == key);
         if matches {
             if let Some(value) = replacement {
-                let prefix_len = body.len() - assignment.len();
+                let prefix_len = bare.len() - assignment.len();
                 let prefix = &body[..prefix_len];
                 let (name, old_value) = assignment.split_once('=').unwrap_or((key, ""));
                 let suffix = old_value
@@ -231,14 +231,19 @@ fn edit_line(content: &str, key: &str, replacement: Option<&str>) -> DocumentRes
     }
     if !found {
         if let Some(value) = replacement {
+            let newline = if content.contains("\r\n") {
+                "\r\n"
+            } else {
+                "\n"
+            };
             if !output.is_empty() && !output.ends_with('\n') {
-                output.push('\n');
+                output.push_str(newline);
             }
             output.push_str(key);
             output.push('=');
             output.push_str(value);
             if content.ends_with('\n') || !output.ends_with('\n') {
-                output.push('\n');
+                output.push_str(newline);
             }
             return Ok(output);
         }

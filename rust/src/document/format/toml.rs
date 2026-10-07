@@ -111,7 +111,7 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
             }
         }
     }
-    Ok(document.to_string())
+    Ok(preserve_line_endings(content, document.to_string()))
 }
 
 /// Remove an existing TOML item through `toml_edit`, retaining document decor.
@@ -177,7 +177,19 @@ pub fn unset_preserving(content: &str, path: &str) -> DocumentResult<String> {
             final_value.decor_mut().set_suffix(suffix);
         }
     }
-    Ok(document.to_string())
+    Ok(preserve_line_endings(content, document.to_string()))
+}
+
+fn preserve_line_endings(content: &str, rendered: String) -> String {
+    if content.contains("\r\n")
+        && content.as_bytes().iter().enumerate().all(|(index, byte)| {
+            *byte != b'\n' || (index > 0 && content.as_bytes()[index - 1] == b'\r')
+        })
+    {
+        rendered.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        rendered
+    }
 }
 
 fn toml_item(value: &Value) -> DocumentResult<toml_edit::Item> {
@@ -238,6 +250,8 @@ fn toml_value(
                     .is_some_and(|datetime| datetime.to_string() == *value)
             }) {
                 Ok(existing.clone())
+            } else if value.contains('\n') {
+                single_line_string(value)
             } else {
                 Ok(toml_edit::Value::from(value.clone()))
             }
@@ -251,6 +265,45 @@ fn toml_value(
         *converted.decor_mut() = existing.decor().clone();
     }
     Ok(converted)
+}
+
+/// A string holding a newline, written as a one-line basic string.
+///
+/// The default rendering is a `\"\"\"` multiline literal, which puts the value's
+/// own newlines into the source as raw line breaks. [`preserve_line_endings`]
+/// cannot tell those from the document's line endings, so on a CRLF file it
+/// would rewrite the value's `\n` to `\r\n` — a successful `set` that stores
+/// something other than what it was given. Escaped, the value carries no raw
+/// line break for a line-ending pass to touch.
+fn single_line_string(value: &str) -> DocumentResult<toml_edit::Value> {
+    use std::fmt::Write as _;
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => literal.push_str("\\\\"),
+            '"' => literal.push_str("\\\""),
+            '\n' => literal.push_str("\\n"),
+            '\r' => literal.push_str("\\r"),
+            '\t' => literal.push_str("\\t"),
+            control if control.is_control() => {
+                let _ = write!(literal, "\\u{:04X}", u32::from(control));
+            }
+            other => literal.push(other),
+        }
+    }
+    literal.push('"');
+    let mut parsed = literal.parse::<toml_edit::Value>().map_err(|error| {
+        DocumentError::UnsupportedOperation {
+            format: "TOML".to_string(),
+            operation: "set".to_string(),
+            detail: format!("string is not representable in TOML: {error}"),
+        }
+    })?;
+    // A parsed value carries explicit empty decor; clear it so the surrounding
+    // table or array applies its own spacing as it does for any new value.
+    parsed.decor_mut().clear();
+    Ok(parsed)
 }
 
 /// Keep a decor's layout (newlines and indentation) and drop its comments.

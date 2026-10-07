@@ -72,6 +72,249 @@ fn write_temp(dir: &TempDir, name: &str, contents: &str) -> String {
     path.to_str().unwrap().to_string()
 }
 
+const OVERSIZED_DOCUMENT_CANARY: &str = "oversized_document_secret_canary";
+
+fn write_oversized_document(dir: &TempDir) -> String {
+    use agent_first_data::value_source::MAX_FILE_BYTES;
+
+    let path = dir.path().join("oversized.json");
+    let mut file = std::fs::File::create(&path).unwrap();
+    write!(
+        file,
+        "{{\"api_key_secret\":\"{OVERSIZED_DOCUMENT_CANARY}\",\"plain_value\":1,\"items\":[{{\"id\":\"existing\"}}]}}"
+    )
+    .unwrap();
+    // A sparse file exercises the metadata cap without allocating/writing a
+    // large fixture. The stable size error must precede document parsing.
+    file.set_len(MAX_FILE_BYTES + 1).unwrap();
+    assert_eq!(MAX_FILE_BYTES, 16 * 1024 * 1024);
+    path.to_str().unwrap().to_string()
+}
+
+fn directory_entries(dir: &TempDir) -> Vec<std::ffi::OsString> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    entries.sort();
+    entries
+}
+
+fn assert_document_too_large(output: &std::process::Output, command: &str) {
+    assert_eq!(output.status.code(), Some(1), "{command}: {output:?}");
+    assert!(output.stdout.is_empty(), "{command}: {output:?}");
+    let response = json_stderr(output);
+    assert_eq!(response["kind"], "error", "{command}: {response}");
+    assert_eq!(
+        response["error"]["code"], "document_too_large",
+        "{command}: {response}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains(OVERSIZED_DOCUMENT_CANARY),
+        "{command} echoed document contents"
+    );
+}
+
+#[test]
+fn oversized_document_reads_are_rejected_without_echoing_contents() {
+    let dir = TempDir::new().unwrap();
+    let config_path = write_oversized_document(&dir);
+    let original = std::fs::read(&config_path).unwrap();
+    let entries = directory_entries(&dir);
+    for arguments in [
+        vec!["get", config_path.as_str()],
+        vec!["value", config_path.as_str(), "plain_value"],
+        vec!["values", config_path.as_str(), "plain_value"],
+        vec!["paths", config_path.as_str()],
+        vec!["keys", config_path.as_str()],
+    ] {
+        let command = arguments[0];
+        let output = run(&arguments);
+        assert_document_too_large(&output, command);
+        assert!(
+            std::fs::read(&config_path).unwrap() == original,
+            "{command} changed the document"
+        );
+        assert_eq!(
+            directory_entries(&dir),
+            entries,
+            "{command} changed the directory"
+        );
+    }
+}
+
+#[test]
+fn oversized_document_mutations_leave_the_file_and_directory_unchanged() {
+    let dir = TempDir::new().unwrap();
+    let config_path = write_oversized_document(&dir);
+    let original = std::fs::read(&config_path).unwrap();
+    let entries = directory_entries(&dir);
+    for arguments in [
+        vec![
+            "set",
+            config_path.as_str(),
+            "plain_value",
+            "2",
+            "--value-type",
+            "number",
+        ],
+        vec![
+            "add",
+            config_path.as_str(),
+            "items",
+            "new",
+            "--slug-field",
+            "id",
+        ],
+        vec![
+            "remove",
+            config_path.as_str(),
+            "items",
+            "existing",
+            "--slug-field",
+            "id",
+        ],
+        vec!["unset", config_path.as_str(), "api_key_secret"],
+    ] {
+        let command = arguments[0];
+        let output = run(&arguments);
+        assert_document_too_large(&output, command);
+        assert!(
+            std::fs::read(&config_path).unwrap() == original,
+            "{command} changed the document"
+        );
+        assert_eq!(
+            directory_entries(&dir),
+            entries,
+            "{command} left a temporary file"
+        );
+    }
+}
+
+/// `--max-file-bytes` moves the budget in both directions, and the
+/// too-large error names it as the way out. One small document under a cap
+/// a few bytes either side of its size checks every command that reads a
+/// document FILE, so a command that forgets to pass the flag through fails here.
+#[test]
+fn max_file_bytes_sets_the_document_read_budget() {
+    let dir = TempDir::new().unwrap();
+    let config_path = write_temp(
+        &dir,
+        "budget.json",
+        r#"{"plain_value":1,"items":[{"id":"existing"}],"drop":true}"#,
+    );
+    let commands: Vec<Vec<&str>> = vec![
+        vec!["lint", config_path.as_str()],
+        vec!["get", config_path.as_str()],
+        vec!["value", config_path.as_str(), "plain_value"],
+        vec!["values", config_path.as_str(), "plain_value"],
+        vec!["paths", config_path.as_str()],
+        vec!["keys", config_path.as_str()],
+        vec![
+            "set",
+            config_path.as_str(),
+            "plain_value",
+            "2",
+            "--value-type",
+            "number",
+        ],
+        vec![
+            "add",
+            config_path.as_str(),
+            "items",
+            "new",
+            "--slug-field",
+            "id",
+        ],
+        vec![
+            "remove",
+            config_path.as_str(),
+            "items",
+            "new",
+            "--slug-field",
+            "id",
+        ],
+        vec!["unset", config_path.as_str(), "drop"],
+    ];
+    for arguments in &commands {
+        let command = arguments[0];
+        let original = std::fs::read(&config_path).unwrap();
+        // Edits grow and shrink the file, so each command gets a budget cut
+        // to the size it is about to read.
+        let size = original.len() as u64;
+        let short = (size - 1).to_string();
+        let exact = size.to_string();
+        let mut too_small = arguments.clone();
+        too_small.extend(["--max-file-bytes", short.as_str()]);
+        let output = run(&too_small);
+        assert_eq!(output.status.code(), Some(1), "{command}: {output:?}");
+        let response = json_stderr(&output);
+        assert_eq!(
+            response["error"]["code"], "document_too_large",
+            "{command}: {response}"
+        );
+        assert!(
+            response["error"]["hint"]
+                .as_str()
+                .unwrap()
+                .contains("--max-file-bytes"),
+            "{command}: {response}"
+        );
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            original,
+            "{command} wrote over budget"
+        );
+
+        let mut enough = arguments.clone();
+        enough.extend(["--max-file-bytes", exact.as_str()]);
+        let output = run(&enough);
+        assert_eq!(output.status.code(), Some(0), "{command}: {output:?}");
+    }
+}
+
+#[test]
+fn max_file_bytes_must_be_a_positive_byte_count() {
+    let dir = TempDir::new().unwrap();
+    let config_path = write_temp(&dir, "budget.json", r#"{"plain_value":1}"#);
+    for bad in ["0", "-1"] {
+        for arguments in [
+            vec!["get", config_path.as_str(), "--max-file-bytes", bad],
+            vec![
+                "unset",
+                config_path.as_str(),
+                "plain_value",
+                "--max-file-bytes",
+                bad,
+            ],
+            vec!["lint", config_path.as_str(), "--max-file-bytes", bad],
+        ] {
+            let output = run(&arguments);
+            assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+            let response = json_stderr(&output);
+            assert_eq!(
+                response["error"]["code"], "document_usage_error",
+                "{response}"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        r#"{"plain_value":1}"#
+    );
+}
+
+/// Stdin is a stream the caller chose to send, so no file budget applies to it.
+#[test]
+fn max_file_bytes_does_not_cap_stdin() {
+    let output = run_with_stdin(
+        &["value", "-", "plain_value", "--max-file-bytes", "1"],
+        br#"{"plain_value":"from-stdin"}"#,
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stdout, b"from-stdin");
+}
+
 #[test]
 fn bare_relative_document_mutation_commits_and_reports_success() {
     let dir = tempfile::tempdir().unwrap();
@@ -2867,4 +3110,149 @@ fn test_default_absorbs_a_content_miss_but_not_an_ambiguity() {
     ]);
     assert!(keys.status.success(), "{keys:?}");
     assert!(keys.stdout.is_empty());
+}
+
+#[cfg(feature = "dotenv")]
+#[test]
+fn dotenv_set_preserves_crlf_keys_and_new_lines() {
+    let temp = TempDir::new().unwrap();
+    let file = write_temp(&temp, "crlf.env", "KEY=old\r\nexport OTHER=x\r\n");
+    for (key, value) in [("KEY", "new"), ("OTHER", "y"), ("NEW", "z")] {
+        let output = run(&["set", &file, key, value]);
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        b"KEY=new\r\nexport OTHER=y\r\nNEW=z\r\n"
+    );
+    assert_eq!(run(&["value", &file, "KEY"]).stdout, b"new");
+}
+
+#[cfg(feature = "dotenv")]
+#[test]
+fn dotenv_set_preserves_crlf_around_comments_indentation_and_a_missing_final_newline() {
+    let temp = TempDir::new().unwrap();
+
+    // An inline comment sits between the value and the line ending; both stay.
+    let commented = write_temp(&temp, "commented.env", "KEY=old # c\r\nOTHER=x\r\n");
+    let output = run(&["set", &commented, "KEY", "new"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read(&commented).unwrap(),
+        b"KEY=new # c\r\nOTHER=x\r\n"
+    );
+    assert_eq!(run(&["value", &commented, "KEY"]).stdout, b"new");
+
+    // Leading indentation, with and without `export`, is not the editor's to drop.
+    let indented = write_temp(
+        &temp,
+        "indented.env",
+        "  KEY=old\r\n\texport OTHER=x # c\r\n",
+    );
+    for (key, value) in [("KEY", "new"), ("OTHER", "y")] {
+        let output = run(&["set", &indented, key, value]);
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert_eq!(
+        std::fs::read(&indented).unwrap(),
+        b"  KEY=new\r\n\texport OTHER=y # c\r\n"
+    );
+    assert_eq!(run(&["value", &indented, "OTHER"]).stdout, b"y");
+
+    // A final line with no terminator gets one in the file's own style before
+    // the appended key; editing that final line in place adds nothing.
+    let unterminated = write_temp(&temp, "unterminated.env", "A=1\r\nB=2");
+    let output = run(&["set", &unterminated, "B", "3"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read(&unterminated).unwrap(), b"A=1\r\nB=3");
+    let output = run(&["set", &unterminated, "NEW", "z"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read(&unterminated).unwrap(),
+        b"A=1\r\nB=3\r\nNEW=z\r\n"
+    );
+    assert_eq!(run(&["value", &unterminated, "NEW"]).stdout, b"z");
+}
+
+#[cfg(feature = "toml")]
+#[test]
+fn toml_mutations_preserve_crlf() {
+    let temp = TempDir::new().unwrap();
+    let file = write_temp(
+        &temp,
+        "crlf.toml",
+        "a = 1\r\n# note\r\n[s]\r\nk = \"v\"\r\n",
+    );
+    let output = run(&["set", &file, "s.k", "w"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        b"a = 1\r\n# note\r\n[s]\r\nk = \"w\"\r\n"
+    );
+    let output = run(&["unset", &file, "s.k"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read(&file).unwrap(), b"a = 1\r\n# note\r\n[s]\r\n");
+}
+
+#[cfg(feature = "toml")]
+#[test]
+fn toml_crlf_file_stores_a_multiline_value_byte_for_byte() {
+    let temp = TempDir::new().unwrap();
+    let file = write_temp(&temp, "crlf.toml", "a = 1\r\nk = \"v\"\r\n");
+
+    // Replacing an existing key: the value's own `\n` is not a line ending of
+    // the document, so CRLF preservation must leave it alone.
+    let output = run(&["set", &file, "k", "x\ny"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read(&file).unwrap(), b"a = 1\r\nk = \"x\\ny\"\r\n");
+    assert_eq!(run(&["value", &file, "k"]).stdout, b"x\ny");
+
+    // Appending a new key takes the same route.
+    let output = run(&["set", &file, "n", "p\n\"q\"\\\tr\n"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        b"a = 1\r\nk = \"x\\ny\"\r\nn = \"p\\n\\\"q\\\"\\\\\\tr\\n\"\r\n"
+    );
+    assert_eq!(run(&["value", &file, "n"]).stdout, b"p\n\"q\"\\\tr\n");
+}
+
+#[cfg(feature = "toml")]
+#[test]
+fn toml_crlf_file_keeps_an_existing_multiline_string_when_another_key_changes() {
+    let temp = TempDir::new().unwrap();
+    let file = write_temp(
+        &temp,
+        "crlf.toml",
+        "a = 1\r\nm = \"\"\"\r\nl1\r\nl2\"\"\"\r\nk = \"v\"\r\n",
+    );
+    let before = run(&["value", &file, "m"]);
+    assert!(before.status.success(), "{before:?}");
+    assert_eq!(before.stdout, b"l1\r\nl2");
+
+    let output = run(&["set", &file, "k", "w"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        b"a = 1\r\nm = \"\"\"\r\nl1\r\nl2\"\"\"\r\nk = \"w\"\r\n"
+    );
+    assert_eq!(run(&["value", &file, "m"]).stdout, before.stdout);
+}
+
+#[cfg(unix)]
+#[test]
+fn value_succeeds_when_stdout_reader_has_closed() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    let temp = TempDir::new().unwrap();
+    let file = write_temp(&temp, "value.json", r#"{"a":"hello"}"#);
+    let (reader, writer) = UnixStream::pair().unwrap();
+    drop(reader);
+    let output = afdata()
+        .args(["value", &file, "a"])
+        .stdout(Stdio::from(OwnedFd::from(writer)))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
 }

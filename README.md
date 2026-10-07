@@ -105,12 +105,18 @@ deliberately turns one scalar into raw shell bytes. `set` creates missing object
 parents along the requested dot-path, but refuses to traverse an existing
 scalar or incompatible container.
 
+CLI document file reads and edits accept regular files up to 16 MiB by
+default; `--max-file-bytes BYTES` sets a different budget. Stdin (`-`) is not
+capped.
+
 Edits are **source-preserving and atomic**: comments, key order, and formatting
 survive; a write is read back before it lands, so an edit that would leave a
 file its own parser rejects fails instead of succeeding; no partial file is
 observable, and failures before atomic installation leave the original
 untouched. A rare parent-directory fsync failure after installation is
-commit-uncertain, so reopen the path before retrying. Values are **never
+commit-uncertain, so reopen the path before retrying. Saves are last-writer-wins:
+if two handles edit the same file, the later save replaces the earlier one;
+callers must serialize concurrent edits themselves. Values are **never
 guessed** — a bare value is always a string, and an exact type is asked for,
 not inferred. A name marks its whole subtree, so a `_secret` node stays
 redacted however you address it, and revealing it is an auditable opt-in.

@@ -145,8 +145,19 @@ export function parseOutputTo(value: string): OutputTo {
   throw new Error("invalid --output-to: expected split, stdout, or stderr");
 }
 
+const guardedProcessStreams = new WeakSet<NodeJS.WriteStream>();
+
+function guardProcessStream(stream: NodeJS.WriteStream): void {
+  if (guardedProcessStreams.has(stream)) return;
+  guardedProcessStreams.add(stream);
+  stream.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") throw error;
+  });
+}
+
 /** Event writer bound to the process stdout stream. */
 const processStdoutWriter: CliEventWriter = (line) => {
+  guardProcessStream(process.stdout);
   process.stdout.write(line);
 };
 
@@ -157,6 +168,7 @@ const processStdoutWriter: CliEventWriter = (line) => {
  * `stderr-sink` marker is what no_stderr_policy.test.ts allows through.
  */
 const processStderrWriter: CliEventWriter = (line) => {
+  guardProcessStream(process.stderr); // stderr-sink: CliEmitter diagnostic channel
   process.stderr.write(line); // stderr-sink: CliEmitter diagnostic channel
 };
 

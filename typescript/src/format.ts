@@ -1151,17 +1151,25 @@ function isTrailingTextUrlPunctuation(character: string): boolean {
 function redactUrlFieldValue(s: string, secretNames: ReadonlySet<string>): string {
   const redacted = redactUrlInStr(s, secretNames);
   if (redacted !== null) return redacted;
-  const trimmed = s.trim();
+  let start = 0;
+  let end = s.length;
+  while (start < end && isSpanTerminatorWhitespace(s.charCodeAt(start))) start += 1;
+  while (end > start && isSpanTerminatorWhitespace(s.charCodeAt(end - 1))) end -= 1;
+  const trimmed = s.slice(start, end);
   if (trimmed !== s) {
     const trimmedRedacted = redactUrlInStr(trimmed, secretNames);
     if (trimmedRedacted !== null) return trimmedRedacted;
   }
   // Fail closed: a _url value we could not parse as a clean scheme-prefixed
-  // URL, yet which carries a credential sigil ('@' userinfo) or internal
-  // whitespace, is redacted wholesale rather than passed through. A schemeless
-  // connection string like user:pass@host/db has no scheme anchor for the
-  // surgical span logic above, so blanket redaction is the safe default.
-  if (/\s/.test(s) || s.includes("@")) return REDACTED_MARKER;
+  // URL, yet which carries a credential sigil ('@' userinfo), internal
+  // whitespace, or a '://' scheme separator, is redacted wholesale rather than
+  // passed through. A schemeless connection string like user:pass@host/db
+  // has no scheme anchor for the surgical span logic above, and a URL behind
+  // a non-whitespace prefix (a BOM, a zero-width space, a label) has one the
+  // span logic cannot reach, so blanket redaction is the safe default.
+  if ([...s].some(c => isSpanTerminatorWhitespace(c.charCodeAt(0))) || s.includes("@") || s.includes("://")) {
+    return REDACTED_MARKER;
+  }
   return s;
 }
 
@@ -1718,7 +1726,8 @@ function isAmbiguousYamlKey(key: string): boolean {
   if (["true", "false", "null", "~", ".nan", ".inf", "+.inf", "-.inf"].includes(key.toLowerCase())) {
     return true;
   }
-  return key.trim() !== "" && Number.isFinite(Number(key));
+  return ["inf", "infinity", "nan"].includes(key.replace(/^[+-]/, "").toLowerCase())
+    || /^[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$/.test(key);
 }
 
 function yamlScalar(value: JsonValue): string {
@@ -1797,7 +1806,7 @@ function plainScalarRaw(value: JsonValue): string {
 
 function quoteLogfmtValue(value: string): string {
   if (value === "") return "";
-  if (!/[\s="\\]/.test(value)) return value;
+  if (!/[ \t\n\r\f\v\u00a0="\\]/.test(value)) return value;
   const escaped = value
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')

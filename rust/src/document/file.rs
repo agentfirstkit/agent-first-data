@@ -815,8 +815,12 @@ impl DocumentFile {
     /// source-preserving edit in memory and do **not** touch disk; this is the
     /// one commit point. That lets a caller apply several edits and inspect the
     /// result via [`value`](Document::value) (e.g. deserialize-and-validate)
-    /// before any bytes are written, and makes a multi-edit change atomic —
-    /// all edits land together or none do.
+    /// before any bytes are written. The complete edit set is installed together.
+    ///
+    /// Saves are last-writer-wins: if two handles edit the same file, the later
+    /// save replaces the earlier one. Callers must serialize concurrent edits
+    /// themselves; saving does not compare the file to the handle's original
+    /// snapshot.
     pub fn save(&self) -> DocumentResult<()> {
         self.save_atomic(self.doc.source())
     }

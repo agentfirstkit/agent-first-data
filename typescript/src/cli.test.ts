@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import {
   cliParseOutput,
   parseOutputTo,
@@ -435,4 +436,31 @@ describe("version helpers", () => {
     assert.ok(!("build" in parsed.result));
   });
 
+});
+
+
+const closedPipeSkip = process.platform === "win32"
+  ? "closed-pipe writes do not reliably surface as EPIPE on Windows; the reader-closed contract is asserted on POSIX only"
+  : false;
+
+it("real process stdout tolerates an asynchronously closed pipe", { skip: closedPipeSkip }, async () => {
+  const moduleUrl = new URL("./index.ts", import.meta.url).href;
+  const script = `import { CliEmitter } from ${JSON.stringify(moduleUrl)};
+    process.stdin.resume();
+    process.stdin.on("end", () => {
+      process.exitCode = CliEmitter.finite("json").finishResult({ ok: true });
+    });`;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", chunk => { stderr += String(chunk); });
+  const completion = new Promise<number | null>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", resolve);
+  });
+  child.stdout.destroy();
+  child.stdin.end();
+  assert.equal(await completion, 0, stderr);
+  assert.equal(stderr, "");
 });

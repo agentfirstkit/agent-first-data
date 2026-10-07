@@ -650,7 +650,43 @@ fn is_ambiguous_yaml_key(key: &str) -> bool {
     matches!(
         lower.as_str(),
         "true" | "false" | "null" | "~" | ".nan" | ".inf" | "+.inf" | "-.inf"
-    ) || key.parse::<f64>().is_ok()
+    ) || matches!(
+        lower.strip_prefix(['+', '-']).unwrap_or(&lower),
+        "inf" | "infinity" | "nan"
+    ) || is_decimal_yaml_key(key)
+}
+
+fn is_decimal_yaml_key(key: &str) -> bool {
+    let mut bytes = key.bytes().peekable();
+    if matches!(bytes.peek(), Some(b'+' | b'-')) {
+        bytes.next();
+    }
+    let mut digits = 0;
+    while bytes.next_if(u8::is_ascii_digit).is_some() {
+        digits += 1;
+    }
+    if bytes.next_if_eq(&b'.').is_some() {
+        while bytes.next_if(u8::is_ascii_digit).is_some() {
+            digits += 1;
+        }
+    }
+    if digits == 0 {
+        return false;
+    }
+    if matches!(bytes.peek(), Some(b'e' | b'E')) {
+        bytes.next();
+        if matches!(bytes.peek(), Some(b'+' | b'-')) {
+            bytes.next();
+        }
+        let mut exponent_digits = 0;
+        while bytes.next_if(u8::is_ascii_digit).is_some() {
+            exponent_digits += 1;
+        }
+        if exponent_digits == 0 {
+            return false;
+        }
+    }
+    bytes.next().is_none()
 }
 
 fn quote_logfmt_key(key: &str) -> String {
@@ -758,10 +794,12 @@ fn quote_logfmt_value(value: &str) -> String {
     if value.is_empty() {
         return String::new();
     }
-    if !value
-        .chars()
-        .any(|c| c.is_whitespace() || matches!(c, '=' | '"' | '\\'))
-    {
+    if !value.chars().any(|c| {
+        matches!(
+            c,
+            ' ' | '\t' | '\n' | '\r' | '\x0c' | '\x0b' | '\u{a0}' | '=' | '"' | '\\'
+        )
+    }) {
         return value.to_string();
     }
     let escaped = value

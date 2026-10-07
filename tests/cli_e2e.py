@@ -519,6 +519,18 @@ def assert_afdata_render_redacts() -> None:
     assert value["ok"] is True, f"afdata render changed non-secret value: {value!r}"
 
 
+def assert_afdata_render_routes_values_to_stderr() -> None:
+    for text, expected in (
+        ('{"answer":42,"api_key_secret":"sk-live"}\n', [{"answer": 42, "api_key_secret": "***"}]),
+        ('{"answer":42}\n{"answer":43}\n', [{"answer": 42}, {"answer": 43}]),
+    ):
+        proc = run_afdata(("render", "-", "--output-to", "stderr"), text)
+        assert proc.returncode == 0, f"afdata render failed: stderr={proc.stderr!r}, stdout={proc.stdout!r}"
+        assert not proc.stdout, f"render --output-to stderr leaked values to stdout: {proc.stdout!r}"
+        values = [json.loads(line) for line in proc.stderr.splitlines()]
+        assert values == expected, f"render changed routed values: {values!r}"
+
+
 def assert_afdata_parse_error() -> None:
     proc = run_afdata(("render", "-"), '{"ok":true}\nnot-json\n')
     assert proc.returncode != 0, "afdata render accepted invalid JSONL"
@@ -587,6 +599,7 @@ def main() -> None:
         assert_afdata_lint_suffix_type_regressions,
         assert_afdata_cli_capabilities,
         assert_afdata_render_redacts,
+        assert_afdata_render_routes_values_to_stderr,
         assert_afdata_parse_error,
         assert_afdata_skill_status_feature,
         assert_afdata_skill_error_includes_partial_report,

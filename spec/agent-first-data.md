@@ -270,13 +270,17 @@ field are scrubbed, while a free-form `error` or `message` field is never
 touched even if it contains a URL (use the explicit prose helper there).
 `Off` disables this along with all other redaction; `TraceOnly` scopes it to the
 `trace` subtree. A URL-context value with surrounding whitespace is trimmed
-before URL redaction. One that cannot be parsed as a clean scheme-prefixed URL
+before URL redaction. Whitespace here uses the same explicit Unicode
+`White_Space` set enumerated for URL spans above, for both trimming and
+internal-whitespace detection. One that cannot be parsed as a clean scheme-prefixed URL
 is replaced with `***` rather than silently passing through a likely malformed
-secret-bearing value when it carries either internal whitespace or an `@`
-credential sigil — for example a schemeless connection string
+secret-bearing value when it carries internal whitespace, an `@` credential
+sigil, or a `://` scheme separator — for example a schemeless connection string
 `user:pass@host:5432/db`, which has no scheme anchor for the surgical span
-logic. A schemeless, `@`-free, whitespace-free value (e.g. a relative URL
-`/cb?page=2`) still passes through unchanged. The `secret_names` list applies
+logic, or a URL behind a non-whitespace prefix such as a BOM, a zero-width
+space, or a label (`链接https://h/?token_secret=…`), whose secret the span logic
+cannot reach. A schemeless value free of `@`, `://`, and whitespace (e.g. a
+relative URL `/cb?page=2`) still passes through unchanged. The `secret_names` list applies
 to query-parameter names inside these values as well. (A field carrying both
 meanings, e.g. `token_url_secret`, ends in `_secret` and so its whole value is
 redacted to `***`.)

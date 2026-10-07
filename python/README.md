@@ -24,11 +24,11 @@ Useful names use Python casing: `render` (the single value x format x options ->
 ## Behavior Notes
 
 - Default redaction replaces every `_secret` or configured secret-name subtree with `***`, including objects and arrays.
-- `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed and internal whitespace redacts the whole field.
+- `_url` fields scrub userinfo passwords and secret-named query parameters; surrounding whitespace is trimmed, and internal whitespace or a `://` that is not the start of a clean URL redacts the whole field, where whitespace is the explicit Unicode `White_Space` set the spec enumerates, not the language's native predicate.
 - `OutputOptions.url_names` applies URL treatment to exact legacy field names
   and recurses through collections. `redact_urls_in_text` is explicit and scans
   only complete scheme URLs, never arbitrary prose secrets.
-- YAML keeps original keys and values (structure-preserving, like JSON), sorting keys by UTF-16 code unit order and quoting/escaping unsafe keys and string scalars. Plain strips formatting suffixes, formats values, sorts the same way, and renders nested objects/arrays as canonical JSON.
+- YAML keeps original keys and values (structure-preserving, like JSON), sorting keys by UTF-16 code unit order and quoting/escaping unsafe keys and string scalars. Plain strips formatting suffixes, formats values, sorts the same way, and renders nested objects/arrays as canonical JSON; it quotes a value only when it contains ASCII space, tab, newline, carriage return, form feed, vertical tab, NBSP, `=`, `"`, or `\`, and escapes `\`, `"`, newline, carriage return, tab, form feed, and vertical tab inside the quotes.
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - `build_cli_error(message, hint?)` returns a strict-ready CLI error with `error.retryable:false` and `trace:{}`.
 - Do not add a raw version/help pre-parser. Until the Python `CliSpec` compiler lands, applications should keep lifecycle parsing in their own parser rather than claim AFDATA closed-world help compatibility.
