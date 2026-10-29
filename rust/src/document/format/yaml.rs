@@ -41,9 +41,12 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
     })?;
     // Existing leaf: replace in place (preserves the scalar's style). Missing
     // leaf under an existing mapping: splice a sibling entry via `insert_entry`.
-    let exists = load(content).ok().is_some_and(|loaded| {
-        crate::document::get_path_ref(&loaded, path, Addressing::INDEX_ONLY).is_ok()
-    });
+    let mut expected = load(content)?;
+    let exists = crate::document::get_path_ref(&expected, path, Addressing::INDEX_ONLY).is_ok();
+    // Float and small unsigned inputs canonicalize to the reader's numeric
+    // variants. Compare that representation while retaining exact literals.
+    let canonical = load(&save(value)?)?;
+    crate::document::set_path(&mut expected, path, &canonical, Addressing::INDEX_ONLY)?;
     if exists && matches!(value, Value::Array(_) | Value::Object(_)) {
         replace_collection_in_place(&mut document, content, &yaml_path, value)?;
     } else if exists {
@@ -90,22 +93,23 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
             }
             _ => document.insert_entry(&parent_path, last, yaml_fragment(value, "set")?.trim_end()),
         };
-        if let Err(error) = result {
-            // `insert_entry` places a new entry relative to the last existing
-            // one, so it needs that entry to have a value node to measure. A
-            // mapping ending in a bare key (`attachments:`, which reads as null)
-            // has none, and the insert fails with nowhere to anchor. At the root
-            // there is still an unambiguous answer — the end of the document,
-            // which is where a person adding a key would put it.
-            if parent_path.is_empty() {
-                append_root_entry(&mut document, content, last, value)?;
+        if result.is_err() {
+            // The fragment tier requires a block anchor; typed insertion also
+            // handles empty and flow mappings, including the key's quoting.
+            // Exact numbers are inserted through a null site, then replaced
+            // verbatim so their spelling never passes through f64.
+            let retry = if let Value::Number(text) = value {
+                document
+                    .insert_entry_value(&parent_path, last, &YamlValue::Null)
+                    .and_then(|()| document.set(&yaml_path, text))
             } else {
-                return Err(DocumentError::UnsupportedOperation {
-                    format: "YAML".to_string(),
-                    operation: "set".to_string(),
-                    detail: error.to_string(),
-                });
-            }
+                document.insert_entry_value(&parent_path, last, &to_noyalib_value(value)?)
+            };
+            retry.map_err(|error| DocumentError::UnsupportedOperation {
+                format: "YAML".to_string(),
+                operation: "set".to_string(),
+                detail: error.to_string(),
+            })?;
         }
     }
     document
@@ -114,52 +118,15 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
             format: "YAML".to_string(),
             detail: error.to_string(),
         })?;
-    Ok(document.to_string())
-}
-
-/// Append a new top-level entry at the end of the document.
-///
-/// The fallback for a root mapping the CST cannot anchor an insertion to. The
-/// entry is written at column zero after the last byte, with the document's own
-/// newline style, and the result is validated like any other edit — so a source
-/// this does not suit fails rather than silently producing something else.
-fn append_root_entry(
-    document: &mut noyalib::cst::Document,
-    content: &str,
-    key: &str,
-    value: &Value,
-) -> DocumentResult<()> {
-    let newline = if content.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
-    let rendered = yaml_fragment(value, "set")?;
-    let rendered = rendered.trim_end_matches(['\r', '\n']);
-    let separator = if content.is_empty() || content.ends_with('\n') {
-        String::new()
-    } else {
-        newline.to_string()
-    };
-    let entry = if matches!(value, Value::Array(_) | Value::Object(_)) {
-        // A collection cannot share the key's line; indent it one unit under.
-        let pad = " ".repeat(document.indent_unit());
-        let body = rendered
-            .lines()
-            .map(|line| format!("{newline}{pad}{line}"))
-            .collect::<String>();
-        format!("{separator}{key}:{body}{newline}")
-    } else {
-        format!("{separator}{key}: {rendered}{newline}")
-    };
-    let end = content.len();
-    document
-        .replace_span(end, end, &entry)
-        .map_err(|error| DocumentError::UnsupportedOperation {
+    let output = document.to_string();
+    if load(&output)? != expected {
+        return Err(DocumentError::UnsupportedOperation {
             format: "YAML".to_string(),
             operation: "set".to_string(),
-            detail: error.to_string(),
-        })
+            detail: "YAML edit did not preserve the requested document value".to_string(),
+        });
+    }
+    Ok(output)
 }
 
 /// Splice a block-style collection over the span of an existing value.
@@ -839,6 +806,59 @@ fn value_contains_text(value: &Value, needle: &str) -> bool {
 mod tests {
     use super::{load, save, set_preserving};
     use crate::document::Value;
+
+    #[test]
+    fn new_fields_in_flow_mappings_preserve_their_exact_value_and_source() {
+        use crate::document::{Document, Format};
+        for (source, path) in [
+            ("{}\n", "field"),
+            ("{existing: before}\n", "field"),
+            ("outer: {}\n", "outer.field"),
+            ("# keep\r\n{}\r\n", "field"),
+        ] {
+            for value in [
+                Value::String("new".into()),
+                Value::Bool(true),
+                Value::Null,
+                Value::Integer(7),
+                Value::Unsigned(7),
+                Value::Float(2.0),
+                Value::Array(Vec::new()),
+                Value::Object(Default::default()),
+                Value::Number("123456789012345678901234567890".into()),
+                Value::Number("0.10000000000000000000001".into()),
+            ] {
+                let mut document = Document::parse(source, Format::Yaml).unwrap();
+                document
+                    .set(path, value.clone())
+                    .expect("insert into a flow mapping");
+                assert_eq!(document.value_at(path).unwrap(), value);
+                assert_eq!(
+                    load(document.source()).unwrap(),
+                    load(&save(document.value()).unwrap()).unwrap()
+                );
+                if source.starts_with("# keep") {
+                    assert!(document.source().starts_with("# keep\r\n"));
+                    assert!(document.source().ends_with("\r\n"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_key_cannot_fall_back_to_inserting_multiple_entries() {
+        use crate::document::{Document, Format};
+        let source = "attachments:\n";
+        let mut document = Document::parse(source, Format::Yaml).unwrap();
+        let original = document.value().clone();
+        assert!(
+            document
+                .set("one:\ntwo", Value::String("injected".into()))
+                .is_err()
+        );
+        assert_eq!(document.source(), source);
+        assert_eq!(document.value(), &original);
+    }
 
     #[test]
     fn preserves_large_integer_and_high_precision_float_literals() {

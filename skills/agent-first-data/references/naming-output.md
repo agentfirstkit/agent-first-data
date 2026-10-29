@@ -72,8 +72,19 @@ serialization failure, or guessed sensitivity.
 `_url` scrubs:
 
 - the password in URL userinfo; and
-- query parameters whose names end in `_secret` or match configured exact
-  secret names.
+- query and fragment parameters whose names end in `_secret` or match
+  configured exact secret names.
+
+Fragments are redacted under both readings: a secret value absorbs any `?` in
+it, and parameters after the first surviving `?` (a hash route) are checked
+too.
+Parameter values containing URLs are checked recursively. An encoded nested
+URL with secrets is replaced whole. Inspection follows at most 16 URLs in a
+chain, counting the outer URL, and redacts any deeper URL value to `***`.
+
+Malformed percent escapes do not disable inspection: valid escapes alongside
+them still decode for matching. Unchanged URL bytes retain their original
+encoding.
 
 It does not automatically scrub generic `access_token`, `api_key`, `code`, or
 `sig` parameters. Rename parameters you control or configure their exact names.

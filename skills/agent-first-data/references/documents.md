@@ -327,16 +327,18 @@ and the difference is what to fix:
   `\`, a bare `*`, an index beyond the platform's range). The file is fine; fix
   the path.
 - `document_source_refused` — the file parses, and afdata declines to answer
-  about it anyway because it cannot do so honestly. Markdown containing a bare
-  `\r` is the one case: CommonMark ends a line there and `sed`/`awk`/`git` do
-  not, so no single `source_start_line` would be right for both. The message
-  names the way out; convert the file to LF or CRLF.
+  about it anyway. Markdown containing a bare `\r` is one case: CommonMark
+  ends a line there and `sed`/`awk`/`git` do not, so no single
+  `source_start_line` would be right for both; convert the file to LF or CRLF.
+  Markdown blocks nested more than 128 levels deep is the other.
 
 `document_unsupported_operation` means the format cannot express the edit —
-a read-only backend, an escaped or keyed-list route through YAML, or a YAML
+a read-only backend, an escaped or keyed-list route through YAML, a YAML
 path that resolves through an alias (editing it would rewrite the anchor, a
-different key than the one named). A TOML array of tables is refused because
-the editor has no explicit element-identity policy. It is not retryable as-is;
+different key than the one named), or an INI name or value that would not read
+back unchanged (INI has no quoting for a newline, edge whitespace, or a
+delimiter in a name). A TOML array of tables is refused because the editor has
+no explicit element-identity policy. It is not retryable as-is;
 change the verb, the path, or the format.
 
 `document_target_exists` is the expected no-clobber result from

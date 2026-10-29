@@ -6,7 +6,7 @@
 
 use crate::{BuildError, ErrorBuilder, Event, json_error};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 
 /// Stable fields that are safe to return to a caller.
@@ -130,16 +130,18 @@ impl ErrorCatalog {
 
     /// Validate and insert one declaration.
     pub fn insert(&mut self, spec: ErrorSpec) -> Result<(), ErrorCatalogError> {
-        let code = spec.code.clone();
-        if self.specs.contains_key(&code) {
-            return Err(ErrorCatalogError::DuplicateCode(code));
-        }
+        let slot = match self.specs.entry(spec.code.clone()) {
+            Entry::Occupied(slot) => {
+                return Err(ErrorCatalogError::DuplicateCode(slot.key().clone()));
+            }
+            Entry::Vacant(slot) => slot,
+        };
         spec.event()
             .map_err(|source| ErrorCatalogError::InvalidSpec {
-                code: code.clone(),
+                code: slot.key().clone(),
                 source,
             })?;
-        self.specs.insert(code, spec);
+        slot.insert(spec);
         Ok(())
     }
 

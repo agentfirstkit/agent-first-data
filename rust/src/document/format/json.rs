@@ -13,7 +13,7 @@ pub struct JsonDocument<'a> {
 
 impl<'a> JsonDocument<'a> {
     pub fn parse(source: &'a str) -> DocumentResult<Self> {
-        let mut parser = Parser::new(source);
+        let mut parser = Parser::new(source)?;
         let root = parser.parse_value(0)?;
         if parser.skip_ws(root.end) != source.len() {
             return Err(DocumentError::ParseError {
@@ -262,7 +262,7 @@ pub fn append_array_item_preserving(
     item: &Value,
 ) -> DocumentResult<String> {
     let segments = array_path_segments(path)?;
-    let mut parser = Parser::new(content);
+    let mut parser = Parser::new(content)?;
     let root = parser.parse_value(0)?;
     let target = resolve(&root, &segments, 0).ok_or_else(|| DocumentError::PathNotFound {
         path: path.to_string(),
@@ -317,7 +317,7 @@ pub fn remove_array_item_preserving(
     index: usize,
 ) -> DocumentResult<String> {
     let segments = array_path_segments(path)?;
-    let mut parser = Parser::new(content);
+    let mut parser = Parser::new(content)?;
     let root = parser.parse_value(0)?;
     let target = resolve(&root, &segments, 0).ok_or_else(|| DocumentError::PathNotFound {
         path: path.to_string(),
@@ -450,10 +450,19 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(source: &'a str) -> Self {
-        Self {
+    fn new(source: &'a str) -> DocumentResult<Self> {
+        // Validate the complete grammar and recursion budget before scanning
+        // spans. Otherwise an edit could repair malformed input silently, or
+        // unbounded nesting could exhaust the stack before semantic loading.
+        serde_json::from_str::<serde_json::Value>(source).map_err(|error| {
+            DocumentError::ParseError {
+                format: "JSON".to_string(),
+                detail: error.to_string(),
+            }
+        })?;
+        Ok(Self {
             source: source.as_bytes(),
-        }
+        })
     }
 
     fn parse_value(&mut self, mut position: usize) -> DocumentResult<Node> {
@@ -634,6 +643,29 @@ mod tests {
         let source = r#"{"same":1,"same":2}"#;
         assert!(load(source).is_err());
         assert!(JsonDocument::parse(source).is_err());
+    }
+
+    #[test]
+    fn source_parser_rejects_invalid_strings_and_trailing_commas_before_editing() {
+        for source in [r#"{"key":"\q"}"#, "[1,]", r#"{"key":1,}"#] {
+            assert!(JsonDocument::parse(source).is_err(), "{source}");
+        }
+        assert!(
+            super::set_preserving(
+                r#"{"key":"\q"}"#,
+                "key",
+                &Value::String("replacement".into()),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn source_parser_bounds_nesting_before_scanning_spans() {
+        for depth in [256, 10_000] {
+            let source = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+            assert!(JsonDocument::parse(&source).is_err());
+        }
     }
 
     #[test]

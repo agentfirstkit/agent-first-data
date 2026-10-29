@@ -152,8 +152,14 @@ fn as_uint(value: &Value) -> Option<u64> {
     if let Some(u) = value.as_u64() {
         return Some(u);
     }
+    if let Value::Number(number) = value
+        && number_is_integer_literal(number)
+    {
+        return None;
+    }
     let f = value.as_f64()?;
-    if f.is_finite() && f.fract() == 0.0 && (0.0..=u64::MAX as f64).contains(&f) {
+    // u64::MAX rounds to 2^64 in f64, which is already outside the range.
+    if f.is_finite() && f.fract() == 0.0 && (0.0..u64::MAX as f64).contains(&f) {
         return Some(f as u64);
     }
     None

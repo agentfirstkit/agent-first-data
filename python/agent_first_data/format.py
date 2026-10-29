@@ -1117,7 +1117,7 @@ def _redact_url_value(value: Any, context: _RedactionContext, depth: int) -> Any
 # ═══════════════════════════════════════════
 
 
-def _redact_url_in_str(s: str, context: _RedactionContext) -> str | None:
+def _redact_url_in_str(s: str, context: _RedactionContext, depth: int = 0) -> str | None:
     """Redact secret components of a single URL string.
 
     Returns the redacted string when ``s`` is a processable URL, or None when it
@@ -1127,6 +1127,9 @@ def _redact_url_in_str(s: str, context: _RedactionContext) -> str | None:
     # Fast path + precondition: a single, whitespace-free, scheme-prefixed URL.
     if "://" not in s or not _is_single_url(s):
         return None
+    # Bound recursive redirect inspection, failing closed before stack growth.
+    if depth >= 16:
+        return REDACTED_MARKER
     scheme_sep = s.find("://")
     scheme = s[:scheme_sep]
     rest = s[scheme_sep + 3 :]
@@ -1137,8 +1140,28 @@ def _redact_url_in_str(s: str, context: _RedactionContext) -> str | None:
         if c in "/?#":
             auth_end = i
             break
+    # An unencoded '?' or '#' inside a password ends that authority early and
+    # leaves the rest of the password in the query or fragment. When a ':'
+    # precedes that early end and an '@' follows it before the first '/', the
+    # userinfo runs to that '@' — how libpq reads such a connection string.
+    first_slash = rest.find("/")
+    if first_slash == -1:
+        first_slash = len(rest)
+    at = rest.rfind("@", 0, first_slash)
+    if ":" in rest[:auth_end] and at > auth_end:
+        auth_end = len(rest)
+        for i in range(at, len(rest)):
+            if rest[i] in "/?#":
+                auth_end = i
+                break
     authority = rest[:auth_end]
     remainder = rest[auth_end:]
+
+    # An unencoded '/' inside a password ends the authority at a "port" that
+    # is not a number, with the '@' somewhere after it. Where the password
+    # ends cannot be known, so the whole value is replaced.
+    if "@" not in authority and _has_non_numeric_port(authority) and "@" in remainder:
+        return REDACTED_MARKER
 
     new_authority = _redact_userinfo_password(authority)
 
@@ -1147,7 +1170,7 @@ def _redact_url_in_str(s: str, context: _RedactionContext) -> str | None:
     before_fragment, hash_sep, fragment = remainder.partition("#")
     path, question_sep, query = before_fragment.partition("?")
     if question_sep:
-        new_before_fragment = f"{path}?{_redact_query(query, context)}"
+        new_before_fragment = f"{path}?{_redact_query(query, context, depth)}"
     else:
         new_before_fragment = before_fragment
     # A fragment gets the same treatment as the query: `k=v&k=v` after the '#'
@@ -1155,7 +1178,19 @@ def _redact_url_in_str(s: str, context: _RedactionContext) -> str | None:
     # secret-named fragment parameter must not survive where the identically
     # named query parameter would not. A fragment that is not in that shape has
     # no '=' in its segments and passes through byte-for-byte.
-    new_fragment = f"#{_redact_query(fragment, context)}" if hash_sep else ""
+    # A hash route (`#/cb?k=v`) carries its parameters after its first '?',
+    # while a form reader keeps that '?' inside a value; redact both readings:
+    # the fragment as parameters first, so a secret value absorbs its '?',
+    # then whatever follows the first '?' that survives.
+    if not hash_sep:
+        new_fragment = ""
+    else:
+        params = _redact_query(fragment, context, depth)
+        route, route_sep, route_query = params.partition("?")
+        if route_sep:
+            new_fragment = f"#{route}?{_redact_query(route_query, context, depth)}"
+        else:
+            new_fragment = f"#{params}"
 
     return f"{scheme}://{new_authority}{new_before_fragment}{new_fragment}"
 
@@ -1306,7 +1341,7 @@ def _redact_userinfo_password(authority: str) -> str:
     return f"{authority[:colon]}:{REDACTED_MARKER}{authority[at:]}"
 
 
-def _redact_query(query: str, context: _RedactionContext) -> str:
+def _redact_query(query: str, context: _RedactionContext, depth: int) -> str:
     """Redact the values of secret-named query parameters.
 
     Preserves the raw bytes of every other segment (keys, benign values,
@@ -1324,9 +1359,31 @@ def _redact_query(query: str, context: _RedactionContext) -> str:
         name = unquote_plus(raw_key)
         if context.is_secret_key(name):
             segments.append(f"{raw_key}={REDACTED_MARKER}")
+            continue
+        # A redirect target carries its own parameters: redact a nested URL in
+        # place, or the whole value when it arrived encoded.
+        raw_value = segment[eq + 1 :]
+        value = unquote_plus(raw_value)
+        redacted = _redact_url_in_str(value, context, depth + 1)
+        if redacted is not None and redacted != value:
+            if value == raw_value:
+                segments.append(f"{raw_key}={redacted}")
+            else:
+                segments.append(f"{raw_key}={REDACTED_MARKER}")
         else:
             segments.append(segment)
     return "&".join(segments)
+
+
+def _has_non_numeric_port(authority: str) -> bool:
+    """True when the authority's text after its last ':' is not a port number.
+
+    A bracketed IPv6 literal without a port ends in ']' and has none.
+    """
+    colon = authority.rfind(":")
+    if colon == -1 or authority.endswith("]"):
+        return False
+    return not all("0" <= c <= "9" for c in authority[colon + 1 :])
 
 
 def _is_single_url(s: str) -> bool:
@@ -1425,20 +1482,23 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
-def _as_non_neg_int(value: Any) -> int | None:
-    n = _as_int(value)
-    if n is not None and n >= 0:
+def _raw_as_int(value: Any) -> int | None:
+    if isinstance(value, _RawNumber):
+        if re.fullmatch(r"-?\d+", value.literal):
+            return int(value.literal)
+        return _as_int(float(value.literal))
+    return _as_int(value)
+
+
+def _as_u64(value: Any) -> int | None:
+    n = _raw_as_int(value)
+    if n is not None and 0 <= n <= 18_446_744_073_709_551_615:
         return n
     return None
 
 
 def _as_i64(value: Any) -> int | None:
-    if isinstance(value, _RawNumber):
-        if not re.fullmatch(r"-?\d+", value.literal):
-            return None
-        n = int(value.literal)
-    else:
-        n = _as_int(value)
+    n = _raw_as_int(value)
     if n is not None and -9_223_372_036_854_775_808 <= n <= 9_223_372_036_854_775_807:
         return n
     return None
@@ -1577,7 +1637,7 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
         return None
     stripped = _strip_suffix_ci(key, "_bytes")
     if stripped is not None:
-        n = _as_non_neg_int(numeric)
+        n = _as_u64(value)
         if n is not None:
             return stripped, _format_bytes_human(n)
         return None

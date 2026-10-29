@@ -256,9 +256,19 @@ the end of the previous one.
 Each surviving span is handed to the single-URL redactor and every byte outside
 the spans is copied through unchanged.
 
-**Surgical replacement.** Only the secret spans (a secret parameter's value bytes after `=` up to the next `&`/`#`/end; the password bytes after the first `:` in userinfo up to the authority's last `@`) are replaced with the literal `***`. Every other byte — scheme, host, path, benign parameters, percent-encoding, ordering — is preserved exactly. Implementations locate the scheme, authority, query, and fragment spans structurally and form-decode parameter names only; they deliberately do not require a URL library to accept the whole input, because malformed-but-credential-bearing URLs must still be scrubbed and cross-language parsers disagree about them. Output equals input outside the redacted spans.
+**Surgical replacement.** Only the secret spans (a secret parameter's value bytes after `=` up to the next `&`/`#`/end; the password bytes after the first `:` in userinfo up to the authority's last `@`) are replaced with the literal `***`. Every other byte — scheme, host, path, benign parameters, percent-encoding, ordering — is preserved exactly. Implementations locate the scheme, authority, query, and fragment spans structurally and form-decode parameter names and nested URL candidates for inspection only; they deliberately do not require a URL library to accept the whole input, because malformed-but-credential-bearing URLs must still be scrubbed and cross-language parsers disagree about them. Form decoding replaces `+` with space, decodes valid `%HH` escapes even alongside malformed escapes, preserves malformed escapes literally, and replaces invalid UTF-8 subsequences with U+FFFD. Output equals input outside the redacted spans.
 
 **The fragment is parameters too, when it holds them.** A fragment written as `k=v(&k=v)*` is subject to the same secret-parameter rule as the query — the OAuth implicit flow returns tokens there, so a fragment is a routine place for a credential to be, and treating it as opaque text means `?token_secret=` is redacted while `#token_secret=` is not. A fragment whose segments contain no `=` carries no parameters and is preserved byte for byte (`#section`, `#`, `#a/b?c`). `secret_names` applies inside the fragment as well.
+
+**A hash route carries its parameters after a `?`.** A hash router reads `#/cb?token=x` as a route followed by parameters at the first `?`, while a form reader keeps that `?` inside a parameter value. Both readings are redacted: the whole fragment first gets the secret-parameter rule, so a secret value absorbs any `?` in it (`#token_secret=a?b` → `#token_secret=***`); then the text after the first `?` that survives gets the rule again (`#a=b?token_secret=x` → `#a=b?token_secret=***`).
+
+**A nested URL in a parameter value is redacted too.** A redirect target (`?next=https://b/cb?token_secret=x`) carries its own parameters. When a parameter value, form-decoded, is itself a single URL whose redaction changes it, the redacted URL replaces the value in place if the value was not encoded, and `***` replaces the whole value if it was, since its encoded bytes cannot be edited surgically. Inspection follows at most 16 URLs in a chain, counting the outer URL; any deeper URL value becomes `***` without further inspection so untrusted redirect chains cannot exhaust the call stack.
+
+**A password containing an unencoded delimiter.** Hand-written connection strings put `?`, `#` or `/` inside a password, which ends the authority early and leaves the rest of the password in the query, fragment or path. Two rules keep it from leaking:
+- When a `:` precedes the first `?`/`#` and an `@` follows it before the first `/`, the userinfo runs to that `@` (how libpq reads the string): `postgres://u:p#x@h/db` → `postgres://u:***@h/db`.
+- When the authority has no `@` and its text after the last `:` is not a port number (and it is not a bracketed IPv6 literal), while an `@` appears later in the URL, where the password ends cannot be known and the whole value becomes `***`: `https://u:p/x@h/` → `***`.
+
+An `@` in a path or query after a real host (`https://h:8443/users/@me`, `?email=a@b.com`) matches neither rule and is preserved. `;` is not a parameter separator: WHATWG URL parsing and mainstream servers treat `a=1;b=2` as one parameter, so its value is matched under the name before the first `=` only.
 
 **Automatic application via `_url` or `url_names`.** Redaction applies URL
 treatment to any field whose name ends in `_url`/`_URL`, and to an exact legacy
@@ -712,7 +722,7 @@ Strict string suffixes (`_bcp47`, `_utc_offset`, `_rfc3339_date`, `_rfc3339_time
 - `_minutes`, `_hours`, `_days` → append unit (`30 minutes`, `24 hours`)
 - `_epoch_ms` / `_epoch_s` / decimal-string `_epoch_ns` → RFC 3339 (`2024-02-14T00:00:00.000Z`), negative values produce pre-1970 dates
 - `_rfc3339` → pass through
-- `_bytes` → human-readable (`456789` → `446.1KiB`); negative and fractional byte values fall through as raw values
+- `_bytes` → human-readable (`456789` → `446.1KiB`); negative, fractional, and beyond-u64 byte values fall through as raw values
 - `_percent` → append `%` (`85` → `85%`, `99.9` → `99.9%`)
 - `_msats` → append unit (`2056msats`)
 - `_sats` → append unit (`1234sats`)

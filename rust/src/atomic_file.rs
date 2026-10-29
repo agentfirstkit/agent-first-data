@@ -188,14 +188,7 @@ fn temp_file_name(file_name: &str, pid: u32, attempt: u32) -> String {
     let suffix = format!(".afdata.{pid}.{attempt}.tmp");
     // One byte for the leading dot that hides the temporary file.
     let budget = MAX_NAME_BYTES.saturating_sub(suffix.len() + 1);
-    let mut stem = file_name;
-    if stem.len() > budget {
-        let mut cut = budget;
-        while cut > 0 && !stem.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        stem = &stem[..cut];
-    }
+    let stem = &file_name[..file_name.floor_char_boundary(budget)];
     format!(".{stem}{suffix}")
 }
 

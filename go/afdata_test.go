@@ -511,7 +511,7 @@ func TestHelperFixtures(t *testing.T) {
 		case "format_bytes_human":
 			for _, c := range cases {
 				pair := c.([]any)
-				input := int64(pair[0].(float64))
+				input := uint64(pair[0].(float64))
 				expected := pair[1].(string)
 				t.Run(fmt.Sprintf("bytes_%d", input), func(t *testing.T) {
 					got := formatBytesHuman(input)
@@ -1315,8 +1315,14 @@ func deepEqualIgnoringTrace(a, b any) bool {
 // number presented as a real one. Out of range must fall through to the raw
 // value, the way Rust does, rather than invent a plausible amount.
 func TestOutOfRangeFloatsFallThroughInsteadOfSaturating(t *testing.T) {
-	for _, key := range []string{"amount_jpy", "size_bytes", "price_usd_cents"} {
-		for _, value := range []float64{1e21, -1e21, 9223372036854775808.0, -9223372036854777856.0} {
+	ranges := map[string][]float64{
+		"amount_jpy":      {1e21, -1e21, 9223372036854775808.0, -9223372036854777856.0},
+		"price_usd_cents": {1e21, -1e21, 9223372036854775808.0, -9223372036854777856.0},
+		// Bytes cover the unsigned 64-bit range, which ends at 2^64.
+		"size_bytes": {1e21, -1, 18446744073709551616.0},
+	}
+	for key, values := range ranges {
+		for _, value := range values {
 			got := Render(map[string]any{key: value}, OutputFormatPlain, OutputOptions{})
 			if !strings.HasPrefix(got, key+"=") {
 				t.Errorf("%s=%v: formatted an out-of-range value as %q; expected the raw fallback", key, value, got)

@@ -179,7 +179,9 @@ run_unit() {
 
   echo ""
   echo "[2/4] Go"
-  (cd "$ROOTPATH/go" && go test -v ./...)
+  # Shared fixtures live outside the Go module, so Go's test cache does not
+  # reliably invalidate when only those inputs change.
+  (cd "$ROOTPATH/go" && go test -count=1 -v ./...)
 
   echo ""
   echo "[3/4] Python"

@@ -20,8 +20,17 @@
 //! This module never redacts values — it reads and writes raw values as-is;
 //! redaction is the caller's responsibility.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::Read as _;
+mod read;
+mod write;
+
+use write::{guard_mutation, write_atomic, write_atomic_create};
+
+#[cfg(test)]
+use read::{inspect_capped_source, read_capped_contents};
+use read::{open_read_handle, read_capped_source};
+use std::fs;
+#[cfg(test)]
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use crate::document::{Addressing, DocumentError, DocumentResult, Format, KeyedList, Value};
@@ -35,7 +44,7 @@ use crate::document::{Addressing, DocumentError, DocumentResult, Format, KeyedLi
 /// check-before-open sequence provides the same guarantee.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SymlinkPolicy {
-    /// Follow a symbolic link in the same way as [`File::open`].
+    /// Follow a symbolic link in the same way as [`std::fs::File::open`].
     #[default]
     Follow,
     /// Refuse a symbolic-link final path component atomically.
@@ -896,89 +905,6 @@ fn resolve_format(path: &Path, format_override: Option<Format>) -> DocumentResul
     }
 }
 
-fn open_read_handle(path: &Path, symlink_policy: SymlinkPolicy) -> DocumentResult<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(all(unix, feature = "libc"))]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        // Opening a FIFO for reading can otherwise block before handle
-        // metadata gets the chance to reject it as non-regular. O_NONBLOCK has
-        // no effect on ordinary regular-file reads.
-        let mut flags = libc::O_NONBLOCK;
-        if symlink_policy == SymlinkPolicy::NoFollow {
-            flags |= libc::O_NOFOLLOW;
-        }
-        options.custom_flags(flags);
-    }
-    #[cfg(all(unix, not(feature = "libc")))]
-    if symlink_policy == SymlinkPolicy::NoFollow {
-        return Err(DocumentError::UnsupportedOperation {
-            format: "filesystem".to_string(),
-            operation: "open".to_string(),
-            detail: "atomic no-follow reads require Cargo feature `libc` on unix".to_string(),
-        });
-    }
-    #[cfg(not(unix))]
-    if symlink_policy == SymlinkPolicy::NoFollow {
-        return Err(DocumentError::UnsupportedOperation {
-            format: "filesystem".to_string(),
-            operation: "open".to_string(),
-            detail: "atomic no-follow reads are unavailable on this platform".to_string(),
-        });
-    }
-    options.open(path).map_err(|error| DocumentError::IoError {
-        detail: format!("read `{}`: {error}", path.display()),
-    })
-}
-
-fn read_capped_source(file: File, path: &Path, max_bytes: u64) -> DocumentResult<String> {
-    inspect_capped_source(&file, path, max_bytes)?;
-    read_capped_contents(file, path, max_bytes)
-}
-
-fn inspect_capped_source(file: &File, path: &Path, max_bytes: u64) -> DocumentResult<()> {
-    let metadata = file.metadata().map_err(|error| DocumentError::IoError {
-        detail: format!("inspect `{}`: {error}", path.display()),
-    })?;
-    if !metadata.is_file() {
-        return Err(DocumentError::IoError {
-            detail: format!("`{}` is not a regular file", path.display()),
-        });
-    }
-    if metadata.len() > max_bytes {
-        return Err(DocumentError::TooLarge {
-            path: path.display().to_string(),
-            max_bytes,
-        });
-    }
-    Ok(())
-}
-
-fn read_capped_contents(file: File, path: &Path, max_bytes: u64) -> DocumentResult<String> {
-    let read_limit = max_bytes.saturating_add(1);
-    let initial_capacity = usize::try_from(max_bytes.min(1024 * 1024)).unwrap_or(1024 * 1024);
-    let mut bytes = Vec::with_capacity(initial_capacity);
-    file.take(read_limit)
-        .read_to_end(&mut bytes)
-        .map_err(|error| DocumentError::IoError {
-            detail: format!("read `{}`: {error}", path.display()),
-        })?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
-        return Err(DocumentError::TooLarge {
-            path: path.display().to_string(),
-            max_bytes,
-        });
-    }
-    String::from_utf8(bytes).map_err(|error| DocumentError::IoError {
-        detail: format!(
-            "read `{}`: document is not UTF-8 (valid through byte {})",
-            path.display(),
-            error.utf8_error().valid_up_to()
-        ),
-    })
-}
-
 fn validate_source_for_write(document: &Document) -> DocumentResult<()> {
     validate_source_text_for_write(document.source(), document.format())
 }
@@ -1000,103 +926,6 @@ fn validate_create_options(options: CreateOptions) -> DocumentResult<()> {
         });
     }
     Ok(())
-}
-
-/// Reject mutation of a symlink or (on unix) a hardlinked file. Returns the
-/// target's metadata on success so callers that also need to write can reuse
-/// it (e.g. to preserve permissions) without a second syscall.
-fn guard_mutation(path: &Path, operation: &str) -> DocumentResult<fs::Metadata> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| DocumentError::IoError {
-        detail: format!("{operation} preflight `{}`: {error}", path.display()),
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(DocumentError::UnsupportedOperation {
-            format: "filesystem".to_string(),
-            operation: operation.to_string(),
-            detail: format!("refusing to mutate symlink `{}`", path.display()),
-        });
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() > 1 {
-            return Err(DocumentError::UnsupportedOperation {
-                format: "filesystem".to_string(),
-                operation: operation.to_string(),
-                detail: format!("refusing to mutate hardlinked file `{}`", path.display()),
-            });
-        }
-    }
-    Ok(metadata)
-}
-
-/// Turn a failed atomic installation into this module's error type. The step
-/// names the failure; `operation` names what the caller was doing when it
-/// happened, so a `save` and a `create` read differently for the same fault.
-fn document_io_error(operation: &str, error: crate::atomic_file::AtomicError) -> DocumentError {
-    DocumentError::IoError {
-        detail: format!("{operation} {error}"),
-    }
-}
-
-/// Write `bytes` to `path` atomically: guard, same-directory temp file,
-/// fsync, permission preservation, then rename over the target.
-fn write_atomic(path: &Path, bytes: &[u8], operation: &str) -> DocumentResult<()> {
-    let metadata = guard_mutation(path, operation)?;
-    crate::atomic_file::install(
-        path,
-        crate::atomic_file::AtomicInstall::replacing(bytes)
-            .with_permissions(Some(metadata.permissions())),
-    )
-    .map_err(|error| document_io_error(operation, error))
-}
-
-fn write_atomic_create(path: &Path, bytes: &[u8], options: CreateOptions) -> DocumentResult<()> {
-    let operation = "create";
-    let mut existing_permissions = None;
-    match fs::symlink_metadata(path) {
-        Ok(_) => match options.mode {
-            CreateMode::NewOnly => {
-                return Err(DocumentError::AlreadyExists {
-                    path: path.display().to_string(),
-                });
-            }
-            CreateMode::Replace => {
-                let metadata = guard_mutation(path, operation)?;
-                existing_permissions = Some(metadata.permissions());
-            }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(DocumentError::IoError {
-                detail: format!("create preflight `{}`: {error}", path.display()),
-            });
-        }
-    }
-
-    // A replace with no explicit mode keeps the target's own permissions,
-    // exactly as `save()` does; only a first creation falls back to 0o600.
-    let unix_mode = options.effective_unix_mode(existing_permissions.is_some());
-    let preserved = unix_mode
-        .is_none()
-        .then(|| existing_permissions.clone())
-        .flatten();
-    let mut request = crate::atomic_file::AtomicInstall::replacing(bytes)
-        .with_permissions(preserved)
-        .with_unix_mode(unix_mode);
-    if options.mode == CreateMode::NewOnly {
-        request = request.new_only();
-    }
-    crate::atomic_file::install(path, request).map_err(|error| {
-        // `NewOnly` installs with a link, so losing the race for a name that
-        // was absent at preflight is the same answer as finding it there.
-        if error.target_exists() {
-            return DocumentError::AlreadyExists {
-                path: path.display().to_string(),
-            };
-        }
-        document_io_error(operation, error)
-    })
 }
 
 #[cfg(test)]

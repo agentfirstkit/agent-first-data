@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.35.0",
+  "version": "0.35.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,14 +13,13 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Fail closed on a _url value that is not a clean URL but contains ://, so a secret behind a BOM, zero-width space, control character, or label no longer leaks",
-    "Keep CRLF line endings on dotenv and TOML edits; dotenv no longer doubles a key's first character on CRLF files",
-    "Write a TOML string containing a newline as a single-line escaped string, so the stored value is the one set",
-    "Cap CLI document file reads at 16 MiB by default, adjustable with --max-file-bytes on every document command and lint",
-    "Use one explicit grammar for YAML numeric-key quoting, Plain quoting, and _url whitespace across Rust, Go, Python, and TypeScript",
-    "Send render output where --output-to says",
-    "Exit 0 when the stdout reader closes early, in the Rust CLI and the Python and TypeScript emitters",
-    "Upgrade noyalib to 0.0.53"
+    "Redact secrets in nested redirect URLs, hash-route fragments, and passwords containing an unencoded ?, # or /, in all four SDKs",
+    "Refuse INI writes that would not read back unchanged",
+    "Refuse Markdown nested more than 128 levels instead of overflowing the stack",
+    "Check JSON syntax and depth before editing, and insert YAML flow fields without an unsafe source fallback",
+    "Keep dotenv edits intact",
+    "Print _bytes beyond u64 as raw values, and accept integral floats for integer suffixes in Go",
+    "Fail a prompt the terminal closes before answering, and keep the answer's whitespace"
   ],
   "bonds": [],
   "tree": {

@@ -15,9 +15,15 @@
   },
   {
     "name": "negative_zero",
-    "description": "-0.0 must keep its sign, not normalize to 0 or 0.0, when parsed and re-emitted as JSON. (Deliberately the float spelling, not the bare-integer \"-0\": that narrower form is a documented Rust/serde_json limitation, see rust/src/tests.rs's negative_zero_bare_integer_is_a_known_serde_json_limitation.) No expected_yaml: Rust's YAML/plain renderer canonicalizes an integral-valued decoded float's trailing zero the same way it does for a hand-built one (\"-0.0\" -> \"-0\", value-preserving, spelling-lossy) since serde_json::Number carries no decoded-vs-hand-built distinction; see rust/src/tests.rs's number_fidelity_fixtures comment. JSON is unaffected and asserted exactly.",
+    "description": "-0.0 must keep its sign, not normalize to 0 or 0.0, when parsed and re-emitted as JSON. No expected_yaml: Rust's YAML/plain renderer canonicalizes an integral-valued decoded float's trailing zero the same way it does for a hand-built one (\"-0.0\" -> \"-0\", value-preserving, spelling-lossy) since serde_json::Number carries no decoded-vs-hand-built distinction; see rust/src/tests.rs's number_fidelity_fixtures comment. JSON is unaffected and asserted exactly.",
     "input_line": "{\"kind\":\"result\",\"result\":-0.0,\"trace\":{}}",
     "expected_json": "-0.0"
+  },
+  {
+    "name": "negative_zero_integer",
+    "description": "The bare integer spelling -0 must keep its sign too. Rust's serde_json fast-pathed bare integers through a native parse that dropped the sign until 1.0.154; a decoded -0 now retains its literal in every language.",
+    "input_line": "{\"kind\":\"result\",\"result\":-0,\"trace\":{}}",
+    "expected_json": "-0"
   },
   {
     "name": "u64_max_regression",
@@ -54,5 +60,12 @@
     "expected_json": "{\"fee_jpy\":9223372036854775808,\"price_usd_cents\":9223372036854775808}",
     "expected_yaml": "---\nfee_jpy: 9223372036854775808\nprice_usd_cents: 9223372036854775808",
     "expected_plain": "fee_jpy=9223372036854775808 price_usd_cents=9223372036854775808"
+  },
+  {
+    "name": "bytes_bounded_by_u64",
+    "description": "Byte formatting accepts the full unsigned 64-bit range in every SDK, and a decoded integral float counts as an integer for byte and money suffixes alike. A larger integer literal keeps its original key and exact digits.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"above_bytes\":18446744073709551616,\"fee_jpy\":3.0,\"float_bytes\":3.0,\"i64_bytes\":9223372036854775808,\"max_bytes\":18446744073709551615},\"trace\":{}}",
+    "expected_json": "{\"above_bytes\":18446744073709551616,\"fee_jpy\":3.0,\"float_bytes\":3.0,\"i64_bytes\":9223372036854775808,\"max_bytes\":18446744073709551615}",
+    "expected_plain": "above_bytes=18446744073709551616 fee=¥3 float=3B i64=8388608.0TiB max=16777216.0TiB"
   }
 ]

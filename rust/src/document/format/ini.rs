@@ -49,7 +49,7 @@ impl<'a> IniDocument<'a> {
                 continue;
             }
             if trimmed.starts_with('[') {
-                let Some(name) = trimmed.strip_prefix('[').and_then(|v| v.strip_suffix(']')) else {
+                let Some(name) = trimmed.strip_circumfix('[', ']') else {
                     return parse_error(line_number, 1, "invalid section header");
                 };
                 let name = name.trim();
@@ -127,7 +127,7 @@ impl<'a> IniDocument<'a> {
             if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
                 continue;
             }
-            if let Some(name) = trimmed.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+            if let Some(name) = trimmed.strip_circumfix('[', ']') {
                 let name = name.trim().to_string();
                 root.insert(name.clone(), Value::Object(BTreeMap::new()));
                 current = Some(name);
@@ -210,15 +210,38 @@ pub fn save(value: &Value) -> DocumentResult<String> {
             output.push('\n');
         }
     }
+    validate_round_trip(&output, value, "save")?;
     Ok(output)
 }
 
 /// Replace an existing INI scalar without reordering sections or entries.
 pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
-    let Value::String(value) = value else {
+    let Value::String(text) = value else {
         return Err(unsupported("set", "INI values are strings"));
     };
-    edit_entry(content, path, Some(value))
+    let mut expected = load(content)?;
+    crate::document::set_path(
+        &mut expected,
+        path,
+        value,
+        crate::document::Addressing::INDEX_ONLY,
+    )?;
+    let output = edit_entry(content, path, Some(text))?;
+    validate_round_trip(&output, &expected, "set")?;
+    Ok(output)
+}
+
+/// INI has no quoting or escaping for structural delimiters or edge spaces.
+/// Refuse values the writer cannot express instead of silently changing their
+/// meaning, dropping a key, or introducing an additional entry.
+fn validate_round_trip(output: &str, expected: &Value, operation: &str) -> DocumentResult<()> {
+    if load(output).is_ok_and(|parsed| &parsed == expected) {
+        return Ok(());
+    }
+    Err(unsupported(
+        operation,
+        "INI names and values must round-trip without changing structure or whitespace",
+    ))
 }
 
 /// Remove an existing INI entry without rewriting the document.
@@ -415,5 +438,60 @@ fn with_path(error: DocumentError, path: &str) -> DocumentError {
             detail: format!("path `{path}`: {detail}"),
         },
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::{Document, Format};
+
+    #[test]
+    fn unrepresentable_edits_leave_the_document_unchanged() {
+        let source = "; keep\r\n[section]\r\nkey = old\r\n";
+        for (path, value) in [
+            ("section.key", "new\nextra=injected"),
+            ("section.key", " padded "),
+            ("section.new=key", "value"),
+            ("section.#hidden", "value"),
+            ("section. leading", "value"),
+            ("new[section.key", "value"),
+        ] {
+            let mut document = Document::parse(source, Format::Ini).unwrap();
+            let original = document.value().clone();
+            assert!(
+                document.set(path, Value::String(value.into())).is_err(),
+                "{path}"
+            );
+            assert_eq!(document.source(), source);
+            assert_eq!(document.value(), &original);
+        }
+    }
+
+    #[test]
+    fn save_refuses_names_and_values_that_change_when_reparsed() {
+        for source in [
+            r##"{"key":"value\nextra=injected"}"##,
+            r##"{"key":" padded "}"##,
+            r##"{"#hidden":"value"}"##,
+            r##"{"section":{"key=other":"value"}}"##,
+            r##"{"bad]section":{"key":"value"}}"##,
+        ] {
+            let value = Format::Json.load(source).unwrap();
+            assert!(save(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn literal_delimiters_inside_values_still_round_trip() {
+        let value = Value::String("new=literal # ; value".into());
+        let source = "; keep\r\n[section]\r\nkey = old\r\n";
+        let edited = set_preserving(source, "section.key", &value).unwrap();
+        assert_eq!(
+            edited,
+            "; keep\r\n[section]\r\nkey = new=literal # ; value\r\n"
+        );
+        let parsed = load(&edited).unwrap();
+        assert_eq!(load(&save(&parsed).unwrap()).unwrap(), parsed);
     }
 }

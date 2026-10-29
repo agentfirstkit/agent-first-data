@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/url"
 	"reflect"
 	"regexp"
 	"sort"
@@ -1197,6 +1196,10 @@ func redactURLFieldValue(s string, context redactionContext) string {
 // (so callers keep the original). Only secret spans change; all other bytes are
 // preserved.
 func redactURLInStr(s string, context redactionContext) (string, bool) {
+	return redactURLInStrDepth(s, context, 0)
+}
+
+func redactURLInStrDepth(s string, context redactionContext, depth int) (string, bool) {
 	// Precondition (spec): a single, whitespace-free, scheme-prefixed URL.
 	// The gate is scheme + no-whitespace only — NOT "parses via net/url". Span
 	// location below is purely byte-wise (we never re-serialize the URL), so a
@@ -1205,6 +1208,10 @@ func redactURLInStr(s string, context redactionContext) (string, bool) {
 	// reject, and rejecting here would silently leak secrets in those values.
 	if !strings.Contains(s, "://") || !isSingleURL(s) {
 		return "", false
+	}
+	// Bound recursive redirect inspection, failing closed before stack growth.
+	if depth >= 16 {
+		return redactedMarker, true
 	}
 	schemeSep := strings.Index(s, "://")
 	if schemeSep < 0 {
@@ -1218,8 +1225,32 @@ func redactURLInStr(s string, context redactionContext) (string, bool) {
 	if authEnd < 0 {
 		authEnd = len(rest)
 	}
+	// An unencoded '?' or '#' inside a password ends that authority early and
+	// leaves the rest of the password in the query or fragment. When a ':'
+	// precedes that early end and an '@' follows it before the first '/', the
+	// userinfo runs to that '@' — how libpq reads such a connection string.
+	firstSlash := strings.Index(rest, "/")
+	if firstSlash < 0 {
+		firstSlash = len(rest)
+	}
+	if strings.Contains(rest[:authEnd], ":") {
+		if at := strings.LastIndex(rest[:firstSlash], "@"); at > authEnd {
+			if end := strings.IndexAny(rest[at:], "/?#"); end >= 0 {
+				authEnd = at + end
+			} else {
+				authEnd = len(rest)
+			}
+		}
+	}
 	authority := rest[:authEnd]
 	remainder := rest[authEnd:]
+
+	// An unencoded '/' inside a password ends the authority at a "port" that
+	// is not a number, with the '@' somewhere after it. Where the password
+	// ends cannot be known, so the whole value is replaced.
+	if !strings.Contains(authority, "@") && hasNonNumericPort(authority) && strings.Contains(remainder, "@") {
+		return redactedMarker, true
+	}
 
 	newAuthority := redactUserinfoPassword(authority)
 
@@ -1228,16 +1259,25 @@ func redactURLInStr(s string, context redactionContext) (string, bool) {
 	beforeFragment, fragment, hasFragment := strings.Cut(remainder, "#")
 	newBeforeFragment := beforeFragment
 	if path, query, found := strings.Cut(beforeFragment, "?"); found {
-		newBeforeFragment = path + "?" + redactQuery(query, context)
+		newBeforeFragment = path + "?" + redactQuery(query, context, depth)
 	}
 	// A fragment gets the same treatment as the query: k=v&k=v after the '#' is
 	// exactly how an OAuth implicit-flow response hands back a token, so a
 	// secret-named fragment parameter must not survive where the identically
 	// named query parameter would not. A fragment that is not in that shape has
 	// no '=' in its segments and passes through byte-for-byte.
+	// A hash route (`#/cb?k=v`) carries its parameters after its first '?',
+	// while a form reader keeps that '?' inside a value; redact both readings:
+	// the fragment as parameters first, so a secret value absorbs its '?',
+	// then whatever follows the first '?' that survives.
 	newFragment := ""
 	if hasFragment {
-		newFragment = "#" + redactQuery(fragment, context)
+		params := redactQuery(fragment, context, depth)
+		if route, query, found := strings.Cut(params, "?"); found {
+			newFragment = "#" + route + "?" + redactQuery(query, context, depth)
+		} else {
+			newFragment = "#" + params
+		}
 	}
 
 	return scheme + "://" + newAuthority + newBeforeFragment + newFragment, true
@@ -1386,10 +1426,26 @@ func redactUserinfoPassword(authority string) string {
 	return authority[:colon] + ":" + redactedMarker + authority[at:]
 }
 
+// hasNonNumericPort reports whether the authority's text after its last ':'
+// is not a port number. A bracketed IPv6 literal without a port ends in ']'
+// and has none.
+func hasNonNumericPort(authority string) bool {
+	colon := strings.LastIndex(authority, ":")
+	if colon < 0 || strings.HasSuffix(authority, "]") {
+		return false
+	}
+	for _, b := range []byte(authority[colon+1:]) {
+		if b < '0' || b > '9' {
+			return true
+		}
+	}
+	return false
+}
+
 // redactQuery redacts the values of secret-named query parameters, preserving
 // raw bytes of every other segment (keys, benign values, encoding, ordering,
 // separators).
-func redactQuery(query string, context redactionContext) string {
+func redactQuery(query string, context redactionContext, depth int) string {
 	segments := strings.Split(query, "&")
 	for i, segment := range segments {
 		eq := strings.Index(segment, "=")
@@ -1401,25 +1457,77 @@ func redactQuery(query string, context redactionContext) string {
 		name := formDecodeName(segment)
 		if context.isSecretKey(name) {
 			segments[i] = rawKey + "=" + redactedMarker
+			continue
+		}
+		// A redirect target carries its own parameters: redact a nested URL
+		// in place, or the whole value when it arrived encoded.
+		rawValue := segment[eq+1:]
+		value := formDecodeValue(rawValue)
+		if redacted, ok := redactURLInStrDepth(value, context, depth+1); ok && redacted != value {
+			if value == rawValue {
+				segments[i] = rawKey + "=" + redacted
+			} else {
+				segments[i] = rawKey + "=" + redactedMarker
+			}
 		}
 	}
 	return strings.Join(segments, "&")
 }
 
+// formDecodeValue decodes valid escapes even alongside malformed ones, as
+// application/x-www-form-urlencoded requires. Invalid escapes remain literal.
+func formDecodeValue(rawValue string) string {
+	var decoded strings.Builder
+	for i := 0; i < len(rawValue); i++ {
+		switch rawValue[i] {
+		case '+':
+			decoded.WriteByte(' ')
+		case '%':
+			if i+2 < len(rawValue) {
+				if value, err := strconv.ParseUint(rawValue[i+1:i+3], 16, 8); err == nil {
+					decoded.WriteByte(byte(value))
+					i += 2
+					continue
+				}
+			}
+			decoded.WriteByte('%')
+		default:
+			decoded.WriteByte(rawValue[i])
+		}
+	}
+	value := decoded.String()
+	if utf8.ValidString(value) {
+		return value
+	}
+	// Replace each malformed UTF-8 subsequence, consuming an incomplete valid
+	// prefix as one replacement, consistently with the other implementations.
+	var repaired strings.Builder
+	for len(value) > 0 {
+		character, size := utf8.DecodeRuneInString(value)
+		if character == utf8.RuneError && size == 1 {
+			for size < len(value) && !utf8.FullRuneInString(value[:size]) {
+				size++
+			}
+			if size > 1 && utf8.FullRuneInString(value[:size]) {
+				size--
+			}
+		}
+		repaired.WriteRune(character)
+		value = value[size:]
+	}
+	return repaired.String()
+}
+
 // formDecodeName form-decodes the parameter name (the bytes before the first
 // '='), matching application/x-www-form-urlencoded: '+' → space then
-// percent-decode. Falls back to the raw key bytes on a decode error.
+// percent-decode, preserving malformed escapes and repairing invalid UTF-8.
 func formDecodeName(segment string) string {
 	eq := strings.Index(segment, "=")
 	rawKey := segment
 	if eq >= 0 {
 		rawKey = segment[:eq]
 	}
-	decoded, err := url.QueryUnescape(rawKey)
-	if err != nil {
-		return rawKey
-	}
-	return decoded
+	return formDecodeValue(rawKey)
 }
 
 // isSingleURL reports whether s begins with a URL scheme
@@ -1619,7 +1727,7 @@ func tryProcessField(key string, value any) (string, string, bool) {
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_bytes"); ok {
-		if n, ok := asNonNegInt64(value); ok {
+		if n, ok := asUint64(value); ok {
 			return stripped, formatBytesHuman(n), true
 		}
 		return "", "", false
@@ -1776,7 +1884,7 @@ func formatRFC3339Ms(ms int64) (string, bool) {
 	return t.Format("2006-01-02T15:04:05.000Z"), true
 }
 
-func formatBytesHuman(bytes int64) string {
+func formatBytesHuman(bytes uint64) string {
 	const KiB = 1024.0
 	const MiB = KiB * 1024
 	const GiB = MiB * 1024
@@ -2249,14 +2357,39 @@ func asInt64(value any) (int64, bool) {
 		if n, err := v.Int64(); err == nil {
 			return n, true
 		}
+		// A decoded integral float (`3.0`) is an integer like any other; an
+		// integer literal Int64 rejected is out of range, not a float.
+		if !isDecimalIntegerString(string(v)) {
+			if f, err := v.Float64(); err == nil {
+				return asInt64(f)
+			}
+		}
 	}
 	return 0, false
 }
 
-func asNonNegInt64(value any) (int64, bool) {
-	n, ok := asInt64(value)
-	if ok && n >= 0 {
-		return n, true
+// asUint64 accepts the full unsigned 64-bit range that `_bytes` covers.
+func asUint64(value any) (uint64, bool) {
+	switch v := value.(type) {
+	case uint64:
+		return v, true
+	case float64:
+		// 2^64 is exact as a float64; MaxUint64 is not.
+		if v == math.Trunc(v) && v >= 0 && v < 18446744073709551616.0 {
+			return uint64(v), true
+		}
+	case json.Number:
+		if n, err := strconv.ParseUint(string(v), 10, 64); err == nil {
+			return n, true
+		}
+		if !isDecimalIntegerString(string(v)) {
+			if f, err := v.Float64(); err == nil {
+				return asUint64(f)
+			}
+		}
+	}
+	if n, ok := asInt64(value); ok && n >= 0 {
+		return uint64(n), true
 	}
 	return 0, false
 }

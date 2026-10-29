@@ -70,20 +70,22 @@
 
 use std::{collections::BTreeMap, ops::Range};
 
-use pulldown_cmark::{CodeBlockKind, Event, MetadataBlockKind, Options, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, MetadataBlockKind, Options, Parser, Tag, TagEnd};
 
 use crate::document::{DocumentError, DocumentResult, Value};
 
 /// Parse `content` as CommonMark into the section tree described above.
 ///
-/// Never fails on content: CommonMark has no invalid-input production — every
-/// UTF-8 string is some sequence of blocks — so the result is `Ok`, including
-/// for an empty string (which yields an empty `preamble` and no sections).
+/// CommonMark has no invalid-input production — every UTF-8 string is some
+/// sequence of blocks — so this fails only where afdata declines to answer: a
+/// bare carriage return, or block nesting deeper than [`MAX_BLOCK_DEPTH`]. An
+/// empty string yields an empty `preamble` and no sections.
 pub fn load(content: &str) -> DocumentResult<Value> {
     reject_lone_carriage_return(content)?;
     let events: Vec<SpannedEvent<'_>> = Parser::new_ext(content, options())
         .into_offset_iter()
         .collect();
+    reject_deep_nesting(&events)?;
     let lines = LineIndex::new(content);
     let mut cursor = 0;
     Ok(fold_sections(read_blocks(&events, &lines, &mut cursor)))
@@ -184,6 +186,45 @@ fn reject_lone_carriage_return(content: &str) -> DocumentResult<()> {
         }
     }
     Ok(())
+}
+
+/// The block walk recurses once per nested container, matching the depth the
+/// JSON and YAML readers allow.
+const MAX_BLOCK_DEPTH: usize = 128;
+
+/// Refuse nesting the recursive block walk cannot hold before it starts, so a
+/// file of `> > > …` is an error rather than a stack overflow.
+fn reject_deep_nesting(events: &[SpannedEvent<'_>]) -> DocumentResult<()> {
+    let mut depth = 0usize;
+    for (event, _) in events {
+        match event {
+            Event::Start(tag) if !is_inline_tag(tag) => {
+                depth += 1;
+                if depth > MAX_BLOCK_DEPTH {
+                    return Err(DocumentError::SourceRefused {
+                        format: "Markdown".to_string(),
+                        detail: format!("blocks nest deeper than {MAX_BLOCK_DEPTH} levels"),
+                    });
+                }
+            }
+            Event::End(tag) if !is_inline_end(*tag) => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn is_inline_end(tag: TagEnd) -> bool {
+    matches!(
+        tag,
+        TagEnd::Emphasis
+            | TagEnd::Strong
+            | TagEnd::Strikethrough
+            | TagEnd::Superscript
+            | TagEnd::Subscript
+            | TagEnd::Link
+            | TagEnd::Image
+    )
 }
 
 /// Pure CommonMark, plus the two metadata-block rules and nothing else.
@@ -1224,6 +1265,20 @@ mod tests {
         assert_eq!(integer(source, "h1.0.paragraph.0.source_end_line"), 4);
         assert_eq!(integer(source, "h1.0.h2.0.source_start_line"), 6);
         assert_eq!(integer(source, "h1.0.h2.0.heading_end_line"), 6);
+    }
+
+    #[test]
+    fn nesting_beyond_the_block_depth_is_refused_not_a_stack_overflow() {
+        let nested = |depth: usize| format!("# T\n{}x\n", "> ".repeat(depth));
+        // The heading closes first, so the innermost paragraph adds one level.
+        assert_eq!(text(&nested(127), "h1.0.blockquote.0.text"), "x");
+        for depth in [128, 100_000] {
+            let error = load(&nested(depth)).unwrap_err();
+            assert_eq!(error.code(), "document_source_refused");
+            assert!(error.to_string().contains("128 levels"), "{error}");
+        }
+        let error = load(&format!("{}x\n", "- ".repeat(100_000))).unwrap_err();
+        assert_eq!(error.code(), "document_source_refused");
     }
 
     #[test]

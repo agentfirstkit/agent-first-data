@@ -40,10 +40,8 @@ fn parse_semantic(content: &str) -> DocumentResult<Value> {
     let mut values = BTreeMap::new();
 
     for (line_number, raw_line) in logical_lines(content)? {
-        let line = raw_line
-            .strip_suffix('\r')
-            .unwrap_or(&raw_line)
-            .trim_start();
+        let raw_line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line).trim_start();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -82,19 +80,20 @@ fn parse_semantic(content: &str) -> DocumentResult<Value> {
 /// isn't already there` — open a quote at the apostrophe that no later line
 /// closed, swallowing the rest of the file into one unparseable line and
 /// yielding zero keys with no error at all.
-fn logical_lines(content: &str) -> DocumentResult<Vec<(usize, String)>> {
+fn logical_lines(content: &str) -> DocumentResult<Vec<(usize, &str)>> {
     let mut lines = Vec::new();
-    let mut buffer = String::new();
+    let mut start = 0;
     let mut first_line = 1;
     let mut line_number = 1;
     let mut quote = None;
     let mut quote_opened_at = 0;
     let mut escaped = false;
     let mut value_may_open = false;
+    let mut assignment_started = false;
     let mut in_comment = false;
     let mut at_line_start = true;
 
-    for character in content.chars() {
+    for (offset, character) in content.char_indices() {
         if quote.is_none() {
             if at_line_start && !character.is_whitespace() {
                 at_line_start = false;
@@ -106,15 +105,15 @@ fn logical_lines(content: &str) -> DocumentResult<Vec<(usize, String)>> {
                     && character != '\n'
                     && character != '\r'
                 {
-                    buffer.push(character);
                     continue;
                 }
                 if value_may_open && (character == '\'' || character == '"') {
                     quote = Some(character);
                     quote_opened_at = line_number;
                     value_may_open = false;
-                } else if character == '=' {
+                } else if character == '=' && !assignment_started {
                     value_may_open = true;
+                    assignment_started = true;
                 } else if !character.is_whitespace() {
                     // The value has already started unquoted, so a quote from
                     // here on is an ordinary character, not a delimiter.
@@ -129,19 +128,15 @@ fn logical_lines(content: &str) -> DocumentResult<Vec<(usize, String)>> {
             quote = None;
         }
         if character == '\n' && quote.is_none() {
-            lines.push((
-                first_line,
-                buffer.strip_suffix('\n').unwrap_or(&buffer).to_string(),
-            ));
-            buffer.clear();
+            lines.push((first_line, &content[start..offset + 1]));
+            start = offset + 1;
             first_line = line_number + 1;
-        } else {
-            buffer.push(character);
         }
         if character == '\n' {
             line_number += 1;
             if quote.is_none() {
                 value_may_open = false;
+                assignment_started = false;
                 in_comment = false;
                 at_line_start = true;
             }
@@ -153,8 +148,8 @@ fn logical_lines(content: &str) -> DocumentResult<Vec<(usize, String)>> {
         // fallback while the real value sat in the file, unread and unmentioned.
         return Err(parse_error(quote_opened_at, "unterminated quoted value"));
     }
-    if !buffer.is_empty() || content.is_empty() {
-        lines.push((first_line, buffer));
+    if start < content.len() || content.is_empty() {
+        lines.push((first_line, &content[start..]));
     }
     Ok(lines)
 }
@@ -190,7 +185,7 @@ fn edit_line(content: &str, key: &str, replacement: Option<&str>) -> DocumentRes
     let document = DotenvDocument::parse(content).map_err(|error| with_path(error, key))?;
     let mut output = String::with_capacity(content.len());
     let found = document.has_key(key);
-    for line in content.split_inclusive('\n') {
+    for (line_number, line) in logical_lines(content)? {
         let body = line.strip_suffix('\n').unwrap_or(line);
         let bare = body.strip_suffix('\r').unwrap_or(body);
         let trimmed = bare.trim_start();
@@ -209,13 +204,13 @@ fn edit_line(content: &str, key: &str, replacement: Option<&str>) -> DocumentRes
                 let prefix_len = bare.len() - assignment.len();
                 let prefix = &body[..prefix_len];
                 let (name, old_value) = assignment.split_once('=').unwrap_or((key, ""));
-                let suffix = old_value
-                    .find(" #")
-                    .map(|index| &old_value[index..])
-                    .unwrap_or("");
+                let old_trimmed = old_value.trim_start();
+                let spacing = &old_value[..old_value.len() - old_trimmed.len()];
+                let suffix = value_suffix(old_trimmed, line_number)?;
                 output.push_str(prefix);
                 output.push_str(name);
                 output.push('=');
+                output.push_str(spacing);
                 output.push_str(value);
                 output.push_str(suffix);
                 if body.ends_with('\r') {
@@ -258,7 +253,7 @@ fn encode_value(value: &str) -> String {
     if !value.is_empty()
         && value
             .chars()
-            .all(|c| !c.is_whitespace() && c != '#' && c != '\\')
+            .all(|c| !c.is_whitespace() && !matches!(c, '#' | '\\' | '\'' | '"'))
     {
         return value.to_string();
     }
@@ -268,6 +263,8 @@ fn encode_value(value: &str) -> String {
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t")
     )
 }
 
@@ -292,13 +289,13 @@ fn parse_value(input: &str, line_number: usize) -> DocumentResult<String> {
         return Err(parse_error(line_number, "value exceeds 1 MiB"));
     }
     match input.chars().next() {
-        Some('\'') => parse_quoted(input, '\'', line_number),
-        Some('"') => parse_quoted(input, '"', line_number),
+        Some('\'') => parse_quoted(input, '\'', line_number).map(|(value, _)| value),
+        Some('"') => parse_quoted(input, '"', line_number).map(|(value, _)| value),
         _ => parse_unquoted(input),
     }
 }
 
-fn parse_quoted(input: &str, quote: char, line_number: usize) -> DocumentResult<String> {
+fn parse_quoted(input: &str, quote: char, line_number: usize) -> DocumentResult<(String, usize)> {
     let mut output = String::new();
     let mut escaped = false;
 
@@ -332,12 +329,41 @@ fn parse_quoted(input: &str, quote: char, line_number: usize) -> DocumentResult<
                     "unexpected content after quoted value",
                 ));
             }
-            return Ok(output);
+            return Ok((output, remainder_index));
         }
         output.push(character);
     }
 
     Err(parse_error(line_number, "unterminated quoted value"))
+}
+
+/// Keep only an actual trailing comment or whitespace, never a ` #` inside a
+/// quoted value. The parser and editor share the quote boundary.
+fn value_suffix(input: &str, line_number: usize) -> DocumentResult<&str> {
+    if let Some(quote @ ('\'' | '"')) = input.chars().next() {
+        let (_, end) = parse_quoted(input, quote, line_number)?;
+        return Ok(&input[end..]);
+    }
+    let mut escaped = false;
+    let mut whitespace = None;
+    for (offset, character) in input.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+            continue;
+        } else if character == '#'
+            && let Some(start) = whitespace
+        {
+            return Ok(&input[start..]);
+        }
+        if character.is_whitespace() {
+            whitespace.get_or_insert(offset);
+        } else {
+            whitespace = None;
+        }
+    }
+    Ok(&input[whitespace.unwrap_or(input.len())..])
 }
 
 fn parse_unquoted(input: &str) -> DocumentResult<String> {
@@ -422,6 +448,57 @@ mod tests {
             Some(&Value::String("line1\nline2".to_string()))
         );
         assert_eq!(values.get("B"), Some(&Value::String("after".to_string())));
+    }
+
+    #[test]
+    fn editing_a_multiline_value_replaces_its_whole_assignment() {
+        let source = "# before\r\n export A = \"first # value\r\nB=inside\"\t# keep\r\nB=after\r\n";
+        let value = Value::String("\"quoted\"\r\t\n".into());
+        let edited = set_preserving(source, "A", &value).unwrap();
+        assert!(edited.starts_with("# before\r\n export A = "));
+        assert!(edited.ends_with("\t# keep\r\nB=after\r\n"));
+        assert!(!edited.contains("B=inside"));
+        let Value::Object(values) = load(&edited).unwrap() else {
+            panic!("expected an object");
+        };
+        assert_eq!(values["A"], value);
+        assert_eq!(values["B"], Value::String("after".into()));
+        assert_eq!(
+            unset_preserving(source, "A").unwrap(),
+            "# before\r\nB=after\r\n"
+        );
+    }
+
+    #[test]
+    fn written_quotes_and_comment_like_values_round_trip() {
+        for value in [
+            "\"quoted\"",
+            "'quoted'",
+            "x=\"literal",
+            "x # value",
+            "a\r\nb\tc",
+        ] {
+            let value = Value::String(value.into());
+            let edited = set_preserving("A=old # keep\n", "A", &value).unwrap();
+            let Value::Object(values) = load(&edited).unwrap() else {
+                panic!("expected an object");
+            };
+            assert_eq!(values["A"], value, "{edited}");
+            assert!(edited.ends_with(" # keep\n"));
+        }
+        assert_eq!(
+            set_preserving("A=\"old # value\"\n", "A", &Value::String("new".into())).unwrap(),
+            "A=new\n"
+        );
+    }
+
+    #[test]
+    fn later_equals_signs_cannot_open_an_unquoted_value() {
+        let Value::Object(values) = load("A=query=\"literal\nB=after\n").unwrap() else {
+            panic!("expected an object");
+        };
+        assert_eq!(values["A"], Value::String("query=\"literal".into()));
+        assert_eq!(values["B"], Value::String("after".into()));
     }
 
     #[test]

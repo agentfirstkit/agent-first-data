@@ -977,7 +977,7 @@ function applyRedactionPolicyWithContext(
  * when s is a processable URL, or null when it is not (so callers can keep the
  * original). Only secret spans change; all other bytes are preserved.
  */
-function redactUrlInStr(s: string, secretNames: ReadonlySet<string>): string | null {
+function redactUrlInStr(s: string, secretNames: ReadonlySet<string>, depth = 0): string | null {
   // Precondition (spec): a single, whitespace-free, scheme-prefixed URL.
   // The gate is scheme + no-whitespace only — NOT "parses via `new URL`". Span
   // location below is purely byte-wise (we never re-serialize the URL), so a
@@ -987,6 +987,8 @@ function redactUrlInStr(s: string, secretNames: ReadonlySet<string>): string | n
   if (!s.includes("://") || !isSingleUrl(s)) {
     return null;
   }
+  // Bound recursive redirect inspection, failing closed before stack growth.
+  if (depth >= 16) return REDACTED_MARKER;
   const schemeSep = s.indexOf("://");
   const scheme = s.slice(0, schemeSep);
   const rest = s.slice(schemeSep + 3);
@@ -1000,8 +1002,32 @@ function redactUrlInStr(s: string, secretNames: ReadonlySet<string>): string | n
       break;
     }
   }
+  // An unencoded '?' or '#' inside a password ends that authority early and
+  // leaves the rest of the password in the query or fragment. When a ':'
+  // precedes that early end and an '@' follows it before the first '/', the
+  // userinfo runs to that '@' — how libpq reads such a connection string.
+  const slash = rest.indexOf("/");
+  const firstSlash = slash < 0 ? rest.length : slash;
+  const at = rest.slice(0, firstSlash).lastIndexOf("@");
+  if (rest.slice(0, authEnd).includes(":") && at > authEnd) {
+    authEnd = rest.length;
+    for (let i = at; i < rest.length; i++) {
+      const c = rest[i];
+      if (c === "/" || c === "?" || c === "#") {
+        authEnd = i;
+        break;
+      }
+    }
+  }
   const authority = rest.slice(0, authEnd);
   const remainder = rest.slice(authEnd);
+
+  // An unencoded '/' inside a password ends the authority at a "port" that is
+  // not a number, with the '@' somewhere after it. Where the password ends
+  // cannot be known, so the whole value is replaced.
+  if (!authority.includes("@") && hasNonNumericPort(authority) && remainder.includes("@")) {
+    return REDACTED_MARKER;
+  }
 
   const newAuthority = redactUserinfoPassword(authority);
 
@@ -1014,14 +1040,26 @@ function redactUrlInStr(s: string, secretNames: ReadonlySet<string>): string | n
   const q = beforeFragment.indexOf("?");
   const newBeforeFragment =
     q >= 0
-      ? `${beforeFragment.slice(0, q)}?${redactQuery(beforeFragment.slice(q + 1), secretNames)}`
+      ? `${beforeFragment.slice(0, q)}?${redactQuery(beforeFragment.slice(q + 1), secretNames, depth)}`
       : beforeFragment;
   // A fragment gets the same treatment as the query: `k=v&k=v` after the '#' is
   // exactly how an OAuth implicit-flow response hands back a token, so a
   // secret-named fragment parameter must not survive where the identically
   // named query parameter would not. A fragment that is not in that shape has
   // no '=' in its segments and passes through byte-for-byte.
-  const newFragment = fragment === null ? "" : `#${redactQuery(fragment, secretNames)}`;
+  // A hash route (`#/cb?k=v`) carries its parameters after its first '?',
+  // while a form reader keeps that '?' inside a value; redact both readings:
+  // the fragment as parameters first, so a secret value absorbs its '?',
+  // then whatever follows the first '?' that survives.
+  let newFragment = "";
+  if (fragment !== null) {
+    const params = redactQuery(fragment, secretNames, depth);
+    const routeQuery = params.indexOf("?");
+    newFragment =
+      routeQuery >= 0
+        ? `#${params.slice(0, routeQuery)}?${redactQuery(params.slice(routeQuery + 1), secretNames, depth)}`
+        : `#${params}`;
+  }
 
   return `${scheme}://${newAuthority}${newBeforeFragment}${newFragment}`;
 }
@@ -1190,7 +1228,7 @@ function redactUserinfoPassword(authority: string): string {
  * Redact the values of secret-named query parameters, preserving raw bytes of
  * every other segment (keys, benign values, encoding, ordering, separators).
  */
-function redactQuery(query: string, secretNames: ReadonlySet<string>): string {
+function redactQuery(query: string, secretNames: ReadonlySet<string>, depth: number): string {
   return query
     .split("&")
     .map((segment) => {
@@ -1201,19 +1239,34 @@ function redactQuery(query: string, secretNames: ReadonlySet<string>): string {
       if (isSecretKey(name, secretNames)) {
         return `${rawKey}=${REDACTED_MARKER}`;
       }
+      // A redirect target carries its own parameters: redact a nested URL in
+      // place, or the whole value when it arrived encoded.
+      const rawValue = segment.slice(eq + 1);
+      const value = formDecode(rawValue);
+      const redacted = redactUrlInStr(value, secretNames, depth + 1);
+      if (redacted !== null && redacted !== value) {
+        return value === rawValue ? `${rawKey}=${redacted}` : `${rawKey}=${REDACTED_MARKER}`;
+      }
       return segment;
     })
     .join("&");
 }
 
-/** Form-decode a query-parameter name: '+' → space, then percent-decode. */
+/**
+ * True when the authority's text after its last ':' is not a port number. A
+ * bracketed IPv6 literal without a port ends in ']' and has none.
+ */
+function hasNonNumericPort(authority: string): boolean {
+  const colon = authority.lastIndexOf(":");
+  if (colon < 0 || authority.endsWith("]")) return false;
+  return !/^[0-9]*$/.test(authority.slice(colon + 1));
+}
+
+/** Form-decode a query-parameter name or value: '+' → space, then percent-decode. */
 function formDecode(rawKey: string): string {
-  const withSpaces = rawKey.replace(/\+/g, " ");
-  try {
-    return decodeURIComponent(withSpaces);
-  } catch {
-    return withSpaces;
-  }
+  // URLSearchParams keeps malformed escapes literal and replaces invalid
+  // UTF-8, while still decoding valid escapes elsewhere in the value.
+  return new URLSearchParams(`value=${rawKey.replace(/&/g, "%26")}`).get("value") ?? "";
 }
 
 /**
@@ -1299,23 +1352,30 @@ function decimalIntText(value: JsonValue): string | null {
 const MIN_I64 = -9_223_372_036_854_775_808n;
 const MAX_I64 = 9_223_372_036_854_775_807n;
 
-function signedI64(value: JsonValue): bigint | null {
-  let text: string | null = null;
-  if (typeof value === "bigint") {
-    text = value.toString();
-  } else if (typeof value === "number" && Number.isSafeInteger(value)) {
-    text = String(value);
-  } else if (isLosslessNumber(value)) {
+const MAX_U64 = 18_446_744_073_709_551_615n;
+
+// An integer literal stays exact; a decoded integral float (`3.0`) counts as
+// an integer like any other.
+function integerValue(value: JsonValue): bigint | null {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") return Number.isInteger(value) ? BigInt(value) : null;
+  if (isLosslessNumber(value)) {
     const literal = value.toString();
-    if (/^-?\d+$/.test(literal)) text = literal;
+    if (/^-?\d+$/.test(literal)) return BigInt(literal);
+    const parsed = Number(literal);
+    return Number.isInteger(parsed) ? BigInt(parsed) : null;
   }
-  if (text === null) return null;
-  try {
-    const integer = BigInt(text);
-    return integer >= MIN_I64 && integer <= MAX_I64 ? integer : null;
-  } catch {
-    return null;
-  }
+  return null;
+}
+
+function signedI64(value: JsonValue): bigint | null {
+  const integer = integerValue(value);
+  return integer !== null && integer >= MIN_I64 && integer <= MAX_I64 ? integer : null;
+}
+
+function unsignedU64(value: JsonValue): bigint | null {
+  const integer = integerValue(value);
+  return integer !== null && integer >= 0n && integer <= MAX_U64 ? integer : null;
 }
 
 function formatCents(value: bigint, symbol: string): string {
@@ -1452,7 +1512,8 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   }
   stripped = stripSuffixCI(key, "_bytes");
   if (stripped !== null) {
-    if (isInt(numeric) && numeric >= 0) return [stripped, formatBytesHuman(numeric)];
+    const bytes = unsignedU64(value);
+    if (bytes !== null) return [stripped, formatBytesHuman(Number(bytes))];
     return null;
   }
   stripped = stripSuffixCI(key, "_percent");

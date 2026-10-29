@@ -547,10 +547,18 @@ fn read_prompt_line<R: std::io::BufRead>(reader: R) -> Result<String> {
     // allocation even when the terminal never sends a newline.
     let mut limited = reader.take((MAX_STREAM_BYTES + 2) as u64);
     let mut value = String::new();
-    limited
+    let read = limited
         .read_line(&mut value)
         .map_err(|error| SourceError::unreadable(format!("read from the terminal: {error}")))?;
-    let value = value.trim_end_matches(['\r', '\n']);
+    if read == 0 {
+        return Err(SourceError::unreadable(
+            "the terminal closed before a value was entered",
+        ));
+    }
+    let value = match value.strip_suffix('\n') {
+        Some(line) => line.strip_suffix('\r').unwrap_or(line),
+        None => &value,
+    };
     if value.len() > MAX_STREAM_BYTES {
         return Err(SourceError::unreadable(format!(
             "prompt exceeds {MAX_STREAM_BYTES} bytes"
@@ -1000,6 +1008,22 @@ mod tests {
         let oversized = vec![b'x'; MAX_STREAM_BYTES + 1];
         let error = read_stream(oversized.as_slice(), "test").expect_err("over the cap");
         assert!(error.message().contains("exceeds"), "{error}");
+    }
+
+    #[test]
+    fn prompt_eof_is_not_an_empty_answer_and_only_one_line_ending_is_removed() {
+        assert!(read_prompt_line(std::io::Cursor::new(b"")).is_err());
+        for (input, expected) in [
+            ("\n", ""),
+            ("\r\n", ""),
+            ("value\r\r\n", "value\r"),
+            ("value\r", "value\r"),
+        ] {
+            assert_eq!(
+                read_prompt_line(std::io::Cursor::new(input)).expect("answer"),
+                expected
+            );
+        }
     }
 
     #[test]

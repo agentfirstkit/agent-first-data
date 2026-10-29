@@ -138,5 +138,165 @@
         "token"
       ]
     }
+  },
+  {
+    "name": "userinfo password containing a fragment delimiter",
+    "input": "postgres://u:p#LEAK@h/db",
+    "expected": "postgres://u:***@h/db"
+  },
+  {
+    "name": "userinfo password containing a query delimiter",
+    "input": "postgres://u:p?LEAK@h/db?sslmode=require",
+    "expected": "postgres://u:***@h/db?sslmode=require"
+  },
+  {
+    "name": "userinfo password containing a slash fails closed",
+    "input": "https://u:p/LEAK@h/",
+    "expected": "***"
+  },
+  {
+    "name": "at sign in a path after a port is preserved",
+    "input": "https://h:8443/users/@me?page=2",
+    "expected": "https://h:8443/users/@me?page=2"
+  },
+  {
+    "name": "at sign in a query without userinfo is preserved",
+    "input": "https://h/?token_secret=x&email=a@b.com",
+    "expected": "https://h/?token_secret=***&email=a@b.com"
+  },
+  {
+    "name": "bracketed IPv6 host with an at sign in the path is preserved",
+    "input": "http://[::1]/@me",
+    "expected": "http://[::1]/@me"
+  },
+  {
+    "name": "nested redirect URL is redacted in place",
+    "input": "https://h/login?next=https://b/cb?token_secret=X&page=2",
+    "expected": "https://h/login?next=https://b/cb?token_secret=***&page=2"
+  },
+  {
+    "name": "encoded nested redirect URL with a secret is replaced whole",
+    "input": "https://h/login?next=https%3A%2F%2Fb%2Fcb%3Ftoken_secret%3DX&page=2",
+    "expected": "https://h/login?next=***&page=2"
+  },
+  {
+    "name": "encoded nested redirect URL without a secret is preserved",
+    "input": "https://h/login?next=https%3A%2F%2Fb%2Fcb%3Fpage%3D2",
+    "expected": "https://h/login?next=https%3A%2F%2Fb%2Fcb%3Fpage%3D2"
+  },
+  {
+    "name": "hash-route fragment parameters are redacted",
+    "input": "https://h/#/cb?token=abc&page=2",
+    "expected": "https://h/#/cb?token=***&page=2",
+    "options": {
+      "secret_names": [
+        "token"
+      ]
+    }
+  },
+  {
+    "name": "deeply nested redirect URLs fail closed at sixteen URLs",
+    "input": "https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?token_secret=LEAK",
+    "expected": "https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=https://h/?next=***"
+  },
+  {
+    "name": "question mark inside secret fragment value is secret too",
+    "input": "https://h/#token_secret=a?LEAK",
+    "expected": "https://h/#token_secret=***"
+  },
+  {
+    "name": "configured secret fragment value includes question marks",
+    "input": "https://h/#token=a?LEAK&state=ok",
+    "expected": "https://h/#token=***&state=ok",
+    "options": {
+      "secret_names": [
+        "token"
+      ]
+    }
+  },
+  {
+    "name": "hash route secret value includes question marks",
+    "input": "https://h/#/cb?token_secret=a?LEAK&state=ok",
+    "expected": "https://h/#/cb?token_secret=***&state=ok"
+  },
+  {
+    "name": "benign fragment value with a question mark is preserved",
+    "input": "https://h/#state=a?section=2",
+    "expected": "https://h/#state=a?section=2"
+  },
+  {
+    "name": "secret after a question mark in a benign fragment value is redacted",
+    "input": "https://h/#a=b?token_secret=LEAK",
+    "expected": "https://h/#a=b?token_secret=***"
+  },
+  {
+    "name": "hash-router parameters after a benign fragment value are redacted",
+    "input": "https://h/#state=x?token_secret=LEAK&z=1",
+    "expected": "https://h/#state=x?token_secret=***&z=1"
+  },
+  {
+    "name": "malformed escape does not bypass encoded redirect password redaction",
+    "input": "https://h/?next=https%3A%2F%2Fu%3Apassword%40b%2F%ZZ&state=ok",
+    "expected": "https://h/?next=***&state=ok"
+  },
+  {
+    "name": "invalid UTF-8 escape does not bypass encoded redirect password redaction",
+    "input": "https://h/?next=https%3A%2F%2Fu%3Apassword%40b%2F%FF",
+    "expected": "https://h/?next=***"
+  },
+  {
+    "name": "configured secret name decodes valid escapes beside malformed ones",
+    "input": "https://h/?%74oken%ZZ=LEAK&state=ok",
+    "expected": "https://h/?%74oken%ZZ=***&state=ok",
+    "options": {
+      "secret_names": [
+        "token%ZZ"
+      ]
+    }
+  },
+  {
+    "name": "benign encoded redirect with a malformed escape stays unchanged",
+    "input": "https://h/?next=https%3A%2F%2Fb%2F%ZZ",
+    "expected": "https://h/?next=https%3A%2F%2Fb%2F%ZZ"
+  },
+  {
+    "name": "configured secret name repairs invalid UTF-8 %FF%FF",
+    "input": "https://h/?token%FF%FF=LEAK",
+    "expected": "https://h/?token%FF%FF=***",
+    "options": {
+      "secret_names": [
+        "token��"
+      ]
+    }
+  },
+  {
+    "name": "configured secret name repairs invalid UTF-8 %E2%82",
+    "input": "https://h/?token%E2%82=LEAK",
+    "expected": "https://h/?token%E2%82=***",
+    "options": {
+      "secret_names": [
+        "token�"
+      ]
+    }
+  },
+  {
+    "name": "configured secret name repairs invalid UTF-8 %E2%82x",
+    "input": "https://h/?token%E2%82x=LEAK",
+    "expected": "https://h/?token%E2%82x=***",
+    "options": {
+      "secret_names": [
+        "token�x"
+      ]
+    }
+  },
+  {
+    "name": "configured secret name repairs invalid UTF-8 %ED%A0%80",
+    "input": "https://h/?token%ED%A0%80=LEAK",
+    "expected": "https://h/?token%ED%A0%80=***",
+    "options": {
+      "secret_names": [
+        "token���"
+      ]
+    }
   }
 ]

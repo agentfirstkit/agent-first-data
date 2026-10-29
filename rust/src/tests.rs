@@ -1357,6 +1357,29 @@ fn plain_nested_secrets() {
 // ═══════════════════════════════════════════
 
 #[test]
+fn bytes_outside_u64_range_fall_through_without_saturation() {
+    for literal in [
+        "18446744073709551616",
+        "18446744073709551617",
+        "18446744073709551616.0",
+        "1.8446744073709552e19",
+    ] {
+        let value: Value = serde_json::from_str(&format!("{{\"size_bytes\":{literal}}}")).unwrap();
+        let rendered = render(&value, OutputFormat::Plain, &OutputOptions::default());
+        assert!(rendered.starts_with("size_bytes="), "{literal}: {rendered}");
+        assert!(!rendered.contains("TiB"), "{rendered}");
+    }
+    assert_eq!(
+        render(
+            &json!({"size_bytes":u64::MAX}),
+            OutputFormat::Plain,
+            &OutputOptions::default()
+        ),
+        "size=16777216.0TiB"
+    );
+}
+
+#[test]
 fn fallthrough_bytes_float() {
     let out = render(
         &json!({"size_bytes": 1024.5}),
@@ -2478,7 +2501,9 @@ fn protocol_decode_fixtures() {
 // for every fixture case here except one: a decoded "-0.0" loses its trailing
 // zero in YAML/plain ("-0.0" -> "-0", value-preserving — IEEE-754 negative
 // zero survives — but spelling-lossy), which is why number_fidelity.json's
-// "negative_zero" case has no expected_yaml. Every other case's YAML is
+// "negative_zero" case has no expected_yaml (nor does "negative_zero_integer",
+// whose bare "-0" is an integer literal the renderers need not canonicalize
+// but whose JSON retention is the point). Every other case's YAML is
 // asserted and exact, since only integral-valued floats hit this path.
 
 #[test]
@@ -2542,31 +2567,6 @@ fn number_fidelity_does_not_regress_ordinary_decoded_numbers_in_plain_output() {
     };
     let got = render(&result, OutputFormat::Plain, &OutputOptions::default());
     assert_eq!(got, "cpu=85.5% duration=42ms size=5.0MiB");
-}
-
-// Known, narrow infeasibility (see number_fidelity.json's "negative_zero"
-// case, which deliberately uses "-0.0" rather than bare "-0"): serde_json's
-// arbitrary_precision parser fast-paths a *bare integer* literal with no '.'
-// or 'e' through Rust's native `str::parse::<i64/u64>`, which treats "-0" and
-// "0" as equal and returns unsigned 0, discarding the sign before the
-// string-retention branch is ever reached (rust/src/tests.rs asserted this
-// directly against upstream serde_json 1.0.150's `parse_any_number`, not
-// afdata code). Any float-shaped spelling ("-0.0", "-0e0") is unaffected —
-// those always take the string-retention path. Working around the bare-
-// integer case would require a hand-rolled JSON tokenizer to rewrite "-0"
-// tokens outside of strings before handing text to serde_json, which is
-// exactly the fragile hand-scanning this project's own conventions reject
-// elsewhere; not attempted here.
-#[test]
-fn negative_zero_bare_integer_is_a_known_serde_json_limitation() {
-    let v: serde_json::Value = serde_json::from_str("-0").expect("parses");
-    assert_eq!(
-        serde_json::to_string(&v).expect("serializes"),
-        "0",
-        "if this starts passing, serde_json fixed the upstream limitation \
-         documented above -- promote \"-0\" (bare integer) back into \
-         number_fidelity.json's negative_zero case"
-    );
 }
 
 // Known, narrow infeasibility (see number_fidelity.json's "exponent_notation"
