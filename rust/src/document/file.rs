@@ -25,11 +25,11 @@ mod write;
 
 use write::{guard_mutation, write_atomic, write_atomic_create};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use read::{inspect_capped_source, read_capped_contents};
 use read::{open_read_handle, read_capped_source};
 use std::fs;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
