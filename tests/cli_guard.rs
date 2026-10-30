@@ -362,28 +362,23 @@ fn tmp_path_recognizes_the_real_temp_area_regardless_of_spoofed_tmpdir_env() {
 }
 
 #[test]
-fn tmp_path_rejects_a_mktemp_result_from_a_tmpdir_pointed_at_home() {
-    let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .map(std::path::PathBuf::from)
-    else {
-        return;
-    };
-    // Simulate `TMPDIR=$HOME mktemp -d`: a real directory, physically outside
+fn tmp_path_rejects_a_mktemp_result_from_a_tmpdir_pointed_at_the_checkout() {
+    let fixture = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let fake_temp_root = fixture.path();
+    // Simulate `TMPDIR=<checkout> mktemp -d`: a real directory, physically outside
     // every recognized system temp root, that a spoofed `TMPDIR` would make a
     // naive (env-trusting) implementation accept.
-    let fake_mktemp_result = home.join(format!("afdata-guard-e2e-fake-tmp-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&fake_mktemp_result);
+    let fake_mktemp_result = fake_temp_root.join("fake-mktemp-result");
     std::fs::create_dir(&fake_mktemp_result).unwrap();
 
     let output = afdata()
-        .env("TMPDIR", &home)
-        .env("TMP", &home)
-        .env("TEMP", &home)
+        .env("TMPDIR", fake_temp_root)
+        .env("TMP", fake_temp_root)
+        .env("TEMP", fake_temp_root)
         .args(["guard", "tmp_path", fake_mktemp_result.to_str().unwrap()])
         .output()
         .unwrap();
 
-    std::fs::remove_dir_all(&fake_mktemp_result).unwrap();
     assert_guard_failed(&output, "guard_outside_containment");
 }
 
@@ -429,6 +424,64 @@ fn final_symlink_segment_is_guarded_not_its_target() {
     let output = run(&["guard", "path", link.to_str().unwrap()]);
     let canonical_dir = std::fs::canonicalize(dir.path()).unwrap();
     assert_guard_ok(&output, &canonical_dir.join("link_name"));
+}
+
+/// A link stored in decomposed form (`cafe` + U+0301) and addressed in
+/// composed form (U+00E9). APFS answers to both, so the guard must report the
+/// one entry it found rather than refuse because no name compares equal; a
+/// filesystem that does not normalize finds nothing under the composed name,
+/// which is then a missing leaf kept as typed.
+#[cfg(unix)]
+#[test]
+fn a_symlink_addressed_in_another_unicode_normalization_is_guarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical_dir = std::fs::canonicalize(dir.path()).unwrap();
+    let target_dir = canonical_dir.join("target_dir");
+    std::fs::create_dir(&target_dir).unwrap();
+    let stored = "cafe\u{301}";
+    let typed = "caf\u{e9}";
+    std::os::unix::fs::symlink(&target_dir, canonical_dir.join(stored)).unwrap();
+
+    let lookup = std::fs::symlink_metadata(canonical_dir.join(typed));
+    #[cfg(target_os = "macos")]
+    let expected = {
+        assert!(lookup.unwrap().file_type().is_symlink());
+        canonical_dir.join(stored)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let expected = {
+        assert_eq!(lookup.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        canonical_dir.join(typed)
+    };
+
+    let output = run(&["guard", "path", canonical_dir.join(typed).to_str().unwrap()]);
+    assert_guard_ok(&output, &expected);
+}
+
+/// An execute-only parent can be traversed but not listed. A link in it must
+/// pass the way a real directory beside it does, rather than fail because the
+/// listing used to find its spelling is not permitted.
+#[cfg(unix)]
+#[test]
+fn a_symlink_in_an_execute_only_directory_is_guarded() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let canonical_dir = std::fs::canonicalize(dir.path()).unwrap();
+    let parent = canonical_dir.join("exec_only");
+    std::fs::create_dir(&parent).unwrap();
+    let real = parent.join("real_dir");
+    std::fs::create_dir(&real).unwrap();
+    let link = parent.join("link_name");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o311)).unwrap();
+
+    let real_output = run(&["guard", "path", real.to_str().unwrap()]);
+    let link_output = run(&["guard", "path", link.to_str().unwrap()]);
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_guard_ok(&real_output, &real);
+    assert_guard_ok(&link_output, &link);
 }
 
 #[cfg(unix)]

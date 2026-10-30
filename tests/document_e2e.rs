@@ -21,6 +21,124 @@ use agent_first_data::document::{
 };
 use std::collections::BTreeMap;
 
+#[cfg(all(unix, feature = "libc"))]
+#[test]
+fn a_saved_document_refuses_a_target_replaced_by_a_fifo() {
+    use agent_first_data::document::DocumentFile;
+    use std::os::unix::ffi::OsStrExt;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.json");
+    std::fs::write(&path, "{\"a\":1}").unwrap();
+    let mut document = DocumentFile::open(&path, None).unwrap();
+    document.set("a", Value::Integer(2)).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let fifo_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: the CString lives through the call and names this test's path.
+    assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+    assert!(document.ensure_mutable("set").is_err());
+    assert!(document.save().is_err());
+    assert!(!std::fs::metadata(&path).unwrap().is_file());
+}
+
+#[test]
+fn source_edits_read_back_the_staged_value_across_container_shapes() {
+    let mut cases = vec![
+        (Format::Json, r#"["keep"]"#, "-"),
+        (Format::Json, r#"{"nested":[[]],"keep":true}"#, "nested.0.-"),
+    ];
+    #[cfg(feature = "toml")]
+    cases.extend([
+        (
+            Format::Toml,
+            "settings = { keep = 1 }\n",
+            "settings.new.text",
+        ),
+        (Format::Toml, "items = [] # keep\n", "items.-"),
+        (Format::Toml, "items = [\n  'keep', # keep\n]\n", "items.-"),
+        (Format::Toml, "nested = [[1]]\n", "nested.0.-"),
+    ]);
+    #[cfg(feature = "yaml")]
+    cases.extend([
+        (Format::Yaml, "[]\n", "-"),
+        (Format::Yaml, "nested:\n  - []\nkeep: true\n", "nested.0.-"),
+        (Format::Yaml, "root:\n  keep: true\n", "root.-"),
+    ]);
+    for (format, source, path) in cases {
+        let mut document = Document::parse(source, format).unwrap();
+        document
+            .set(path, Value::String("added".into()))
+            .unwrap_or_else(|error| panic!("{format:?} {path}: {error}"));
+        let reopened = Document::parse(document.source(), format).unwrap();
+        assert_eq!(
+            reopened.value(),
+            document.value(),
+            "{format:?} {path}: {}",
+            document.source()
+        );
+    }
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn yaml_sequence_edits_through_an_alias_never_rewrite_the_anchor() {
+    let source = "base: &items\n  - id: one\nother: *items\n";
+    let mut failed = Vec::new();
+    for verb in ["set", "unset", "add", "remove"] {
+        let mut document = Document::parse(source, Format::Yaml).unwrap();
+        let before = document.value().clone();
+        let fields = [("id".to_string(), Value::String("two".into()))];
+        let result = match verb {
+            "set" => document.set(
+                "other.-",
+                Value::Object(fields.clone().into_iter().collect()),
+            ),
+            "unset" => document.unset("other.0").map(|_| ()),
+            "add" => document.add("other", "two", "id", &fields),
+            _ => document.remove("other", "one", "id"),
+        };
+        if result.is_ok() || document.source() != source || document.value() != &before {
+            failed.push((verb, result, document.source().to_string()));
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "alias edits must refuse without changes: {failed:?}"
+    );
+}
+
+#[cfg(feature = "toml")]
+#[test]
+fn replacing_an_array_of_tables_reports_the_requested_operation() {
+    let source = "[[items]]\nid = 'one'\n";
+    let mut document = Document::parse(source, Format::Toml).unwrap();
+    let error = document.set("items", Value::Array(Vec::new())).unwrap_err();
+    assert!(
+        matches!(error, DocumentError::UnsupportedOperation { operation, .. } if operation == "set")
+    );
+    assert_eq!(document.source(), source);
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn yaml_empty_array_append_refuses_non_finite_values_without_staging_changes() {
+    for (source, path) in [
+        ("[]\n", "-"),
+        ("items: []\n", "items.-"),
+        ("nested:\n  - []\n", "nested.0.-"),
+    ] {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut document = Document::parse(source, Format::Yaml).unwrap();
+            let before = document.value().clone();
+            assert!(
+                document.set(path, Value::Float(invalid)).is_err(),
+                "{source:?} {invalid}"
+            );
+            assert_eq!(document.source(), source);
+            assert_eq!(document.value(), &before);
+        }
+    }
+}
+
 #[test]
 fn test_json_round_trip() {
     let json_str = r#"{"imap": {"host": "mail.example.com", "port": 993}}"#;
@@ -260,6 +378,183 @@ fn test_toml_set_and_unset_address_the_same_inline_table_keys() {
         ),
         "{missing:?}"
     );
+}
+
+#[cfg(feature = "toml")]
+#[test]
+fn test_toml_set_and_unset_address_the_same_array_elements() {
+    use agent_first_data::document::format::toml::{set_preserving, unset_preserving};
+    let source = "arr = [{ k = 1, j = 2 }, { k = 3 }] # keep\nn = [1, 2, 3]\n";
+    let set = set_preserving(source, "arr.1.k", &Value::Integer(9)).unwrap();
+    assert_eq!(
+        set,
+        "arr = [{ k = 1, j = 2 }, { k = 9 }] # keep\nn = [1, 2, 3]\n"
+    );
+    let inner = unset_preserving(&set, "arr.0.j").unwrap();
+    assert_eq!(
+        inner,
+        "arr = [{ k = 1 }, { k = 9 }] # keep\nn = [1, 2, 3]\n"
+    );
+    let element = unset_preserving(&inner, "arr.1").unwrap();
+    assert_eq!(element, "arr = [{ k = 1 }] # keep\nn = [1, 2, 3]\n");
+    let first = unset_preserving(&element, "n.0").unwrap();
+    assert_eq!(first, "arr = [{ k = 1 }] # keep\nn = [2, 3]\n");
+    for missing in ["n.5", "n.x", "arr.3.k"] {
+        let error = unset_preserving(&first, missing).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                agent_first_data::document::DocumentError::PathNotFound { .. }
+            ),
+            "{missing}: {error:?}"
+        );
+    }
+}
+
+/// `paths` escapes a dot inside a key, and its output must feed every write
+/// verb unchanged in TOML as it does elsewhere.
+#[cfg(feature = "toml")]
+#[test]
+fn test_toml_escaped_dot_keys_round_trip_through_set_and_unset() {
+    use agent_first_data::document::format::toml::{set_preserving, unset_preserving};
+    let source = "[hosts]\n\"example.com\" = 1 # primary\n";
+    let set = set_preserving(source, "hosts.example\\.com", &Value::Integer(2)).unwrap();
+    assert_eq!(set, "[hosts]\n\"example.com\" = 2 # primary\n");
+    let added = set_preserving(&set, "hosts.new\\.org", &Value::Integer(3)).unwrap();
+    assert_eq!(
+        added,
+        "[hosts]\n\"example.com\" = 2 # primary\n\"new.org\" = 3\n"
+    );
+    let removed = unset_preserving(&added, "hosts.example\\.com").unwrap();
+    assert_eq!(removed, "[hosts]\n\"new.org\" = 3\n");
+}
+
+#[cfg(feature = "toml")]
+#[test]
+fn test_toml_edits_keep_a_byte_order_mark() {
+    use agent_first_data::document::format::toml::{set_preserving, unset_preserving};
+    for source in [
+        "\u{feff}title = \"a\"\nx = 1\n",
+        "\u{feff}title = \"a\"\r\nx = 1\r\n",
+    ] {
+        let set = set_preserving(source, "title", &Value::String("b".into())).unwrap();
+        assert!(set.starts_with("\u{feff}title = \"b\""), "{set:?}");
+        let unset = unset_preserving(&set, "x").unwrap();
+        assert!(unset.starts_with('\u{feff}'), "{unset:?}");
+        assert_eq!(unset.matches('\u{feff}').count(), 1);
+    }
+}
+
+/// Appending keeps each spelling of an array's layout: a comment beside the
+/// last element stays beside it, the bracket keeps its own line, and a
+/// one-element array still gets the space after its comma.
+#[cfg(feature = "toml")]
+#[test]
+fn test_toml_append_and_new_inline_key_keep_layout() {
+    use agent_first_data::document::format::toml::set_preserving;
+    let three = Value::Integer(3);
+    for (source, expected) in [
+        ("a = [1]\n", "a = [1, 3]\n"),
+        ("a = [ 1, 2 ]\n", "a = [ 1, 2, 3 ]\n"),
+        (
+            "a = [\n  \"x\", # c1\n  \"y\" # c2\n]\n",
+            "a = [\n  \"x\", # c1\n  \"y\", # c2\n  3\n]\n",
+        ),
+        (
+            "a = [\n  \"x\",\n  \"y\",\n  # own\n]\n",
+            "a = [\n  \"x\",\n  \"y\",\n  # own\n  3,\n]\n",
+        ),
+        (
+            "a = [\n  \"x\",\n  \"y\" # c2\n  # own\n]\n",
+            "a = [\n  \"x\",\n  \"y\", # c2\n  # own\n  3\n]\n",
+        ),
+    ] {
+        assert_eq!(set_preserving(source, "a.-", &three).unwrap(), expected);
+    }
+    let v = Value::String("v".into());
+    for (source, expected) in [
+        ("x = { y = 1 }\n", "x = { y = 1, z = \"v\" }\n"),
+        ("x = {y = 1}\n", "x = {y = 1, z = \"v\"}\n"),
+    ] {
+        assert_eq!(set_preserving(source, "x.z", &v).unwrap(), expected);
+    }
+    // A table created on the way to the new leaf is a new entry too.
+    for (source, expected) in [
+        ("x = { y = 1 }\n", "x = { y = 1, z = { w = \"v\" } }\n"),
+        ("x = {y = 1}\n", "x = {y = 1, z = { w = \"v\" }}\n"),
+    ] {
+        assert_eq!(set_preserving(source, "x.z.w", &v).unwrap(), expected);
+    }
+}
+
+/// Removing an array element takes its comment with it and leaves every other
+/// comment beside the element it was written for — in the middle, at the end,
+/// with or without a trailing comma, and on one line.
+#[cfg(feature = "toml")]
+#[test]
+fn test_toml_unset_array_element_keeps_comments_with_their_elements() {
+    use agent_first_data::document::format::toml::unset_preserving;
+    for (source, path, expected) in [
+        (
+            "a = [\n  1, # one\n  2, # two\n  3, # three\n]\n",
+            "a.1",
+            "a = [\n  1, # one\n  3, # three\n]\n",
+        ),
+        (
+            "a = [\n  1, # one\n  2, # two\n]\n",
+            "a.1",
+            "a = [\n  1, # one\n]\n",
+        ),
+        (
+            "a = [\n  1, # one\n  2,\n]\n",
+            "a.1",
+            "a = [\n  1, # one\n]\n",
+        ),
+        (
+            "a = [\n  1, # one\n  2 # two\n]\n",
+            "a.1",
+            "a = [\n  1 # one\n]\n",
+        ),
+        (
+            "a = [\n  1, # one\n  2, # two\n]\n",
+            "a.0",
+            "a = [\n  2, # two\n]\n",
+        ),
+        ("a = [1, 2, 3]\n", "a.1", "a = [1, 3]\n"),
+        ("a = [1, 2, 3]\n", "a.2", "a = [1, 2]\n"),
+        ("a = [ 1, 2 ]\n", "a.1", "a = [ 1 ]\n"),
+        // The first element: the next one keeps the comment written above it,
+        // the removed one takes the comment above it along, and a comment
+        // beside `[` belongs to the bracket.
+        (
+            "a = [\n  1, # one\n  # about two\n  2,\n]\n",
+            "a.0",
+            "a = [\n  # about two\n  2,\n]\n",
+        ),
+        (
+            "a = [ # header\n  # about one\n  1, # one\n  # about two\n  2,\n]\n",
+            "a.0",
+            "a = [ # header\n  # about two\n  2,\n]\n",
+        ),
+        (
+            "a = [ # header\n  1, # one\n]\n",
+            "a.0",
+            "a = [ # header\n]\n",
+        ),
+        (
+            "a = [\n  # about one\n  1, 2\n]\n",
+            "a.0",
+            "a = [\n  2\n]\n",
+        ),
+        ("a = [ 1, 2 ]\n", "a.0", "a = [ 2 ]\n"),
+        ("a = [1, 2]\n", "a.0", "a = [2]\n"),
+    ] {
+        assert_eq!(
+            unset_preserving(source, path).unwrap(),
+            expected,
+            "unset {path} from {source:?}"
+        );
+    }
 }
 
 #[cfg(feature = "toml")]
@@ -878,13 +1173,11 @@ fn test_json_number_literal_fidelity_matrix() {
         get_path(&value, "exp", Addressing::INDEX_ONLY).unwrap(),
         Value::Number("1e+140".to_string())
     );
-    // An integer `-0` has no distinct representation from `0` in `i64` —
-    // there is no signed zero for integers, so this collapses to a plain
-    // `Integer(0)`, not a fidelity violation (no digits are lost; the sign
-    // was mathematically redundant).
+    // `-0` has no distinct `i64`, but JSON keeps a literal as written, and
+    // `render` already prints `-0`: the read keeps the literal too.
     assert_eq!(
         get_path(&value, "neg_zero_int", Addressing::INDEX_ONLY).unwrap(),
-        Value::Integer(0)
+        Value::Number("-0".to_string())
     );
     // A *float* `-0.0` is a distinct IEEE 754 value from `0.0`, and its
     // literal is preserved exactly (not collapsed).
@@ -1653,4 +1946,268 @@ fn frontmatter_keyed_lists_are_editable_like_a_standalone_yaml_file() {
 
     document.remove("identities", "work", "identity").unwrap();
     assert_eq!(document.source(), source);
+}
+
+#[test]
+fn append_path_is_array_only_and_numeric_indices_still_require_an_element() {
+    let mut value = Format::Json
+        .load(r#"{"features":["a"],"object":{"-":"old"}}"#)
+        .unwrap();
+    set_path(
+        &mut value,
+        "features.-",
+        &Value::String("b".into()),
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        get_path(&value, "features.1", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_str(),
+        Some("b")
+    );
+    set_path(
+        &mut value,
+        "object.-",
+        &Value::String("new".into()),
+        Addressing::INDEX_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        get_path(&value, "object.-", Addressing::INDEX_ONLY)
+            .unwrap()
+            .as_str(),
+        Some("new")
+    );
+    assert!(matches!(
+        set_path(
+            &mut value,
+            "features.5",
+            &Value::Null,
+            Addressing::INDEX_ONLY
+        ),
+        Err(DocumentError::IndexOutOfBounds { .. })
+    ));
+}
+
+#[test]
+fn array_append_preserves_source_and_comments() {
+    let cases = [
+        (
+            Format::Json,
+            "{\n  \"features\": [\"a\", \"b\"],\n  \"keep\": 1e+3\n}\n",
+            "{\n  \"features\": [\"a\", \"b\", \"c\"],\n  \"keep\": 1e+3\n}\n",
+        ),
+        #[cfg(feature = "toml")]
+        (
+            Format::Toml,
+            "features = [\n  \"a\", # first\n  \"b\", # second\n] # tail\n",
+            "features = [\n  \"a\", # first\n  \"b\", # second\n  \"c\",\n] # tail\n",
+        ),
+        #[cfg(feature = "yaml")]
+        (
+            Format::Yaml,
+            "features:\n  - a  # first\n  - b\nkeep: 1\n",
+            "",
+        ),
+    ];
+    for (format, source, exact) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(&path, source).unwrap();
+        let mut document =
+            agent_first_data::document::DocumentFile::open(&path, Some(format)).unwrap();
+        document
+            .set("features.-", Value::String("c".into()))
+            .unwrap();
+        document.save().unwrap();
+        let edited = std::fs::read_to_string(&path).unwrap();
+        if !exact.is_empty() {
+            assert_eq!(edited, exact);
+        }
+        if format != Format::Json {
+            assert!(edited.contains("# first"));
+        }
+        if format == Format::Toml {
+            assert!(edited.contains("# second"));
+            assert!(edited.contains("] # tail"));
+        }
+        let value = format.load(&edited).unwrap();
+        assert_eq!(
+            get_path(&value, "features.2", Addressing::INDEX_ONLY)
+                .unwrap()
+                .as_str(),
+            Some("c")
+        );
+        assert!(matches!(
+            document.set("features.5", Value::String("d".into())),
+            Err(DocumentError::IndexOutOfBounds { .. })
+        ));
+    }
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn yaml_creates_missing_mapping_chain_and_distinguishes_missing_paths() {
+    use agent_first_data::document::format::yaml;
+    let source = "a: 1\n";
+    let output = yaml::set_preserving(source, "new.deep.key", &Value::String("v".into())).unwrap();
+    assert_eq!(output, "a: 1\nnew:\n  deep:\n    key: v\n");
+    assert!(matches!(
+        yaml::unset_preserving(source, "missing.key"),
+        Err(DocumentError::PathNotFound { .. })
+    ));
+    assert!(matches!(
+        yaml::set_preserving("{a: 1}\n", "new.deep.key", &Value::String("v".into())),
+        Err(DocumentError::UnsupportedOperation { .. })
+    ));
+}
+
+#[test]
+fn public_atomic_writer_replaces_bytes_preserves_permissions_and_refuses_links() {
+    use agent_first_data::document::{AtomicStep, write_atomic};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.json");
+    write_atomic(&path, b"first").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
+    write_atomic(&path, b"second").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"second");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let link = dir.path().join("link");
+        symlink(&path, &link).unwrap();
+        assert_eq!(
+            write_atomic(&link, b"bad").unwrap_err().step,
+            AtomicStep::Guard
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+    }
+    assert_eq!(
+        write_atomic(dir.path(), b"bad").unwrap_err().step,
+        AtomicStep::Guard
+    );
+    assert!(
+        !write_atomic(&dir.path().join("missing/state"), b"bad")
+            .unwrap_err()
+            .commit_uncertain()
+    );
+}
+
+#[test]
+fn append_handles_empty_arrays_and_root_sequences() {
+    let mut cases = vec![
+        (Format::Json, "{\"features\":[]}", "features.-"),
+        (Format::Json, "[]", "-"),
+    ];
+    #[cfg(feature = "toml")]
+    cases.push((Format::Toml, "features = []\n", "features.-"));
+    #[cfg(feature = "yaml")]
+    cases.extend([
+        (Format::Yaml, "features: []\n", "features.-"),
+        (Format::Yaml, "[]\n", "-"),
+        (Format::Yaml, "- a  # first\n", "-"),
+    ]);
+    for (format, source, path) in cases {
+        let mut document = Document::parse(source, format).unwrap();
+        document.set(path, Value::String("new".into())).unwrap();
+        let expected_path = if path == "-" {
+            if source.starts_with("- a") { "1" } else { "0" }
+        } else {
+            "features.0"
+        };
+        assert_eq!(
+            get_path(document.value(), expected_path, Addressing::INDEX_ONLY)
+                .unwrap()
+                .as_str(),
+            Some("new")
+        );
+    }
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn yaml_missing_parents_can_grow_from_an_empty_mapping() {
+    for source in ["{}\n", "new: {}\n"] {
+        let mut document = Document::parse(source, Format::Yaml).unwrap();
+        document
+            .set("new.deep.key", Value::String("v".into()))
+            .unwrap();
+        assert_eq!(
+            get_path(document.value(), "new.deep.key", Addressing::INDEX_ONLY)
+                .unwrap()
+                .as_str(),
+            Some("v")
+        );
+    }
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn yaml_writes_reach_every_address_a_read_does() {
+    let object = |pairs: &[(&str, Value)]| {
+        Value::Object(
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.clone()))
+                .collect(),
+        )
+    };
+    // A field added to a single-key list item, which is what `add` leaves.
+    for source in ["servers:\n  - name: web\n", "servers:\n- name: web # c\n"] {
+        let mut document = Document::parse(source, Format::Yaml).unwrap();
+        document.set("servers.0.port", Value::Integer(80)).unwrap();
+        assert_eq!(
+            get_path(document.value(), "servers.0.port", Addressing::INDEX_ONLY).unwrap(),
+            Value::Integer(80),
+            "{source:?} became {:?}",
+            document.source()
+        );
+        assert_eq!(
+            Document::parse(document.source(), Format::Yaml)
+                .unwrap()
+                .value(),
+            document.value()
+        );
+    }
+    // A sequence element replaced by a collection.
+    let mut document = Document::parse("b:\n  - 7\n  - 8 # c\n", Format::Yaml).unwrap();
+    let replacement = object(&[("k", Value::Integer(1))]);
+    document.set("b.0", replacement.clone()).unwrap();
+    assert_eq!(document.source(), "b:\n  - k: 1\n  - 8 # c\n");
+    // An empty document starts its mapping, keeping its comments.
+    let mut document = Document::parse("# config\n", Format::Yaml).unwrap();
+    document.set("a.b", Value::String("c".into())).unwrap();
+    assert_eq!(document.source(), "# config\na:\n  b: c\n");
+}
+
+#[cfg(feature = "toml")]
+#[test]
+fn toml_datetime_text_written_back_stays_a_datetime() {
+    let mut document = Document::parse("d = 1979-05-27T07:32:00Z\n", Format::Toml).unwrap();
+    document
+        .set("d", Value::String("2020-01-01T00:00:00Z".into()))
+        .unwrap();
+    assert_eq!(document.source(), "d = 2020-01-01T00:00:00Z\n");
+}
+
+#[cfg(feature = "dotenv")]
+#[test]
+fn an_invalid_dotenv_name_blames_the_path_not_the_file() {
+    let mut document = Document::parse("Z=1\n", Format::Dotenv).unwrap();
+    let error = document.set("a b", Value::String("v".into())).unwrap_err();
+    assert_eq!(error.code(), "document_unsupported_operation", "{error}");
+    assert_eq!(document.source(), "Z=1\n");
 }

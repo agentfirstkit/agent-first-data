@@ -71,7 +71,9 @@ impl std::error::Error for SkillValidationError {}
 ///
 /// The YAML parser uses its strict resource and duplicate-key policy. The
 /// metadata fields and limits follow the Agent Skills specification; unknown
-/// fields outside the documented client extensions are rejected.
+/// fields outside the documented client extensions are rejected. A
+/// description, and a compatibility note when present, must contain
+/// non-whitespace text; length limits count Unicode characters.
 pub fn validate_skill(text: &str) -> Result<SkillMetadata, SkillValidationError> {
     let frontmatter = extract_frontmatter(text)?;
     let metadata = from_str_with_config::<SkillMetadata>(frontmatter, &ParserConfig::strict())
@@ -164,6 +166,11 @@ fn validate_length(
     minimum: usize,
     maximum: usize,
 ) -> Result<(), SkillValidationError> {
+    if value.trim().is_empty() {
+        return Err(SkillValidationError::new(format!(
+            "{field} must contain non-whitespace text"
+        )));
+    }
     let length = value.chars().count();
     if !(minimum..=maximum).contains(&length) {
         return Err(SkillValidationError::new(format!(
@@ -221,5 +228,36 @@ mod tests {
     fn supports_crlf_frontmatter() {
         let input = "---\r\nname: code-review\r\ndescription: valid\r\n---\r\n# Body\r\n";
         assert!(validate_skill(input).is_ok());
+    }
+
+    #[test]
+    fn rejects_blank_descriptions_and_present_but_blank_compatibility() {
+        for blank in ["", " ", "\n\t", "\u{3000}"] {
+            for field in ["description", "compatibility"] {
+                let mut metadata = validate_skill(VALID).unwrap();
+                if field == "description" {
+                    metadata.description = blank.to_owned();
+                } else {
+                    metadata.compatibility = Some(blank.to_owned());
+                }
+                let error = validate_metadata(&metadata).unwrap_err();
+                assert_eq!(
+                    error.message(),
+                    format!("{field} must contain non-whitespace text")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_limits_count_unicode_characters_without_rewriting_content() {
+        let description = format!(" {} ", "字".repeat(1022));
+        let input = format!("---\nname: code-review\ndescription: '{description}'\n---\n");
+        assert_eq!(validate_skill(&input).unwrap().description, description);
+        let too_long = format!(
+            "---\nname: code-review\ndescription: '{}'\n---\n",
+            "字".repeat(1025)
+        );
+        assert!(validate_skill(&too_long).is_err());
     }
 }

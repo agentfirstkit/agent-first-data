@@ -69,7 +69,7 @@ execution and output policies. Use the resolved `OutputPlan` with
 case.
 
 An `ArgSpec` can declare indirect values with
-`sources(SourceSet::config())` (`env:NAME`, `file:PATH#DOT_PATH`, or
+`sources(SourceSet::config())` (`env:NAME`, `file:PATH[#DOT_PATH]`, or
 `file+FORMAT:PATH#DOT_PATH`) or `SourceSet::stream()` (also `stdin`, `fd:N`,
 and `prompt`). Parse the resolved string with that same set, then call
 `ValueSource::read()` for an ordinary value or `read_secret()` for a
@@ -89,6 +89,7 @@ Canonical flags are `--stdout-file` and `--stderr-file`. They redirect the corre
 - `Redactor::url_names` applies that URL treatment to exact legacy field names
   and recurses through collections. `redact_urls_in_text` is the explicit
   scheme-URL-only prose helper; ordinary structured redaction never scans prose.
+- `Redactor::reveal_names` reveals exact structured field names at the selected output boundary. Children still pass through redaction; URL parameters and argv receive no exemption.
 - YAML/plain quote and escape keys as well as values, sort by UTF-16 code unit order, and render nested objects in arrays as canonical JSON.
 - Logging records use `kind:"log"` with a nested `log` payload and a separate `level` field, so error-level logs are not terminal protocol errors.
 - Use `AfdataLayer::new(...).with_writer(...)` when composing tracing or
@@ -115,16 +116,31 @@ Canonical flags are `--stdout-file` and `--stderr-file`. They redirect the corre
   and every fixed `one_of` member, so the same registered shapes can be
   round-trip tested independently of help placeholders.
 - Use `document::DocumentFile::open_capped` for bounded untrusted reads,
-  `create_atomic` for a parsed first commit, and `edit_and_validate` for a
-  typed transactional edit. TOML collections are source-preserving except
+  `create_atomic` for a parsed first commit, `decode` for a typed read, and
+  `edit_and_validate` for a typed transactional edit. TOML collections are source-preserving except
   arrays of tables, which require an explicit identity and are refused.
 - Feature `libc` gives `open_capped` nonblocking special-file rejection and
   atomic `SymlinkPolicy::NoFollow` on unix. Without it, `NoFollow` is
   unsupported and opening a special file may block before its type is checked.
 - `ErrorSpec` / `ErrorCatalog` keep stable public errors separate from runtime
   diagnostics. `lint_value`, strict-event assertions, and redaction-canary
-  assertions test final serialized boundaries in-process.
+  assertions test final serialized boundaries in-process. Canary assertions
+  inspect successive decoding layers, including JSON escapes around
+  percent-encoded nested URLs.
+- Protocol payloads are `serde_json::Value` built with `arbitrary_precision`,
+  so decode and render keep every digit. Cargo unifies that feature across the
+  whole dependency graph, including builds with default features disabled:
+  convert at another serializer's typed boundary, or it may render
+  `serde_json`'s private number marker.
 - `stream-redirect` enables `libc` and provides Unix fd-level redirection where supported. It is stream destination control, not a second AFDATA protocol stream, and it does not implement rotation.
+
+A file value source without `#DOT_PATH` reads the complete UTF-8 file verbatim,
+without document parsing or scalar conversion. An explicit `#` requires a
+non-empty document address. Whole files and stream sources (`stdin`, `fd:N`)
+read through `read()` are capped at 16 MiB and preserve trailing whitespace;
+credential streams through `read_secret()` and terminal prompts retain their
+1 MiB bound. File sources require regular files. Addressed file sources retain
+their typed scalar semantics.
 
 ## Reference
 

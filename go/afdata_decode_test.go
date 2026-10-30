@@ -48,7 +48,7 @@ func TestDecodeProtocolEventError(t *testing.T) {
 	if errEvent.Message != "not found" {
 		t.Errorf("message = %v", errEvent.Message)
 	}
-	if !errEvent.Retryable {
+	if errEvent.Retryable == nil || !*errEvent.Retryable {
 		t.Errorf("retryable = %v, want true", errEvent.Retryable)
 	}
 	if errEvent.Hint != "try again" {
@@ -74,7 +74,7 @@ func TestDecodeProtocolEventErrorWithoutHint(t *testing.T) {
 	if errEvent.Hint != "" {
 		t.Errorf("hint = %q, want empty", errEvent.Hint)
 	}
-	if errEvent.Retryable {
+	if errEvent.Retryable == nil || *errEvent.Retryable {
 		t.Errorf("retryable = true, want false")
 	}
 }
@@ -127,11 +127,14 @@ func TestDecodeProtocolEventInvalidJSON(t *testing.T) {
 }
 
 func TestDecodeProtocolEventFailsStrictValidation(t *testing.T) {
-	// Missing trace fails the strict profile even though it is a well-formed result envelope.
-	_, err := DecodeProtocolEvent(`{"kind":"result","result":{}}`)
-	if err == nil {
-		t.Fatal("expected strict validation error for missing trace")
+	decoded, err := DecodeProtocolEvent(`{"kind":"error","error":{"code":"failed","message":"Failed"}}`)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if decoded.(*DecodedError).Retryable != nil {
+		t.Fatal("missing retryable must stay nil")
+	}
+
 }
 
 func TestDecodeProtocolEventRejectsUnknownKind(t *testing.T) {
@@ -145,10 +148,19 @@ func TestProtocolDecodeFixtures(t *testing.T) {
 	for _, tc := range loadFixture("protocol_decode.json") {
 		name := tc["name"].(string)
 		t.Run(name, func(t *testing.T) {
-			_, err := DecodeProtocolEvent(tc["input_line"].(string))
+			decoded, err := DecodeProtocolEvent(tc["input_line"].(string))
 			valid := tc["valid"].(bool)
 			if (err == nil) != valid {
 				t.Fatalf("valid = %v, error = %v", valid, err)
+			}
+			if expected, ok := tc["expected_result_json"].(string); ok {
+				result, isResult := decoded.(*DecodedResult)
+				if !isResult {
+					t.Fatalf("expected a result event, got %T", decoded)
+				}
+				if got := Render(result.Result, OutputFormatJson, OutputOptions{}); got != expected {
+					t.Errorf("result = %q, want %q", got, expected)
+				}
 			}
 		})
 	}

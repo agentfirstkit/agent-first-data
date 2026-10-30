@@ -157,3 +157,8 @@ as an empty value.
 4. Apply redaction before every serializer, including HTTP/MCP/SSE.
 5. Keep JSON/YAML schema-preserving.
 6. Run `afdata lint` against representative serialized values.
+
+Use `reveal_names` (`revealNames` in TypeScript, `RevealNames` in Go) only at an
+intentional delivery boundary. Exact structured field names skip whole-value
+masking; nested children, URL parameters, URL credentials, and argv retain their
+normal redaction. Prefer this to disabling redaction for the whole event.

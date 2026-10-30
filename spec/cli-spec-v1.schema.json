@@ -44,7 +44,7 @@
     },
     "exit_codes": {
       "type": "array",
-      "description": "Exit codes this CLI returns beyond AFDATA's 0/1/2, rendered into the reference's exit-code table. 0/1/2 are AFDATA's own and may not be redeclared.",
+      "description": "Exit codes this CLI returns beyond AFDATA's 0/1/2/4, rendered into the reference's exit-code table. AFDATA's codes may not be redeclared.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -56,7 +56,10 @@
           "code": {
             "type": "integer",
             "minimum": 3,
-            "maximum": 255
+            "maximum": 255,
+            "not": {
+              "const": 4
+            }
           },
           "meaning": {
             "$ref": "#/$defs/nonEmpty"

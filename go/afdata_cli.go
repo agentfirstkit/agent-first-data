@@ -169,7 +169,17 @@ type CliEmitter struct {
 	outputOptions   OutputOptions
 	strictProtocol  bool
 	terminalEmitted bool
+	// processStderr overrides where an event-stream emitter reports a failed
+	// write; nil means the process's stderr. Tests set it.
+	processStderr io.Writer
 }
+
+// emitWriteError marks an emit failure that happened while writing, as
+// opposed to an event the emitter refused.
+type emitWriteError struct{ err error }
+
+func (e *emitWriteError) Error() string { return fmt.Sprintf("failed to write CLI event: %v", e.err) }
+func (e *emitWriteError) Unwrap() error { return e.err }
 
 // NewCliEmitter creates an event-stream (unified) emitter: every event,
 // including error, goes to writer. Alias for the stream form. Use
@@ -277,7 +287,7 @@ func (e *CliEmitter) writeEvent(envelope map[string]any) error {
 	}
 	_, err := io.WriteString(sink, Render(envelope, e.format, e.outputOptions)+"\n")
 	if err != nil {
-		return fmt.Errorf("failed to write CLI event: %w", err)
+		return &emitWriteError{err: err}
 	}
 	if kind == "result" || kind == "error" {
 		e.terminalEmitted = true
@@ -318,7 +328,12 @@ func (e *CliEmitter) EmitLog(level LogLevel, message string) error {
 // an exit status" boilerplate. It returns successCode when the event is written;
 // 0 when the write failed because the reader hung up (a broken pipe, i.e.
 // errors.Is(err, syscall.EPIPE) — the conventional clean shutdown when a
-// consumer stops reading); and 4 on any other emit or write failure.
+// consumer stops reading), saying nothing. Any other write failure returns 4
+// after reporting output_write_failed as an error event: on the diagnostic
+// writer in finite mode, on the process's stderr in event-stream mode, whose
+// only writer is the one that just failed. That report is best effort. An
+// event the emitter refuses (a protocol violation or a second terminal event)
+// is the command's own failure, not an output one, and returns 1.
 // For process standard output/error streams, the runtime can terminate with SIGPIPE before the
 // write returns an error; Finish does not override that process signal policy.
 //
@@ -326,14 +341,36 @@ func (e *CliEmitter) EmitLog(level LogLevel, message string) error {
 // decision to the caller (typically os.Exit(code)).
 func (e *CliEmitter) Finish(event Event, successCode int) int {
 	err := e.Emit(event)
+	var writeErr *emitWriteError
 	switch {
 	case err == nil:
 		return successCode
 	case errors.Is(err, syscall.EPIPE):
 		return 0
-	default:
+	case errors.As(err, &writeErr):
+		e.reportOutputWriteFailed()
 		return 4
+	default:
+		return 1
 	}
+}
+
+func (e *CliEmitter) reportOutputWriteFailed() {
+	event, err := NewJSONError("output_write_failed", "could not write command output").Build()
+	if err != nil {
+		return
+	}
+	if e.diagnostic != nil {
+		_ = e.Emit(event)
+		return
+	}
+	// Event-stream mode has no diagnostic writer, so the report goes to the
+	// process's stderr through an emitter of its own.
+	stderr := NewCliEmitterWithOptions(os.Stderr, e.format, OutputOptions{}).WithStrictProtocol()
+	if e.processStderr != nil {
+		stderr.writer = e.processStderr
+	}
+	_ = stderr.Emit(event)
 }
 
 // FinishResult builds a result event for payload, emits it to the primary

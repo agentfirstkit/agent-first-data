@@ -55,10 +55,15 @@
 //!   `--input-format toml-frontmatter` is the reading that turns it into
 //!   values. Omitting the raw metadata also prevents this structural reading
 //!   from becoming a way around field-name-based secret redaction.
-//! - **No recursion into a block's children.** A blockquote or list reports
-//!   flattened `text`; its inner block structure is not exposed. (Heading
-//!   sections *are* nested — that hierarchy comes from the level, not from
-//!   walking inside a block.)
+//! - **`text` is flattened plain text.** Emphasis is unwrapped, a code span
+//!   keeps only its content, a link keeps its text, an image keeps its alt
+//!   text, and inline HTML tags are dropped. What was flattened away is kept
+//!   beside it: a paragraph, a heading, and a section report `inlines`, the
+//!   ordered inline tree (`text`, `code`, `html`, `line_break`, and `emphasis`,
+//!   `strong`, `link` with their own `inlines`; `link` and `image` carry
+//!   `destination_url`). A blockquote, a list, and a list item report their
+//!   child blocks under `blocks`, so a code fence inside a list item is still a
+//!   `code` block. (Heading sections nest by level, not by walking a block.)
 //! - **No byte offsets or columns.** Every block does carry 1-based inclusive
 //!   `source_start_line` / `source_end_line`. Every section carries its whole
 //!   source range plus `heading_end_line` for the
@@ -70,7 +75,7 @@
 
 use std::{collections::BTreeMap, ops::Range};
 
-use pulldown_cmark::{CodeBlockKind, Event, MetadataBlockKind, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, MetadataBlockKind, Options, Parser, Tag};
 
 use crate::document::{DocumentError, DocumentResult, Value};
 
@@ -78,7 +83,7 @@ use crate::document::{DocumentError, DocumentResult, Value};
 ///
 /// CommonMark has no invalid-input production — every UTF-8 string is some
 /// sequence of blocks — so this fails only where afdata declines to answer: a
-/// bare carriage return, or block nesting deeper than [`MAX_BLOCK_DEPTH`]. An
+/// bare carriage return, or block nesting more than 48 levels deep. An
 /// empty string yields an empty `preamble` and no sections.
 pub fn load(content: &str) -> DocumentResult<Value> {
     reject_lone_carriage_return(content)?;
@@ -188,43 +193,38 @@ fn reject_lone_carriage_return(content: &str) -> DocumentResult<()> {
     Ok(())
 }
 
-/// The block walk recurses once per nested container, matching the depth the
-/// JSON and YAML readers allow.
-const MAX_BLOCK_DEPTH: usize = 128;
+/// How deep blocks and inline spans may nest. The walk recurses once per
+/// level, and the reported tree is deeper still: each level becomes an object
+/// plus the array of its children, and the root and six heading levels add
+/// about fifteen more. 48 keeps the deepest accepted file's tree near 111
+/// levels, so it fits inside the 128 a JSON reader allows — serde_json's
+/// limit, which `afdata get` applies to its own output read back — with room
+/// for an envelope around it.
+const MAX_BLOCK_DEPTH: usize = 48;
 
-/// Refuse nesting the recursive block walk cannot hold before it starts, so a
-/// file of `> > > …` is an error rather than a stack overflow.
+/// Refuse nesting the recursive walk cannot hold before it starts, so a file
+/// of `> > > …` is an error rather than a stack overflow. Inline spans count
+/// too: the reported inline tree nests exactly as deep as they do.
 fn reject_deep_nesting(events: &[SpannedEvent<'_>]) -> DocumentResult<()> {
     let mut depth = 0usize;
     for (event, _) in events {
         match event {
-            Event::Start(tag) if !is_inline_tag(tag) => {
+            Event::Start(_) => {
                 depth += 1;
                 if depth > MAX_BLOCK_DEPTH {
                     return Err(DocumentError::SourceRefused {
                         format: "Markdown".to_string(),
-                        detail: format!("blocks nest deeper than {MAX_BLOCK_DEPTH} levels"),
+                        detail: format!(
+                            "blocks and inline spans nest deeper than {MAX_BLOCK_DEPTH} levels"
+                        ),
                     });
                 }
             }
-            Event::End(tag) if !is_inline_end(*tag) => depth = depth.saturating_sub(1),
+            Event::End(_) => depth = depth.saturating_sub(1),
             _ => {}
         }
     }
     Ok(())
-}
-
-fn is_inline_end(tag: TagEnd) -> bool {
-    matches!(
-        tag,
-        TagEnd::Emphasis
-            | TagEnd::Strong
-            | TagEnd::Strikethrough
-            | TagEnd::Superscript
-            | TagEnd::Subscript
-            | TagEnd::Link
-            | TagEnd::Image
-    )
 }
 
 /// Pure CommonMark, plus the two metadata-block rules and nothing else.
@@ -249,6 +249,7 @@ fn options() -> Options {
 struct Section {
     level: i64,
     text: String,
+    inlines: Value,
     heading_lines: SourceLines,
     blocks: Vec<Value>,
     children: Vec<Section>,
@@ -282,6 +283,10 @@ fn fold_sections(blocks: Vec<Value>) -> Value {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string(),
+                    inlines: block
+                        .get("inlines")
+                        .cloned()
+                        .unwrap_or_else(|| Value::Array(Vec::new())),
                     heading_lines: SourceLines {
                         start: block
                             .get("source_start_line")
@@ -378,6 +383,7 @@ impl Section {
         let mut fields = block_views(self.blocks);
         fields.insert("level".to_string(), Value::Integer(self.level));
         fields.insert("text".to_string(), Value::String(self.text));
+        fields.insert("inlines".to_string(), self.inlines);
         fields.insert(
             "source_start_line".to_string(),
             Value::Integer(self.heading_lines.start),
@@ -433,10 +439,16 @@ fn read_blocks(
             // loose list report the same items.
             _ => {
                 let first = *cursor;
-                let text = read_loose_inline(events, cursor);
+                let (text, inlines) = read_loose_inline(events, cursor);
                 if !text.is_empty() {
                     let source = covered_range(events, first, *cursor);
-                    blocks.push(block("paragraph", text, &source, lines, vec![]));
+                    blocks.push(block(
+                        "paragraph",
+                        text,
+                        &source,
+                        lines,
+                        vec![("inlines", inlines)],
+                    ));
                 }
             }
         }
@@ -467,20 +479,29 @@ fn read_block(
     cursor: &mut usize,
 ) -> Option<Value> {
     match tag {
-        Tag::Paragraph => Some(block(
-            "paragraph",
-            read_inline(events, cursor),
-            source,
-            lines,
-            vec![],
-        )),
-        Tag::Heading { level, .. } => Some(block(
-            "heading",
-            read_inline(events, cursor),
-            source,
-            lines,
-            vec![("level", Value::Integer(*level as i64))],
-        )),
+        Tag::Paragraph => {
+            let (text, inlines) = read_inline(events, cursor);
+            Some(block(
+                "paragraph",
+                text,
+                source,
+                lines,
+                vec![("inlines", inlines)],
+            ))
+        }
+        Tag::Heading { level, .. } => {
+            let (text, inlines) = read_inline(events, cursor);
+            Some(block(
+                "heading",
+                text,
+                source,
+                lines,
+                vec![
+                    ("level", Value::Integer(*level as i64)),
+                    ("inlines", inlines),
+                ],
+            ))
+        }
         Tag::CodeBlock(kind) => {
             // CommonMark's info string is everything after the opening fence;
             // in practice it is the language. An indented block has none.
@@ -537,31 +558,41 @@ fn read_block(
                 )],
             ))
         }
-        Tag::BlockQuote(_) => Some(block(
-            "blockquote",
-            read_container(events, lines, cursor),
-            source,
-            lines,
-            vec![],
-        )),
-        Tag::List(first_number) => Some(block(
-            "list",
-            read_container(events, lines, cursor),
-            source,
-            lines,
-            vec![("ordered", Value::Bool(first_number.is_some()))],
-        )),
-        // An item exists only as a list's child, and the list flattens it away
-        // into its own `text`, so this shape never reaches a caller. It is a
-        // block here so that the generic container walk can reach an item's
-        // own children at all.
-        Tag::Item => Some(block(
-            "item",
-            read_container(events, lines, cursor),
-            source,
-            lines,
-            vec![],
-        )),
+        Tag::BlockQuote(_) => {
+            let (text, children) = read_container(events, lines, cursor);
+            Some(block(
+                "blockquote",
+                text,
+                source,
+                lines,
+                vec![("blocks", children)],
+            ))
+        }
+        Tag::List(first_number) => {
+            let (text, children) = read_container(events, lines, cursor);
+            Some(block(
+                "list",
+                text,
+                source,
+                lines,
+                vec![
+                    ("ordered", Value::Bool(first_number.is_some())),
+                    ("blocks", children),
+                ],
+            ))
+        }
+        // An item exists only as a list's child: it is reached through the
+        // list's `blocks`, one `item` per list item, each with its own blocks.
+        Tag::Item => {
+            let (text, children) = read_container(events, lines, cursor);
+            Some(block(
+                "item",
+                text,
+                source,
+                lines,
+                vec![("blocks", children)],
+            ))
+        }
         // Tables, footnote definitions, definition lists, and metadata blocks
         // require options this backend does not enable, so none of them can
         // occur. Skipping the subtree keeps that a fact rather than a
@@ -574,7 +605,8 @@ fn read_block(
 }
 
 /// Flattened text of a container block — its child blocks' `text` joined by a
-/// newline — consuming through the container's own `End`.
+/// newline — and the child blocks themselves, consuming through the
+/// container's own `End`.
 ///
 /// Block boundaries survive as newlines because they are structure; a wrapped
 /// line inside one paragraph does not, because it is presentation (see
@@ -584,65 +616,209 @@ fn read_container(
     events: &[SpannedEvent<'_>],
     lines: &LineIndex<'_>,
     cursor: &mut usize,
-) -> String {
+) -> (String, Value) {
     let children = read_blocks(events, lines, cursor);
     // `read_blocks` stops on the container's `End` rather than past it.
     *cursor += 1;
-    children
+    let text = children
         .iter()
         .filter_map(|child| child.get("text").and_then(Value::as_str))
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    (text, Value::Array(children))
 }
 
-/// Flattened plain text of a leaf block's inline content, consuming through
-/// that block's own `End`.
+/// Flattened plain text of a leaf block's inline content, and the inline tree
+/// it was flattened from, consuming through that block's own `End`.
 ///
-/// Emphasis and strong are unwrapped, a code span keeps its content, a link
-/// keeps its text and drops its URL, an image keeps its alt text, raw inline
-/// HTML tags are dropped, and every line break inside the block — soft or hard
-/// — becomes a single space. The result is one line of plain prose, which is
-/// what a name, a synopsis, or a prompt is.
-fn read_inline(events: &[SpannedEvent<'_>], cursor: &mut usize) -> String {
-    let text = read_loose_inline(events, cursor);
+/// In `text`, emphasis and strong are unwrapped, a code span keeps its
+/// content, a link keeps its text and drops its URL, an image keeps its alt
+/// text, raw inline HTML tags are dropped, and every line break inside the
+/// block — soft or hard — becomes a single space. The result is one line of
+/// plain prose, which is what a name, a synopsis, or a prompt is. The tree
+/// keeps what that dropped; see [`InlineReader`].
+fn read_inline(events: &[SpannedEvent<'_>], cursor: &mut usize) -> (String, Value) {
+    let read = read_loose_inline(events, cursor);
     if matches!(events.get(*cursor), Some((Event::End(_), _))) {
         *cursor += 1;
     }
-    text
+    read
 }
 
 /// [`read_inline`] without an owning block: stops *before* the next block
 /// boundary instead of consuming a closing `End`. This is the form a tight
 /// list item needs, whose text has no paragraph of its own to end.
-fn read_loose_inline(events: &[SpannedEvent<'_>], cursor: &mut usize) -> String {
-    let mut text = String::new();
+fn read_loose_inline(events: &[SpannedEvent<'_>], cursor: &mut usize) -> (String, Value) {
+    let mut reader = InlineReader::default();
     let mut depth = 0usize;
     while let Some((event, _)) = events.get(*cursor) {
         match event {
             Event::Start(tag) if depth == 0 && !is_inline_tag(tag) => break,
             Event::End(_) if depth == 0 => break,
             Event::Rule if depth == 0 => break,
-            Event::Start(_) => {
+            Event::Start(tag) => {
                 depth += 1;
-                *cursor += 1;
+                reader.open(tag);
             }
             Event::End(_) => {
                 depth -= 1;
-                *cursor += 1;
+                reader.close();
             }
-            Event::Text(chunk) | Event::Code(chunk) => {
-                text.push_str(chunk);
-                *cursor += 1;
-            }
-            Event::SoftBreak | Event::HardBreak => {
-                text.push(' ');
-                *cursor += 1;
-            }
-            _ => *cursor += 1,
+            Event::Text(chunk) => reader.text(chunk),
+            Event::Code(chunk) => reader.leaf("code", chunk, chunk),
+            Event::InlineHtml(chunk) | Event::Html(chunk) => reader.leaf("html", chunk, ""),
+            Event::SoftBreak => reader.text(" "),
+            Event::HardBreak => reader.leaf("line_break", "", " "),
+            _ => {}
+        }
+        *cursor += 1;
+    }
+    reader.finish()
+}
+
+/// One inline node while its parent is still open.
+struct Inline {
+    kind: &'static str,
+    /// Flattened text, under the same rule as the block's `text`.
+    text: String,
+    destination_url: Option<String>,
+    /// `None` for a leaf, and for an image: alt text is plain text in the
+    /// rendered output, so its markup is not reported as structure.
+    children: Option<Vec<Inline>>,
+}
+
+impl Inline {
+    fn into_value(self) -> Value {
+        // A span's flattened text is trimmed like a block's; a leaf is not, or
+        // the space between `see ` and a following link would be lost.
+        let text = if self.children.is_some() || self.destination_url.is_some() {
+            self.text.trim().to_string()
+        } else {
+            self.text
+        };
+        let mut fields = BTreeMap::from([
+            ("type".to_string(), Value::String(self.kind.to_string())),
+            ("text".to_string(), Value::String(text)),
+        ]);
+        if let Some(url) = self.destination_url {
+            fields.insert("destination_url".to_string(), Value::String(url));
+        }
+        if let Some(children) = self.children {
+            fields.insert("inlines".to_string(), inline_values(children));
+        }
+        Value::Object(fields)
+    }
+}
+
+fn inline_values(inlines: Vec<Inline>) -> Value {
+    Value::Array(inlines.into_iter().map(Inline::into_value).collect())
+}
+
+/// Builds a block's flattened `text` and its inline tree in one pass.
+///
+/// Every open span accumulates its own flattened text as content arrives, so
+/// a link reports the text a reader sees without the caller walking its
+/// children. Adjacent text — including a soft break, which is presentation —
+/// merges into one `text` node. Spans that need a dialect this reader does not
+/// enable (strikethrough, sub- and superscript) cannot occur; if one did, its
+/// content would join its parent rather than invent a node kind.
+#[derive(Default)]
+struct InlineReader {
+    text: String,
+    roots: Vec<Inline>,
+    open: Vec<Inline>,
+    /// Per opened tag, whether it opened a node in `open`.
+    opened: Vec<bool>,
+}
+
+impl InlineReader {
+    /// The list new content joins. Never an image's: content inside one is
+    /// only flattened (see `in_image`), so an image is never open here.
+    fn siblings(&mut self) -> &mut Vec<Inline> {
+        match self.open.last_mut() {
+            Some(span) => span.children.get_or_insert_with(Vec::new),
+            None => &mut self.roots,
         }
     }
-    text.trim().to_string()
+
+    fn flatten(&mut self, chunk: &str) {
+        self.text.push_str(chunk);
+        for span in &mut self.open {
+            span.text.push_str(chunk);
+        }
+    }
+
+    fn in_image(&self) -> bool {
+        self.open.iter().any(|span| span.kind == "image")
+    }
+
+    fn text(&mut self, chunk: &str) {
+        self.flatten(chunk);
+        if self.in_image() {
+            return;
+        }
+        let siblings = self.siblings();
+        match siblings.last_mut() {
+            Some(last) if last.kind == "text" => last.text.push_str(chunk),
+            _ => siblings.push(Inline {
+                kind: "text",
+                text: chunk.to_string(),
+                destination_url: None,
+                children: None,
+            }),
+        }
+    }
+
+    fn leaf(&mut self, kind: &'static str, node_text: &str, flat: &str) {
+        self.flatten(flat);
+        if self.in_image() {
+            return;
+        }
+        self.siblings().push(Inline {
+            kind,
+            text: node_text.to_string(),
+            destination_url: None,
+            children: None,
+        });
+    }
+
+    fn open(&mut self, tag: &Tag<'_>) {
+        let span = match tag {
+            Tag::Emphasis => Some(("emphasis", None, true)),
+            Tag::Strong => Some(("strong", None, true)),
+            Tag::Link { dest_url, .. } => Some(("link", Some(dest_url.to_string()), true)),
+            Tag::Image { dest_url, .. } => Some(("image", Some(dest_url.to_string()), false)),
+            _ => None,
+        };
+        // Inside an image everything is alt text: no nested nodes.
+        let span = span.filter(|_| !self.in_image());
+        self.opened.push(span.is_some());
+        if let Some((kind, destination_url, structured)) = span {
+            self.open.push(Inline {
+                kind,
+                text: String::new(),
+                destination_url,
+                children: structured.then(Vec::new),
+            });
+        }
+    }
+
+    fn close(&mut self) {
+        if self.opened.pop() == Some(true)
+            && let Some(done) = self.open.pop()
+        {
+            self.siblings().push(done);
+        }
+    }
+
+    fn finish(mut self) -> (String, Value) {
+        while !self.open.is_empty() {
+            self.opened.push(true);
+            self.close();
+        }
+        (self.text.trim().to_string(), inline_values(self.roots))
+    }
 }
 
 /// Literal content of a code or HTML block, consuming through its `End`.
@@ -1271,11 +1447,11 @@ mod tests {
     fn nesting_beyond_the_block_depth_is_refused_not_a_stack_overflow() {
         let nested = |depth: usize| format!("# T\n{}x\n", "> ".repeat(depth));
         // The heading closes first, so the innermost paragraph adds one level.
-        assert_eq!(text(&nested(127), "h1.0.blockquote.0.text"), "x");
-        for depth in [128, 100_000] {
+        assert_eq!(text(&nested(47), "h1.0.blockquote.0.text"), "x");
+        for depth in [48, 100_000] {
             let error = load(&nested(depth)).unwrap_err();
             assert_eq!(error.code(), "document_source_refused");
-            assert!(error.to_string().contains("128 levels"), "{error}");
+            assert!(error.to_string().contains("48 levels"), "{error}");
         }
         let error = load(&format!("{}x\n", "- ".repeat(100_000))).unwrap_err();
         assert_eq!(error.code(), "document_source_refused");
@@ -1368,5 +1544,164 @@ mod tests {
             shape("```\nline one\nline two\n```\n", "preamble.blocks"),
             [("code".to_string(), "line one\nline two".to_string())]
         );
+    }
+
+    /// `text` flattens inline markup; `inlines` keeps exactly what that drops:
+    /// which words are code, where a link points, what is an image.
+    #[test]
+    fn inlines_keep_what_text_flattens() {
+        let source =
+            "See [the **docs**](docs.md), ![alt *x*](img.png) and `code` <b>b</b>\\\nend\n";
+        assert_eq!(
+            text(source, "preamble.paragraph.0.text"),
+            "See the docs, alt x and code b end"
+        );
+        let kinds = |path: &str| -> Vec<(String, String)> {
+            at(source, path)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|node| {
+                    (
+                        node.get("type")
+                            .and_then(Value::as_str)
+                            .unwrap()
+                            .to_string(),
+                        node.get("text")
+                            .and_then(Value::as_str)
+                            .unwrap()
+                            .to_string(),
+                    )
+                })
+                .collect()
+        };
+        let pairs = |items: &[(&str, &str)]| -> Vec<(String, String)> {
+            items
+                .iter()
+                .map(|(kind, text)| (kind.to_string(), text.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            kinds("preamble.paragraph.0.inlines"),
+            pairs(&[
+                ("text", "See "),
+                ("link", "the docs"),
+                ("text", ", "),
+                ("image", "alt x"),
+                ("text", " and "),
+                ("code", "code"),
+                ("text", " "),
+                ("html", "<b>"),
+                ("text", "b"),
+                ("html", "</b>"),
+                ("line_break", ""),
+                ("text", "end"),
+            ])
+        );
+        assert_eq!(
+            kinds("preamble.paragraph.0.inlines.docs.inlines"),
+            pairs(&[("text", "the "), ("strong", "docs")])
+        );
+        assert_eq!(
+            text(source, "preamble.paragraph.0.inlines.docs.destination_url"),
+            "docs.md"
+        );
+        assert_eq!(
+            text(source, "preamble.paragraph.0.inlines.3.destination_url"),
+            "img.png"
+        );
+        // Alt text is plain text when rendered, so an image has no children.
+        assert!(
+            at(source, "preamble.paragraph.0.inlines.3.inlines").is_err(),
+            "an image reports flattened alt text only"
+        );
+    }
+
+    #[test]
+    fn a_heading_and_its_section_report_inlines() {
+        let source = "# Run `serve` now\n";
+        assert_eq!(text(source, "h1.0.text"), "Run serve now");
+        assert_eq!(text(source, "h1.0.inlines.1.type"), "code");
+        assert_eq!(text(source, "h1.0.inlines.1.text"), "serve");
+    }
+
+    /// A soft break is a wrapped line, which is presentation: it joins the
+    /// surrounding text node rather than becoming a node of its own.
+    #[test]
+    fn a_soft_break_joins_adjacent_text() {
+        assert_eq!(
+            text("one\ntwo\n", "preamble.paragraph.0.inlines.0.text"),
+            "one two"
+        );
+        assert!(at("one\ntwo\n", "preamble.paragraph.0.inlines.1").is_err());
+    }
+
+    /// A code fence inside a list item or a blockquote is still a `code`
+    /// block: containers report their children, not only flattened text.
+    #[test]
+    fn containers_report_their_child_blocks() {
+        let source = "- item\n\n  ```bash\n  nested\n  ```\n\n> ```json\n> {}\n> ```\n";
+        assert_eq!(text(source, "preamble.blocks.0.blocks.0.type"), "item");
+        assert_eq!(
+            text(source, "preamble.blocks.0.blocks.0.blocks.1.type"),
+            "code"
+        );
+        assert_eq!(
+            text(source, "preamble.blocks.0.blocks.0.blocks.1.language"),
+            "bash"
+        );
+        assert_eq!(
+            text(source, "preamble.blocks.0.blocks.0.blocks.1.text"),
+            "nested"
+        );
+        assert_eq!(
+            integer(
+                source,
+                "preamble.blocks.0.blocks.0.blocks.1.source_start_line"
+            ),
+            3
+        );
+        assert_eq!(text(source, "preamble.blocks.1.blocks.0.type"), "code");
+        assert_eq!(text(source, "preamble.blocks.1.blocks.0.language"), "json");
+        assert_eq!(text(source, "preamble.blocks.1.blocks.0.text"), "{}");
+        // The flattened view is unchanged.
+        assert_eq!(text(source, "preamble.blocks.0.text"), "item\nnested");
+    }
+
+    /// The reported tree of the deepest file the reader accepts must still be
+    /// readable as JSON, inside a protocol envelope, by a reader that stops at
+    /// 128 levels — or `afdata get` emits documents it cannot read back.
+    #[test]
+    fn the_deepest_accepted_file_reports_a_tree_json_can_read_back() {
+        fn depth(value: &Value) -> usize {
+            match value {
+                Value::Array(items) => 1 + items.iter().map(depth).max().unwrap_or(0),
+                Value::Object(fields) => 1 + fields.values().map(depth).max().unwrap_or(0),
+                _ => 0,
+            }
+        }
+        let headings = "# a\n## b\n### c\n#### d\n##### e\n###### f\n";
+        // A list item is two levels (list, item), the paragraph inside one more.
+        let deepest = [
+            format!("{headings}{}x\n", "> ".repeat(MAX_BLOCK_DEPTH - 1)),
+            format!("{headings}{}x\n", "- ".repeat((MAX_BLOCK_DEPTH - 1) / 2)),
+            format!("{headings}{}*x*\n", "> ".repeat(MAX_BLOCK_DEPTH - 3)),
+        ];
+        for source in deepest {
+            let tree = load(&source).unwrap();
+            assert!(depth(&tree) <= 112, "{} levels", depth(&tree));
+            let json = serde_json::to_string(&tree).unwrap();
+            let enveloped = format!("{{\"kind\":\"result\",\"result\":{{\"value\":{json}}}}}");
+            serde_json::from_str::<serde_json::Value>(&enveloped).unwrap();
+        }
+    }
+
+    #[test]
+    fn inline_nesting_counts_toward_the_depth_limit() {
+        let nested = |depth: usize| format!("{}x{}\n", "*".repeat(depth), "*".repeat(depth));
+        assert!(load(&nested(8)).is_ok());
+        let error = load(&nested(400)).unwrap_err();
+        assert_eq!(error.code(), "document_source_refused");
     }
 }

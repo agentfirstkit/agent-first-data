@@ -190,7 +190,9 @@ run_unit() {
   echo ""
   echo "[4/4] TypeScript"
   ensure_typescript_deps
-  (cd "$ROOTPATH/typescript" && npx tsx --test src/*.test.ts)
+  # Load the transformer directly: the tsx CLI also opens an IPC listener for
+  # its process supervisor, which these finite Node tests do not need.
+  (cd "$ROOTPATH/typescript" && npm test)
 }
 
 run_package() {
@@ -315,6 +317,8 @@ RS
   [ -d "$ROOTPATH/python/build" ] && had_py_build=1
   compgen -G "$ROOTPATH/python/*.egg-info" >/dev/null && had_py_egg=1
   (cd "$ROOTPATH/python" && "$PYTOOL" -m build --no-isolation --outdir "$py_out")
+  # The release's registry dry-run checks the same artifacts; fail here first.
+  "$PYTOOL" -m twine check "$py_out"/*
   "$PYTOOL" - "$py_out" <<'PY'
 import sys
 import zipfile

@@ -12,6 +12,57 @@ use crate::cli_spec::{
 };
 use crate::protocol::{Event, json_error, json_result};
 
+/// Standard terminal diagnostic for an output sink that could not be installed.
+pub fn cli_output_setup_failed_event(detail: &str) -> Event {
+    json_error(
+        "output_setup_failed",
+        if detail.is_empty() {
+            "an output sink could not be established"
+        } else {
+            detail
+        },
+    )
+    .build()
+    .unwrap_or_else(|_| cli_invocation_invalid_event("could not construct output setup diagnostic"))
+}
+
+/// Standard terminal diagnostic for a non-broken-pipe output write failure.
+pub fn cli_output_write_failed_event() -> Event {
+    json_error("output_write_failed", "could not write command output")
+        .build()
+        .unwrap_or_else(|_| {
+            cli_invocation_invalid_event("could not construct output write diagnostic")
+        })
+}
+
+impl<R> crate::cli_spec::BoundOutcome<R> {
+    /// Finish registry lifecycle responses, or hand a bound domain call back.
+    /// Hosts install file sinks from `output_plan()` before calling this.
+    pub fn into_run(self) -> Result<crate::cli_spec::BoundInvocation<R>, std::process::ExitCode> {
+        let (event, plan) = match self {
+            Self::Run(invocation) => return Ok(invocation),
+            Self::Docs(docs) => {
+                return Err(crate::cli::write_raw_exit(
+                    &render_cli_reference(docs.registry()),
+                    docs.output_plan(),
+                ));
+            }
+            Self::Help(help)
+                if help.output_plan().output_format() == Some(crate::OutputFormat::Plain) =>
+            {
+                return Err(crate::cli::write_raw_exit(
+                    &help.plain(),
+                    help.output_plan(),
+                ));
+            }
+            Self::Help(help) => (cli_help_event(&help), help.output_plan().clone()),
+            Self::Version(version) => (cli_version_event(&version), version.output_plan().clone()),
+        };
+        let mut emitter = crate::cli::CliEmitter::from_plan(&plan);
+        Err(std::process::ExitCode::from(emitter.finish(event, 0)))
+    }
+}
+
 /// Build a registry under AFDATA's naming conventions.
 ///
 /// `ArgSpec::sensitive` is not an independent switch. AFDATA already decides
@@ -301,11 +352,18 @@ pub fn render_cli_reference(cli: &BuiltCliSpec) -> String {
     );
     // Sorted rather than left in declaration order: the table is read by code,
     // and a registry author's ordering is not the reader's.
-    let mut declared_exit_codes: Vec<&crate::cli_spec::ExitCodeSpec> =
-        spec.exit_codes.iter().collect();
-    declared_exit_codes.sort_by_key(|exit| exit.code);
-    for exit in declared_exit_codes {
-        out.push_str(&format!("| {} | {} |\n", exit.code, exit.meaning));
+    let mut declared_exit_codes: Vec<(u8, &str)> = spec
+        .exit_codes
+        .iter()
+        .map(|exit| (exit.code, exit.meaning.as_str()))
+        .collect();
+    declared_exit_codes.push((
+        4,
+        "Output could not be written (`output_write_failed`); a closed reader is success.",
+    ));
+    declared_exit_codes.sort_by_key(|(code, _)| *code);
+    for (code, meaning) in declared_exit_codes {
+        out.push_str(&format!("| {code} | {meaning} |\n"));
     }
     out.push_str(
         "\nThe split is the useful one for a caller: exit 2 means the call was never made, so \
@@ -514,7 +572,7 @@ mod tests {
     fn a_cli_declares_exit_codes_beyond_afdatas_own() {
         let spec = CliSpec::new("demo", "1.0.0")
             .lifecycle_output(output())
-            .exit_code(4, "The output could not be written.")
+            .exit_code(5, "An application-specific failure.")
             .exit_code(3, "The command ran and partly succeeded.")
             .command(CommandSpec::root())
             .build()
@@ -526,7 +584,7 @@ mod tests {
             .expect("the reference documents exit codes");
         // Sorted by code, not by declaration order: the table is read by code.
         let partial = table.find("| 3 | The command ran and partly succeeded. |");
-        let write_failed = table.find("| 4 | The output could not be written. |");
+        let write_failed = table.find("| 5 | An application-specific failure. |");
         assert!(partial.is_some() && write_failed.is_some(), "{table}");
         assert!(partial < write_failed, "{table}");
     }
@@ -547,7 +605,7 @@ mod tests {
         assert!(
             reference.contains(
                 "Token this host requires (the value, or where to read it: env:NAME, \
-                 file[+FORMAT]:PATH#DOT_PATH, container:NAME, literal:VALUE)"
+                 file[+FORMAT]:PATH[#DOT_PATH], container:NAME, literal:VALUE)"
             ),
             "{reference}"
         );
@@ -563,7 +621,7 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .to_string();
-        assert!(note.contains("file[+FORMAT]:PATH#DOT_PATH"), "{model}");
+        assert!(note.contains("file[+FORMAT]:PATH[#DOT_PATH]"), "{model}");
     }
 
     /// A value naming a scheme the argument does not accept is a usage error,

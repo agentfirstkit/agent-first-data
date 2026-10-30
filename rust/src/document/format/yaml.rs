@@ -33,12 +33,35 @@ pub fn load(content: &str) -> DocumentResult<Value> {
 /// `replace_collection_in_place`, which also documents what that costs.
 pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
     let segments = crate::document::parse_path(path)?;
+    if is_blank_document(content) {
+        return set_in_blank_document(content, &segments, value);
+    }
+    if let Some((last, parents)) = segments.split_last()
+        && last == "-"
+        && array_at_path(&load(content)?, &crate::document::join_path(parents), "set").is_ok()
+    {
+        guard_cst_segments(content, parents, "set", false)?;
+        return append_array_item_preserving(content, &crate::document::join_path(parents), value)
+            .map_err(|error| match error {
+                DocumentError::UnsupportedOperation { format, detail, .. } => {
+                    DocumentError::UnsupportedOperation {
+                        format,
+                        operation: "set".into(),
+                        detail,
+                    }
+                }
+                other => other,
+            });
+    }
     let yaml_path = cst_path(&segments, "set")?;
     guard_cst_segments(content, &segments, "set", true)?;
     let mut document = parse_document(content).map_err(|error| DocumentError::ParseError {
         format: "YAML".to_string(),
         detail: error.to_string(),
     })?;
+    // The leaf itself may be an alias site: a scalar written there replaces the
+    // `*name` reference, which is the key the caller named.
+    refuse_through_alias(&document, &segments, segments.len() - 1, "set")?;
     // Existing leaf: replace in place (preserves the scalar's style). Missing
     // leaf under an existing mapping: splice a sibling entry via `insert_entry`.
     let mut expected = load(content)?;
@@ -48,7 +71,7 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
     let canonical = load(&save(value)?)?;
     crate::document::set_path(&mut expected, path, &canonical, Addressing::INDEX_ONLY)?;
     if exists && matches!(value, Value::Array(_) | Value::Object(_)) {
-        replace_collection_in_place(&mut document, content, &yaml_path, value)?;
+        replace_collection_in_place(&mut document, content, &segments, &yaml_path, value)?;
     } else if exists {
         let result = if let Value::Number(text) = value {
             document.set(&yaml_path, text)
@@ -61,6 +84,35 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
             detail: error.to_string(),
         })?;
     } else {
+        // Grow missing mapping parents from the deepest existing ancestor.
+        let original = load(content)?;
+        for index in 0..segments.len().saturating_sub(1) {
+            let prefix = crate::document::join_path(&segments[..=index]);
+            if crate::document::get_path(&original, &prefix, Addressing::INDEX_ONLY).is_err() {
+                let parent = cst_path(&segments[..index], "set")?;
+                // An empty flow mapping has nothing to lay out around, so it
+                // grows like a block one — however much space is inside `{ }`.
+                if document.span_at(&parent).is_some_and(|(start, end)| {
+                    let text = content[start..end].trim();
+                    let empty = text
+                        .strip_prefix('{')
+                        .and_then(|inner| inner.strip_suffix('}'))
+                        .is_some_and(|inner| inner.trim().is_empty());
+                    text.starts_with('{') && !empty
+                }) {
+                    return Err(DocumentError::UnsupportedOperation {
+                        format: "YAML".into(),
+                        operation: "set".into(),
+                        detail: "creating parents inside a flow mapping is not supported".into(),
+                    });
+                }
+                let mut nested = value.clone();
+                for key in segments[index + 1..].iter().rev() {
+                    nested = Value::Object([(key.clone(), nested)].into_iter().collect());
+                }
+                return set_preserving(content, &prefix, &nested);
+            }
+        }
         let (last, parents) = segments.split_last().ok_or(DocumentError::EmptyPath)?;
         if last.parse::<usize>().is_ok() {
             return Err(DocumentError::UnsupportedOperation {
@@ -105,11 +157,25 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
             } else {
                 document.insert_entry_value(&parent_path, last, &to_noyalib_value(value)?)
             };
-            retry.map_err(|error| DocumentError::UnsupportedOperation {
-                format: "YAML".to_string(),
-                operation: "set".to_string(),
-                detail: error.to_string(),
-            })?;
+            if let Err(error) = retry {
+                // noyalib finds no anchor in a sequence item's mapping that
+                // holds a single key (`- name: web`), which is exactly what
+                // `add` leaves behind; lay the entry out under the dash.
+                // Upstream: https://github.com/sebastienrousseau/noyalib/issues/499
+                if !append_to_sequence_item_mapping(
+                    &mut document,
+                    content,
+                    &parent_path,
+                    last,
+                    value,
+                )? {
+                    return Err(DocumentError::UnsupportedOperation {
+                        format: "YAML".to_string(),
+                        operation: "set".to_string(),
+                        detail: error.to_string(),
+                    });
+                }
+            }
         }
     }
     document
@@ -120,6 +186,66 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
         })?;
     let output = document.to_string();
     if load(&output)? != expected {
+        return Err(DocumentError::UnsupportedOperation {
+            format: "YAML".to_string(),
+            operation: "set".to_string(),
+            detail: "YAML edit did not preserve the requested document value".to_string(),
+        });
+    }
+    Ok(output)
+}
+
+/// True when `content` holds no YAML node at all: only blank lines, comments,
+/// and at most an opening `---`. Such a document reads as null — a blank
+/// frontmatter template, a fresh config file — and a `set` starts its mapping.
+pub(crate) fn is_blank_document(content: &str) -> bool {
+    let mut markers = 0;
+    content.lines().all(|line| {
+        let line = line.trim();
+        if line == "---" {
+            markers += 1;
+            return markers == 1;
+        }
+        line.is_empty() || line.starts_with('#')
+    })
+}
+
+/// Append the mapping `path = value` after whatever comments `content` has.
+fn set_in_blank_document(
+    content: &str,
+    segments: &[String],
+    value: &Value,
+) -> DocumentResult<String> {
+    if segments
+        .iter()
+        .any(|segment| segment == "-" || segment.parse::<usize>().is_ok())
+    {
+        return Err(DocumentError::UnsupportedOperation {
+            format: "YAML".to_string(),
+            operation: "set".to_string(),
+            detail: "an empty document has no sequence to index into".to_string(),
+        });
+    }
+    let mut nested = value.clone();
+    for segment in segments.iter().rev() {
+        nested = Value::Object([(segment.clone(), nested)].into_iter().collect());
+    }
+    let rendered = save(&nested)?;
+    let body = rendered.strip_prefix("---\n").unwrap_or(&rendered);
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut output = content.to_string();
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push_str(newline);
+    }
+    for line in body.trim_end_matches('\n').split('\n') {
+        output.push_str(line);
+        output.push_str(newline);
+    }
+    if load(&output)? != load(&save(&nested)?)? {
         return Err(DocumentError::UnsupportedOperation {
             format: "YAML".to_string(),
             operation: "set".to_string(),
@@ -155,6 +281,7 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
 fn replace_collection_in_place(
     document: &mut noyalib::cst::Document,
     content: &str,
+    segments: &[String],
     yaml_path: &str,
     value: &Value,
 ) -> DocumentResult<()> {
@@ -166,24 +293,42 @@ fn replace_collection_in_place(
     let (value_start, value_end) = document
         .span_at(yaml_path)
         .ok_or_else(|| unsupported(format!("could not locate the value at `{yaml_path}`")))?;
-    let (key_start, key_end) = document
-        .key_span(yaml_path)
-        .ok_or_else(|| unsupported(format!("could not locate the key at `{yaml_path}`")))?;
-    if value_start < key_end {
-        return Err(unsupported(format!(
-            "`{yaml_path}` resolves through a YAML alias; editing it would rewrite the anchor \
-             instead. Materialize the alias first."
-        )));
-    }
-
-    let bytes = content.as_bytes();
-    let key_column = line_column_of(content, key_start);
-    let indent = key_column + document.indent_unit();
     let newline = if content.contains("\r\n") {
         "\r\n"
     } else {
         "\n"
     };
+    let Some((key_start, key_end)) = document.key_span(yaml_path) else {
+        // A sequence element has no key: the collection starts on the dash's
+        // own line and continues two columns in from it.
+        let dash_column = preceding_sequence_dash_column(content, value_start).ok_or_else(|| {
+            unsupported(format!(
+                "a collection can replace only a block sequence element, and `{yaml_path}` is not one"
+            ))
+        })?;
+        let indent = dash_column + 2;
+        let fragment = block_fragment(value, document.indent_unit(), indent, newline)?;
+        let inline = fragment
+            .strip_prefix(newline)
+            .and_then(|rest| rest.strip_prefix(" ".repeat(indent).as_str()))
+            .unwrap_or_else(|| fragment.trim_start());
+        let end = end_of_trailing_inline_comment(content, value_end);
+        return document
+            .replace_span(value_start, end, inline)
+            .map_err(|error| unsupported(error.to_string()));
+    };
+    if value_start < key_end {
+        return Err(through_alias_refused(
+            segments,
+            segments,
+            anchor_before(document, value_start).as_deref(),
+            "set",
+        ));
+    }
+
+    let bytes = content.as_bytes();
+    let key_column = line_column_of(content, key_start);
+    let indent = key_column + document.indent_unit();
 
     let mut start = value_start;
     while start > 0 && matches!(bytes[start - 1], b' ' | b'\t' | b'\n' | b'\r') {
@@ -195,6 +340,43 @@ fn replace_collection_in_place(
     document
         .replace_span(start, end, &fragment)
         .map_err(|error| unsupported(error.to_string()))
+}
+
+/// Append `key: value` to the block mapping at `parent_path` when that mapping
+/// is a sequence element. Returns `false` when it is not one, leaving the
+/// caller's own error to report.
+fn append_to_sequence_item_mapping(
+    document: &mut noyalib::cst::Document,
+    content: &str,
+    parent_path: &str,
+    key: &str,
+    value: &Value,
+) -> DocumentResult<bool> {
+    let Some((start, end)) = document.span_at(parent_path) else {
+        return Ok(false);
+    };
+    let Some(dash_column) = preceding_sequence_dash_column(content, start) else {
+        return Ok(false);
+    };
+    if content[start..end].trim_start().starts_with('{') {
+        return Ok(false);
+    }
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let entry = Value::Object([(key.to_string(), value.clone())].into_iter().collect());
+    let fragment = block_fragment(&entry, document.indent_unit(), dash_column + 2, newline)?;
+    let at = end_of_trailing_inline_comment(content, end);
+    document.replace_span(at, at, &fragment).map_err(|error| {
+        DocumentError::UnsupportedOperation {
+            format: "YAML".to_string(),
+            operation: "set".to_string(),
+            detail: error.to_string(),
+        }
+    })?;
+    Ok(true)
 }
 
 /// Render `value` as the bytes that go after a mapping key.
@@ -273,6 +455,7 @@ pub fn unset_preserving(content: &str, path: &str) -> DocumentResult<String> {
         format: "YAML".to_string(),
         detail: error.to_string(),
     })?;
+    refuse_through_alias(&document, &segments, segments.len() - 1, "unset")?;
     document
         .remove(&yaml_path)
         .map_err(|error| DocumentError::UnsupportedOperation {
@@ -302,14 +485,53 @@ pub fn append_array_item_preserving(
         format: "YAML".to_string(),
         detail: error.to_string(),
     })?;
+    refuse_through_alias(&document, &segments, segments.len(), "add")?;
     let loaded = load(content)?;
     let existing = array_at_path(&loaded, path, "add")?;
     let previous_len = existing.len();
+    // Validate before the empty-sequence shortcut too: JSON would otherwise
+    // silently serialize a non-finite float as null.
+    let canonical_item = load(&save(item)?)?;
     if previous_len == 0 {
         // The CST's `push_back` needs an existing item to take indentation
         // from, so it refuses on `tags: []`. Writing the whole one-element
         // sequence gets there instead, and costs nothing: an empty collection
         // has no interior comments or layout to preserve.
+        // A sequence element has a value span but no mapping-key span, so the
+        // mapping-oriented collection writer cannot grow an empty nested array.
+        // A one-line flow sequence fills the empty span without touching its
+        // dash or surrounding comments, just as it does for a root empty
+        // sequence. It comes from the YAML emitter, not a JSON one: JSON leaves
+        // DEL and C1 controls raw, which YAML forbids in source.
+        if path.is_empty()
+            || segments
+                .last()
+                .is_some_and(|part| part.parse::<usize>().is_ok())
+        {
+            let (start, end) = document
+                .span_at(&yaml_path)
+                .ok_or_else(|| DocumentError::PathNotFound { path: path.into() })?;
+            let replacement = flow_fragment(&Value::Array(vec![item.clone()]))?;
+            document
+                .replace_span(start, end, &replacement)
+                .map_err(|error| DocumentError::UnsupportedOperation {
+                    format: "YAML".into(),
+                    operation: "add".into(),
+                    detail: error.to_string(),
+                })?;
+            let output = document.to_string();
+            let edited = load(&output)?;
+            if array_at_path(&edited, path, "add")?.as_slice()
+                != std::slice::from_ref(&canonical_item)
+            {
+                return Err(DocumentError::UnsupportedOperation {
+                    format: "YAML".into(),
+                    operation: "add".into(),
+                    detail: "the source edit did not reproduce the requested item".into(),
+                });
+            }
+            return Ok(output);
+        }
         return set_preserving(content, path, &Value::Array(vec![item.clone()]));
     }
     let mut fragment = yaml_fragment(item, "add")?;
@@ -349,7 +571,7 @@ pub fn append_array_item_preserving(
     let output = document.to_string();
     let edited = load(&output)?;
     let edited_items = array_at_path(&edited, path, "add")?;
-    if edited_items.len() != previous_len + 1 || edited_items.last() != Some(item) {
+    if edited_items.len() != previous_len + 1 || edited_items.last() != Some(&canonical_item) {
         return Err(DocumentError::UnsupportedOperation {
             format: "YAML".to_string(),
             operation: "add".to_string(),
@@ -379,6 +601,7 @@ pub fn remove_array_item_preserving(
         format: "YAML".to_string(),
         detail: error.to_string(),
     })?;
+    refuse_through_alias(&document, &segments, segments.len(), "remove")?;
     let yaml_path = cst_path(&segments, "remove")?;
     document
         .remove(&format!("{yaml_path}[{index}]"))
@@ -485,6 +708,101 @@ fn cst_path(segments: &[String], operation: &str) -> DocumentResult<String> {
     Ok(path)
 }
 
+/// The refusal for an edit whose target is reached through `*alias`.
+///
+/// Every CST write resolves an alias to its anchor's bytes, so the edit would
+/// land in `&alias` and show up at every alias of it — a different key than
+/// the caller named. One message for every verb that meets one.
+fn through_alias_refused(
+    target: &[String],
+    site: &[String],
+    alias: Option<&str>,
+    operation: &str,
+) -> DocumentError {
+    let alias = alias.map_or_else(|| "a YAML alias".to_string(), |name| format!("`*{name}`"));
+    let target = crate::document::join_path(target);
+    let site = crate::document::join_path(site);
+    let location = if site == target {
+        String::new()
+    } else {
+        format!(" at `{site}`")
+    };
+    DocumentError::UnsupportedOperation {
+        format: "YAML".to_string(),
+        operation: operation.to_string(),
+        detail: format!(
+            "`{target}` is reached through the alias {alias}{location}; afdata does not edit \
+             through YAML aliases, because the edit would change the anchored value and every \
+             alias of it. Edit the anchor's own path instead"
+        ),
+    }
+}
+
+/// The anchor whose value begins at `value_start`: the closest one declared
+/// before it, since an anchor mark sits directly in front of its value.
+fn anchor_before(document: &noyalib::cst::Document, value_start: usize) -> Option<String> {
+    document
+        .anchors()
+        .into_iter()
+        .rev()
+        .find(|anchor| anchor.mark_span.1 <= value_start)
+        .map(|anchor| anchor.name)
+}
+
+/// Refuse when any of the first `walked` nodes along `target` is reached
+/// through an alias. A writer that replaces the node at `target` itself passes
+/// one less than its length, since an alias site written over is the key the
+/// caller named.
+///
+/// `span_at` resolves an alias to its anchor's value, which always sits
+/// earlier in the source than the alias site. So a node is reached through an
+/// alias exactly when its value starts before something that must precede it:
+/// its own key, the end of the previous sequence element, or its parent's
+/// start. The value view cannot tell; only positions can.
+fn refuse_through_alias(
+    document: &noyalib::cst::Document,
+    target: &[String],
+    walked: usize,
+    operation: &str,
+) -> DocumentResult<()> {
+    let segments = &target[..walked.min(target.len())];
+    for (index, segment) in segments.iter().enumerate() {
+        let prefix = &segments[..=index];
+        let Some((start, _)) = document.span_at(&cst_path(prefix, operation)?) else {
+            // Missing, or an implicit null: nothing below it to reach.
+            return Ok(());
+        };
+        let through_alias = match segment.parse::<usize>() {
+            Ok(0) if index > 0 => document
+                .span_at(&cst_path(&segments[..index], operation)?)
+                .is_some_and(|(parent_start, _)| start < parent_start),
+            Ok(0) => false,
+            Ok(position) => {
+                let previous = format!(
+                    "{}[{}]",
+                    cst_path(&segments[..index], operation)?,
+                    position - 1
+                );
+                document
+                    .span_at(&previous)
+                    .is_some_and(|(_, previous_end)| start < previous_end)
+            }
+            Err(_) => document
+                .key_span(&cst_path(prefix, operation)?)
+                .is_some_and(|(_, key_end)| start < key_end),
+        };
+        if through_alias {
+            return Err(through_alias_refused(
+                target,
+                prefix,
+                anchor_before(document, start).as_deref(),
+                operation,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn guard_cst_segments(
     content: &str,
     segments: &[String],
@@ -580,12 +898,12 @@ fn to_noyalib_value(value: &Value) -> DocumentResult<YamlValue> {
             .ok_or_else(|| DocumentError::UnsupportedOperation {
                 format: "YAML".to_string(),
                 operation: "set".to_string(),
-                detail: format!("float literal `{text}` is not representable in YAML"),
+                detail: "float literal is not representable in YAML".to_string(),
             }),
-        Value::Number(text) => Err(DocumentError::UnsupportedOperation {
+        Value::Number(_) => Err(DocumentError::UnsupportedOperation {
             format: "YAML".to_string(),
             operation: "set".to_string(),
-            detail: format!("integer literal `{text}` exceeds YAML's 64-bit integer range"),
+            detail: "integer literal exceeds YAML's 64-bit integer range".to_string(),
         }),
         Value::String(value) => Ok(YamlValue::String(value.clone())),
         Value::Array(values) => Ok(YamlValue::Sequence(
@@ -605,13 +923,40 @@ fn to_noyalib_value(value: &Value) -> DocumentResult<YamlValue> {
 }
 
 pub fn save(value: &Value) -> DocumentResult<String> {
+    render(value, None)
+}
+
+/// `value` as one line of flow YAML (`["a\x7Fb"]`), for filling an empty
+/// flow collection in place. Emitted by noyalib like every other fragment, so
+/// a scalar YAML forbids raw (DEL, C1 controls) is escaped rather than written
+/// into source the reader would then reject, and exact numbers keep their
+/// spelling.
+fn flow_fragment(value: &Value) -> DocumentResult<String> {
+    let config = noyalib::SerializerConfig::new().flow_style(noyalib::FlowStyle::Flow);
+    let rendered = render(value, Some(&config))?;
+    let line = rendered.trim_end_matches(['\r', '\n']);
+    if line.contains('\n') {
+        return Err(DocumentError::UnsupportedOperation {
+            format: "YAML".to_string(),
+            operation: "add".to_string(),
+            detail: "the item has no single-line flow spelling".to_string(),
+        });
+    }
+    Ok(line.to_string())
+}
+
+fn render(value: &Value, config: Option<&noyalib::SerializerConfig>) -> DocumentResult<String> {
     let mut prefix = "__AFDATA_EXACT_NUMBER_".to_string();
     while value_contains_text(value, &prefix) {
         prefix.push('_');
     }
     let mut literals = Vec::new();
     let yaml_val = our_value_to_yaml_value(value, &prefix, &mut literals)?;
-    let mut output = to_string(&yaml_val).map_err(|e| DocumentError::ParseError {
+    let rendered = match config {
+        Some(config) => noyalib::to_string_value_with_config(&yaml_val, config),
+        None => to_string(&yaml_val),
+    };
+    let mut output = rendered.map_err(|e| DocumentError::ParseError {
         format: "YAML".to_string(),
         detail: e.to_string(),
     })?;
@@ -681,7 +1026,7 @@ fn our_value_to_yaml_value(
                 return Err(DocumentError::UnsupportedOperation {
                     format: "YAML".to_string(),
                     operation: "save".to_string(),
-                    detail: format!("invalid number literal `{text}`"),
+                    detail: "invalid number literal".to_string(),
                 });
             }
             let sentinel = format!("{prefix}{}__", literals.len());

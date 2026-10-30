@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -38,10 +39,20 @@ def run_rust_example(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def run_afdata_skill(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+def run_afdata_skill(
+    args: Sequence[str],
+    *,
+    cwd: Path = ROOT,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    manifest = str(ROOT / "Cargo.toml")
     return subprocess.run(
-        ["cargo", "run", "--quiet", "--features", "skill-admin", "--bin", "afdata", "--", *args],
-        cwd=ROOT,
+        [
+            "cargo", "run", "--quiet", "--manifest-path", manifest,
+            "--features", "skill-admin", "--bin", "afdata", "--", *args,
+        ],
+        cwd=cwd,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -559,16 +570,35 @@ def assert_afdata_skill_error_includes_partial_report() -> None:
             "---\nname: custom\ndescription: custom\n---\n", encoding="utf-8"
         )
         proc = run_afdata_skill(("skill", "install", "--agent", "codex", "--skills-dir", tmp))
-    assert proc.returncode != 0, "afdata skill install overwrote unmanaged skill without --force"
+    # Refused after resolving targets, so a domain failure (exit 1), not a
+    # usage error (exit 2).
+    assert proc.returncode == 1, f"unmanaged skill refusal exit: {proc.returncode}, stderr={proc.stderr!r}"
     events = terminal_events(proc)
     assert len(events) == 1, f"afdata skill install emitted unexpected events: {events!r}"
     error = events[0]["error"]
-    assert error["code"] == "cli_error", f"wrong skill error code: {events[0]!r}"
+    assert error["code"] == "skill_refused", f"wrong skill error code: {events[0]!r}"
     report = error["partial_report"]
     assert report["code"] == "skill_install", f"wrong partial report code: {report!r}"
     assert report["installed"] is False, f"partial install report should be failed: {report!r}"
     assert report["targets"][0]["installed"] is True, f"partial report lost target status: {report!r}"
     assert report["targets"][0]["managed"] is False, f"unmanaged target should be reported: {report!r}"
+
+
+def assert_afdata_skill_empty_home_is_a_usage_error() -> None:
+    # An empty HOME or CODEX_HOME used to resolve to the current directory, so
+    # a personal install landed in ./skills. Cargo and rustup keep their own
+    # resolved homes so the build itself still finds them.
+    env = dict(os.environ)
+    env["CARGO_HOME"] = env.get("CARGO_HOME") or str(Path.home() / ".cargo")
+    env["RUSTUP_HOME"] = env.get("RUSTUP_HOME") or str(Path.home() / ".rustup")
+    env.update({"HOME": "", "USERPROFILE": "", "CODEX_HOME": ""})
+    with tempfile.TemporaryDirectory(prefix="afdata-skill-home-e2e-") as tmp:
+        proc = run_afdata_skill(("skill", "install", "--agent", "codex"), cwd=Path(tmp), env=env)
+        leaked = sorted(p.name for p in Path(tmp).iterdir())
+    assert leaked == [], f"empty HOME installed into the current directory: {leaked!r}"
+    assert proc.returncode == 2, f"empty HOME exit: {proc.returncode}, stderr={proc.stderr!r}"
+    events = terminal_events(proc)
+    assert events[0]["error"]["code"] == "skill_usage_error", f"wrong empty-HOME code: {events!r}"
 
 
 def assert_afdata_skill_help_is_feature_gated() -> None:
@@ -603,6 +633,7 @@ def main() -> None:
         assert_afdata_parse_error,
         assert_afdata_skill_status_feature,
         assert_afdata_skill_error_includes_partial_report,
+        assert_afdata_skill_empty_home_is_a_usage_error,
         assert_afdata_skill_help_is_feature_gated,
     ):
         check()

@@ -244,9 +244,33 @@ fn validate_round_trip(output: &str, expected: &Value, operation: &str) -> Docum
     ))
 }
 
-/// Remove an existing INI entry without rewriting the document.
+/// Remove an existing INI entry, or a whole section named by one segment,
+/// without rewriting the rest of the document.
 pub fn unset_preserving(content: &str, path: &str) -> DocumentResult<String> {
+    if let [name] = crate::document::parse_path(path)?.as_slice() {
+        let document = IniDocument::parse(content).map_err(|error| with_path(error, path))?;
+        // A read of `name` returns the section, so unset must remove it
+        // rather than report a path that reads as present not found.
+        if !document.has_entry(ROOT, name) && document.has_section(name) {
+            return Ok(remove_section(content, name));
+        }
+    }
     edit_entry(content, path, None)
+}
+
+/// Drop `name`'s header line and every line up to the next header.
+fn remove_section(content: &str, name: &str) -> String {
+    let mut output = String::with_capacity(content.len());
+    let mut inside = false;
+    for line in content.split_inclusive('\n') {
+        if let Some(header) = section_header(line) {
+            inside = header == name;
+        }
+        if !inside {
+            output.push_str(line);
+        }
+    }
+    output
 }
 
 /// The section name a line declares, or `None` when it is not a header.
@@ -466,6 +490,15 @@ mod tests {
             assert_eq!(document.source(), source);
             assert_eq!(document.value(), &original);
         }
+    }
+
+    #[test]
+    fn unset_removes_a_whole_section_and_keeps_the_rest() {
+        let source = "top = 1\n[a]\nk = 1\n\n[b]\nk = 2\n";
+        let mut document = Document::parse(source, Format::Ini).unwrap();
+        assert!(document.unset("a").unwrap());
+        assert_eq!(document.source(), "top = 1\n[b]\nk = 2\n");
+        assert!(document.value().as_object().unwrap().get("a").is_none());
     }
 
     #[test]

@@ -10,9 +10,10 @@
  * Number literal fidelity: decodeProtocolEvent parses with `lossless-json`
  * instead of JSON.parse, so a number's exact source literal (arbitrary
  * precision integers, high-precision floats, exponent forms, "-0") survives
- * decode. Parsed numbers become LosslessNumber internally; every JSON/YAML
- * rendering path here treats it as an opaque scalar leaf (never destructured
- * as a plain object) and re-emits its exact literal text. Native bigint values
+ * decode. Parsed numbers become LosslessNumber internally; every rendering
+ * path here treats it as an opaque scalar leaf (never destructured as a plain
+ * object). JSON re-emits its exact literal text; YAML/plain render it in the
+ * spec's canonical number form without losing a digit. Native bigint values
  * are also supported so callers can render integers beyond Number's safe
  * range without first corrupting them.
  */
@@ -36,7 +37,8 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 
 /**
  * Event is an opaque type wrapping a protocol event envelope.
- * Guaranteed to be strict-valid by construction.
+ * Non-error builders retain caller-provided traces verbatim; validate the
+ * envelope before accepting externally supplied traces as protocol-valid.
  */
 export class Event {
   private readonly __brand = "Event";
@@ -136,7 +138,7 @@ export class JsonErrorBuilder {
     if (this.isReservedErrorField(name)) {
       this.issues.push(`cannot write reserved error field ${JSON.stringify(name)}`);
     } else {
-      this.extensionFields[name] = value;
+      setJsonField(this.extensionFields, name, value);
     }
     return this;
   }
@@ -150,7 +152,7 @@ export class JsonErrorBuilder {
       if (this.isReservedErrorField(key)) {
         this.issues.push(`cannot write reserved error field ${JSON.stringify(key)}`);
       } else {
-        this.extensionFields[key] = val as JsonValue;
+        setJsonField(this.extensionFields, key, val as JsonValue);
       }
     }
     return this;
@@ -165,7 +167,7 @@ export class JsonErrorBuilder {
       if (this.isReservedErrorField(key)) {
         this.issues.push(`cannot write reserved error field ${JSON.stringify(key)}`);
       } else {
-        this.extensionFields[key] = val as JsonValue;
+        setJsonField(this.extensionFields, key, val as JsonValue);
       }
     }
     return this;
@@ -305,6 +307,9 @@ function validateErrorPayload(error: unknown): void {
   if ("hint" in error && typeof error.hint !== "string") {
     throw new Error("event.error.hint must be a string when present");
   }
+  if ("retryable" in error && typeof error.retryable !== "boolean") {
+    throw new Error("event.error.retryable must be a boolean when present");
+  }
 }
 
 /** Validate finite CLI lifecycle: (log | progress)* -> exactly one terminal. `strict` also enforces the recommended strict protocol profile (default true). */
@@ -359,7 +364,7 @@ export type DecodedError = {
   kind: "error";
   code: string;
   message: string;
-  retryable: boolean;
+  retryable: boolean | null;
   hint?: string;
   fields: Record<string, JsonValue>;
   trace?: Record<string, JsonValue>;
@@ -380,7 +385,7 @@ export type DecodedLog = {
 /** Discriminated union of decoded protocol events, narrow on `kind`. */
 export type DecodedEvent = DecodedResult | DecodedError | DecodedProgress | DecodedLog;
 
-/** Thrown by decodeProtocolEvent for malformed JSON or a strict-invalid event. */
+/** Thrown by decodeProtocolEvent for malformed JSON or a base-invalid event. */
 export class EventDecodeError extends Error {
   constructor(message: string) {
     super(message);
@@ -390,8 +395,62 @@ export class EventDecodeError extends Error {
 
 const ERROR_RESERVED_FIELDS = new Set(["code", "message", "hint", "retryable"]);
 
+/** How many arrays and objects a protocol line may nest, counting the envelope object. Every SDK enforces the same bound. */
+const MAX_PROTOCOL_NESTING = 127;
+
+function hexEscape(text: string, at: number): number | null {
+  if (text.charCodeAt(at) !== 0x5c || text.charCodeAt(at + 1) !== 0x75) return null;
+  const digits = text.slice(at + 2, at + 6);
+  return /^[0-9a-fA-F]{4}$/.test(digits) ? parseInt(digits, 16) : null;
+}
+
 /**
- * Parse one protocol line (a single JSON text value), strict-validate it, and
+ * The decode rules lossless-json does not enforce: a nesting bound, and no
+ * lone UTF-16 surrogate, escaped or raw (lossless-json keeps one in the
+ * string). Only strings and escapes are tracked; the rest of the grammar is
+ * left to the parser.
+ */
+function checkProtocolLine(text: string): void {
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (c === 0x22) {
+        inString = false;
+      } else if (c === 0x5c) {
+        const unit = hexEscape(text, i);
+        if (unit !== null && unit >= 0xd800 && unit <= 0xdbff) {
+          const low = hexEscape(text, i + 6);
+          if (low === null || low < 0xdc00 || low > 0xdfff) {
+            throw new SyntaxError(`lone surrogate escape at position ${i}`);
+          }
+          i += 11;
+        } else if (unit !== null && unit >= 0xdc00 && unit <= 0xdfff) {
+          throw new SyntaxError(`lone surrogate escape at position ${i}`);
+        } else {
+          i++;
+        }
+      } else if (c >= 0xd800 && c <= 0xdbff) {
+        const next = text.charCodeAt(i + 1);
+        if (!(next >= 0xdc00 && next <= 0xdfff)) throw new SyntaxError(`lone surrogate at position ${i}`);
+        i++;
+      } else if (c >= 0xdc00 && c <= 0xdfff) {
+        throw new SyntaxError(`lone surrogate at position ${i}`);
+      }
+    } else if (c === 0x22) {
+      inString = true;
+    } else if (c === 0x5b || c === 0x7b) {
+      depth++;
+      if (depth > MAX_PROTOCOL_NESTING) throw new SyntaxError(`nesting deeper than ${MAX_PROTOCOL_NESTING}`);
+    } else if (c === 0x5d || c === 0x7d) {
+      depth--;
+    }
+  }
+}
+
+/**
+ * Parse one protocol line (a single JSON text value), base-validate it, and
  * return a typed decoded event.
  */
 export function decodeProtocolEvent(text: string): DecodedEvent {
@@ -401,12 +460,15 @@ export function decodeProtocolEvent(text: string): DecodedEvent {
     // source literal (see module-level fidelity note) instead of collapsing
     // it through float64. isSyntaxError-compatible: throws the same
     // SyntaxError shape JSON.parse would.
-    parsed = losslessParse(text);
+    checkProtocolLine(text);
+    // A repeated key keeps its last value, as JSON.parse and every other
+    // SDK's decoder do; lossless-json would otherwise throw.
+    parsed = losslessParse(text, null, { onDuplicateKey: ({ newValue }) => newValue });
   } catch (e) {
     throw new EventDecodeError(`invalid JSON: ${(e as Error).message}`);
   }
   try {
-    validateProtocolEvent(parsed, true);
+    validateProtocolEvent(parsed, false);
   } catch (e) {
     throw new EventDecodeError((e as Error).message);
   }
@@ -419,13 +481,13 @@ export function decodeProtocolEvent(text: string): DecodedEvent {
       const error = event.error as Record<string, JsonValue>;
       const fields: Record<string, JsonValue> = {};
       for (const [k, v] of Object.entries(error)) {
-        if (!ERROR_RESERVED_FIELDS.has(k)) fields[k] = v;
+        if (!ERROR_RESERVED_FIELDS.has(k)) setJsonField(fields, k, v);
       }
       const decoded: DecodedError = {
         kind: "error",
         code: error.code as string,
         message: error.message as string,
-        retryable: error.retryable as boolean,
+        retryable: typeof error.retryable === "boolean" ? error.retryable : null,
         fields,
         trace,
       };
@@ -496,6 +558,8 @@ export type OutputOptions = {
      * redaction in addition to _url/_URL fields.
      */
     urlNames?: readonly string[];
+    /** Exact structured field names to reveal; URL parameters and argv stay redacted. */
+    revealNames?: readonly string[];
   };
   /** Rendering style for plain (logfmt) output only. Omitted means readable.
    * JSON and YAML are structure-preserving and ignore this setting. */
@@ -528,8 +592,13 @@ export function formatJsonValue(value: JsonValue | Event, options: OutputOptions
  * and formatting for everything else.
  */
 function canonicalJsonString(value: JsonValue): string {
-  return losslessStringify(value) ?? "null";
+  return losslessStringify(value, null, undefined, NUMBER_STRINGIFIERS) ?? "null";
 }
+
+// JSON.stringify spells negative zero "0"; the other SDKs keep its sign.
+const NUMBER_STRINGIFIERS = [
+  { test: (value: unknown) => Object.is(value, -0), stringify: () => "-0" },
+];
 
 /**
  * Format as multi-line YAML. Structure-preserving: like JSON, original keys,
@@ -584,6 +653,8 @@ export function redactedValue(
     policy?: RedactionPolicy;
     secretNames?: readonly string[];
     urlNames?: readonly string[];
+    /** Exact structured field names to reveal; URL parameters and argv stay redacted. */
+    revealNames?: readonly string[];
   },
 ): JsonValue {
   const v = sanitizeForJson(value);
@@ -851,16 +922,19 @@ type RedactionOpts = {
   policy?: RedactionPolicy;
   secretNames?: readonly string[];
   urlNames?: readonly string[];
+  revealNames?: readonly string[];
 };
 
 type RedactionContext = {
   secretNames: ReadonlySet<string>;
   urlNames: ReadonlySet<string>;
+  revealNames: ReadonlySet<string>;
 };
 
 const DEFAULT_CONTEXT: RedactionContext = {
   secretNames: new Set<string>(),
   urlNames: new Set<string>(),
+  revealNames: new Set<string>(),
 };
 
 function secretNameSet(redactionOptions: RedactionOpts): ReadonlySet<string> {
@@ -871,6 +945,7 @@ function contextFromOptions(redactionOptions: RedactionOpts): RedactionContext {
   return {
     secretNames: secretNameSet(redactionOptions),
     urlNames: new Set(redactionOptions.urlNames ?? []),
+    revealNames: new Set(redactionOptions.revealNames ?? []),
   };
 }
 
@@ -898,7 +973,7 @@ function redactSecrets(value: JsonValue, context: RedactionContext = DEFAULT_CON
   if (isObject(value)) {
     for (const k of Object.keys(value)) {
       const v = value[k];
-      if (isSecretKey(k, context.secretNames)) {
+      if (isSecretKey(k, context.secretNames) && !context.revealNames.has(k)) {
         // A null secret is an absent secret. Masking it would manufacture the
         // appearance of a configured credential — readers cannot tell
         // "***"-because-set from "***"-because-null. Redaction hides a value
@@ -934,7 +1009,7 @@ function redactUrlValue(value: JsonValue, context: RedactionContext, depth: numb
   if (isObject(value)) {
     for (const key of Object.keys(value)) {
       const item = value[key];
-      if (isSecretKey(key, context.secretNames)) {
+      if (isSecretKey(key, context.secretNames) && !context.revealNames.has(key)) {
         if (item !== null) value[key] = REDACTED_MARKER;
       } else {
         value[key] = redactUrlValue(item, context, depth + 1);
@@ -1334,19 +1409,28 @@ function tryStripGenericMicro(key: string): [string, string] | null {
   return [stripped, code];
 }
 
-function isInt(value: JsonValue): value is number {
-  return typeof value === "number" && Number.isInteger(value);
-}
-
+/**
+ * The exact digits of an integer-valued number or decimal integer string, of
+ * any magnitude. Bitcoin amounts and `_epoch_ns` only append a unit or divide,
+ * so unlike money suffixes they are not bounded by i64: an integer literal
+ * keeps its digits, and a float counts when its value is an integer below 1e21
+ * (the canonical number form's integer range). A numeric -0 is zero.
+ */
 function decimalIntText(value: JsonValue): string | null {
-  if (typeof value === "string" && /^-?\d+$/.test(value)) return value;
+  if (typeof value === "string") return /^-?\d+$/.test(value) ? value : null;
   if (typeof value === "bigint") return value.toString();
-  if (isInt(value) && Number.isSafeInteger(value)) return String(value);
-  if (isLosslessNumber(value)) {
-    const text = value.toString();
-    return /^-?\d+$/.test(text) ? text : null;
+  let literal: string;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+    literal = value.toString();
+  } else if (isLosslessNumber(value)) {
+    literal = value.toString();
+  } else {
+    return null;
   }
-  return null;
+  const integer = /[.eE]/.test(literal) ? integralFloatText(literal) : literal;
+  if (integer === null) return null;
+  return integer === "-0" ? "0" : integer;
 }
 
 const MIN_I64 = -9_223_372_036_854_775_808n;
@@ -1358,12 +1442,21 @@ const MAX_U64 = 18_446_744_073_709_551_615n;
 // an integer like any other.
 function integerValue(value: JsonValue): bigint | null {
   if (typeof value === "bigint") return value;
-  if (typeof value === "number") return Number.isInteger(value) ? BigInt(value) : null;
+  if (typeof value === "number") {
+    // Read through the shortest spelling, the text the canonical number form
+    // prints, so 2**60 counts as 1152921504606847000 exactly as a decoded
+    // literal of that spelling does in every SDK; BigInt(value) would give
+    // ...846976 and disagree with Rust.
+    if (!Number.isFinite(value)) return null;
+    const literal = value.toString();
+    const integer = /[.eE]/.test(literal) ? integralFloatText(literal) : literal;
+    return integer !== null ? BigInt(integer) : null;
+  }
   if (isLosslessNumber(value)) {
     const literal = value.toString();
     if (/^-?\d+$/.test(literal)) return BigInt(literal);
-    const parsed = Number(literal);
-    return Number.isInteger(parsed) ? BigInt(parsed) : null;
+    const integer = integralFloatText(literal);
+    return integer !== null ? BigInt(integer) : null;
   }
   return null;
 }
@@ -1407,29 +1500,20 @@ function isNum(value: JsonValue): value is number {
 function tryProcessField(key: string, value: JsonValue): [string, string] | null {
   let stripped: string | null;
 
-  // Plain-format suffix processing below does real arithmetic (division,
-  // modulo, Math.floor/abs) that only works on a native JS number. A decoded
-  // LosslessNumber is normalized to one here via Number() \u2014 which never
-  // throws, unlike LosslessNumber's own valueOf() (documented to throw for
-  // values it can't safely represent as number/bigint) \u2014 so an ordinary
-  // decoded value (e.g. duration_ms: 42) keeps formatting exactly as before,
-  // and an exotic decoded value degrades gracefully (loses precision here,
-  // same as it always would for a >2^53 native number) rather than crashing.
-  // This is Plain's documented lossy/human path; JSON/YAML stay exact via
-  // yamlScalar/plainScalar/canonicalJsonString, and decimalIntText below
-  // (msats/sats/epoch_ns) keeps exactness by reading `value` directly instead
-  // of `numeric`.
-  const numeric: JsonValue = isLosslessNumber(value) ? Number(value.toString()) : value;
+  // Appending a unit does no arithmetic and must retain decoded digits.
+  const isNumber = isNum(value) || isLosslessNumber(value);
 
   // Group 1: compound timestamp suffixes
   stripped = stripSuffixCI(key, "_epoch_ms");
   if (stripped !== null) {
-    if (isInt(numeric)) { const formatted = formatRfc3339Ms(numeric); if (formatted !== null) return [stripped, formatted]; }
+    const integer = signedI64(value);
+    if (integer !== null) { const formatted = formatRfc3339Ms(Number(integer)); if (formatted !== null) return [stripped, formatted]; }
     return null;
   }
   stripped = stripSuffixCI(key, "_epoch_s");
   if (stripped !== null) {
-    if (isInt(numeric)) { const formatted = formatRfc3339Ms(numeric * 1000); if (formatted !== null) return [stripped, formatted]; }
+    const integer = signedI64(value);
+    if (integer !== null) { const formatted = formatRfc3339Ms(Number(integer) * 1000); if (formatted !== null) return [stripped, formatted]; }
     return null;
   }
   stripped = stripSuffixCI(key, "_epoch_ns");
@@ -1483,17 +1567,17 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   }
   stripped = stripSuffixCI(key, "_minutes");
   if (stripped !== null) {
-    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)} minutes`];
+    if (isNumber) return [stripped, `${plainScalar(value)} minutes`];
     return null;
   }
   stripped = stripSuffixCI(key, "_hours");
   if (stripped !== null) {
-    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)} hours`];
+    if (isNumber) return [stripped, `${plainScalar(value)} hours`];
     return null;
   }
   stripped = stripSuffixCI(key, "_days");
   if (stripped !== null) {
-    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)} days`];
+    if (isNumber) return [stripped, `${plainScalar(value)} days`];
     return null;
   }
 
@@ -1518,7 +1602,7 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   }
   stripped = stripSuffixCI(key, "_percent");
   if (stripped !== null) {
-    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)}%`];
+    if (isNumber) return [stripped, `${plainScalar(value)}%`];
     return null;
   }
   // Group 5: short suffixes (last to avoid false positives)
@@ -1534,23 +1618,23 @@ function tryProcessField(key: string, value: JsonValue): [string, string] | null
   }
   stripped = stripSuffixCI(key, "_ns");
   if (stripped !== null) {
-    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)}ns`];
+    if (isNumber) return [stripped, `${plainScalar(value)}ns`];
     return null;
   }
   stripped = stripSuffixCI(key, "_us");
   if (stripped !== null) {
-    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)}\u03bcs`];
+    if (isNumber) return [stripped, `${plainScalar(value)}\u03bcs`];
     return null;
   }
   stripped = stripSuffixCI(key, "_ms");
   if (stripped !== null) {
-    const fv = formatMsValue(numeric);
+    const fv = formatMsValue(value);
     if (fv !== null) return [stripped, fv];
     return null;
   }
   stripped = stripSuffixCI(key, "_s");
   if (stripped !== null) {
-    if (isNum(numeric)) return [stripped, `${plainScalar(numeric)}s`];
+    if (isNumber) return [stripped, `${plainScalar(value)}s`];
     return null;
   }
 
@@ -1609,15 +1693,16 @@ function processObjectFields(obj: { [key: string]: JsonValue }): ProcessedField[
 // ═══════════════════════════════════════════
 
 function formatMsAsSeconds(ms: number): string {
-  const formatted = (ms / 1000).toFixed(3);
+  const formatted = toFixedHalfEven(ms / 1000, 3);
   const trimmed = formatted.replace(/0+$/, "");
   if (trimmed.endsWith(".")) return trimmed + "0s";
   return trimmed + "s";
 }
 
 function formatMsValue(value: JsonValue): string | null {
-  if (!isNum(value)) return null;
-  if (Math.abs(value) >= 1000) return formatMsAsSeconds(value);
+  const numeric = isLosslessNumber(value) ? Number(value.toString()) : value;
+  if (!isNum(numeric) || !Number.isFinite(numeric)) return null;
+  if (Math.abs(numeric) >= 1000) return formatMsAsSeconds(numeric);
   return `${plainScalar(value)}ms`;
 }
 
@@ -1632,22 +1717,29 @@ function formatRfc3339Ms(ms: number): string | null {
 }
 
 /**
- * Round to `digits` decimals using round-half-to-even (banker's rounding) and
- * format with a fixed decimal count. `Number.toFixed` rounds half away from
- * zero, which diverges from the printf `%.1f` used by Rust/Go/Python on exact
- * ties (e.g. 1280 bytes = 1.25 KiB → "1.2KiB", not "1.3KiB").
+ * Format `x` with `digits` decimals the way printf `%.Nf` does in Rust, Go and
+ * Python: round the double's exact binary value, half to even.
+ *
+ * `Number.toFixed` already rounds the exact value, but breaks a true tie
+ * (1.0625 at 3 places) away from zero and switches to exponent form from
+ * 1e21. So take the exact expansion — 100 places covers every double this
+ * can tie on — and round the decimal string here. An epsilon test on
+ * `x * 10 ** digits` is not a substitute: it calls near-ties ties.
  */
 function toFixedHalfEven(x: number, digits: number): string {
-  const factor = 10 ** digits;
-  const scaled = x * factor;
-  const floor = Math.floor(scaled);
-  const diff = scaled - floor;
-  const eps = 1e-9;
-  let rounded: number;
-  if (diff > 0.5 + eps) rounded = floor + 1;
-  else if (diff < 0.5 - eps) rounded = floor;
-  else rounded = floor % 2 === 0 ? floor : floor + 1;
-  return (rounded / factor).toFixed(digits);
+  const negative = x < 0;
+  const a = Math.abs(x);
+  // Every double from 1e21 up is an integer, which BigInt spells exactly.
+  const exact = a >= 1e21 ? `${BigInt(a)}.${"0".repeat(100)}` : a.toFixed(100);
+  const [whole, fraction] = exact.split(".");
+  const next = fraction.charCodeAt(digits) - 48;
+  let units = BigInt(whole + fraction.slice(0, digits));
+  const tieBroken = /[1-9]/.test(fraction.slice(digits + 1)) || units % 2n === 1n;
+  if (next > 5 || (next === 5 && tieBroken)) units += 1n;
+  const text = units.toString().padStart(digits + 1, "0");
+  const point = text.length - digits;
+  const body = digits === 0 ? text : `${text.slice(0, point)}.${text.slice(point)}`;
+  return negative ? `-${body}` : body;
 }
 
 function formatBytesHuman(bytes: number): string {
@@ -1791,16 +1883,104 @@ function isAmbiguousYamlKey(key: string): boolean {
     || /^[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?$/.test(key);
 }
 
+/**
+ * Render a number's literal canonically for YAML/plain: a float literal whose
+ * value is an integer below 1e21 in magnitude renders as that integer ("3.0"
+ * -> "3", "-0.0" -> "-0"); anything else keeps its digits, placed by
+ * placeDecimalPoint. Native numbers and decoded literals share it, and it
+ * works on the text so a digit is never lost to a float64 round trip.
+ */
+function formatNumberLiteral(literal: string): string {
+  return integralFloatText(literal) ?? placeDecimalPoint(literal) ?? normalizeExponent(literal);
+}
+
+const I64_MIN = -(2n ** 63n);
+const I64_MAX = 2n ** 63n - 1n;
+
+/**
+ * Spell a non-integral float literal with the notation `Number#toString`
+ * picks: positional when the value lies in [1e-6, 1e21), exponent form
+ * otherwise. A decoded literal carries its own spelling and the other SDKs'
+ * native formatters switch elsewhere, so the choice is made here, on the
+ * digits as written. Null for integer literals and exponents beyond i64,
+ * which keep their spelling.
+ */
+function placeDecimalPoint(literal: string): string | null {
+  if (!/[.eE]/.test(literal)) return null;
+  const sign = literal.startsWith("-") ? "-" : "";
+  const unsigned = sign ? literal.slice(1) : literal;
+  const e = unsigned.search(/[eE]/);
+  const mantissa = e >= 0 ? unsigned.slice(0, e) : unsigned;
+  const [whole, fraction = ""] = mantissa.split(".");
+  const digits = whole + fraction;
+  const significant = digits.replace(/^0+/, "");
+  if (!significant) return null;
+  const shape = /^([-+]?)0*(\d{0,19})$/.exec(e >= 0 ? unsigned.slice(e + 1) : "0");
+  if (!shape || (e >= 0 && unsigned.length === e + 1 + shape[1].length)) return null;
+  const exponent = BigInt(shape[1] + (shape[2] || "0"));
+  // point: how many significant digits precede the decimal point.
+  const point = BigInt(whole.length - (digits.length - significant.length)) + exponent;
+  if (exponent < I64_MIN || exponent > I64_MAX || point - 1n < I64_MIN || point > I64_MAX) {
+    return null;
+  }
+  let text: string;
+  if (point >= 1n && point <= 21n) {
+    const integer = significant.slice(0, Number(point));
+    const rest = significant.slice(Number(point));
+    if (!rest) return null;
+    text = `${integer}.${rest}`;
+  } else if (point >= -5n && point <= 0n) {
+    text = `0.${"0".repeat(Number(-point))}${significant}`;
+  } else {
+    const scale = point - 1n;
+    const rest = significant.length > 1 ? `.${significant.slice(1)}` : "";
+    text = `${significant[0]}${rest}e${scale < 0n ? "-" : "+"}${scale < 0n ? -scale : scale}`;
+  }
+  return sign + text;
+}
+
+function integralFloatText(literal: string): string | null {
+  if (!/[.eE]/.test(literal)) return null;
+  const negative = literal.startsWith("-");
+  const unsigned = negative ? literal.slice(1) : literal;
+  const e = unsigned.search(/[eE]/);
+  const mantissa = e >= 0 ? unsigned.slice(0, e) : unsigned;
+  const [whole, fraction = ""] = mantissa.split(".");
+  const digits = whole + fraction;
+  if (!/[^0]/.test(digits)) return negative ? "-0" : "0";
+  const exponent = e >= 0 ? Number(unsigned.slice(e + 1)) : 0;
+  if (!Number.isSafeInteger(exponent)) return null;
+  const point = whole.length + exponent;
+  const split = Math.min(Math.max(point, 0), digits.length);
+  if (/[^0]/.test(digits.slice(split))) return null;
+  const padding = Math.min(Math.max(point - digits.length, 0), 22);
+  const integer = (digits.slice(0, split) + "0".repeat(padding)).replace(/^0+/, "");
+  if (integer.length > 21) return null;
+  return (negative ? "-" : "") + (integer || "0");
+}
+
+function normalizeExponent(literal: string): string {
+  const match = /^(.*?)[eE]([-+]?)0*(\d*)$/.exec(literal);
+  if (!match) return literal;
+  // An unsigned exponent is positive; spell it like toString() does (e+23).
+  return `${match[1]}e${match[2] || "+"}${match[3] || "0"}`;
+}
+
+function numberText(value: number): string {
+  // `toString` spells negative zero "0"; the canonical form keeps the sign.
+  return Object.is(value, -0) ? "-0" : formatNumberLiteral(value.toString());
+}
+
 function yamlScalar(value: JsonValue): string {
   if (typeof value === "string") return `"${escapeYamlStr(value)}"`;
   if (value === null) return "null";
   if (typeof value === "boolean") return value.toString();
-  if (typeof value === "number") return value.toString();
+  if (typeof value === "number") return numberText(value);
   if (typeof value === "bigint") return value.toString();
-  // Decoded number: emit the exact source literal unquoted, matching JSON's
-  // structure-preserving fidelity contract for YAML too.
-  if (isLosslessNumber(value)) return value.toString();
-  return `"${escapeYamlStr(canonicalJsonString(sortJsonValue(value)))}"`;
+  // Decoded number: its exact digits, in the same canonical form a native
+  // number gets.
+  if (isLosslessNumber(value)) return formatNumberLiteral(value.toString());
+  return `"${escapeYamlStr(embeddedJson(value))}"`;
 }
 
 
@@ -1849,18 +2029,18 @@ function plainScalar(value: JsonValue): string {
   if (typeof value === "string") return value;
   if (value === null) return "null";
   if (typeof value === "boolean") return value.toString();
-  if (typeof value === "number") return value.toString();
+  if (typeof value === "number") return numberText(value);
   if (typeof value === "bigint") return value.toString();
-  // Decoded number: emit the exact source literal (Plain is documented lossy
-  // for arithmetic-derived formatting, but a bare pass-through scalar still
-  // gets its exact digits, not a mangled float64 round-trip).
-  if (isLosslessNumber(value)) return value.toString();
-  return canonicalJsonString(sortJsonValue(value));
+  // Decoded number: its exact digits (Plain is documented lossy only for
+  // arithmetic-derived formatting), in the same canonical form a native
+  // number gets.
+  if (isLosslessNumber(value)) return formatNumberLiteral(value.toString());
+  return embeddedJson(value);
 }
 
 function plainScalarRaw(value: JsonValue): string {
   if (isObject(value) || Array.isArray(value)) {
-    return canonicalJsonString(sortJsonValue(value));
+    return embeddedJson(value);
   }
   return plainScalar(value);
 }
@@ -1888,6 +2068,12 @@ function quoteLogfmtKey(key: string): string {
 // Utilities
 // ═══════════════════════════════════════════
 
+// Arbitrary JSON names, including __proto__, are own data properties. A normal
+// bracket assignment would invoke Object.prototype's legacy prototype setter.
+function setJsonField(target: Record<string, JsonValue>, key: string, value: JsonValue): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
 function sanitizeForJson(value: unknown, stack = new WeakSet<object>(), depth = 0): JsonValue {
   if (depth >= MAX_DEPTH) return MAX_DEPTH_MARKER;
   if (value === null) return null;
@@ -1897,7 +2083,9 @@ function sanitizeForJson(value: unknown, stack = new WeakSet<object>(), depth = 
   if (t === "number") {
     const n = value as number;
     if (!Number.isFinite(n)) return "<unsupported:number>";
-    if (Number.isInteger(n) && !Number.isSafeInteger(n)) return "<unsupported:unsafe-integer>";
+    // An integral number past 2^53 is still a float64, like every SDK's native
+    // float, and renders by the same canonical rule. A caller that needs such
+    // an integer exactly passes a bigint.
     return n;
   }
   if (t === "bigint") return value as bigint;
@@ -1927,7 +2115,7 @@ function sanitizeForJson(value: unknown, stack = new WeakSet<object>(), depth = 
     stack.add(obj);
     const out: { [key: string]: JsonValue } = {};
     for (const [k, v] of Object.entries(obj)) {
-      out[k] = sanitizeForJson(v, stack, depth + 1);
+      setJsonField(out, k, sanitizeForJson(v, stack, depth + 1));
     }
     stack.delete(obj);
     return out;
@@ -1950,16 +2138,21 @@ function sortedObjectKeys(obj: { [key: string]: JsonValue }): string[] {
   return Object.keys(obj).sort(jcsCompare);
 }
 
-function sortJsonValue(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) return value.map(sortJsonValue);
+/**
+ * A container nested inside a Plain array (or in a YAML scalar position) is
+ * written as compact JSON with sorted keys. Its number leaves take the
+ * canonical number form, the same text the value prints as a scalar, so a
+ * nested `1.0` reads `1` and a decoded `1e5` reads `100000` in every SDK
+ * rather than in each runtime's own JSON spelling.
+ */
+function embeddedJson(value: JsonValue): string {
+  if (Array.isArray(value)) return `[${value.map(embeddedJson).join(",")}]`;
   if (isObject(value)) {
-    const out: { [key: string]: JsonValue } = {};
-    for (const key of sortedObjectKeys(value)) {
-      out[key] = sortJsonValue(value[key]);
-    }
-    return out;
+    const members = sortedObjectKeys(value).map((key) => `${JSON.stringify(key)}:${embeddedJson(value[key])}`);
+    return `{${members.join(",")}}`;
   }
-  return value;
+  if (typeof value === "string") return JSON.stringify(value);
+  return plainScalar(value);
 }
 
 function jcsCompare(a: string, b: string): number {

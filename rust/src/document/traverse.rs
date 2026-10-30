@@ -14,12 +14,39 @@ use crate::document::{
 /// [`DocumentError::UnregisteredArray`], no match is
 /// [`DocumentError::SlugNotFound`], and several matches is
 /// [`DocumentError::AmbiguousMatch`] rather than the first one.
+/// `-` is not a name but the append position, which only `set` writes to,
+/// and only as the last segment of its path. It is reserved on every array
+/// and in every verb, so an element whose slug happens to be `-` is reached by
+/// index instead: were it a name anywhere, `get a.-` would read an element
+/// that `set a.-` then appends beside. Reporting it as an unnamed element
+/// would send the caller looking for a naming rule.
+pub(crate) fn append_position_refused(prefix: &[String], last: bool) -> DocumentError {
+    let detail = if last {
+        format!(
+            "`-` names the append position after the last element of `{}`, which is only \
+             valid as the last segment of a `set` path; address an existing element by index",
+            join_path(prefix)
+        )
+    } else {
+        format!(
+            "`-` names the append position of `{}` and can only be the last segment of a \
+             path; address an existing element by index",
+            join_path(prefix)
+        )
+    };
+    DocumentError::PathSyntax { detail }
+}
+
 fn resolve_named_element(
     array: &[Value],
     segment: &str,
     prefix: &[String],
+    last: bool,
     addressing: Addressing<'_>,
 ) -> DocumentResult<usize> {
+    if segment == "-" {
+        return Err(append_position_refused(prefix, last));
+    }
     // A caller's explicit declaration outranks a format-wide rule: it names one
     // array on purpose, so it is the more specific statement about this one.
     if let Some(registration) = addressing
@@ -138,8 +165,13 @@ pub fn get_path_ref<'a>(
                     current = elem;
                     seg_idx += 1;
                 } else {
-                    let index =
-                        resolve_named_element(arr, current_seg, &accumulated_prefix, addressing)?;
+                    let index = resolve_named_element(
+                        arr,
+                        current_seg,
+                        &accumulated_prefix,
+                        seg_idx + 1 == segments.len(),
+                        addressing,
+                    )?;
                     current = &arr[index];
                     accumulated_prefix.push(current_seg.to_string());
                     seg_idx += 1;
@@ -147,7 +179,7 @@ pub fn get_path_ref<'a>(
             }
             _ => {
                 return Err(DocumentError::NotTraversable {
-                    path: path.to_string(),
+                    path: join_path(&accumulated_prefix),
                     got: current.kind_name().to_string(),
                 });
             }
@@ -214,9 +246,19 @@ pub fn resolve_path(
                 }
             },
             Value::Array(array) => {
+                if segment == "-" && idx + 1 == segments.len() {
+                    canonical.push(segment.clone());
+                    break;
+                }
                 let index = match array_index(segment)? {
                     Some(index) => index,
-                    None => resolve_named_element(array, segment, &semantic, addressing)?,
+                    None => resolve_named_element(
+                        array,
+                        segment,
+                        &semantic,
+                        idx + 1 == segments.len(),
+                        addressing,
+                    )?,
                 };
                 let Some(next) = array.get(index) else {
                     copy_rest(&mut canonical);
@@ -320,6 +362,10 @@ fn set_path_recursive(
             }
         }
         Value::Array(arr) => {
+            if current_seg == "-" && is_last {
+                arr.push(value.clone());
+                return Ok(());
+            }
             // Numeric index takes priority over keyed-list slug.
             if let Some(arr_idx) = array_index(current_seg)? {
                 if arr_idx >= arr.len() {
@@ -344,8 +390,13 @@ fn set_path_recursive(
                     )
                 }
             } else {
-                let elem_idx =
-                    resolve_named_element(arr, current_seg, accumulated_prefix, addressing)?;
+                let elem_idx = resolve_named_element(
+                    arr,
+                    current_seg,
+                    accumulated_prefix,
+                    is_last,
+                    addressing,
+                )?;
                 if is_last {
                     Err(DocumentError::UnsupportedOperation {
                         format: "keyed list".to_string(),
@@ -448,6 +499,8 @@ fn unset_path_recursive(
                     accumulated_prefix.push(current_seg.to_string());
                     unset_path_recursive(&mut arr[arr_idx], segments, idx + 1, accumulated_prefix)
                 }
+            } else if current_seg == "-" {
+                Err(append_position_refused(accumulated_prefix, is_last))
             } else {
                 Err(DocumentError::UnregisteredArray {
                     path: join_path(accumulated_prefix),

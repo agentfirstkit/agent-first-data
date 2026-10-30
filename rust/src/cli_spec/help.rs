@@ -141,14 +141,18 @@ impl ResolvedVersion {
 /// The registry asked to describe itself in full.
 ///
 /// Rendering is not the core's business — it carries no Markdown — so this only
-/// says the request was legal and where the bytes go. A host renders the
-/// registry it already holds.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// carries the legal sink plan and registry so the rendering adapter can
+/// complete the response without a second registry argument.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedDocs {
     pub(super) output: OutputPlan,
+    pub(super) registry: BuiltCliSpec,
 }
 
 impl ResolvedDocs {
+    pub fn registry(&self) -> &BuiltCliSpec {
+        &self.registry
+    }
     pub fn output_plan(&self) -> &OutputPlan {
         &self.output
     }

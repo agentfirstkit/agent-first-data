@@ -45,6 +45,30 @@ function loadObject(name: string): any {
   return JSON.parse(readFileSync(join(FIXTURES_DIR, name), "utf-8"));
 }
 
+describe("arbitrary JSON extension names", () => {
+  it("keeps prototype-named fields through every builder and decoding path", () => {
+    const extension = JSON.parse('{"__proto__":{"token_secret":"hidden","keep":"visible"}}');
+    for (const builder of [
+      jsonError("failed", "failed").field("__proto__", extension.__proto__),
+      jsonError("failed", "failed").fields(extension),
+      jsonError("failed", "failed").extend(extension),
+    ]) {
+      const event = builder.build();
+      const rendered = render(event, "json");
+      const payload = JSON.parse(rendered).error;
+      assert.equal(Object.hasOwn(payload, "__proto__"), true);
+      assert.deepEqual(payload.__proto__, { token_secret: "***", keep: "visible" });
+      const decoded = decodeProtocolEvent(rendered);
+      assert.equal(decoded.kind, "error");
+      if (decoded.kind === "error") {
+        assert.equal(Object.getPrototypeOf(decoded.fields), Object.prototype);
+        assert.equal(Object.hasOwn(decoded.fields, "__proto__"), true);
+        assert.deepEqual(decoded.fields.__proto__, payload.__proto__);
+      }
+    }
+  });
+});
+
 describe("builder contract fixtures", () => {
   for (const tc of load("builder_contract.json")) {
     it(tc.name, () => {
@@ -85,12 +109,14 @@ function redactionOptions(tc: any): {
   policy?: RedactionPolicy;
   secretNames?: readonly string[];
   urlNames?: readonly string[];
+  revealNames?: readonly string[];
 } {
   const opts = tc.options ?? {};
   return {
     policy: opts.policy as RedactionPolicy | undefined,
     secretNames: opts.secret_names ?? [],
     urlNames: opts.url_names ?? [],
+    revealNames: opts.reveal_names ?? [],
   };
 }
 
@@ -119,7 +145,16 @@ describe("redact_urls_in_text fixtures", () => {
 describe("redact_argv fixtures", () => {
   for (const tc of load("redact_argv.json")) {
     it(tc.name, () => {
-      const options = redactionOptions(tc);
+      const { revealNames, ...options } = redactionOptions(tc);
+      if (tc.requires === "redactor_reveal_names") {
+        // redactArgv declares no reveal option, but an untyped JavaScript
+        // caller can hand it the same options bag it gives redactedValue.
+        // The reveal list in that bag must not reveal argv.
+        const bag = { ...options, revealNames } as Parameters<typeof redactArgv>[1];
+        assert.deepEqual(redactArgv(tc.input, bag), tc.expected);
+        return;
+      }
+      assert.deepEqual(revealNames, [], "a reveal_names case must declare requires");
       assert.deepEqual(redactArgv(tc.input, options), tc.expected);
     });
   }
@@ -138,7 +173,7 @@ describe("redact fixtures", () => {
   for (const tc of load("redact.json")) {
     it(tc.name, () => {
       const input = JSON.parse(JSON.stringify(tc.input));
-      assert.deepEqual(redactedValue(input), tc.expected);
+      assert.deepEqual(redactedValue(input, redactionOptions(tc)), tc.expected);
       // redactedValue returns a copy: the input must be untouched.
       assert.deepEqual(input, tc.input);
     });
@@ -459,9 +494,10 @@ describe("decodeProtocolEvent", () => {
     assert.throws(() => decodeProtocolEvent(JSON.stringify({ kind: "result" })), EventDecodeError);
   });
 
-  it("throws EventDecodeError when strict validation fails", () => {
-    // Missing trace fails the strict profile even though the shape is otherwise valid.
-    assert.throws(() => decodeProtocolEvent(JSON.stringify({ kind: "result", result: {} })), EventDecodeError);
+  it("accepts base errors without manufacturing retryable", () => {
+    const decoded = decodeProtocolEvent('{"kind":"error","error":{"code":"failed","message":"Failed"}}');
+    assert.equal(decoded.kind, "error");
+    if (decoded.kind === "error") assert.equal(decoded.retryable, null);
   });
 });
 
@@ -505,7 +541,7 @@ describe("number fidelity fixtures", () => {
     assert.equal(plain, "cpu=85.5% duration=42ms size=5.0MiB");
   });
 
-  it("renders native bigint exactly and marks unsafe native integers", () => {
+  it("renders native bigint exactly and large native numbers as the floats they are", () => {
     assert.equal(render({ amount: 9_007_199_254_740_993n }, "json"), '{"amount":9007199254740993}');
     assert.equal(
       render({ adjustment_usd_cents: -9_223_372_036_854_775_808n }, "plain"),
@@ -515,10 +551,10 @@ describe("number fidelity fixtures", () => {
       render({ fee_jpy: 1_000_000_000_000_000_000_000n }, "plain"),
       "fee_jpy=1000000000000000000000",
     );
-    assert.equal(
-      render({ amount: 9_007_199_254_740_993 }, "json"),
-      '{"amount":"<unsupported:unsafe-integer>"}',
-    );
+    // A number literal past 2^53 was already rounded when JavaScript parsed
+    // it; the float it became renders like any other SDK's native float.
+    assert.equal(render({ amount: 9_007_199_254_740_993 }, "json"), '{"amount":9007199254740992}');
+    assert.equal(render({ amount: 1e21 }, "yaml"), "---\namount: 1e+21");
   });
 });
 
@@ -528,7 +564,12 @@ describe("protocol decode fixtures", () => {
       if (tc.valid) {
         assert.doesNotThrow(() => decodeProtocolEvent(tc.input_line));
       } else {
-        assert.throws(() => decodeProtocolEvent(tc.input_line));
+        assert.throws(() => decodeProtocolEvent(tc.input_line), EventDecodeError);
+      }
+      if (tc.expected_result_json !== undefined) {
+        const decoded = decodeProtocolEvent(tc.input_line);
+        assert.equal(decoded.kind, "result");
+        assert.equal(render((decoded as { result: JsonValue }).result, "json"), tc.expected_result_json);
       }
     });
   }
@@ -649,8 +690,12 @@ describe("output format fixtures", () => {
     it(tc.name, () => {
       const input = tc.input as JsonValue;
 
-      const gotJson = JSON.parse(render(input, "json"));
+      const jsonText = render(input, "json");
+      const gotJson = JSON.parse(jsonText);
       assert.deepEqual(gotJson, tc.expected_json, "json mismatch");
+      if (tc.expected_json_text !== undefined) {
+        assert.equal(jsonText, tc.expected_json_text, "json text mismatch");
+      }
 
       const gotYaml = render(input, "yaml");
       assert.equal(gotYaml, tc.expected_yaml, "yaml mismatch");
@@ -788,5 +833,15 @@ describe("json safety", () => {
     const out = render(input as JsonValue, "json");
     assert.ok(out.includes("<afdata:max-depth>"));
     assert.ok(!out.includes("***"));
+  });
+});
+
+describe("native number rendering", () => {
+  it("keeps the sign of negative zero in YAML and plain", () => {
+    // `(-0).toString()` is "0"; the shared fixtures only reach decoded
+    // literals, which never went through it.
+    const value = { neg_zero: -0, wait_s: -0 };
+    assert.equal(render(value, "yaml"), "---\nneg_zero: -0\nwait_s: -0");
+    assert.equal(render(value, "plain"), "neg_zero=-0 wait=-0s");
   });
 });

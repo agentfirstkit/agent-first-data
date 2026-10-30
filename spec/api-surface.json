@@ -140,7 +140,7 @@
       "python": null,
       "typescript": null,
       "go": null,
-      "note": "Rust-only typed protocol-validation error (stable rule slug + JSON pointer + message) returned by validate_protocol_event/validate_protocol_stream. Python/TS/Go SDKs still surface validation failures as a plain message (ValueError / Error / error), not yet upgraded to the typed violation \u2014 a tracked cross-SDK gap."
+      "note": "Rust-only typed protocol-validation error (stable rule slug + JSON pointer + message) returned by validate_protocol_event/validate_protocol_stream. Python/TS/Go SDKs still surface validation failures as a plain message (ValueError / Error / error), not yet upgraded to the typed violation — a tracked cross-SDK gap."
     },
     {
       "id": "build_cli_error",
@@ -156,7 +156,8 @@
       "rust": "decode_protocol_event",
       "python": "decode_protocol_event",
       "typescript": "decodeProtocolEvent",
-      "go": "DecodeProtocolEvent"
+      "go": "DecodeProtocolEvent",
+      "note": "Reads base-profile events; strict validation remains a separate opt-in. DecodedError.retryable is nullable when absent."
     },
     {
       "id": "event_decode_error",
@@ -214,7 +215,7 @@
       "python": "render",
       "typescript": "render",
       "go": "Render",
-      "note": "The single value \u00d7 format \u00d7 options \u2192 String entry point. Replaces the former output_json/output_yaml/output_plain (+ _with_options) and cli_output/cli_output_with_options families. Rust/Go take an explicit OutputOptions argument (OutputOptions: Default); Python/TS keep it an optional keyword/parameter."
+      "note": "The single value × format × options → String entry point. Replaces the former output_json/output_yaml/output_plain (+ _with_options) and cli_output/cli_output_with_options families. Rust/Go take an explicit OutputOptions argument (OutputOptions: Default); Python/TS keep it an optional keyword/parameter."
     },
     {
       "id": "lint_value",
@@ -338,7 +339,7 @@
       "python": null,
       "typescript": null,
       "go": "Redactor",
-      "note": "Rust/Go use a configured Redactor value (.value()/.url() or .Value()/.URL()) for custom secret_names/policy; Python/TS take secret_names/policy as keyword arguments directly on redacted_value/redact_url_secrets/OutputOptions instead of a separate type."
+      "note": "Rust/Go use a configured Redactor value (.value()/.url() or .Value()/.URL()) for custom secret_names/policy; Python/TS take secret_names/policy as keyword arguments directly on redacted_value/redact_url_secrets/OutputOptions instead of a separate type. Exact reveal names: Rust Redactor::reveal_names, Go Redactor.RevealNames, Python reveal_names (OutputOptions/keyword), TypeScript OutputOptions.redaction.revealNames; URL parameters and argv get no exemption."
     },
     {
       "id": "redaction_policy",
@@ -745,7 +746,7 @@
       "python": null,
       "typescript": null,
       "go": null,
-      "note": "Rust reference cli-spec-v1 declaration of an exit code the CLI defines beyond AFDATA's 0/1/2, so the rendered reference documents what the binary returns. Belongs to the CliSpec compiler, which the other SDKs intentionally defer (see cli_spec)."
+      "note": "Rust reference cli-spec-v1 declaration of an exit code the CLI defines beyond AFDATA's 0/1/2/4, so the rendered reference documents what the binary returns. Belongs to the CliSpec compiler, which the other SDKs intentionally defer (see cli_spec)."
     },
     {
       "id": "output_lifecycle",
@@ -917,6 +918,33 @@
       "typescript": null,
       "go": null,
       "note": "Rust-only compiler-generated type-correct registry fixture."
+    },
+    {
+      "id": "write_raw_exit",
+      "kind": "fn",
+      "rust": "write_raw_exit",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only registry raw-output exit policy: closed readers succeed, other write failures exit 4."
+    },
+    {
+      "id": "cli_output_setup_failed_event",
+      "kind": "fn",
+      "rust": "cli_output_setup_failed_event",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only standard terminal error for output sink installation failure."
+    },
+    {
+      "id": "cli_output_write_failed_event",
+      "kind": "fn",
+      "rust": "cli_output_write_failed_event",
+      "python": null,
+      "typescript": null,
+      "go": null,
+      "note": "Rust-only standard terminal error for output write failure."
     }
   ]
 }

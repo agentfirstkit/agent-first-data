@@ -18,6 +18,13 @@ pub(super) fn guard_mutation(path: &Path, operation: &str) -> DocumentResult<fs:
             detail: format!("refusing to mutate symlink `{}`", path.display()),
         });
     }
+    if !metadata.is_file() {
+        return Err(DocumentError::UnsupportedOperation {
+            format: "filesystem".to_string(),
+            operation: operation.to_string(),
+            detail: format!("refusing to mutate non-regular file `{}`", path.display()),
+        });
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -37,7 +44,7 @@ pub(super) fn guard_mutation(path: &Path, operation: &str) -> DocumentResult<fs:
 /// happened, so a `save` and a `create` read differently for the same fault.
 fn document_io_error(operation: &str, error: crate::atomic_file::AtomicError) -> DocumentError {
     DocumentError::IoError {
-        detail: format!("{operation} {error}"),
+        detail: format!("{operation}: {error}"),
     }
 }
 

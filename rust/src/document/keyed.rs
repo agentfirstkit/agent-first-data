@@ -187,7 +187,7 @@ fn add_keyed_segments(
     if index + 1 < segments.len() {
         let Value::Object(object) = current else {
             return Err(DocumentError::NotTraversable {
-                path: join_path(&segments[..=index]),
+                path: join_path(&segments[..index]),
                 got: current.kind_name().to_string(),
             });
         };
@@ -201,7 +201,7 @@ fn add_keyed_segments(
     } else {
         let Value::Object(object) = current else {
             return Err(DocumentError::NotTraversable {
-                path: join_path(segments),
+                path: join_path(&segments[..index]),
                 got: current.kind_name().to_string(),
             });
         };
@@ -273,7 +273,7 @@ fn remove_keyed_segments(
     if index + 1 < segments.len() {
         let Value::Object(object) = current else {
             return Err(DocumentError::NotTraversable {
-                path: join_path(&segments[..=index]),
+                path: join_path(&segments[..index]),
                 got: current.kind_name().to_string(),
             });
         };
@@ -289,7 +289,7 @@ fn remove_keyed_segments(
     } else {
         let Value::Object(object) = current else {
             return Err(DocumentError::NotTraversable {
-                path: join_path(segments),
+                path: join_path(&segments[..index]),
                 got: current.kind_name().to_string(),
             });
         };

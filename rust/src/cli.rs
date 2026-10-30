@@ -307,14 +307,45 @@ impl<W: std::io::Write> CliEmitter<W> {
     /// exit code, so a one-shot CLI need not hand-roll the emit-then-exit dance.
     ///
     /// A successful write returns `success_code`; a broken pipe (the reader hung
-    /// up) returns `0`; any other write or validation failure returns `4`. A
-    /// library never calls `process::exit` itself — return this code from `main`
-    /// (`std::process::ExitCode::from(code)`).
+    /// up) returns `0` and says nothing. Any other write failure returns `4`
+    /// after reporting `output_write_failed` as an `error` event: on the
+    /// diagnostic sink in finite mode, on the process's stderr in event-stream
+    /// mode, whose only writer is the one that just failed. That report is best
+    /// effort — a stderr that cannot be written either leaves only the code. An
+    /// event the emitter refuses (a protocol violation or a second terminal
+    /// event) is the command's own failure, not an
+    /// output one, and returns `1`.
+    /// A library never calls `process::exit` itself — return this code from
+    /// `main` (`std::process::ExitCode::from(code)`).
     pub fn finish(&mut self, event: Event, success_code: u8) -> u8 {
         match self.emit(event) {
             Ok(()) => success_code,
             Err(err) if err.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe) => 0,
-            Err(_) => 4,
+            Err(CliEmitterError::Write(_)) => {
+                self.report_output_write_failed();
+                4
+            }
+            Err(
+                CliEmitterError::Validation(_)
+                | CliEmitterError::Build(_)
+                | CliEmitterError::Lifecycle(_),
+            ) => 1,
+        }
+    }
+
+    // Event-stream mode has no diagnostic sink, so the report goes to the
+    // process's stderr: the spec's Channel policy sanctions it here exactly as
+    // it does for the wired constructors below.
+    #[allow(clippy::disallowed_methods)]
+    fn report_output_write_failed(&mut self) {
+        let event = crate::cli_afdata::cli_output_write_failed_event();
+        if self.diagnostic.is_some() {
+            let _unwritable = self.emit(event);
+        } else {
+            let mut stderr =
+                CliEmitter::with_options(std::io::stderr(), self.format, OutputOptions::default())
+                    .with_strict_protocol();
+            let _unwritable = stderr.emit(event);
         }
     }
 
@@ -416,6 +447,15 @@ impl CliEmitter<std::io::Stdout> {
 // streams (`std::io::stderr` included) as the emitter's own sinks.
 #[allow(clippy::disallowed_methods)]
 impl CliEmitter<Box<dyn std::io::Write>> {
+    /// Use the registry's typed format and routing. Raw plans use JSON diagnostics.
+    pub fn from_plan(plan: &crate::cli_spec::OutputPlan) -> Self {
+        Self::from_output_to(
+            plan.output_to().unwrap_or(OutputTo::Split),
+            plan.output_format().unwrap_or(OutputFormat::Json),
+        )
+        .with_strict_protocol()
+    }
+
     /// Build an emitter from a parsed [`OutputTo`] selector, wired to the
     /// process streams: `Split` is finite mode (`result` → stdout, everything
     /// else → stderr); `Stdout`/`Stderr` are event-stream mode onto that stream.
@@ -467,12 +507,31 @@ impl CliEmitter<Box<dyn std::io::Write>> {
 // stray writes elsewhere from bypassing this routing.
 #[allow(clippy::disallowed_methods)]
 pub fn write_raw(text: &str, selector: OutputTo) -> std::io::Result<()> {
-    use std::io::Write;
     let written = match selector {
-        OutputTo::Stderr => std::io::stderr().lock().write_all(text.as_bytes()),
-        OutputTo::Split | OutputTo::Stdout => std::io::stdout().lock().write_all(text.as_bytes()),
+        OutputTo::Stderr => write_raw_to(&mut std::io::stderr().lock(), text),
+        OutputTo::Split | OutputTo::Stdout => write_raw_to(&mut std::io::stdout().lock(), text),
     };
     forgive_broken_pipe(written)
+}
+
+// Flush even a final fragment without a newline, so a buffered write failure
+// belongs to this call rather than an ignored process-shutdown flush.
+fn write_raw_to(writer: &mut impl std::io::Write, text: &str) -> std::io::Result<()> {
+    writer.write_all(text.as_bytes())?;
+    writer.flush()
+}
+
+/// Write registry-owned raw output with the standard process exit policy.
+pub fn write_raw_exit(text: &str, plan: &crate::cli_spec::OutputPlan) -> std::process::ExitCode {
+    match write_raw(text, plan.output_to().unwrap_or(OutputTo::Stdout)) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(_) => {
+            let mut emitter = CliEmitter::from_output_to(OutputTo::Stderr, OutputFormat::Json)
+                .with_strict_protocol();
+            let _unwritable = emitter.emit(crate::cli_afdata::cli_output_write_failed_event());
+            std::process::ExitCode::from(4)
+        }
+    }
 }
 
 /// A closed reader is not a failure to report.
@@ -539,6 +598,23 @@ pub fn cli_render_version(
 mod raw_write_tests {
     use super::forgive_broken_pipe;
     use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn raw_fragments_report_a_flush_failure() {
+        struct FailsOnFlush;
+        impl std::io::Write for FailsOnFlush {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        }
+        assert_eq!(
+            super::write_raw_to(&mut FailsOnFlush, "fragment").map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::PermissionDenied)
+        );
+    }
 
     #[test]
     fn a_closed_reader_is_success_and_every_other_failure_is_not() {

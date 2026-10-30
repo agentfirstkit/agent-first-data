@@ -15,9 +15,10 @@
   },
   {
     "name": "negative_zero",
-    "description": "-0.0 must keep its sign, not normalize to 0 or 0.0, when parsed and re-emitted as JSON. No expected_yaml: Rust's YAML/plain renderer canonicalizes an integral-valued decoded float's trailing zero the same way it does for a hand-built one (\"-0.0\" -> \"-0\", value-preserving, spelling-lossy) since serde_json::Number carries no decoded-vs-hand-built distinction; see rust/src/tests.rs's number_fidelity_fixtures comment. JSON is unaffected and asserted exactly.",
+    "description": "-0.0 must keep its sign, not normalize to 0 or 0.0, when parsed and re-emitted. JSON keeps the literal exactly; YAML/plain render an integral-valued float as its integer, sign included.",
     "input_line": "{\"kind\":\"result\",\"result\":-0.0,\"trace\":{}}",
-    "expected_json": "-0.0"
+    "expected_json": "-0.0",
+    "expected_yaml": "---\n-0"
   },
   {
     "name": "negative_zero_integer",
@@ -67,5 +68,96 @@
     "input_line": "{\"kind\":\"result\",\"result\":{\"above_bytes\":18446744073709551616,\"fee_jpy\":3.0,\"float_bytes\":3.0,\"i64_bytes\":9223372036854775808,\"max_bytes\":18446744073709551615},\"trace\":{}}",
     "expected_json": "{\"above_bytes\":18446744073709551616,\"fee_jpy\":3.0,\"float_bytes\":3.0,\"i64_bytes\":9223372036854775808,\"max_bytes\":18446744073709551615}",
     "expected_plain": "above_bytes=18446744073709551616 fee=¥3 float=3B i64=8388608.0TiB max=16777216.0TiB"
+  },
+  {
+    "name": "negative_zero_integer_suffixes_agree_with_native_zero",
+    "description": "A numeric -0 is non-negative and formats as integer zero for bytes and Bitcoin amounts. Its JSON literal still retains the sign.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"amount_sats\":-0,\"size_bytes\":-0},\"trace\":{}}",
+    "expected_json": "{\"amount_sats\":-0,\"size_bytes\":-0}",
+    "expected_plain": "amount=0sats size=0B"
+  },
+  {
+    "name": "suffixes_without_arithmetic_keep_exact_decoded_digits",
+    "description": "Appending a unit does not require float64 arithmetic. Percent, duration and small millisecond output retain exact digits, and decoded integral Bitcoin amounts format like native integral numbers.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"cpu_percent\":0.100000000000000005,\"duration_ms\":42.000000000000000005,\"reserve_msats\":50000.0,\"time_s\":9007199254740993.0},\"trace\":{}}",
+    "expected_json": "{\"cpu_percent\":0.100000000000000005,\"duration_ms\":42.000000000000000005,\"reserve_msats\":50000.0,\"time_s\":9007199254740993.0}",
+    "expected_plain": "cpu=0.100000000000000005% duration=42.000000000000000005ms reserve=50000msats time=9007199254740993s"
+  },
+  {
+    "name": "zero_with_an_exponent_beyond_machine_range",
+    "description": "Zero stays an exactly integral value even when its exponent does not fit a machine integer; canonical YAML/plain output must agree across SDKs without converting the exponent to a float.",
+    "input_line": "{\"kind\":\"result\",\"result\":-0.00e+9999999999999999999999999,\"trace\":{}}",
+    "expected_json": "-0.00e+9999999999999999999999999",
+    "expected_yaml": "---\n-0",
+    "expected_plain": "-0"
+  },
+  {
+    "name": "fractional_epoch_literals_do_not_round_into_timestamps",
+    "description": "Timestamp suffixes require exact integral values; a fractional literal that rounds to a whole float64 must retain its original key and digits.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"created_epoch_ms\":1000.0000000000000000001,\"started_epoch_s\":1.0000000000000000001},\"trace\":{}}",
+    "expected_json": "{\"created_epoch_ms\":1000.0000000000000000001,\"started_epoch_s\":1.0000000000000000001}",
+    "expected_plain": "created_epoch_ms=1000.0000000000000000001 started_epoch_s=1.0000000000000000001"
+  },
+  {
+    "name": "integer_suffixes_do_not_round_decoded_float_literals",
+    "description": "Integer-required suffixes must test the exact decoded value before formatting: float64 must not round a fractional byte count into an integer, change a currency unit, or move an out-of-range amount inside i64.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"exact_jpy\":9007199254740993.0,\"fraction_bytes\":1.0000000000000000001,\"max_jpy\":9223372036854775807.0,\"outside_jpy\":-9223372036854775809.0},\"trace\":{}}",
+    "expected_json": "{\"exact_jpy\":9007199254740993.0,\"fraction_bytes\":1.0000000000000000001,\"max_jpy\":9223372036854775807.0,\"outside_jpy\":-9223372036854775809.0}",
+    "expected_plain": "exact=¥9,007,199,254,740,993 fraction_bytes=1.0000000000000000001 max=¥9,223,372,036,854,775,807 outside_jpy=-9223372036854775809"
+  },
+  {
+    "name": "integral_float_literals_render_as_integers",
+    "description": "YAML/plain render a float literal whose value is an integer below 1e21 as that integer, decided on the literal's text so digits beyond float64 survive (9007199254740993.0). Fractional values and magnitudes from 1e21 keep their literal. JSON keeps every literal exactly.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"a\":1.0,\"b\":-0.0,\"c\":1.50e+2,\"d\":9007199254740993.0,\"e\":1e+21,\"f\":100.000,\"g\":1e+3,\"h\":2.50,\"i\":1e+20,\"wait_s\":-0.0},\"trace\":{}}",
+    "expected_json": "{\"a\":1.0,\"b\":-0.0,\"c\":1.50e+2,\"d\":9007199254740993.0,\"e\":1e+21,\"f\":100.000,\"g\":1e+3,\"h\":2.50,\"i\":1e+20,\"wait_s\":-0.0}",
+    "expected_yaml": "---\na: 1\nb: -0\nc: 150\nd: 9007199254740993\ne: 1e+21\nf: 100\ng: 1000\nh: 2.50\ni: 100000000000000000000\nwait_s: -0",
+    "expected_plain": "a=1 b=-0 c=150 d=9007199254740993 e=1e+21 f=100 g=1000 h=2.50 i=100000000000000000000 wait=-0s"
+  },
+  {
+    "name": "unsigned_exponents_render_with_an_explicit_sign",
+    "description": "A decoded exponent written without a sign renders with `e+`, the spelling every native float formatter uses, so a decoded and a native number of the same value render alike. Go, Python and TypeScript JSON keep the literal exactly; serde_json re-spells the exponent while scanning, which expected_json_rust records.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"a\":6.022e23,\"b\":1.5E030,\"c\":2.5e-07,\"d\":6.022e+23},\"trace\":{}}",
+    "expected_json": "{\"a\":6.022e23,\"b\":1.5E030,\"c\":2.5e-07,\"d\":6.022e+23}",
+    "expected_json_rust": "{\"a\":6.022e+23,\"b\":1.5e+030,\"c\":2.5e-07,\"d\":6.022e+23}",
+    "expected_yaml": "---\na: 6.022e+23\nb: 1.5e+30\nc: 2.5e-7\nd: 6.022e+23",
+    "expected_plain": "a=6.022e+23 b=1.5e+30 c=2.5e-7 d=6.022e+23"
+  },
+  {
+    "name": "decoded_literals_take_the_shared_notation",
+    "description": "YAML/plain place a decoded fractional literal's digits by the same [1e-6, 1e21) positional range a native number uses, so a literal and a native float of one value render alike. The digits as written survive, trailing zeros included; JSON keeps every literal exactly.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"a\":1e-5,\"b\":1.50e-4,\"c\":0.0000001,\"d\":12345678901234567890123.5,\"e\":0.000123e+8},\"trace\":{}}",
+    "expected_json": "{\"a\":1e-5,\"b\":1.50e-4,\"c\":0.0000001,\"d\":12345678901234567890123.5,\"e\":0.000123e+8}",
+    "expected_yaml": "---\na: 0.00001\nb: 0.000150\nc: 1e-7\nd: 1.23456789012345678901235e+22\ne: 12300",
+    "expected_plain": "a=0.00001 b=0.000150 c=1e-7 d=1.23456789012345678901235e+22 e=12300"
+  },
+  {
+    "name": "containers_inside_plain_arrays_use_the_canonical_number_form",
+    "description": "Plain writes an object or array nested inside an array as compact JSON with sorted keys. Its number leaves take the same canonical form a scalar takes, so a decoded 1e5 reads 100000 and 1.0 reads 1 in every SDK, not each runtime's JSON spelling.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"m\":[[1e5]],\"o\":[{\"a\":6.022e23,\"b\":1.0,\"c\":0.0000001}]},\"trace\":{}}",
+    "expected_json": "{\"m\":[[1e5]],\"o\":[{\"a\":6.022e23,\"b\":1.0,\"c\":0.0000001}]}",
+    "expected_json_rust": "{\"m\":[[1e+5]],\"o\":[{\"a\":6.022e+23,\"b\":1.0,\"c\":0.0000001}]}",
+    "expected_yaml": "---\nm:\n  -\n    - 100000\no:\n  -\n    a: 6.022e+23\n    b: 1\n    c: 1e-7",
+    "expected_plain": "m=[100000] o=\"{\\\"a\\\":6.022e+23,\\\"b\\\":1,\\\"c\\\":1e-7}\""
+  },
+  {
+    "name": "negative_zero_keeps_its_sign_with_a_unit",
+    "description": "A decoded integer -0 renders as -0 with or without a unit suffix, the same text the canonical number form gives it as a scalar.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"a_ms\":-0,\"b_s\":-0,\"c_ns\":-0,\"d_percent\":-0,\"e\":-0},\"trace\":{}}",
+    "expected_json": "{\"a_ms\":-0,\"b_s\":-0,\"c_ns\":-0,\"d_percent\":-0,\"e\":-0}",
+    "expected_plain": "a=-0ms b=-0s c=-0ns d=-0% e=-0"
+  },
+  {
+    "name": "unit_suffixes_keep_numbers_beyond_float64",
+    "description": "Appending a unit does no arithmetic, so a decoded literal beyond float64's range still takes its unit. Only _ms, which converts to seconds from 1000, needs a finite value and otherwise keeps its raw key and digits.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"a_s\":1e+400,\"b_ns\":1e+400,\"c_us\":1e+400,\"d_percent\":1e+400,\"e_minutes\":1e+400,\"f_hours\":1e+400,\"g_days\":1e+400,\"h_ms\":1e+400},\"trace\":{}}",
+    "expected_json": "{\"a_s\":1e+400,\"b_ns\":1e+400,\"c_us\":1e+400,\"d_percent\":1e+400,\"e_minutes\":1e+400,\"f_hours\":1e+400,\"g_days\":1e+400,\"h_ms\":1e+400}",
+    "expected_plain": "a=1e+400s b=1e+400ns c=1e+400μs d=1e+400% e=\"1e+400 minutes\" f=\"1e+400 hours\" g=\"1e+400 days\" h_ms=1e+400"
+  },
+  {
+    "name": "bitcoin_and_epoch_ns_integers_have_no_i64_bound",
+    "description": "_sats, _msats and _epoch_ns take an integer of any size, as a number or a decimal string: Bitcoin amounts keep their exact digits, and _epoch_ns formats whenever the instant lies in RFC 3339's year range 0001-9999. A float literal counts when its value is an integer below 1e21.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"a_sats\":9223372036854775808,\"b_msats\":18446744073709551616,\"c_sats\":\"9223372036854775808\",\"d_epoch_ns\":9223372036854775808,\"e_epoch_ns\":\"9223372036854775808\",\"f_epoch_ns\":253402300799999999999,\"g_epoch_ns\":\"253402300800000000000\",\"h_epoch_ns\":-62135596800000000000,\"i_sats\":1e+20,\"j_sats\":1e+21,\"k_epoch_ns\":100000000000000000000000000000000000000000},\"trace\":{}}",
+    "expected_json": "{\"a_sats\":9223372036854775808,\"b_msats\":18446744073709551616,\"c_sats\":\"9223372036854775808\",\"d_epoch_ns\":9223372036854775808,\"e_epoch_ns\":\"9223372036854775808\",\"f_epoch_ns\":253402300799999999999,\"g_epoch_ns\":\"253402300800000000000\",\"h_epoch_ns\":-62135596800000000000,\"i_sats\":1e+20,\"j_sats\":1e+21,\"k_epoch_ns\":100000000000000000000000000000000000000000}",
+    "expected_plain": "a=9223372036854775808sats b=18446744073709551616msats c=9223372036854775808sats d=2262-04-11T23:47:16.854Z e=2262-04-11T23:47:16.854Z f=9999-12-31T23:59:59.999Z g_epoch_ns=253402300800000000000 h=0001-01-01T00:00:00.000Z i=100000000000000000000sats j_sats=1e+21 k_epoch_ns=100000000000000000000000000000000000000000"
   }
 ]

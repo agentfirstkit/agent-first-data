@@ -10,6 +10,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from markdown_blocks import code_blocks
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = (
@@ -41,9 +43,8 @@ def sourced_documented_events() -> list[tuple[str, dict]]:
             raise ValueError(f"legacy code:ok example in {path.relative_to(ROOT)}")
         if "use `code` / `result` / `error` / `trace` structure" in text:
             raise ValueError(f"legacy protocol checklist in {path.relative_to(ROOT)}")
-        for number, block in enumerate(
-            re.findall(r"```json\s*\n(.*?)```", text, re.DOTALL), start=1
-        ):
+        json_blocks = [block["text"] for block in code_blocks(path) if block["language"] == "json"]
+        for number, block in enumerate(json_blocks, start=1):
             values = []
             try:
                 values.append(json.loads(block))

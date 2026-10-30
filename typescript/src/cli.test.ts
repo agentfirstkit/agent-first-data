@@ -391,11 +391,55 @@ describe("CliEmitter finish helpers", () => {
     assert.equal(emitter.finish(jsonResult({ ok: true }).build(), 0), 0);
   });
 
-  it("finish maps any other write failure to exit code 4", () => {
+  const assertOutputWriteFailed = (lines: string[]) => {
+    assert.equal(lines.length, 1);
+    const reported = JSON.parse(lines[0]);
+    assert.equal(reported.kind, "error");
+    assert.equal(reported.error.code, "output_write_failed");
+  };
+
+  it("finish maps any other write failure to exit code 4 and reports it on stderr in stream mode", () => {
+    const stderr: string[] = [];
     const emitter = new CliEmitter(() => {
       throw new Error("disk full");
     }, "json");
+    (emitter as unknown as { processStderr: (line: string) => void }).processStderr = (line) => stderr.push(line);
     assert.equal(emitter.finish(jsonResult({ ok: true }).build(), 0), 4);
+    assertOutputWriteFailed(stderr);
+  });
+
+  it("finish reports an unwritable result on the diagnostic sink, and a closed reader stays silent", () => {
+    let diagnostic: string[] = [];
+    const failing = CliEmitter.finiteWith(
+      () => {
+        throw new Error("disk full");
+      },
+      (line) => diagnostic.push(line),
+      "json",
+    );
+    assert.equal(failing.finishResult({ rows: 2 }), 4);
+    assertOutputWriteFailed(diagnostic);
+
+    diagnostic = [];
+    const closed = CliEmitter.finiteWith(
+      () => {
+        const e = new Error("write EPIPE") as NodeJS.ErrnoException;
+        e.code = "EPIPE";
+        throw e;
+      },
+      (line) => diagnostic.push(line),
+      "json",
+    );
+    assert.equal(closed.finishResult({}), 0);
+    assert.deepEqual(diagnostic, []);
+  });
+
+  it("finish returns 1 for an event the emitter refuses", () => {
+    const out: string[] = [];
+    const emitter = new CliEmitter((line) => out.push(line), "json");
+    assert.equal(emitter.finishResult({}), 0);
+    assert.equal(emitter.finishResult({}), 1);
+    assert.equal(out.length, 1);
   });
 });
 

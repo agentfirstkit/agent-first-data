@@ -2,10 +2,10 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.35.1",
+  "version": "0.36.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
-  "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
+  "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus the afdata CLI and a Rust library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
   "intent": [
     "Encode all semantic information in the field name itself so agents parse structured data without external schemas, documentation, or type systems — _ms/_s/_epoch_ms for time, _msats/_sats/_usd_cents for currency, _bytes for size, _secret for auto-redaction",
     "Define a JSONL output protocol where every line carries a kind discriminator (result, error, progress, or log), a payload field named after that kind, and a trace object for execution context (duration, token counts, cost, data source) — same structure whether the transport is CLI stdout, HTTP response body, MCP tool result, or SSE stream",
@@ -13,13 +13,15 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Redact secrets in nested redirect URLs, hash-route fragments, and passwords containing an unencoded ?, # or /, in all four SDKs",
-    "Refuse INI writes that would not read back unchanged",
-    "Refuse Markdown nested more than 128 levels instead of overflowing the stack",
-    "Check JSON syntax and depth before editing, and insert YAML flow fields without an unsafe source fallback",
-    "Keep dotenv edits intact",
-    "Print _bytes beyond u64 as raw values, and accept integral floats for integer suffixes in Go",
-    "Fail a prompt the terminal closes before answering, and keep the answer's whitespace"
+    "Refuse a --secret-from write that would replace a mapping or a non-string",
+    "Keep a TOML datetime a datetime when its text is written back",
+    "Write fields into single-key YAML list items, collections into YAML list elements, and keys into empty YAML documents",
+    "Remove an INI section on unset, and blame the path for an invalid dotenv name",
+    "Keep JSON -0 on read, name the blocking scalar in traversal errors, and reject a repeated add field",
+    "Report skill admin failures with their own codes, exiting 1 unless the call was malformed",
+    "Never install a personal skill into the current directory when HOME is empty",
+    "Read only ASCII digit strings as integers in Python, and round seconds like printf in TypeScript",
+    "Tag the Go module so go get resolves this release"
   ],
   "bonds": [],
   "tree": {

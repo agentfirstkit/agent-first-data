@@ -6,10 +6,12 @@ use std::fmt;
 // Event Type and Build Errors (0.16 API)
 // ═══════════════════════════════════════════
 
-/// A typed, strict-valid AFDATA protocol v1 event.
+/// An SDK-built AFDATA protocol v1 event envelope.
 ///
 /// Wraps the complete JSON envelope and provides access to the underlying value.
-/// Events produced by builders are guaranteed to pass `validate_protocol_event(_, true)`.
+/// The non-error builders retain a caller-provided trace verbatim and cannot
+/// fail. Validate externally supplied trace values with
+/// [`validate_protocol_event`] before treating the envelope as protocol-valid.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Event(Value);
 
@@ -575,6 +577,18 @@ fn validate_error_payload(error: Option<&Value>) -> Result<(), ProtocolViolation
             "event.error.hint must be a string when present",
         ));
     }
+    // Absent is "unknown"; a value of the wrong type is not, and decoding it as
+    // absent would turn `"retryable":"false"` into a silent "maybe".
+    if error
+        .get("retryable")
+        .is_some_and(|retryable| !retryable.is_boolean())
+    {
+        return Err(violation(
+            "error_retryable_invalid",
+            "/error/retryable",
+            "event.error.retryable must be a boolean when present",
+        ));
+    }
     Ok(())
 }
 
@@ -719,7 +733,7 @@ fn require_non_empty_string(
 // Reader API: decode_protocol_event
 // ═══════════════════════════════════════════
 
-/// A decoded, strict-valid AFDATA protocol v1 event, typed by kind.
+/// A decoded, base-valid AFDATA protocol v1 event, typed by kind.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DecodedEvent {
     Result(DecodedResult),
@@ -742,7 +756,7 @@ pub struct DecodedResult {
 pub struct DecodedError {
     pub code: String,
     pub message: String,
-    pub retryable: bool,
+    pub retryable: Option<bool>,
     pub hint: Option<String>,
     /// Payload keys beyond `code`, `message`, `retryable`, `hint`.
     pub fields: serde_json::Map<String, Value>,
@@ -773,7 +787,7 @@ pub struct DecodedLog {
 pub enum EventDecodeError {
     /// `text` is not valid JSON.
     InvalidJson(String),
-    /// The parsed JSON value failed strict protocol validation.
+    /// The parsed JSON value failed base protocol validation.
     InvalidEvent(String),
 }
 
@@ -788,20 +802,26 @@ impl fmt::Display for EventDecodeError {
 
 impl std::error::Error for EventDecodeError {}
 
-/// Parse one protocol v1 line, strict-validate it, and return a typed decoded event.
+/// Parse one protocol v1 line, base-validate it, and return a typed decoded event.
 ///
 /// `text` is a single JSON text value (one protocol line), not a JSONL stream.
+///
+/// The decode rules every SDK shares come from `serde_json` here: a repeated
+/// key keeps its last value, a lone surrogate `\u` escape is invalid, and
+/// arrays and objects nest at most 127 deep counting the envelope (serde_json's
+/// recursion limit). The other SDKs enforce the same rules explicitly, and
+/// `spec/fixtures/protocol_decode.json` pins each one on both sides.
 pub fn decode_protocol_event(text: &str) -> Result<DecodedEvent, EventDecodeError> {
     let value: Value =
         serde_json::from_str(text).map_err(|err| EventDecodeError::InvalidJson(err.to_string()))?;
-    validate_protocol_event(&value, true)
+    validate_protocol_event(&value, false)
         .map_err(|v| EventDecodeError::InvalidEvent(v.to_string()))?;
 
-    // Strict validation above guarantees the envelope is an object with a
+    // Base validation above guarantees the envelope is an object with a
     // recognized `kind`; the `ok_or_else` fallbacks below are defensive only.
     let malformed = || {
         EventDecodeError::InvalidEvent(
-            "event passed strict validation but has an unexpected shape".to_string(),
+            "event passed base validation but has an unexpected shape".to_string(),
         )
     };
     let obj = value.as_object().ok_or_else(malformed)?;
@@ -825,10 +845,7 @@ pub fn decode_protocol_event(text: &str) -> Result<DecodedEvent, EventDecodeErro
                 .remove("message")
                 .and_then(|v| v.as_str().map(str::to_string))
                 .ok_or_else(malformed)?;
-            let retryable = fields
-                .remove("retryable")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(malformed)?;
+            let retryable = fields.remove("retryable").and_then(|v| v.as_bool());
             let hint = fields
                 .remove("hint")
                 .and_then(|v| v.as_str().map(str::to_string));

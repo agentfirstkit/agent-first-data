@@ -121,22 +121,19 @@ fn as_int(value: &Value) -> Option<i64> {
         return value.as_u64()?.try_into().ok();
     }
     // An integer literal that neither `as_i64` nor `as_u64` accepted is out of
-    // i64 range, and must not reach the float path below: the nearest double to
-    // `i64::MIN - 1` is `i64::MIN` itself, so rounding would clamp it and
-    // format a plausible but wrong amount — worst of all on a money field. The
-    // positive side is already refused by the `is_u64` check above; this is its
-    // missing negative counterpart.
+    // i64 range. Converting `i64::MIN - 1` through f64 would round it back into
+    // range, formatting a plausible but wrong amount on a money field. The
+    // positive side is already refused by the `is_u64` check above. Floating
+    // literals below are also checked on their exact decimal digits.
     if let Value::Number(number) = value
         && number_is_integer_literal(number)
     {
         return None;
     }
-    let f = value.as_f64()?;
-    let upper_exclusive = -(i64::MIN as f64);
-    if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f < upper_exclusive {
-        return Some(f as i64);
-    }
-    None
+    let Value::Number(number) = value else {
+        return None;
+    };
+    integral_float_text(&number.to_string())?.parse().ok()
 }
 
 /// Whether the producer wrote this number as an integer literal.
@@ -152,22 +149,41 @@ fn as_uint(value: &Value) -> Option<u64> {
     if let Some(u) = value.as_u64() {
         return Some(u);
     }
+    if value.as_i64() == Some(0) {
+        return Some(0);
+    }
     if let Value::Number(number) = value
         && number_is_integer_literal(number)
     {
         return None;
     }
-    let f = value.as_f64()?;
-    // u64::MAX rounds to 2^64 in f64, which is already outside the range.
-    if f.is_finite() && f.fract() == 0.0 && (0.0..u64::MAX as f64).contains(&f) {
-        return Some(f as u64);
+    let Value::Number(number) = value else {
+        return None;
+    };
+    let integer = integral_float_text(&number.to_string())?;
+    if integer == "-0" {
+        return Some(0);
     }
-    None
+    integer.parse().ok()
 }
 
+/// The exact digits of an integer-valued number or decimal integer string, of
+/// any magnitude. Bitcoin amounts and `_epoch_ns` only append a unit or
+/// divide, so unlike money suffixes they are not bounded by `i64`: an integer
+/// literal keeps its digits, and a float literal counts when its value is an
+/// integer below 1e21 (the canonical number form's integer range). A numeric
+/// `-0` is zero.
 fn integer_text(value: &Value) -> Option<String> {
     match value {
-        Value::Number(_) => as_int(value).map(|n| n.to_string()),
+        Value::Number(number) => {
+            let literal = number.to_string();
+            let integer = if number_is_integer_literal(number) {
+                literal
+            } else {
+                integral_float_text(&literal)?
+            };
+            Some(if integer == "-0" { "0".into() } else { integer })
+        }
         Value::String(s) if is_decimal_integer_string(s) => Some(s.clone()),
         _ => None,
     }
@@ -178,12 +194,11 @@ fn is_decimal_integer_string(s: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Floor-divide an integer nanosecond count of any size to milliseconds.
+/// `i128` spans ±1.7e38 ns, far beyond the RFC 3339 year range, so a count it
+/// cannot hold is out of range for the same reason a smaller one can be.
 fn epoch_ns_to_ms(value: &Value) -> Option<i64> {
-    let ns = match value {
-        Value::Number(_) => i128::from(as_int(value)?),
-        Value::String(s) if is_decimal_integer_string(s) => s.parse::<i128>().ok()?,
-        _ => return None,
-    };
+    let ns = integer_text(value)?.parse::<i128>().ok()?;
     ns.div_euclid(1_000_000).try_into().ok()
 }
 
@@ -391,21 +406,119 @@ fn number_str(value: &Value) -> String {
     }
 }
 
-/// Render a JSON number canonically for YAML/plain output: an integral-valued
-/// float drops its trailing `.0` so `3.0` and `3` both render as `3`. This
-/// matches Go (`strconv.FormatFloat(_, 'f', -1, 64)`), TypeScript
-/// (`Number.prototype.toString`), and Python (`int(v)` for integral floats),
-/// keeping the four implementations byte-identical.
+/// Render a JSON number canonically for YAML/plain output: a float literal
+/// whose value is an integer below 1e21 in magnitude renders as that integer
+/// (`3.0` → `3`, `-0.0` → `-0`, `1.5e2` → `150`); everything else keeps its
+/// digits, placed by [`place_decimal_point`]. Go, Python and TypeScript apply
+/// the same rule to native floats and to decoded literals alike, so the four
+/// implementations stay byte-identical.
+///
+/// Decided on the literal's text rather than through `f64`, which would round
+/// `9007199254740993.0` to `…992`: rendering may change a number's spelling,
+/// never its digits.
 fn format_number(n: &serde_json::Number) -> String {
-    if n.is_f64()
-        && let Some(f) = n.as_f64()
-        && f.is_finite()
-        && f.fract() == 0.0
-        && f.abs() < 1e21
-    {
-        return format!("{f:.0}");
+    let literal = n.to_string();
+    integral_float_text(&literal)
+        .or_else(|| place_decimal_point(&literal))
+        .unwrap_or_else(|| normalize_exponent(&literal))
+}
+
+/// Spell a non-integral float literal with the notation ECMAScript's
+/// `Number#toString` picks: positional when the value lies in [1e-6, 1e21),
+/// exponent form otherwise. Each runtime's native formatter switches at a
+/// different magnitude (ryu below 1e-5, Python and Go below 1e-4, Go also from
+/// 1e6), so the choice is made here, on the digits as written. `None` for
+/// integer literals and exponents beyond `i64`, which keep their spelling.
+fn place_decimal_point(literal: &str) -> Option<String> {
+    if !literal.contains(['.', 'e', 'E']) {
+        return None;
     }
-    normalize_exponent(&n.to_string())
+    let (sign, unsigned) = match literal.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", literal),
+    };
+    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+        Some(index) => (&unsigned[..index], &unsigned[index + 1..]),
+        None => (unsigned, "0"),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    let leading = digits.bytes().take_while(|digit| *digit == b'0').count();
+    let significant = &digits[leading..];
+    if significant.is_empty() {
+        return None;
+    }
+    // `point`: how many significant digits precede the decimal point.
+    let point = i64::try_from(whole.len())
+        .ok()?
+        .checked_sub(i64::try_from(leading).ok()?)?
+        .checked_add(exponent.parse::<i64>().ok()?)?;
+    let text = if (1..=21).contains(&point) {
+        let split = usize::try_from(point).ok()?.min(significant.len());
+        let (integer, rest) = significant.split_at(split);
+        if rest.is_empty() {
+            // An integral value at or beyond the point is integral_float_text's.
+            return None;
+        }
+        format!("{integer}.{rest}")
+    } else if (-5..=0).contains(&point) {
+        let zeros = "0".repeat(usize::try_from(-point).ok()?);
+        format!("0.{zeros}{significant}")
+    } else {
+        let (first, rest) = significant.split_at(1);
+        let scale = point.checked_sub(1)?;
+        let marker = if scale < 0 { "-" } else { "+" };
+        let rest = if rest.is_empty() {
+            String::new()
+        } else {
+            format!(".{rest}")
+        };
+        format!("{first}{rest}e{marker}{}", scale.unsigned_abs())
+    };
+    Some(format!("{sign}{text}"))
+}
+
+/// The exact integer a float literal denotes, when it denotes one below 1e21
+/// in magnitude. `None` for integer literals (already canonical), fractional
+/// values, and anything at or beyond 1e21, which keeps exponent form.
+fn integral_float_text(literal: &str) -> Option<String> {
+    if !literal.contains(['.', 'e', 'E']) {
+        return None;
+    }
+    let (negative, unsigned) = match literal.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, literal),
+    };
+    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+        Some(index) => (&unsigned[..index], &unsigned[index + 1..]),
+        None => (unsigned, "0"),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    if digits.bytes().all(|digit| digit == b'0') {
+        return Some(if negative { "-0" } else { "0" }.into());
+    }
+    let exponent = exponent.parse::<i64>().ok()?;
+    // Where the decimal point falls in `digits` once the exponent is applied.
+    let point = i64::try_from(whole.len()).ok()?.checked_add(exponent)?;
+    let split = usize::try_from(point.clamp(0, i64::try_from(digits.len()).ok()?)).ok()?;
+    if digits[split..].bytes().any(|digit| digit != b'0') {
+        return None;
+    }
+    let padding = usize::try_from(point)
+        .unwrap_or(0)
+        .saturating_sub(digits.len());
+    let integer = format!("{}{}", &digits[..split], "0".repeat(padding.min(22)));
+    let integer = integer.trim_start_matches('0');
+    if integer.len() > 21 {
+        return None;
+    }
+    let integer = if integer.is_empty() { "0" } else { integer };
+    Some(if negative {
+        format!("-{integer}")
+    } else {
+        integer.to_string()
+    })
 }
 
 fn normalize_exponent(s: &str) -> String {
@@ -414,7 +527,9 @@ fn normalize_exponent(s: &str) -> String {
     };
     let mantissa = &s[..e];
     let mut exp = &s[e + 1..];
-    let mut sign = "";
+    // An unsigned exponent is a positive one: spell it `e+` like every
+    // native float formatter, so a decoded literal renders the same.
+    let mut sign = "+";
     if exp.starts_with(['+', '-']) {
         sign = &exp[..1];
         exp = &exp[1..];
@@ -451,11 +566,11 @@ fn signed_magnitude(value: i64) -> (&'static str, u64) {
 
 /// Format `_ms` value: < 1000 → `{n}ms`, >= 1000 → seconds.
 fn format_ms_value(value: &Value) -> Option<String> {
-    let n = value.as_f64()?;
+    // A decoded literal beyond f64 parses as infinity; it cannot be converted
+    // to seconds, so it keeps its raw key and digits as in the other SDKs.
+    let n = value.as_f64().filter(|n| n.is_finite())?;
     if n.abs() >= 1000.0 {
         Some(format_ms_as_seconds(n))
-    } else if let Some(i) = value.as_i64() {
-        Some(format!("{}ms", i))
     } else {
         Some(format!("{}ms", number_str(value)))
     }
@@ -717,7 +832,7 @@ fn yaml_scalar(value: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => format_number(n),
         Value::Object(_) | Value::Array(_) => {
-            format!("\"{}\"", escape_yaml_str(&canonical_json(value)))
+            format!("\"{}\"", escape_yaml_str(&embedded_json(value)))
         }
     }
 }
@@ -792,7 +907,7 @@ fn plain_scalar(value: &Value) -> String {
         Value::Null => "null".to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => format_number(n),
-        Value::Object(_) | Value::Array(_) => canonical_json(value),
+        Value::Object(_) | Value::Array(_) => embedded_json(value),
     }
 }
 
@@ -819,25 +934,51 @@ fn quote_logfmt_value(value: &str) -> String {
     format!("\"{}\"", escaped)
 }
 
-fn canonical_json(value: &Value) -> String {
-    serde_json::to_string(&sort_json_value(value))
-        .unwrap_or_else(|_| "<unsupported:json>".to_string())
+/// A container inside a Plain array (or a YAML scalar position) is written as
+/// compact JSON with sorted keys. Its number leaves take the canonical number
+/// form, the same text the value prints as a scalar, so a nested `1.0` reads
+/// `1` and a decoded `1e5` reads `100000` in every SDK rather than in each
+/// runtime's own JSON spelling.
+fn embedded_json(value: &Value) -> String {
+    let mut out = String::new();
+    write_embedded_json(value, &mut out);
+    out
 }
 
-fn sort_json_value(value: &Value) -> Value {
+fn write_embedded_json(value: &Value, out: &mut String) {
     match value {
         Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            for key in sorted_value_keys(map) {
-                if let Some(v) = map.get(&key) {
-                    out.insert(key, sort_json_value(v));
+            out.push('{');
+            for (index, key) in sorted_value_keys(map).iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
                 }
+                write_json_string(key, out);
+                out.push(':');
+                write_embedded_json(&map[key], out);
             }
-            Value::Object(out)
+            out.push('}');
         }
-        Value::Array(arr) => Value::Array(arr.iter().map(sort_json_value).collect()),
-        _ => value.clone(),
+        Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_embedded_json(item, out);
+            }
+            out.push(']');
+        }
+        Value::String(text) => write_json_string(text, out),
+        Value::Number(number) => out.push_str(&format_number(number)),
+        Value::Bool(flag) => out.push_str(if *flag { "true" } else { "false" }),
+        Value::Null => out.push_str("null"),
     }
+}
+
+fn write_json_string(text: &str, out: &mut String) {
+    // Serializing a `str` cannot fail; the fallback keeps this infallible.
+    out.push_str(&serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string()));
 }
 
 fn sorted_value_keys(map: &serde_json::Map<String, Value>) -> Vec<String> {

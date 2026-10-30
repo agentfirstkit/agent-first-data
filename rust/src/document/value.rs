@@ -235,11 +235,7 @@ impl Serialize for Value {
                 let number = serde_json::from_str::<serde_json::Value>(text)
                     .ok()
                     .filter(serde_json::Value::is_number)
-                    .ok_or_else(|| {
-                        serde::ser::Error::custom(format!(
-                            "invalid preserved number literal `{text}`"
-                        ))
-                    })?;
+                    .ok_or_else(|| serde::ser::Error::custom("invalid preserved number literal"))?;
                 number.serialize(serializer)
             }
             Value::String(value) => serializer.serialize_str(value),
@@ -337,7 +333,11 @@ mod json_convert {
                     // everything else (every float literal, and integers
                     // beyond `u64::MAX`) is preserved digit for digit as
                     // `Value::Number` instead of being forced through `f64`.
-                    if let Some(i) = n.as_i64() {
+                    // `-0` fits `i64` but would lose its sign there; JSON
+                    // keeps a literal as written.
+                    if n.as_str() == "-0" {
+                        Value::Number(n.as_str().to_string())
+                    } else if let Some(i) = n.as_i64() {
                         Value::Integer(i)
                     } else if let Some(u) = n.as_u64() {
                         Value::Unsigned(u)
@@ -379,7 +379,7 @@ mod json_convert {
                 Value::Number(text) => serde_json::from_str::<Self>(text)
                     .ok()
                     .filter(Self::is_number)
-                    .ok_or_else(|| unsupported(format!("invalid number literal `{text}`"))),
+                    .ok_or_else(|| unsupported("invalid number literal".to_string())),
                 Value::String(value) => Ok(Self::String(value.clone())),
                 Value::Array(values) => values
                     .iter()

@@ -46,5 +46,25 @@
     "input": ["tool", "--api-key-secret=sk-live", "--api-key", "sk-legacy"],
     "options": {"policy": "Off", "secret_names": ["api_key"]},
     "expected": ["tool", "--api-key-secret=sk-live", "--api-key", "sk-legacy"]
+  },
+  {
+    "name": "structured reveal names do not reveal argv",
+    "description": "Rust and Go configure argv redaction with the same Redactor that carries reveal_names, so the reveal list reaches argv and must be ignored there. Python's redact_argv takes no reveal option, and its harness asserts the keyword is refused. TypeScript's redactArgv declares none either, but an untyped JavaScript caller can pass the same options bag it gives redactedValue, so its harness runs the case with revealNames in that bag.",
+    "requires": "redactor_reveal_names",
+    "input": [
+      "tool",
+      "--handoff-secret",
+      "hidden"
+    ],
+    "options": {
+      "reveal_names": [
+        "handoff_secret"
+      ]
+    },
+    "expected": [
+      "tool",
+      "--handoff-secret",
+      "***"
+    ]
   }
 ]

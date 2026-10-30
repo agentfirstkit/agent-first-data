@@ -9,12 +9,12 @@ use agent_first_data::document::{
 };
 use agent_first_data::value_source::MAX_FILE_BYTES;
 use agent_first_data::{
-    ArgSpec, BoundOutcome, CliSpec, Combination, CommandSpec, ErrorBuilder, Event, LintFinding,
+    ArgSpec, CliEmitter, CliSpec, Combination, CommandSpec, ErrorBuilder, Event, LintFinding,
     LintOptions, LintSeverity, OutputFormat, OutputOptions, OutputPlan, OutputSpec, OutputTo,
     PlainStyle, Redactor, ResolvedInvocation, SourceScheme, SourceSet, ValueSource,
-    build_afdata_cli, build_cli_error, cli_error_event, cli_help_event,
-    cli_invocation_invalid_event, cli_version_event, json_error, json_log, json_result,
-    lint_value as lint_serialized_value, render, render_cli_reference, validate_protocol_event,
+    build_afdata_cli, build_cli_error, cli_error_event, cli_invocation_invalid_event,
+    cli_output_setup_failed_event, cli_output_write_failed_event, json_error, json_log,
+    json_result, lint_value as lint_serialized_value, render, validate_protocol_event,
     validate_protocol_stream,
 };
 use serde_json::{Value, json};
@@ -34,6 +34,9 @@ enum EmitCommand {
     Result {
         /// Human-readable result message
         message: String,
+    },
+    ResultJson {
+        payload: String,
     },
     /// Emit a terminal error event and exit with status 1
     Error {
@@ -328,8 +331,20 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
             CommandSpec::new(["emit", "result"])
                 .about("Emit a terminal result event")
                 .arg(positional("message", 0, "MESSAGE", "Result message"))
+                .arg(
+                    ArgSpec::option_json("--json", "JSON")
+                        .about("Structured result payload; redaction applies"),
+                )
+                .combination(
+                    Combination::new("emit-result-json")
+                        .about("Emit a structured JSON payload")
+                        .action("emit_result_json")
+                        .required(["json"])
+                        .output(protocol.clone()),
+                )
                 .combination(
                     Combination::new("emit-result")
+                        .about("Emit a text message")
                         .action("emit_result")
                         .required(["message"])
                         .output(protocol.clone()),
@@ -367,7 +382,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                     "file",
                     0,
                     "FILE",
-                    "Document file, or - for stdin",
+                    "Document file, or - for stdin (read as JSON unless --input-format is given)",
                 ))
                 .arg(positional("key", 1, "KEY", "Optional dot-path"))
                 .arg(input_format_arg())
@@ -398,10 +413,10 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                     "file",
                     0,
                     "FILE",
-                    "Document file, or - for stdin",
+                    "Document file, or - for stdin (read as JSON unless --input-format is given)",
                 ))
                 .arg(positional("key", 1, "KEY", "Dot-path to one scalar"))
-                .arg(ArgSpec::flag("--reveal-secret").about("Allow a secret-named leaf"))
+                .arg(ArgSpec::flag("--reveal-secret").about("Allow secret values and URL credentials"))
                 .arg(ArgSpec::option("--default", "VALUE").about("Fallback for missing or null"))
                 .arg(input_format_arg())
                 .arg(max_file_bytes_arg())
@@ -429,14 +444,14 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                     "file",
                     0,
                     "FILE",
-                    "Document file, or - for stdin",
+                    "Document file, or - for stdin (read as JSON unless --input-format is given)",
                 ))
                 .arg(
                     ArgSpec::positional("key", 1, "KEY")
                         .repeatable()
                         .about("Dot-path to one scalar; repeat for each value wanted"),
                 )
-                .arg(ArgSpec::flag("--reveal-secret").about("Allow a secret-named leaf"))
+                .arg(ArgSpec::flag("--reveal-secret").about("Allow secret values and URL credentials"))
                 .arg(ArgSpec::option("--default", "VALUE").about("Fallback for missing or null"))
                 .arg(input_format_arg())
                 .arg(max_file_bytes_arg())
@@ -668,7 +683,7 @@ fn enumerate_command(name: &str, action: &str, about: &str, output: &OutputSpec)
             "file",
             0,
             "FILE",
-            "Document file, or - for stdin",
+            "Document file, or - for stdin (read as JSON unless --input-format is given)",
         ))
         .arg(positional("key", 1, "KEY", "Optional container dot-path"))
         .arg(input_format_arg())
@@ -792,6 +807,7 @@ fn closed_world_main() -> ExitCode {
         ("render", dispatch_invocation),
         ("emit_log", dispatch_invocation),
         ("emit_result", dispatch_invocation),
+        ("emit_result_json", dispatch_invocation),
         ("emit_error", dispatch_invocation),
         ("shell_bash", dispatch_invocation),
         ("get", dispatch_invocation),
@@ -829,53 +845,16 @@ fn closed_world_main() -> ExitCode {
             return emit_event(cli_error_event(&error), OutputFormat::Json, code);
         }
     };
-    match outcome {
-        BoundOutcome::Run(invocation) => {
-            let _stream_redirect = match install_output_redirect(invocation.output_plan()) {
-                Ok(guard) => guard,
-                Err(message) => return emit_output_setup_error(&message),
-            };
-            if let Err(message) = activate_output_plan(invocation.output_plan()) {
-                return emit_output_setup_error(&message);
-            }
-            invocation.run()
-        }
-        // Injected for every registry, so a spore gets an offline reference
-        // without registering anything — and without spending a line of the
-        // agent's discovery surface on a command no agent calls.
-        BoundOutcome::Docs(docs) => {
-            let _stream_redirect = match install_output_redirect(docs.output_plan()) {
-                Ok(guard) => guard,
-                Err(message) => return emit_output_setup_error(&message),
-            };
-            write_text_exit(&render_cli_reference(&cli), 0)
-        }
-        BoundOutcome::Help(help) => {
-            let _stream_redirect = match install_output_redirect(help.output_plan()) {
-                Ok(guard) => guard,
-                Err(message) => return emit_output_setup_error(&message),
-            };
-            let format = match activate_output_plan(help.output_plan()) {
-                Ok(format) => format,
-                Err(message) => return emit_output_setup_error(&message),
-            };
-            if format == OutputFormat::Plain {
-                write_text_exit_to(&help.plain(), 0, result_stream(output_to()))
-            } else {
-                emit_event(cli_help_event(&help), format, 0)
-            }
-        }
-        BoundOutcome::Version(version) => {
-            let _stream_redirect = match install_output_redirect(version.output_plan()) {
-                Ok(guard) => guard,
-                Err(message) => return emit_output_setup_error(&message),
-            };
-            let format = match activate_output_plan(version.output_plan()) {
-                Ok(format) => format,
-                Err(message) => return emit_output_setup_error(&message),
-            };
-            emit_event(cli_version_event(&version), format, 0)
-        }
+    let _stream_redirect = match install_output_redirect(outcome.output_plan()) {
+        Ok(guard) => guard,
+        Err(message) => return emit_output_setup_error(&message),
+    };
+    if let Err(message) = activate_output_plan(outcome.output_plan()) {
+        return emit_output_setup_error(&message);
+    }
+    match outcome.into_run() {
+        Ok(invocation) => invocation.run(),
+        Err(exit) => exit,
     }
 }
 
@@ -888,15 +867,7 @@ struct OutputRedirectGuard;
 fn install_output_redirect(plan: &OutputPlan) -> Result<Option<OutputRedirectGuard>, String> {
     #[cfg(feature = "stream-redirect")]
     {
-        let config = agent_first_data::stream_redirect::StreamRedirectConfig::new(
-            plan.stdout_file().map(Path::to_path_buf),
-            plan.stderr_file().map(Path::to_path_buf),
-        )
-        .map_err(|error| error.to_string())?;
-        config
-            .as_ref()
-            .map(agent_first_data::stream_redirect::install)
-            .transpose()
+        agent_first_data::stream_redirect::install_from_plan(plan)
             .map_err(|error| error.to_string())
     }
     #[cfg(not(feature = "stream-redirect"))]
@@ -946,7 +917,7 @@ fn emit_invocation_error(message: &str) -> ExitCode {
 }
 
 fn emit_output_setup_error(message: &str) -> ExitCode {
-    let event = build_error_event(json_error("output_setup_failed", message));
+    let event = cli_output_setup_failed_event(message);
     emit_event_to(
         event,
         OutputFormat::Json,
@@ -1059,6 +1030,17 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
             },
             format,
         ),
+        "emit_result_json" => {
+            let Some(payload) = invocation.required("json").as_json_str() else {
+                return emit_invocation_error("resolved invocation is missing required JSON");
+            };
+            run_emit(
+                EmitCommand::ResultJson {
+                    payload: payload.to_string(),
+                },
+                format,
+            )
+        }
         "emit_result" => run_emit(
             EmitCommand::Result {
                 message: required_string!(invocation, "message"),
@@ -1577,6 +1559,14 @@ fn run_emit(action: EmitCommand, format: OutputFormat) -> ExitCode {
             .build();
             emit_event(event, format, 0)
         }
+        EmitCommand::ResultJson { payload } => match serde_json::from_str::<Value>(&payload) {
+            Ok(value) => emit_event(json_result(value).build(), format, 0),
+            Err(_) => emit_cli_usage_error(
+                "--json must contain valid JSON",
+                "run `afdata emit result --help`",
+                format,
+            ),
+        },
         EmitCommand::Result { message } => {
             if message.is_empty() {
                 return emit_cli_usage_error(
@@ -1861,7 +1851,7 @@ fn run_skill_admin_action(
             }
         },
         Err(err) => {
-            let mut builder = json_error("cli_error", &err.message);
+            let mut builder = json_error(err.kind.code(), &err.message);
             if let Some(hint) = err.hint.as_deref() {
                 builder = builder.hint(hint);
             }
@@ -1871,7 +1861,12 @@ fn run_skill_admin_action(
                 builder = builder.field("partial_report", partial_report);
             }
             let event = build_error_event(builder);
-            emit_event(event, format, 2)
+            // Only a usage error is decided before any target is touched.
+            let code = match err.kind {
+                agent_first_data::skill::SkillErrorKind::Usage => 2,
+                _ => 1,
+            };
+            emit_event(event, format, code)
         }
     }
 }
@@ -2191,8 +2186,20 @@ fn write_text_exit_to(text: &str, code: u8, stream: Stream) -> ExitCode {
     };
     match agent_first_data::write_raw(text, selector) {
         Ok(()) => ExitCode::from(code),
-        Err(_) => ExitCode::from(1),
+        // `write_raw` already forgave a closed reader; anything left is a
+        // failure the caller must be told about, exactly as for raw output.
+        Err(_) => report_output_write_failed(),
     }
+}
+
+/// Exit 4 with `output_write_failed` on stderr: the one diagnostic for output
+/// that could not be written, whichever command produced it. Best effort — a
+/// stderr that cannot be written either leaves only the code.
+fn report_output_write_failed() -> ExitCode {
+    let mut emitter =
+        CliEmitter::from_output_to(OutputTo::Stderr, OutputFormat::Json).with_strict_protocol();
+    let _unwritable = emitter.emit(cli_output_write_failed_event());
+    ExitCode::from(4)
 }
 
 // ═══════════════════════════════════════════
@@ -2296,12 +2303,11 @@ fn is_addressing_miss(err: &CliDocError) -> bool {
 /// when the error is one a flag can correct.
 fn document_error_builder(err: &DocumentError) -> ErrorBuilder {
     let builder = json_error(err.code(), &err.redacted_message());
-    if err.code() == "document_too_large" {
-        builder.hint(
-            "raise the limit with --max-file-bytes BYTES, or read the document from stdin with -",
-        )
-    } else {
-        builder
+    match err.code() {
+        // No stdin alternative here: `set`/`unset`/`add`/`remove` refuse `-`.
+        "document_too_large" => builder.hint("raise the limit with --max-file-bytes BYTES"),
+        "document_format_unknown" => builder.hint("pass --input-format FORMAT"),
+        _ => builder,
     }
 }
 
@@ -2317,6 +2323,14 @@ fn document_error_event(err: &CliDocError) -> (Event, u8) {
         // document text — which is how a `_secret` leaf reached stderr verbatim.
         CliDocError::Document(doc_err) => (build_error_event(document_error_builder(doc_err)), 1),
         CliDocError::Runtime { code, message } => (build_error_event(json_error(code, message)), 1),
+    }
+}
+
+/// How a refused overwrite would have changed what is there.
+fn overwrite_verb(overwrite: BareOverwrite) -> &'static str {
+    match overwrite {
+        BareOverwrite::Container(_) => "discard",
+        BareOverwrite::Scalar(_) => "change",
     }
 }
 
@@ -2459,6 +2473,81 @@ fn document_path_is_secret(key: &str, secret_names: &[String]) -> Result<bool, D
         .any(|segment| redactor.is_secret_name(segment)))
 }
 
+/// Whether a string `get` would redact under a URL-named field actually
+/// carries a credential: a userinfo password or a secret-named query or
+/// fragment parameter, at any redirect depth.
+///
+/// `get` redacts a URL value it cannot read as one clean, whitespace-free URL
+/// in full, because it cannot point at the secret span inside it. `value`
+/// prints one string the caller asked for by name, so it refuses only when a
+/// credential is really there, and returns a credential-free value that merely
+/// does not read cleanly — `mailto:x@y.z`, a path with a space in it — as is.
+/// Anything this cannot read with a real URL parser still counts as carrying
+/// one: `user:pass@host/db` has no scheme to anchor on and is refused.
+fn url_value_carries_credentials(target: &DocumentValue, secret_names: &[String]) -> bool {
+    let Some(text) = target.as_str() else {
+        return true;
+    };
+    let redactor = Redactor::new().secret_names(secret_names.iter().cloned());
+    // A clean URL is redacted span by span, so any change is a credential.
+    if redactor.url(text) != text {
+        return true;
+    }
+    url_text_carries_credentials(text, &redactor, 0)
+}
+
+fn url_text_carries_credentials(text: &str, redactor: &Redactor, depth: usize) -> bool {
+    if depth >= 16 {
+        return true;
+    }
+    let Ok(url) = url::Url::parse(text) else {
+        return true;
+    };
+    if url.password().is_some() {
+        return true;
+    }
+    // Without `//` the parser sees no authority at all, so `user:pass@host`
+    // reads as scheme `user` and the password as path. Only a scheme whose
+    // `@` separates an address rather than userinfo is taken at its word.
+    if url.cannot_be_a_base() && text.contains('@') && url.scheme() != "mailto" {
+        return true;
+    }
+    let fragment_pairs = url
+        .fragment()
+        .map(|fragment| url::form_urlencoded::parse(fragment.as_bytes()))
+        .into_iter()
+        .flatten();
+    url.query_pairs()
+        .chain(fragment_pairs)
+        .any(|(name, value)| {
+            redactor.is_secret_name(&name)
+                || (url::Url::parse(&value).is_ok()
+                    && url_text_carries_credentials(&value, redactor, depth + 1))
+        })
+}
+
+/// A selected subtree still belongs to the named fields above it. In
+/// particular, moving an `_url` value beneath the generic `value` envelope
+/// must not remove URL scrubbing, and an absent secret remains null.
+fn redacted_document_target(
+    target: &DocumentValue,
+    key: &str,
+    secret_names: &[String],
+) -> Result<Value, DocumentError> {
+    let segments = parse_path(key)?;
+    let redactor = Redactor::new().secret_names(secret_names.iter().cloned());
+    if !target.is_null() && segments.iter().any(|name| redactor.is_secret_name(name)) {
+        return Ok(json!("***"));
+    }
+    let value = Value::try_from(target)?;
+    if let Some(name) = segments.iter().find(|name| redactor.is_url_name(name)) {
+        let mut wrapper = Value::Object([(name.clone(), value)].into_iter().collect());
+        redactor.redact_in_place(&mut wrapper);
+        return Ok(wrapper[name.as_str()].take());
+    }
+    Ok(value)
+}
+
 /// Reject a literal `-` FILE for a mutation command (D1): unlike read
 /// commands (where FILE `-` means stdin), mutation commands never read
 /// stdin, so `-` has no meaning and is a usage error rather than a silent
@@ -2476,18 +2565,18 @@ fn reject_mutation_dash(file: &Path) -> Result<(), CliDocError> {
 /// Write `bytes` directly to stdout with no AFDATA envelope and no forced
 /// trailing newline (used by `value`'s raw scalar output and `paths`/`keys`'
 /// line-oriented output).
+///
+/// The exit policy is the library's `write_raw_exit`: a closed reader is
+/// success, any other write failure is exit 4 with `output_write_failed` on
+/// stderr. That function takes `&str`; these bytes can be a non-UTF-8 path, so
+/// only the write itself is done here.
 fn write_raw_exit(bytes: &[u8]) -> ExitCode {
     let mut stdout = std::io::stdout().lock();
-    if let Err(err) = stdout.write_all(bytes) {
-        if err.kind() == std::io::ErrorKind::BrokenPipe {
-            return ExitCode::from(0);
-        }
-        return ExitCode::from(1);
+    match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(_) => report_output_write_failed(),
     }
-    if let Err(err) = stdout.flush() {
-        return ExitCode::from(u8::from(err.kind() != std::io::ErrorKind::BrokenPipe));
-    }
-    ExitCode::from(0)
 }
 
 /// `get`: read a document whole, or the value at dot-path `key` (D2 — `show`
@@ -2510,18 +2599,13 @@ fn compute_get(
         None => Value::try_from(root)?,
         Some(key) => {
             let target = get_path(&root, key, ctx.addressing(doc_format))?;
-            let is_secret = document_path_is_secret(key, ctx.secret_names)?;
             payload.insert("key".to_string(), json!(key));
             // A generic whole-document redact walk (applied via the
             // `--secret-name` output options below) only rewrites object
             // fields it finds by name; the value here sits under the
             // generic `"value"` wrapper key instead of its own field name,
             // so a directly-targeted secret leaf needs this explicit check.
-            if is_secret {
-                json!("***")
-            } else {
-                Value::try_from(target)?
-            }
+            redacted_document_target(&target, key, ctx.secret_names)?
         }
     };
     payload.insert("value".to_string(), json_value);
@@ -2530,8 +2614,8 @@ fn compute_get(
 
 /// `value`: like `get` with a required KEY, but writes only the scalar's raw
 /// bytes to stdout — no AFDATA envelope, no forced trailing newline. Arrays,
-/// objects, and non-finite floats are rejected. A secret-named leaf is
-/// rejected unless `--reveal-secret` is passed (never bypassed by default,
+/// objects, and non-finite floats are rejected. A secret-named leaf or URL
+/// credential is rejected unless `--reveal-secret` is passed (never bypassed by default,
 /// not even by `--default`). `--default VAL` prints `VAL` instead of erroring
 /// when KEY's path does not exist or its value is `null`; an empty string is
 /// a real value and does not trigger it (§2).
@@ -2688,25 +2772,47 @@ fn scalar_bytes_at(
             format!("path `{key}` names a secret; pass --reveal-secret"),
         ));
     }
-    let target = match get_path(root, key, addressing) {
+    // A fallback printed under a protected name is checked like document
+    // content, but its error must not blame the document for it.
+    let mut from_default = false;
+    let mut target = match get_path(root, key, addressing) {
         Ok(target) => target,
         Err(err) => {
             let err = CliDocError::Document(err);
             if default.is_some() && is_addressing_miss(&err) {
-                return Ok(default.unwrap_or_default().as_bytes().to_vec());
+                from_default = true;
+                DocumentValue::String(default.unwrap_or_default().to_string())
+            } else {
+                return Err(err);
             }
-            return Err(err);
         }
     };
     if target.is_null()
         && let Some(default) = default
     {
-        return Ok(default.as_bytes().to_vec());
+        from_default = true;
+        target = DocumentValue::String(default.to_string());
     }
     if target.is_null() {
         return Err(CliDocError::runtime(
             "document_null_value",
             format!("path `{key}` is null; pass --default to choose replacement output"),
+        ));
+    }
+    if !reveal_secret
+        && target.is_string()
+        && Value::try_from(&target)? != redacted_document_target(&target, key, ctx.secret_names)?
+        && url_value_carries_credentials(&target, ctx.secret_names)
+    {
+        return Err(CliDocError::runtime(
+            "document_secret_redacted",
+            if from_default {
+                format!(
+                    "--default for `{key}` contains protected URL components; pass --reveal-secret"
+                )
+            } else {
+                format!("path `{key}` contains protected URL components; pass --reveal-secret")
+            },
         ));
     }
     document_scalar_bytes(&target, key)
@@ -2737,6 +2843,16 @@ fn run_enumerate(
 ) -> ExitCode {
     match compute_enumerate(file, key, ctx, mode) {
         Ok(lines) => {
+            if lines
+                .iter()
+                .any(|line| line.contains('\0') || (!null_separated && line.contains('\n')))
+            {
+                let error = CliDocError::runtime(
+                    "document_unframeable_name",
+                    "a child name cannot be represented by the selected output separator; use --null for newline-containing names, or read the parent with get".to_string(),
+                );
+                return finish_raw(Err(error), ctx);
+            }
             let separator: u8 = if null_separated { 0 } else { b'\n' };
             let mut bytes = Vec::new();
             for line in &lines {
@@ -2765,6 +2881,14 @@ fn compute_enumerate(
         Some(key) => parse_path(key)?,
         None => Vec::new(),
     };
+    if let Some(key) = key
+        && document_path_is_secret(key, ctx.secret_names)?
+    {
+        return Err(CliDocError::runtime(
+            "document_secret_redacted",
+            "secret subtrees cannot be enumerated".to_string(),
+        ));
+    }
     let target = match key {
         Some(key) => get_path(&root, key, ctx.addressing(doc_format))?,
         None => root,
@@ -2851,6 +2975,22 @@ fn compute_set(
     doc.ensure_mutable("set")?;
 
     let new_value = if let Some(secret_source) = secret_source.as_ref() {
+        // A secret is always a string, so it gets the bare VALUE guard — and
+        // before the source is read. Naming `db` for `db.password` used to
+        // replace the whole mapping with the secret.
+        let existing = get_path(doc.value(), key, ctx.addressing(doc.format())).ok();
+        if let Err(overwrite) = guard_bare_overwrite(existing.as_ref()) {
+            let inside = match overwrite {
+                BareOverwrite::Container(_) => "address a field inside it, or ",
+                BareOverwrite::Scalar(_) => "",
+            };
+            return Err(CliDocError::Usage(format!(
+                "--secret-from would silently {verb} the {found} at `{key}`; \
+                 {inside}unset `{key}` first to replace it deliberately",
+                verb = overwrite_verb(overwrite),
+                found = overwrite.found(),
+            )));
+        }
         DocumentValue::String(read_secret_from(secret_source)?)
     } else if let Some(type_name) = value_type {
         let parsed_type = ValueType::parse(type_name).ok_or_else(|| {
@@ -2872,10 +3012,7 @@ fn compute_set(
         // array with a string used to exit 0 and discard every element.
         let existing = get_path(doc.value(), key, ctx.addressing(doc.format())).ok();
         if let Err(overwrite) = guard_bare_overwrite(existing.as_ref()) {
-            let verb = match overwrite {
-                BareOverwrite::Container(_) => "discard",
-                BareOverwrite::Scalar(_) => "change",
-            };
+            let verb = overwrite_verb(overwrite);
             let keep_instruction = if overwrite.found() == "null" {
                 "pass --value-type null without VALUE to keep it".to_string()
             } else {
@@ -2924,6 +3061,16 @@ fn compute_add(
     ctx: &DocumentContext<'_>,
 ) -> Result<Value, CliDocError> {
     reject_mutation_dash(file)?;
+    // An empty slug or field name would write an element keyed `""`, which no
+    // later read can address — and is how an unset shell variable arrives.
+    if slug_field.is_empty() {
+        return Err(CliDocError::Usage(
+            "--slug-field must not be empty".to_string(),
+        ));
+    }
+    if slug.is_empty() {
+        return Err(CliDocError::Usage("SLUG must not be empty".to_string()));
+    }
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
     let mut field_pairs: Vec<(String, DocumentValue)> = Vec::with_capacity(fields.len());
     for field in fields {
@@ -2936,6 +3083,12 @@ fn compute_add(
             return Err(CliDocError::Usage(
                 "field name must not be empty".to_string(),
             ));
+        }
+        // A repeated field would otherwise keep only its last value.
+        if field_pairs.iter().any(|(existing, _)| existing == name) {
+            return Err(CliDocError::Usage(format!(
+                "field `{name}` is given more than once"
+            )));
         }
         // Close the side door: add's FIELD=VALUE is always a string, the same
         // zero-coercion rule as set's bare VALUE — no separate type syntax.
@@ -3042,15 +3195,22 @@ fn secret_from_sources() -> SourceSet {
 /// Shape problems (an unrecognized keyword, a non-numeric `fd:`, an empty
 /// `env:` name) are usage errors caught before target or source I/O.
 fn parse_secret_from(spec: &str) -> Result<ValueSource, CliDocError> {
-    let source = secret_from_sources()
-        .parse(spec)
-        .map_err(|error| CliDocError::Usage(format!("invalid --secret-from; {error}")))?;
+    const EXPECTED: &str = "expected stdin, prompt, fd:<N>, or env:<VAR>";
+    let sources = secret_from_sources();
+    // A source set always documents `literal:VALUE`, which is exactly what
+    // this flag refuses, so its summary is swapped for this flag's own list.
+    let source = sources.parse(spec).map_err(|error| {
+        let detail = error
+            .to_string()
+            .replace(&sources.syntax_summary(), EXPECTED);
+        CliDocError::Usage(format!("invalid --secret-from; {detail}"))
+    })?;
     // A bare word that is not a source keyword would otherwise be taken as the
     // secret itself, which is the one thing this flag exists to avoid.
     if matches!(source, ValueSource::Literal(_)) {
-        return Err(CliDocError::Usage(
-            "invalid --secret-from; expected stdin, prompt, fd:<N>, or env:<VAR>".to_string(),
-        ));
+        return Err(CliDocError::Usage(format!(
+            "invalid --secret-from; {EXPECTED}"
+        )));
     }
     Ok(source)
 }

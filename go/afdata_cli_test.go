@@ -571,10 +571,63 @@ func TestCliEmitterFinishBrokenPipeReturnsZero(t *testing.T) {
 	}
 }
 
+func assertOutputWriteFailedReport(t *testing.T, sink *bytes.Buffer) {
+	t.Helper()
+	var reported map[string]any
+	if err := json.Unmarshal(sink.Bytes(), &reported); err != nil {
+		t.Fatalf("report must be one JSON event: %v (%q)", err, sink.String())
+	}
+	payload, _ := reported["error"].(map[string]any)
+	if reported["kind"] != "error" || payload["code"] != "output_write_failed" {
+		t.Fatalf("report = %q, want an output_write_failed error event", sink.String())
+	}
+}
+
 func TestCliEmitterFinishOtherWriteFailureReturnsFour(t *testing.T) {
-	// failingWriter returns a non-EPIPE error, so Finish maps it to 4.
-	if code := NewCliEmitter(failingWriter{}, OutputFormatJson).FinishResult(map[string]any{"ok": true}); code != 4 {
+	// failingWriter returns a non-EPIPE error, so Finish maps it to 4 and, in
+	// event-stream mode, reports it on the process's stderr.
+	var stderr bytes.Buffer
+	emitter := NewCliEmitter(failingWriter{}, OutputFormatJson)
+	emitter.processStderr = &stderr
+	if code := emitter.FinishResult(map[string]any{"ok": true}); code != 4 {
 		t.Fatalf("other write failure code = %d, want 4", code)
+	}
+	assertOutputWriteFailedReport(t, &stderr)
+}
+
+func TestCliEmitterFinishReportsAnUnwritableResultOnTheDiagnosticSink(t *testing.T) {
+	var diag bytes.Buffer
+	emitter := NewCliEmitterFinite(failingWriter{}, &diag, OutputFormatJson)
+	if code := emitter.FinishResult(map[string]any{"rows": 2}); code != 4 {
+		t.Fatalf("code = %d, want 4", code)
+	}
+	assertOutputWriteFailedReport(t, &diag)
+
+	// A closed reader stays silent success.
+	diag.Reset()
+	if code := NewCliEmitterFinite(epipeWriter{}, &diag, OutputFormatJson).FinishResult(map[string]any{}); code != 0 {
+		t.Fatalf("broken pipe code = %d, want 0", code)
+	}
+	if diag.Len() != 0 {
+		t.Fatalf("broken pipe must say nothing: %q", diag.String())
+	}
+}
+
+func TestCliEmitterFinishRefusedEventReturnsOne(t *testing.T) {
+	// An event the emitter refuses is the command's failure, not output's.
+	var out bytes.Buffer
+	emitter := NewCliEmitter(&out, OutputFormatJson)
+	if code := emitter.FinishResult(map[string]any{}); code != 0 {
+		t.Fatalf("first terminal code = %d, want 0", code)
+	}
+	if code := emitter.FinishResult(map[string]any{}); code != 1 {
+		t.Fatalf("second terminal code = %d, want 1", code)
+	}
+	strict := NewCliEmitter(&out, OutputFormatJson).WithStrictProtocol()
+	untraced, _ := NewJSONError("failed", "Failed").Build()
+	delete(untraced.Value(), "trace")
+	if code := strict.Finish(untraced, 2); code != 1 {
+		t.Fatalf("protocol violation code = %d, want 1", code)
 	}
 }
 

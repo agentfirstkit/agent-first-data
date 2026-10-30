@@ -54,7 +54,7 @@ arguments, invalid output contracts, and duplicate identities.
 
 An argument whose value should not be typed on the command line declares where
 it may come from instead: `ArgSpec::sources(SourceSet::config())` accepts
-`env:NAME` and `file:PATH#DOT_PATH`; use
+`env:NAME` and `file:PATH[#DOT_PATH]`; use
 `file+FORMAT:PATH#DOT_PATH` when the filename cannot identify any document
 format enabled in the build. `SourceSet::stream()` adds `stdin`, `fd:N`, and
 `prompt`, and `host_scheme` declares one the application reads itself. A bare
@@ -67,6 +67,14 @@ as `cli_invalid_argument_value` before anything is opened.
 A host scheme uses a lowercase `name`, documents syntax beginning with that
 exact `name:`, and cannot collide with another host scheme or
 `env`/`file`/`stdin`/`fd`/`prompt`/`literal`. A host-only set is valid.
+
+A file value source without `#DOT_PATH` reads the complete UTF-8 file verbatim,
+without document parsing or scalar conversion. An explicit `#` requires a
+non-empty document address. Whole files and stream sources (`stdin`, `fd:N`)
+read through `read()` are capped at 16 MiB and preserve trailing whitespace;
+credential streams through `read_secret()` and terminal prompts retain their
+1 MiB bound. File sources require regular files. Addressed file sources retain
+their typed scalar semantics.
 
 Reading is the application's, at the moment it chooses:
 `sources.parse(raw)?` then
@@ -199,6 +207,12 @@ For in-process Rust tests, run `lint_value` on the real serialized value and
 combine `assert_no_lint_findings`, `assert_strict_event`, and
 `assert_redaction_canary_absent` as appropriate. This tests the boundary
 without temporary files or an `afdata` subprocess.
+
+A failed output write is not a usage error. A reader that closed early
+(`| head`) means success; any other write failure exits 4. AFDATA reserves exit
+codes 0, 1, 2 and 4, so a CLI declares only the codes it adds beyond them.
+When reading another tool's events, accept the base profile and treat an absent
+`retryable` as unknown rather than false.
 
 ## Review checklist
 

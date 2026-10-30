@@ -89,6 +89,7 @@ def _redaction_options(case):
     return OutputOptions(
         policy=policy,
         secret_names=opts.get("secret_names", ()),
+        reveal_names=opts.get("reveal_names", ()),
         url_names=opts.get("url_names", ()),
     )
 
@@ -99,7 +100,8 @@ def _redaction_options(case):
 def test_redact_fixtures():
     for case in _load("redact.json"):
         name = case["name"]
-        got = redacted_value(case["input"])
+        options = _redaction_options(case)
+        got = redacted_value(case["input"], secret_names=options.secret_names, url_names=options.url_names, reveal_names=options.reveal_names, policy=options.policy)
         assert got == case["expected"], f"[redact/{name}] got {got!r}"
 
 
@@ -131,6 +133,13 @@ def test_redact_argv_fixtures():
     for case in _load("redact_argv.json"):
         name = case["name"]
         options = _redaction_options(case)
+        if case.get("requires") == "redactor_reveal_names":
+            # Python's redact_argv has no reveal option, so a reveal list
+            # cannot reach argv at all: assert the parameter is refused.
+            with pytest.raises(TypeError):
+                redact_argv(case["input"], reveal_names=options.reveal_names)  # type: ignore[call-arg]
+            continue
+        assert not options.reveal_names, f"[redact_argv/{name}] reveal_names needs requires"
         got = redact_argv(
             case["input"],
             secret_names=options.secret_names,
@@ -154,6 +163,7 @@ def test_redaction_options_fixtures():
             case["input"],
             secret_names=output_options.secret_names,
             url_names=output_options.url_names,
+            reveal_names=output_options.reveal_names,
             policy=output_options.policy,
         )
         assert got == expected, f"[redaction_options/{name}] value mismatch: {got}"
@@ -178,6 +188,7 @@ def test_security_fixtures():
             case["input"],
             secret_names=output_options.secret_names,
             url_names=output_options.url_names,
+            reveal_names=output_options.reveal_names,
             policy=output_options.policy,
         ) == case["expected"]
         outputs = (
@@ -534,13 +545,24 @@ def test_helper_fixtures():
                 assert got == expected, f"[helpers/{name}({inp!r})] got {got!r}"
 
 
+def test_native_negative_zero_keeps_its_sign_in_yaml_and_plain():
+    # int(-0.0) == 0, so rendering through int dropped the sign; the shared
+    # fixtures only reach decoded literals, which never went through int.
+    value = {"neg_zero": -0.0, "wait_s": -0.0}
+    assert render(value, OutputFormat.YAML) == "---\nneg_zero: -0\nwait_s: -0"
+    assert render(value, OutputFormat.PLAIN) == "neg_zero=-0 wait=-0s"
+
+
 def test_output_format_fixtures():
     for case in _load("output_formats.json"):
         name = case["name"]
         inp = json.loads(json.dumps(case["input"]))
 
-        got_json = json.loads(render(inp, OutputFormat.JSON))
+        json_text = render(inp, OutputFormat.JSON)
+        got_json = json.loads(json_text)
         assert got_json == case["expected_json"], f"[output/{name}] json mismatch: {got_json}"
+        if "expected_json_text" in case:
+            assert json_text == case["expected_json_text"], f"[output/{name}] json text mismatch: {json_text!r}"
 
         got_yaml = render(inp, OutputFormat.YAML)
         assert got_yaml == case["expected_yaml"], f"[output/{name}] yaml mismatch: {got_yaml!r}"
@@ -745,12 +767,10 @@ def test_decode_protocol_event_invalid_envelope_raises():
         decode_protocol_event(json.dumps({"kind": "result"}))
 
 
-def test_decode_protocol_event_fails_strict_validation():
-    import pytest
-
-    # Missing trace fails the strict profile even though the shape is otherwise valid.
-    with pytest.raises(EventDecodeError):
-        decode_protocol_event(json.dumps({"kind": "result", "result": {}}))
+def test_decode_protocol_event_accepts_base_profile():
+    decoded = decode_protocol_event('{"kind":"error","error":{"code":"failed","message":"Failed"}}')
+    assert decoded.retryable is None
+    assert decoded.trace is None
 
 
 # --- Number literal fidelity (shared spec/fixtures/number_fidelity.json) ---
@@ -779,14 +799,33 @@ def test_number_fidelity_fixtures():
             assert got_plain == case["expected_plain"], f"[number_fidelity/{name}] plain mismatch: {got_plain!r}"
 
 
+def test_decoded_numbers_beyond_python_conversion_limits_still_render():
+    # Python 3.11+ limits int(string) conversions by default; that limit must
+    # not turn a valid protocol number into a decode or rendering exception.
+    integer = "9" * 5000
+    exponent = "1e+" + "9" * 5000
+    for literal in (integer, exponent):
+        decoded = decode_protocol_event('{"kind":"result","result":' + literal + ',"trace":{}}')
+        assert render(decoded.result, OutputFormat.JSON) == literal
+        assert render(decoded.result, OutputFormat.YAML) == "---\n" + literal
+        assert render(decoded.result, OutputFormat.PLAIN) == literal
+    decoded = decode_protocol_event('{"kind":"result","result":{"cost_jpy":' + integer + '},"trace":{}}')
+    assert render(decoded.result, OutputFormat.PLAIN) == "cost_jpy=" + integer
+
+
 def test_protocol_decode_fixtures():
     for case in _load("protocol_decode.json"):
+        decoded = None
         try:
-            decode_protocol_event(case["input_line"])
+            decoded = decode_protocol_event(case["input_line"])
             valid = True
         except EventDecodeError:
             valid = False
         assert valid is case["valid"], f"[protocol_decode/{case['name']}]"
+        if "expected_result_json" in case:
+            assert isinstance(decoded, DecodedResult), f"[protocol_decode/{case['name']}]"
+            got = render(decoded.result, OutputFormat.JSON)
+            assert got == case["expected_result_json"], f"[protocol_decode/{case['name']}] got {got!r}"
 
 
 def test_number_fidelity_does_not_regress_ordinary_decoded_numbers_in_plain_output():
@@ -807,3 +846,9 @@ def test_signed_fiat_i64_min_formats_without_overflow():
         OutputFormat.PLAIN,
     )
     assert plain == "adjustment=-$92233720368547758.08"
+
+
+def test_output_options_preserve_existing_positional_arguments():
+    options = OutputOptions((), ("legacy",), None, PlainStyle.Raw)
+    rendered = json.loads(render({"legacy": "https://example.test/?token_secret=hidden"}, OutputFormat.JSON, options=options))
+    assert rendered == {"legacy": "https://example.test/?token_secret=***"}

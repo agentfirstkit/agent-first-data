@@ -141,7 +141,11 @@ pub fn assert_no_lint_findings_with_options(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RedactionCanaryError {
     EmptyCanary,
+    /// The canary is present in the output or in one of its decoded layers.
     Exposed,
+    /// Layered encoding was still changing when the decoding budget ran out,
+    /// so absence could not be shown. A failure, but not a confirmed leak.
+    InspectionLimitExceeded,
 }
 
 impl fmt::Display for RedactionCanaryError {
@@ -149,6 +153,9 @@ impl fmt::Display for RedactionCanaryError {
         match self {
             Self::EmptyCanary => formatter.write_str("redaction canary must not be empty"),
             Self::Exposed => formatter.write_str("redaction canary remains in serialized output"),
+            Self::InspectionLimitExceeded => formatter.write_str(
+                "serialized output is still encoded after the inspection limit; canary absence is unproven",
+            ),
         }
     }
 }
@@ -164,11 +171,13 @@ impl std::error::Error for RedactionCanaryError {}
 /// can be present verbatim yet unfindable by a raw substring search: a PEM key
 /// carries newlines, a password may carry `"`, a Windows path carries `\`, and
 /// a canary inside a `_url` value is percent-encoded. This checks the raw text
-/// *and* a decoded copy of it, so the escaping a renderer applies cannot hide a
-/// leak. Decoding the haystack rather than enumerating the escaped spellings of
-/// the canary keeps the check from drifting when a renderer changes, and biases
-/// it the safe way: an over-eager decode can only raise a false alarm, never
-/// pass a real leak.
+/// *and* decoded copies until no escapes change, so nested URL encoding and
+/// serialization escapes cannot hide a leak. Decoding the haystack rather than
+/// enumerating the escaped spellings of the canary keeps the check from
+/// drifting when a renderer changes, and biases it the safe way: an over-eager
+/// decode can only raise a false alarm, never pass a real leak. Inspection is
+/// bounded to 64 decoding passes; encoding that still changes at that bound
+/// fails closed as [`RedactionCanaryError::InspectionLimitExceeded`].
 pub fn assert_redaction_canary_absent(
     serialized: &str,
     canary: &str,
@@ -176,11 +185,20 @@ pub fn assert_redaction_canary_absent(
     if canary.is_empty() {
         return Err(RedactionCanaryError::EmptyCanary);
     }
-    if serialized.contains(canary) || decode_output_escapes(serialized).contains(canary) {
-        Err(RedactionCanaryError::Exposed)
-    } else {
-        Ok(())
+    let mut current = std::borrow::Cow::Borrowed(serialized);
+    // Deep percent chains otherwise remove only two bytes per full scan,
+    // making a small encoded prefix plus a large body quadratic to inspect.
+    for _ in 0..64 {
+        if current.contains(canary) {
+            return Err(RedactionCanaryError::Exposed);
+        }
+        let decoded = decode_output_escapes(&current);
+        if decoded == current {
+            return Ok(());
+        }
+        current = std::borrow::Cow::Owned(decoded);
     }
+    Err(RedactionCanaryError::InspectionLimitExceeded)
 }
 
 /// Undo every escape AFDATA output can introduce: JSON and YAML string escapes,
@@ -1060,6 +1078,44 @@ mod tests {
         assert_eq!(
             assert_redaction_canary_absent("{\"note\":\"https://h/p?q=a%20b%20c\"}", "a b c"),
             Err(RedactionCanaryError::Exposed)
+        );
+    }
+
+    #[test]
+    fn redaction_canary_is_found_through_nested_and_mixed_encoding() {
+        for serialized in [
+            r#"{"note":"https://h/?next=https%3A%2F%2Fb%2F%3Fq%3D%2573ecret"}"#,
+            r#"{"note":"\u002573ecret"}"#,
+            r#"{"note":"%5Cu0073ecret"}"#,
+            r#"{"note":"%255CuD83D%255CuDD11"}"#,
+        ] {
+            let canary = if serialized.contains("D83D") {
+                "🔑"
+            } else {
+                "secret"
+            };
+            assert_eq!(
+                assert_redaction_canary_absent(serialized, canary),
+                Err(RedactionCanaryError::Exposed),
+                "encoded output must still report the canary: {serialized}"
+            );
+        }
+        assert_eq!(
+            assert_redaction_canary_absent("%25not-a-canary", "secret"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn redaction_canary_inspection_fails_closed_on_excessive_encoding_depth() {
+        let ordinary = format!("%{}73afe", "25".repeat(15));
+        assert_eq!(assert_redaction_canary_absent(&ordinary, "secret"), Ok(()));
+        // No canary is present, but inspection may not silently pass an output
+        // whose encoding cannot settle inside its fixed work budget.
+        let deep = format!("%{}73afe{}", "25".repeat(1000), "x".repeat(4096));
+        assert_eq!(
+            assert_redaction_canary_absent(&deep, "secret"),
+            Err(RedactionCanaryError::InspectionLimitExceeded)
         );
     }
 

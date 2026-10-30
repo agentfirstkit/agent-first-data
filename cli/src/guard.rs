@@ -423,7 +423,7 @@ fn normalize_target(value: &str, cwd: &Path) -> io::Result<PathBuf> {
         };
         let parent: PathBuf = components.iter().collect();
         let canonical_parent = resolve_missing_ok(&parent)?;
-        Ok(canonical_parent.join(name))
+        spell_existing_leaf(&canonical_parent, name)
     } else {
         // Ends in `..`, is bare root/prefix, or emptied out entirely by the
         // `.` strip above (impossible in practice: `cwd` is always absolute,
@@ -432,6 +432,99 @@ fn normalize_target(value: &str, cwd: &Path) -> io::Result<PathBuf> {
         let whole: PathBuf = components.iter().collect();
         resolve_missing_ok(&whole)
     }
+}
+
+/// Join `name` onto `parent` the way the filesystem spells it, without
+/// following a final symlink.
+///
+/// On a case-insensitive filesystem (APFS, NTFS) `/Users/ROGER` names the home
+/// directory as surely as `/Users/roger` does, and Windows also answers to 8.3
+/// short names. Every comparison after this one is component-wise, so a leaf
+/// kept as typed would walk a protected directory straight past the reject
+/// set. A real entry is canonicalized; a symlink is looked up among its
+/// parent's entries instead, so the link itself — not its target — is what
+/// comes back. A missing leaf has no other spelling and is kept as typed.
+///
+/// The symlink lookup matches the entry by what it is, not by how its name
+/// compares: a filesystem may answer to a spelling that no simple string rule
+/// relates to the stored one (APFS finds a link stored in decomposed form when
+/// asked in composed form). On Unix the entry is the one with the same device
+/// and inode as the typed path; elsewhere names are compared, exactly and then
+/// case-insensitively.
+///
+/// A symlink is never a component of a canonical path, and `parent` already is
+/// one, so the leaf's spelling cannot move a symlink into or out of the reject
+/// set or a containment root — those are canonical too. When the parent cannot
+/// be listed (an execute-only directory), the typed spelling is therefore kept
+/// rather than refusing a link the filesystem has already shown exists.
+fn spell_existing_leaf(parent: &Path, name: &std::ffi::OsStr) -> io::Result<PathBuf> {
+    let joined = parent.join(name);
+    let metadata = match std::fs::symlink_metadata(&joined) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(joined),
+        Err(err) => return Err(err),
+    };
+    if !metadata.file_type().is_symlink() {
+        return std::fs::canonicalize(&joined).map(plain_form);
+    }
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => return Ok(joined),
+        Err(err) => return Err(err),
+    };
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        // The entry stored under exactly the typed name is the one that was
+        // just stat'd, on every platform.
+        if entry.file_name() == name {
+            return Ok(joined);
+        }
+        if names_same_entry(&entry, name, &metadata)? {
+            matches.push(entry.file_name());
+        }
+    }
+    match matches.as_slice() {
+        [only] => Ok(parent.join(only)),
+        // No unique entry means the guard cannot say what it is handing over,
+        // which is a refusal rather than a pass.
+        _ => Err(io::Error::other(format!(
+            "cannot determine the on-disk spelling of `{}`",
+            joined.display()
+        ))),
+    }
+}
+
+/// Whether directory `entry` is the symlink `wanted` describes: the same
+/// device and inode, read without following the entry.
+#[cfg(unix)]
+fn names_same_entry(
+    entry: &std::fs::DirEntry,
+    _typed: &std::ffi::OsStr,
+    wanted: &std::fs::Metadata,
+) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    // `DirEntry::metadata` does not traverse a symlink on Unix.
+    let found = match entry.metadata() {
+        Ok(found) => found,
+        // Removed between the listing and the stat: it is not the link.
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    Ok(found.dev() == wanted.dev() && found.ino() == wanted.ino())
+}
+
+/// Whether directory `entry` is the symlink typed as `typed`. Without a stable
+/// file identity in std here, the name is compared case-insensitively; the
+/// caller has already taken an exact match.
+#[cfg(not(unix))]
+fn names_same_entry(
+    entry: &std::fs::DirEntry,
+    typed: &std::ffi::OsStr,
+    _wanted: &std::fs::Metadata,
+) -> io::Result<bool> {
+    let entry_name = entry.file_name();
+    Ok(entry_name.to_string_lossy().to_lowercase() == typed.to_string_lossy().to_lowercase())
 }
 
 /// `realpath`-with-missing-components-allowed: canonicalize (resolve `..`,
@@ -580,7 +673,14 @@ fn darwin_user_temp_dir() -> Option<PathBuf> {
     }
     // `written` (per `man confstr`) includes the trailing NUL.
     buffer.truncate(written.saturating_sub(1));
-    String::from_utf8(buffer).ok().map(PathBuf::from)
+    let path = PathBuf::from(String::from_utf8(buffer).ok()?);
+    let path = resolve_missing_ok(&path).ok()?;
+    // Some runtimes return TMPDIR through confstr too. An API result outside
+    // the platform's per-user temp layout must not turn an arbitrary directory
+    // into a trusted cleanup root. Resolve first so a symlink cannot bypass it.
+    let relative = path.strip_prefix("/private/var/folders").ok()?;
+    (relative.components().count() == 3 && relative.file_name() == Some(std::ffi::OsStr::new("T")))
+        .then_some(path)
 }
 
 #[cfg(all(target_os = "macos", not(feature = "libc")))]
@@ -1034,6 +1134,66 @@ mod tests {
         let canonical_root = resolve_missing_ok(root.path()).unwrap();
         assert_eq!(result, canonical_root.join("link_name"));
         assert_ne!(result, resolve_missing_ok(&target_dir).unwrap());
+    }
+
+    /// A case-insensitive filesystem answers to any spelling of a protected
+    /// directory; the guard has to recognise every one of them.
+    #[test]
+    fn a_differently_cased_spelling_of_a_protected_directory_is_rejected() {
+        let cwd = temp();
+        let home = temp();
+        let home_path = resolve_missing_ok(&home.path().join("Home")).unwrap();
+        std::fs::create_dir(&home_path).unwrap();
+        let upper = home_path.with_file_name("HOME");
+        if std::fs::symlink_metadata(&upper).is_err() {
+            // Case-sensitive filesystem: `HOME` is a different, missing entry.
+            return assert!(
+                evaluate_typed(
+                    GuardType::Path,
+                    upper.to_str().unwrap(),
+                    cwd.path(),
+                    Some(&home_path),
+                    &[]
+                )
+                .is_ok()
+            );
+        }
+        let result = evaluate_typed(
+            GuardType::Path,
+            upper.to_str().unwrap(),
+            cwd.path(),
+            Some(&home_path),
+            &[],
+        );
+        assert!(
+            matches!(result, Err(GuardError::Rejected { ref normalized }) if normalized == &home_path),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_differently_cased_symlink_is_spelled_as_the_link_not_its_target() {
+        let root = temp();
+        let target_dir = root.path().join("target_dir");
+        std::fs::create_dir(&target_dir).unwrap();
+        symlink_dir(&target_dir, &root.path().join("link_name"));
+        let upper = root.path().join("LINK_NAME");
+        if std::fs::symlink_metadata(&upper).is_err() {
+            return;
+        }
+        let cwd = temp();
+        let result = evaluate_typed(
+            GuardType::Path,
+            upper.to_str().unwrap(),
+            cwd.path(),
+            None,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            resolve_missing_ok(root.path()).unwrap().join("link_name")
+        );
     }
 
     #[test]

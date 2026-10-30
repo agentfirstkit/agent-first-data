@@ -313,5 +313,47 @@
     "expected": {
       "url": "https://u:pw@h/?token_secret=one"
     }
+  },
+  {
+    "name": "reveal keeps nested credentials and URL parameters protected",
+    "input": {
+      "delivery_secret": {
+        "nested_secret": "hidden",
+        "access": "shown",
+        "endpoint": "https://u:password@h/?access=hidden&delivery_secret=hidden"
+      },
+      "DELIVERY_SECRET": "hidden"
+    },
+    "options": {
+      "secret_names": ["access"],
+      "url_names": ["endpoint"],
+      "reveal_names": ["delivery_secret", "access", "endpoint"]
+    },
+    "expected": {
+      "delivery_secret": {
+        "nested_secret": "***",
+        "access": "shown",
+        "endpoint": "https://u:***@h/?access=***&delivery_secret=***"
+      },
+      "DELIVERY_SECRET": "***"
+    }
+  },
+  {
+    "name": "selected delivery stays revealed through rendering",
+    "input": {
+      "handoff_secret": "shown",
+      "other_secret": "hidden"
+    },
+    "options": {
+      "reveal_names": [
+        "handoff_secret"
+      ]
+    },
+    "expected": {
+      "handoff_secret": "shown",
+      "other_secret": "***"
+    },
+    "expected_yaml": "---\nhandoff_secret: \"shown\"\nother_secret: \"***\"",
+    "expected_plain": "handoff_secret=shown other=***"
   }
 ]

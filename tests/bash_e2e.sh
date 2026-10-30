@@ -82,6 +82,68 @@ result_output="$(afdata_result "Build complete")"
 [ "$(printf '%s' "$result_output" | afdata_cli value - result.message)" = "Build complete" ] \
   || fail "afdata_result changed the message"
 
+structured_result="$(afdata_result --json '{"duration_ms":12,"count":3,"token_secret":"hidden-canary"}')"
+[ "$(printf '%s' "$structured_result" | afdata_cli value - result.duration_ms)" = 12 ] \
+  || fail "structured result lost its numeric value"
+printf '%s\n' "$structured_result" > "$TEST_TMP/structured.jsonl"
+afdata_cli lint "$TEST_TMP/structured.jsonl" > "$TEST_TMP/structured-lint.json"
+[ "$(afdata_cli value "$TEST_TMP/structured-lint.json" result.ok)" = true ] \
+  || fail "structured result failed lint"
+case "$structured_result" in *hidden-canary*) fail "structured result leaked a secret" ;; esac
+_AFDATA_BASH_CHILD=1 afdata_result --json '{"duration_ms":12,"token_secret":"hidden-canary"}' \
+  > "$TEST_TMP/child-json.stdout" 2> "$TEST_TMP/child-json.stderr"
+[ ! -s "$TEST_TMP/child-json.stdout" ] || fail "child emitted a terminal result"
+[ "$(afdata_cli value --input-format json "$TEST_TMP/child-json.stderr" kind)" = log ] || fail "child result was not diagnostic"
+case "$(cat "$TEST_TMP/child-json.stderr")" in *hidden-canary*) fail "child result leaked a secret" ;; esac
+
+json_error_status=0
+afdata_result --json '{"token_secret":"invalid-json-canary",' \
+  > "$TEST_TMP/invalid-json.stdout" 2> "$TEST_TMP/invalid-json.stderr" || json_error_status=$?
+[ "$json_error_status" -eq 2 ] || fail "malformed JSON did not return a usage error"
+[ ! -s "$TEST_TMP/invalid-json.stdout" ] || fail "malformed JSON emitted a successful result"
+case "$(cat "$TEST_TMP/invalid-json.stderr")" in *invalid-json-canary*) fail "JSON parse error echoed the payload" ;; esac
+
+child_json_error_status=0
+_AFDATA_BASH_CHILD=1 afdata_result --json '{"token_secret":"child-invalid-canary",' \
+  > "$TEST_TMP/child-invalid.stdout" 2> "$TEST_TMP/child-invalid.stderr" || child_json_error_status=$?
+[ "$child_json_error_status" -eq 2 ] || fail "child malformed JSON did not return a usage error"
+[ ! -s "$TEST_TMP/child-invalid.stdout" ] || fail "child malformed JSON wrote to stdout"
+[ "$(afdata_cli value --input-format json "$TEST_TMP/child-invalid.stderr" error.code)" = cli_invalid_argument_value ] \
+  || fail "child malformed JSON failed without saying why"
+case "$(cat "$TEST_TMP/child-invalid.stderr")" in *child-invalid-canary*) fail "child JSON parse error echoed the payload" ;; esac
+
+# A lone --json is a payload left out. Top level and child alike must answer
+# with the helper's own usage error, not one about an `emit` command the
+# caller never wrote.
+for child_mode in 0 1; do
+  missing_json_status=0
+  _AFDATA_BASH_CHILD="$child_mode" afdata_result --json \
+    > "$TEST_TMP/missing-json.stdout" 2> "$TEST_TMP/missing-json.stderr" || missing_json_status=$?
+  [ "$missing_json_status" -eq 2 ] || fail "afdata_result --json (child=$child_mode) did not return a usage error"
+  [ ! -s "$TEST_TMP/missing-json.stdout" ] || fail "afdata_result --json (child=$child_mode) wrote to stdout"
+  [ "$(afdata_cli value --input-format json "$TEST_TMP/missing-json.stderr" error.message)" \
+    = "afdata_result requires MESSAGE or --json JSON" ] \
+    || fail "afdata_result --json (child=$child_mode) failed with someone else's error"
+done
+
+# Messages are forwarded as values, so one that starts with `-` is not read
+# as a flag.
+dash_result="$(afdata_result "-5 files")" || fail "afdata_result rejected a message starting with -"
+[ "$(printf '%s' "$dash_result" | afdata_cli value - result.message)" = "-5 files" ] \
+  || fail "afdata_result changed a message starting with -"
+afdata_log warn "--dry-run set" 2> "$TEST_TMP/dash-log.stderr" \
+  || fail "afdata_log rejected a message starting with -"
+[ "$(afdata_cli value --input-format json "$TEST_TMP/dash-log.stderr" log.message)" = "--dry-run set" ] \
+  || fail "afdata_log changed a message starting with -"
+dash_error_status=0
+afdata_error build_failed "-x is unsupported" "--no-x instead" \
+  2> "$TEST_TMP/dash-error.stderr" || dash_error_status=$?
+[ "$dash_error_status" -eq 1 ] || fail "afdata_error with dash-led text did not return status 1"
+[ "$(afdata_cli value --input-format json "$TEST_TMP/dash-error.stderr" error.message)" = "-x is unsupported" ] \
+  || fail "afdata_error changed a message starting with -"
+[ "$(afdata_cli value --input-format json "$TEST_TMP/dash-error.stderr" error.hint)" = "--no-x instead" ] \
+  || fail "afdata_error changed a hint starting with -"
+
 afdata_log info "Building project" > "$TEST_TMP/log.stdout" 2> "$TEST_TMP/log.stderr"
 [ ! -s "$TEST_TMP/log.stdout" ] || fail "afdata_log wrote to stdout under split routing"
 [ "$(afdata_cli value --input-format json "$TEST_TMP/log.stderr" kind)" = log ] \

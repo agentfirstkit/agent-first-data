@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -124,21 +125,24 @@ def skill_reference_text() -> str:
 
 
 def validate_skill_frontmatter() -> None:
-    text = SKILL.read_text(encoding="utf-8")
-    if not text.startswith("---\n"):
-        fail("standard Skill must start with YAML frontmatter")
-    try:
-        _, frontmatter, _ = text.split("---\n", 2)
-    except ValueError:
-        fail("standard Skill frontmatter must be closed")
-    keys = []
-    for line in frontmatter.splitlines():
-        if not line.strip():
-            continue
-        if ":" not in line:
-            fail(f"invalid Skill frontmatter line: {line!r}")
-        keys.append(line.split(":", 1)[0])
-    if keys != ["name", "description"]:
+    # afdata's own frontmatter reading decides where the block is and what it
+    # holds; a missing or unclosed block is its parse error, not ours to spot.
+    run = subprocess.run(
+        [
+            str(ROOT / "target" / "debug" / "afdata"),
+            "keys",
+            str(SKILL),
+            "--input-format",
+            "yaml-frontmatter",
+        ],
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    if run.returncode != 0:
+        fail(f"standard Skill must start with valid YAML frontmatter: {run.stderr.strip()[:200]}")
+    keys = sorted(run.stdout.splitlines())
+    if keys != ["description", "name"]:
         fail(f"standard Skill frontmatter must contain only name and description, got {keys}")
 
 

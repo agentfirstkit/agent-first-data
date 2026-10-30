@@ -1,6 +1,6 @@
 # Agent-First Data
 
-A naming convention that lets AI agents understand your data without being told what it means, plus a CLI and library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.
+A naming convention that lets AI agents understand your data without being told what it means, plus the `afdata` CLI and a Rust library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.
 
 > **Ask your agent:** "Apply the Agent-First Data convention across my project's fields, config, and logs."
 
@@ -18,18 +18,18 @@ None of this is carelessness. The data never says what it means, so the meaning 
 
 Agent-First Data puts the meaning into the field name itself. Call the field `timeout_ms` and there is nothing left to guess — the name says milliseconds. Call it `api_key_secret` and any AFDATA output boundary that follows the convention hides it automatically.
 
-It is a convention, not a framework — a small set of name endings, plus a tiny library in four languages that reads and formats them.
+It is a convention, not a framework — a small set of name endings, plus a tiny library in Rust, Go, Python, and TypeScript that reads and formats them.
 
 - **Names carry meaning.** Endings like `_ms`, `_bytes`, `_secret`, `_usd_cents`, and `_percent` put units and intent directly into the field name.
-- **One set of data, three ways to show it.** The same fields render as JSON or YAML — both keep original keys and types, for machines — or as a single human log line with units formatted for scanning. Secrets are removed in every form.
+- **The same data, rendered for machines or people.** The same fields render as JSON or YAML — both keep original keys and types, for machines — or as a single human log line with units formatted for scanning. Secrets are removed in every form.
 - **Structured secrets are redacted.** Anything ending in `_secret` is hidden when a structured value passes through an AFDATA redactor or renderer. A `_url` field keeps its address but scrubs the userinfo password and secret-named query parameters. Legacy secret and URL fields can be protected with exact `secret_names` and `url_names` lists.
 - **Logging agents can read.** Structured logs that follow the same rules, with request-scoped fields.
-- **One contract in four languages.** Rust, Go, Python, and TypeScript share
+- **One contract across languages.** Rust, Go, Python, and TypeScript share
   wire behavior and fixtures while keeping idiomatic native API shapes.
 
 ## A quick look
 
-One record — a log event with a timeout, an API key, and a database URL — rendered three ways. Nothing is configured; the field names carry everything.
+One record — a log event with a timeout, an API key, and a database URL — rendered as JSON, YAML, and plain. Nothing is configured; the field names carry everything.
 
 ```json
 {"kind":"log","log":{"event":"startup","args":{"timeout_s":30,"api_key_secret":"sk-123"},"db_url":"postgres://user:p@ss@db/app?token_secret=abc"},"trace":{"duration_ms":1280}}
@@ -88,7 +88,7 @@ history, `/proc`, a parent process, or third-party logs. Avoid putting secrets
 in argv; if a tool records its invocation, pass argv through `redact_argv`
 before logging it.
 
-There are no named redaction profiles. Use the default policy (`All`), an explicit `secret_names` list, or the documented scoped policies (`TraceOnly`, `Off`) for deliberate exceptions.
+There are no named redaction profiles. Use the default policy (`All`), an explicit `secret_names` list, the documented scoped policies (`TraceOnly`, `Off`), or an exact `reveal_names` list for deliberate exceptions. A revealed name skips only that field's whole-value mask at the output boundary that intentionally delivers it; its children, URL parameters, URL credentials, and argv get no exemption.
 
 ## Reading and editing config documents
 
@@ -98,16 +98,13 @@ Beyond emitting AFDATA, the library and `afdata` CLI read and safely edit struct
 afdata get config.toml server.port                    # one value as an AFDATA record (secrets redacted)
 host=$(afdata value config.toml server.host)          # raw scalar, for shell substitution
 afdata set config.toml server.port 8080 --value-type number
+afdata set config.toml features.- c                   # append one element to an existing array
 ```
 
 Use `get` when the next step must preserve JSON types and structure; `value`
 deliberately turns one scalar into raw shell bytes. `set` creates missing object
 parents along the requested dot-path, but refuses to traverse an existing
 scalar or incompatible container.
-
-CLI document file reads and edits accept regular files up to 16 MiB by
-default; `--max-file-bytes BYTES` sets a different budget. Stdin (`-`) is not
-capped.
 
 Edits are **source-preserving and atomic**: comments, key order, and formatting
 survive; a write is read back before it lands, so an edit that would leave a
@@ -135,12 +132,14 @@ section cannot share a name. When a config filename such as `phoenix.conf`
 does not identify its parser, a Rust value source can say so explicitly:
 `file+ini:PATH#DOT_PATH`.
 
-A Markdown file has three valid readings, none of them guessed at: name
+A Markdown file is read in an explicitly named mode, never a guessed one: name
 `toml-frontmatter` or `yaml-frontmatter` to edit its metadata block with the body
 frozen, or `markdown` to read the body as a tree of heading sections. The last is
 read-only, and reports structure rather than what a project means by it — whether
 the H1 is the title is a layout convention, and stays with the caller that holds
-it.
+it. Inline structure survives the flattening: each paragraph, heading, and
+section also reports an `inlines` tree, where links and images carry their
+`destination_url`.
 
 ```bash
 afdata value README.md h1.0.paragraph.0.text --input-format markdown  # the synopsis
@@ -169,12 +168,8 @@ redaction applies.
 Flags and exit codes are in [`docs/cli.md`](docs/cli.md) and `afdata <command>
 --help`; the error codes and recovery rules are in the
 [skill reference](skills/agent-first-data/references/documents.md). The Rust
-library is `agent_first_data::document` (`Document` / `DocumentFile`).
-`DocumentFile::open_capped` limits bytes read from one verified file handle;
-`create_atomic` safely performs a first no-clobber commit; `decode` and
-`edit_and_validate` put typed serde validation on the same transaction boundary.
-On Unix, the default-on `libc` feature adds nonblocking special-file rejection
-and atomic `SymlinkPolicy::NoFollow`; `stream-redirect` enables it automatically.
+library is `agent_first_data::document` (`Document` / `DocumentFile`); its
+API is described in [`rust/README.md`](rust/README.md).
 
 ## Token-efficient CLI discovery
 
@@ -234,7 +229,7 @@ must remain the sole owner of the final result. See the complete
 - **Designing an API response or event payload** — units and sensitivity travel *with* the data, across every boundary it crosses.
 - **Auditing for leaked secrets** — one naming rule (`_secret`) makes redaction automatic instead of case-by-case.
 
-## One shared contract, four languages
+## One shared contract across languages
 
 The shared core surface ships in Rust, Go, Python, and TypeScript (each in its own casing):
 
@@ -261,8 +256,8 @@ Rust also provides `ErrorSpec` / `ErrorCatalog` for stable public domain errors,
 in-process `lint_value` and assertion helpers, and a composable
 `afdata_tracing::AfdataLayer` with an injectable writer and
 `StructuredLogHandle` for nested JSON. The shared surface is enumerated in
-[`spec/api-surface.json`](spec/api-surface.json); other SDK compilers consume
-the same serialized CLI spec and fixtures as they migrate.
+[`spec/api-surface.json`](spec/api-surface.json). Go, Python, and TypeScript
+provide emitters/readers; argv parsing belongs to the application.
 
 ## Adopt it: hand the convention to your coding agent
 

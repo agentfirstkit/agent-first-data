@@ -1,5 +1,12 @@
 [
   {
+    "name": "prototype_named_keys_are_ordinary_json_data",
+    "input": {"__proto__":{"token_secret":"hidden","keep":"visible"},"constructor":"kept","toString":"also-kept"},
+    "expected_json": {"__proto__":{"token_secret":"***","keep":"visible"},"constructor":"kept","toString":"also-kept"},
+    "expected_yaml": "---\n__proto__:\n  keep: \"visible\"\n  token_secret: \"***\"\nconstructor: \"kept\"\ntoString: \"also-kept\"",
+    "expected_plain": "__proto__.keep=visible __proto__.token=*** constructor=kept toString=also-kept"
+  },
+  {
     "name": "basic_suffix_formatting_and_redaction",
     "input": {
       "api_key_secret": "sk-123",
@@ -328,6 +335,28 @@
     "expected_plain": "small=1e-7%"
   },
   {
+    "name": "native_float_notation_has_one_threshold",
+    "description": "A fractional number renders positionally in [1e-6, 1e21) and in exponent form outside it, the thresholds of ECMAScript's Number#toString. Each runtime's own shortest formatter switches elsewhere (Go from 1e6 and below 1e-4, Python below 1e-4, Rust below 1e-5), so the SDK decides the notation on the digits.",
+    "input": {
+      "a": 1234567.5,
+      "b": 0.000015,
+      "c": 0.000001,
+      "d": -2.5e-9,
+      "e": 1.5e-22,
+      "f": 123456.789
+    },
+    "expected_json": {
+      "a": 1234567.5,
+      "b": 0.000015,
+      "c": 0.000001,
+      "d": -2.5e-9,
+      "e": 1.5e-22,
+      "f": 123456.789
+    },
+    "expected_yaml": "---\na: 1234567.5\nb: 0.000015\nc: 0.000001\nd: -2.5e-9\ne: 1.5e-22\nf: 123456.789",
+    "expected_plain": "a=1234567.5 b=0.000015 c=0.000001 d=-2.5e-9 e=1.5e-22 f=123456.789"
+  },
+  {
     "name": "out_of_range_epoch_falls_through",
     "input": {
       "created_at_epoch_ms": 253402300800000,
@@ -543,5 +572,131 @@
     },
     "expected_yaml": "---\n\"+infinity\": \"value\"\n--inf: \"value\"\n\"-inf\": \"value\"\n\".1\": \"value\"\n0b1: \"value\"\n0x1f: \"value\"\n0x1p-2: \"value\"\n\"1.\": \"value\"\n1_0: \"value\"\n1e: \"value\"\n\"1e3\": \"value\"\n\"1e9999\": \"value\"\n\"inf\": \"value\"\n\"nan\": \"value\"",
     "expected_plain": "+infinity=value --inf=value -inf=value .1=value 0b1=value 0x1f=value 0x1p-2=value 1.=value 1_0=value 1e=value 1e3=value 1e9999=value inf=value nan=value"
+  },
+  {
+    "name": "html_significant_characters_stay_literal",
+    "input": {
+      "l": [{"k": "x&y\u2028"}],
+      "s": "a\u2028b\u2029c",
+      "url": "https://example.test/a?b=1&c=<2>"
+    },
+    "expected_json": {
+      "l": [{"k": "x&y\u2028"}],
+      "s": "a\u2028b\u2029c",
+      "url": "https://example.test/a?b=1&c=<2>"
+    },
+    "expected_json_text": "{\"l\":[{\"k\":\"x&y\u2028\"}],\"s\":\"a\u2028b\u2029c\",\"url\":\"https://example.test/a?b=1&c=<2>\"}",
+    "expected_yaml": "---\nl:\n  -\n    k: \"x&y\u2028\"\ns: \"a\u2028b\u2029c\"\nurl: \"https://example.test/a?b=1&c=<2>\"",
+    "expected_plain": "l=\"{\\\"k\\\":\\\"x&y\u2028\\\"}\" s=a\u2028b\u2029c url=\"https://example.test/a?b=1&c=<2>\""
+  },
+  {
+    "name": "native_numbers_nested_in_plain_arrays_use_the_canonical_number_form",
+    "description": "Each SDK parses this input natively. Number leaves of a container nested in an array take the canonical number form in Plain, exactly as YAML prints them. JSON keeps the sign of a native -0.",
+    "input": {
+      "m": [
+        [
+          100000.0,
+          1.0,
+          1e-06,
+          1e+16,
+          -0.0
+        ]
+      ],
+      "o": [
+        {
+          "a": 6.022e+23,
+          "b": 1.0,
+          "c": 1e-07
+        }
+      ]
+    },
+    "expected_json": {
+      "m": [
+        [
+          100000.0,
+          1.0,
+          1e-06,
+          1e+16,
+          -0.0
+        ]
+      ],
+      "o": [
+        {
+          "a": 6.022e+23,
+          "b": 1.0,
+          "c": 1e-07
+        }
+      ]
+    },
+    "expected_yaml": "---\nm:\n  -\n    - 100000\n    - 1\n    - 0.000001\n    - 10000000000000000\n    - -0\no:\n  -\n    a: 6.022e+23\n    b: 1\n    c: 1e-7",
+    "expected_plain": "m=[100000,1,0.000001,10000000000000000,-0] o=\"{\\\"a\\\":6.022e+23,\\\"b\\\":1,\\\"c\\\":1e-7}\""
+  },
+  {
+    "name": "native_integral_floats_beyond_2_53_render_like_any_float",
+    "description": "A JavaScript number of 2^53 or more is a float64 like every other SDK's native float, so it renders by the canonical number form rather than being refused: 1e21 reads 1e+21 and 2^53 reads its digits.",
+    "input": {
+      "big": 1e+21,
+      "edge": 9007199254740992,
+      "list": [
+        1e+21,
+        -1e+21
+      ],
+      "small": -1e+21
+    },
+    "expected_json": {
+      "big": 1e+21,
+      "edge": 9007199254740992,
+      "list": [
+        1e+21,
+        -1e+21
+      ],
+      "small": -1e+21
+    },
+    "expected_yaml": "---\nbig: 1e+21\nedge: 9007199254740992\nlist:\n  - 1e+21\n  - -1e+21\nsmall: -1e+21",
+    "expected_plain": "big=1e+21 edge=9007199254740992 list=1e+21,-1e+21 small=-1e+21"
+  },
+  {
+    "name": "native_integral_floats_take_their_shortest_spelling_on_integer_suffixes",
+    "description": "Integer-required suffixes read a native float through its shortest decimal spelling, the text the canonical number form prints, not its exact binary value. 2^60 as a float64 is spelled 1.152921504606847e+18, so it counts as 1152921504606847000 in every SDK, exactly as a decoded literal of that spelling does.",
+    "input": {
+      "fee_jpy": 1.152921504606847e+18,
+      "price_usd_cents": 1.152921504606847e+18,
+      "size_bytes": 1.152921504606847e+18
+    },
+    "expected_json": {
+      "fee_jpy": 1.152921504606847e+18,
+      "price_usd_cents": 1.152921504606847e+18,
+      "size_bytes": 1.152921504606847e+18
+    },
+    "expected_yaml": "---\nfee_jpy: 1152921504606847000\nprice_usd_cents: 1152921504606847000\nsize_bytes: 1152921504606847000",
+    "expected_plain": "fee=¥1,152,921,504,606,847,000 price=$11529215046068470.00 size=1048576.0TiB"
+  },
+  {
+    "name": "ms_seconds_round_exact_ties_half_to_even",
+    "input": {
+      "a_ms": 1062.5,
+      "b_ms": -3312.5
+    },
+    "expected_json": {
+      "a_ms": 1062.5,
+      "b_ms": -3312.5
+    },
+    "expected_yaml": "---\na_ms: 1062.5\nb_ms: -3312.5",
+    "expected_plain": "a=1.062s b=-3.312s"
+  },
+  {
+    "name": "integer_suffixes_require_ascii_digit_strings",
+    "input": {
+      "a_sats": "１２",
+      "b_msats": "١٢",
+      "c_epoch_ns": "١"
+    },
+    "expected_json": {
+      "a_sats": "１２",
+      "b_msats": "١٢",
+      "c_epoch_ns": "١"
+    },
+    "expected_yaml": "---\na_sats: \"１２\"\nb_msats: \"١٢\"\nc_epoch_ns: \"١\"",
+    "expected_plain": "a_sats=１２ b_msats=١٢ c_epoch_ns=١"
   }
 ]

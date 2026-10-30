@@ -33,6 +33,7 @@ pub mod format;
 #[cfg(feature = "schema")]
 pub mod schema;
 
+pub use crate::atomic_file::{AtomicError, AtomicStep, write_atomic};
 pub use coerce::{
     BareOverwrite, ScalarKind, ValueType, coerce_toward, coerce_values_toward,
     guard_bare_overwrite, scalar_kind, value_from_type, value_matches_type,
@@ -41,7 +42,7 @@ pub use error::{DocumentError, DocumentResult};
 pub use file::{CreateMode, CreateOptions, Document, DocumentFile, SymlinkPolicy};
 pub use keyed::{Addressing, ArrayRule, KeyedList, MatchKind, add_keyed, remove_keyed};
 pub use path::{PatternSegment, join_path, parse_path, parse_path_pattern};
-pub(crate) use traverse::keyed_prefix_matches;
+pub(crate) use traverse::{append_position_refused, keyed_prefix_matches};
 pub use traverse::{get_path, get_path_ref, resolve_path, set_path, unset_path};
 pub use typed::{from_value, to_value};
 pub use value::Value;

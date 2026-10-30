@@ -48,6 +48,16 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
     let document = JsonDocument::parse(content)?;
     let root = document.root();
     let mut output = content.to_string();
+    if segments.last().is_some_and(|segment| segment == "-")
+        && let Some(parent) = resolve(root, &segments[..segments.len() - 1], 0)
+        && matches!(parent.kind, NodeKind::Array(_))
+    {
+        return append_array_item_preserving(
+            content,
+            &crate::document::join_path(&segments[..segments.len() - 1]),
+            value,
+        );
+    }
     match resolve(root, &segments, 0) {
         Some(target) => {
             // Replace the whole existing node span — scalar or collection. A

@@ -190,6 +190,9 @@ export class CliEmitter {
   private terminalEmitted = false;
   private diagnostic?: CliEventWriter;
   private strictProtocol = false;
+  private writeFailed = false;
+  /** Where an event-stream emitter reports a failed write; tests replace it. */
+  private processStderr: CliEventWriter = processStderrWriter;
 
   /**
    * Create an event-stream emitter: every event, including `error`, goes to the
@@ -263,6 +266,7 @@ export class CliEmitter {
   }
 
   emit(event: Event): void {
+    this.writeFailed = false;
     const jsonValue = event.toJSON() as Record<string, JsonValue>;
     validateProtocolEvent(jsonValue, this.strictProtocol);
     const kind = jsonValue.kind as string;
@@ -277,7 +281,14 @@ export class CliEmitter {
     } else {
       throw new Error(`unsupported event kind ${JSON.stringify(kind)}`);
     }
-    this.sinkFor(kind)(`${render(jsonValue, this.format, this.outputOptions)}\n`);
+    const line = `${render(jsonValue, this.format, this.outputOptions)}\n`;
+    try {
+      this.sinkFor(kind)(line);
+    } catch (err) {
+      // Marks the failure as output's, not the event's, for finish().
+      this.writeFailed = true;
+      throw err;
+    }
     if (kind === "result" || kind === "error") this.terminalEmitted = true;
   }
 
@@ -310,15 +321,39 @@ export class CliEmitter {
    * exit code, so a one-shot CLI need not hand-roll the emit-then-exit dance.
    *
    * A successful write returns `successCode`; a broken pipe (the reader hung up)
-   * returns `0`; any other write or validation failure returns `4`. A library
-   * never calls process.exit itself — return this code and let the caller exit.
+   * returns `0` and says nothing. Any other write failure returns `4` after
+   * reporting `output_write_failed` as an `error` event: on the diagnostic
+   * writer in finite mode, on the process's stderr in event-stream mode, whose
+   * only writer is the one that just failed. That report is best effort. An
+   * event the emitter refuses (a protocol violation or a second terminal
+   * event) is the command's own failure, not an output one, and returns `1`.
+   * A library never calls process.exit itself — return this code and let the
+   * caller exit.
    */
   finish(event: Event, successCode: number): number {
     try {
       this.emit(event);
       return successCode;
     } catch (err) {
-      return CliEmitter.isBrokenPipe(err) ? 0 : 4;
+      if (CliEmitter.isBrokenPipe(err)) return 0;
+      if (!this.writeFailed) return 1;
+      this.reportOutputWriteFailed();
+      return 4;
+    }
+  }
+
+  private reportOutputWriteFailed(): void {
+    try {
+      const event = jsonError("output_write_failed", "could not write command output").build();
+      if (this.diagnostic) {
+        this.emit(event);
+      } else {
+        // Event-stream mode has no diagnostic writer, so the report goes to
+        // the process's stderr through an emitter of its own.
+        CliEmitter.stream(this.processStderr, this.format).withStrictProtocol().emit(event);
+      }
+    } catch {
+      // Best effort: an unwritable stderr leaves only the exit code.
     }
   }
 

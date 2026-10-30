@@ -51,7 +51,7 @@ class EventBuildError(Exception):
 
 
 class Event:
-    """Opaque typed event envelope wrapping a validated protocol dict."""
+    """SDK event envelope; validate externally supplied trace values explicitly."""
 
     def __init__(self, envelope: dict) -> None:
         """Private: only builders and validators construct Events."""
@@ -302,7 +302,7 @@ def _validate_error_payload(error: Any) -> None:
     if not isinstance(message, str) or message == "":
         raise ValueError("event.error.message must be a non-empty string")
     if "retryable" in error and not isinstance(error["retryable"], bool):
-        raise ValueError("event.error.retryable must be a boolean")
+        raise ValueError("event.error.retryable must be a boolean when present")
     if "hint" in error and not isinstance(error["hint"], str):
         raise ValueError("event.error.hint must be a string when present")
 
@@ -364,11 +364,9 @@ class _RawNumber:
     """Internal: a decoded JSON number whose exact source literal must
     survive re-emission (see decode_protocol_event's number-fidelity note).
 
-    Deliberately not an int/float subclass: Part 2's suffix-driven formatting
-    (`_is_number`, `_as_int`, ...) checks `isinstance(value, (int, float))`,
-    so a `_RawNumber` gracefully falls through to the existing "wrong type"
-    passthrough there rather than risking a lossy or crashing arithmetic
-    conversion. JSON/YAML/plain leaf rendering special-case it directly.
+    Deliberately not an int/float subclass. Serializers treat it as an opaque
+    scalar; integer-required suffixes inspect its exact decimal digits, while
+    unit scaling uses a bounded floating conversion only where needed.
     """
 
     __slots__ = ("literal",)
@@ -383,11 +381,15 @@ class _RawNumber:
 def _parse_int_lossless(text: str) -> Any:
     """json.loads parse_int hook: int() is exact for every JSON integer
     literal except "-0" (int("-0") == 0, dropping the sign), so only that
-    one case needs wrapping; every other integer stays a plain arbitrary-
-    precision Python int, unchanged from the pre-fidelity behavior."""
+    case and literals beyond Python's conversion limit need wrapping. Other
+    integers stay plain arbitrary-precision Python ints."""
     if text == "-0":
         return _RawNumber(text)
-    return int(text)
+    try:
+        return int(text)
+    except ValueError:
+        # Python's configurable conversion limit is not a JSON grammar limit.
+        return _RawNumber(text)
 
 
 def _parse_float_lossless(text: str) -> Any:
@@ -412,7 +414,7 @@ class DecodedError:
 
     code: str
     message: str
-    retryable: bool
+    retryable: bool | None
     hint: str | None = None
     fields: dict[str, Any] = field(default_factory=dict)
     trace: dict | None = None
@@ -434,12 +436,55 @@ class DecodedLog:
     trace: dict | None = None
 
 
+def _reject_non_json_constant(name: str) -> Any:
+    # ``json.loads`` accepts ``NaN`` and ``Infinity`` by default; they are not
+    # JSON, and every other SDK's decoder refuses them.
+    raise ValueError(f"{name} is not a JSON number")
+
+
+# How many arrays and objects a protocol line may nest, counting the envelope
+# object. Every SDK enforces the same bound.
+_MAX_PROTOCOL_NESTING = 127
+_JSON_STRING_OR_BRACKET = re.compile(r'"(?:[^"\\]+|\\.)*"|[\[\]{}]')
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _nesting_exceeds_limit(text: str) -> bool:
+    """Whether brackets outside strings nest past the bound. Checked before
+    ``json.loads``, which would otherwise recurse until RecursionError."""
+    if text.count("[") + text.count("{") <= _MAX_PROTOCOL_NESTING:
+        return False
+    depth = 0
+    for match in _JSON_STRING_OR_BRACKET.finditer(text):
+        token = match.group()
+        if token in "[{":
+            depth += 1
+            if depth > _MAX_PROTOCOL_NESTING:
+                return True
+        elif token in "]}":
+            depth -= 1
+    return False
+
+
+def _has_lone_surrogate(value: Any) -> bool:
+    """``json.loads`` joins an escaped surrogate pair into one character and
+    keeps a lone surrogate (escaped or raw) as-is, so any surrogate code point
+    left in a decoded key or string is a lone one."""
+    if isinstance(value, str):
+        return _SURROGATE.search(value) is not None
+    if isinstance(value, dict):
+        return any(_has_lone_surrogate(k) or _has_lone_surrogate(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_has_lone_surrogate(item) for item in value)
+    return False
+
+
 def decode_protocol_event(
     text: str,
 ) -> DecodedResult | DecodedError | DecodedProgress | DecodedLog:
-    """Parse and strict-validate a single protocol v1 JSON line into a typed event.
+    """Parse and base-validate a single protocol v1 JSON line into a typed event.
 
-    Raises EventDecodeError if ``text`` is not valid JSON or fails strict
+    Raises EventDecodeError if ``text`` is not valid JSON or fails base
     validation.
 
     Number literal fidelity: ``json.loads``'s default integer parsing is
@@ -448,17 +493,26 @@ def decode_protocol_event(
     default float parsing collapses any literal through float64 (30 significant
     digits become 15-17, "0.1000...055511..." becomes "0.1"). ``parse_int``/
     ``parse_float`` hooks below route both exceptions through ``_RawNumber``,
-    which stores the exact source literal; every JSON/YAML/plain renderer in
-    this module treats it as an opaque scalar and re-emits that literal
-    verbatim. This is internal — ``_RawNumber`` is never part of the public API.
+    which stores the exact source literal; JSON re-emits that literal
+    verbatim, and YAML/plain render it in the spec's canonical number form
+    without losing a digit. This is internal — ``_RawNumber`` is never part of the public API.
     """
+    if _nesting_exceeds_limit(text):
+        raise EventDecodeError(f"invalid JSON: nesting deeper than {_MAX_PROTOCOL_NESTING}")
     try:
-        event = json.loads(text, parse_int=_parse_int_lossless, parse_float=_parse_float_lossless)
+        event = json.loads(
+            text,
+            parse_int=_parse_int_lossless,
+            parse_float=_parse_float_lossless,
+            parse_constant=_reject_non_json_constant,
+        )
     except (ValueError, TypeError) as exc:
         raise EventDecodeError(f"invalid JSON: {exc}") from exc
+    if _has_lone_surrogate(event):
+        raise EventDecodeError("invalid JSON: lone surrogate in a string")
 
     try:
-        validate_protocol_event(event, strict=True)
+        validate_protocol_event(event, strict=False)
     except ValueError as exc:
         raise EventDecodeError(str(exc)) from exc
 
@@ -475,7 +529,7 @@ def decode_protocol_event(
         return DecodedError(
             code=error["code"],
             message=error["message"],
-            retryable=error["retryable"],
+            retryable=error.get("retryable"),
             hint=error.get("hint"),
             fields=fields,
             trace=trace,
@@ -544,6 +598,8 @@ class OutputOptions:
     # None or RedactionPolicy.All = full redaction (default).
     policy: RedactionPolicy | None = None
     style: PlainStyle = PlainStyle.Readable
+    # Exact structured field names to reveal; URL parameters and argv stay redacted.
+    reveal_names: Sequence[str] = ()
 
     @classmethod
     def for_policy(cls, policy: RedactionPolicy) -> OutputOptions:
@@ -561,6 +617,7 @@ def _format_json(value: Any, *, options: OutputOptions | None = None) -> str:
         value,
         secret_names=output_options.secret_names,
         url_names=output_options.url_names,
+        reveal_names=output_options.reveal_names,
         policy=output_options.policy,
     )
     return _encode_json_lossless(redacted)
@@ -601,6 +658,7 @@ def _format_yaml(value: Any, *, options: OutputOptions | None = None) -> str:
         value,
         secret_names=output_options.secret_names,
         url_names=output_options.url_names,
+        reveal_names=output_options.reveal_names,
         policy=output_options.policy,
     )
     lines = ["---"]
@@ -618,6 +676,7 @@ def _format_plain(value: Any, *, options: OutputOptions | None = None) -> str:
         value,
         secret_names=output_options.secret_names,
         url_names=output_options.url_names,
+        reveal_names=output_options.reveal_names,
         policy=output_options.policy,
     )
     if not isinstance(value, dict):
@@ -646,6 +705,7 @@ def redacted_value(
     *,
     secret_names: Sequence[str] = (),
     url_names: Sequence[str] = (),
+    reveal_names: Sequence[str] = (),
     policy: RedactionPolicy | None = None,
 ) -> Any:
     """Return a JSON-safe copy with redaction options applied.
@@ -654,7 +714,7 @@ def redacted_value(
     Redacts _url fields and exact ``url_names`` entries by the same rules.
     """
     v = _sanitize_for_json(value)
-    _apply_redaction(v, secret_names, url_names, policy)
+    _apply_redaction(v, secret_names, url_names, policy, reveal_names)
     return v
 
 
@@ -770,8 +830,9 @@ def _apply_redaction(
     secret_names: Sequence[str],
     url_names: Sequence[str],
     policy: RedactionPolicy | None,
+    reveal_names: Sequence[str] = (),
 ) -> None:
-    context = _RedactionContext.from_names(secret_names, url_names)
+    context = _RedactionContext.from_names(secret_names, url_names, reveal_names)
     _apply_redaction_policy_with_context(value, policy, context)
 
 
@@ -1036,16 +1097,19 @@ class _RedactionContext:
 
     secret_names: frozenset[str] = frozenset()
     url_names: frozenset[str] = frozenset()
+    reveal_names: frozenset[str] = frozenset()
 
     @classmethod
     def from_names(
         cls,
         secret_names: Sequence[str],
         url_names: Sequence[str] = (),
+        reveal_names: Sequence[str] = (),
     ) -> _RedactionContext:
         return cls(
             secret_names=frozenset(secret_names),
             url_names=frozenset(url_names),
+            reveal_names=frozenset(reveal_names),
         )
 
     def is_secret_key(self, key: str) -> bool:
@@ -1069,7 +1133,7 @@ def _redact_secrets(value: Any, context: _RedactionContext = _RedactionContext()
     if isinstance(value, dict):
         for k in list(value.keys()):
             v = value[k]
-            if context.is_secret_key(k):
+            if context.is_secret_key(k) and k not in context.reveal_names:
                 # A null secret is an absent secret. Masking it would
                 # manufacture the appearance of a configured credential —
                 # readers cannot tell "***"-because-set from
@@ -1103,7 +1167,7 @@ def _redact_url_value(value: Any, context: _RedactionContext, depth: int) -> Any
     if isinstance(value, dict):
         for key in list(value.keys()):
             item = value[key]
-            if context.is_secret_key(key):
+            if context.is_secret_key(key) and key not in context.reveal_names:
                 if item is not None:
                     value[key] = REDACTED_MARKER
             else:
@@ -1452,17 +1516,100 @@ def _is_number(value: Any) -> bool:
 
 def _number_str(value: int | float) -> str:
     """Render a number canonically for YAML/plain output."""
-    if isinstance(value, float) and math.isfinite(value) and value.is_integer() and abs(value) < 1e21:
-        return str(int(value))
-    s = repr(value) if isinstance(value, float) else str(value)
-    return _normalize_exponent(s)
+    if isinstance(value, float):
+        return _number_literal_str(repr(value))
+    return str(value)
+
+
+def _number_literal_str(literal: str) -> str:
+    """Render a number's literal canonically for YAML/plain output: a float
+    literal whose value is an integer below 1e21 in magnitude renders as that
+    integer (``3.0`` -> ``3``, ``-0.0`` -> ``-0``); anything else keeps its
+    digits, placed by ``_place_decimal_point``. Native floats (via ``repr``)
+    and decoded literals share this, and it works on the text so a digit is
+    never lost to a float64 round trip."""
+    integral = _integral_float_text(literal)
+    if integral is not None:
+        return integral
+    placed = _place_decimal_point(literal)
+    return placed if placed is not None else _normalize_exponent(literal)
+
+
+_I64_MIN = -(2**63)
+_I64_MAX = 2**63 - 1
+
+
+def _place_decimal_point(literal: str) -> str | None:
+    """Spell a non-integral float literal with the notation ECMAScript's
+    ``Number#toString`` picks: positional when the value lies in [1e-6, 1e21),
+    exponent form otherwise. ``repr`` switches below 1e-4 and the other SDKs'
+    native formatters elsewhere, so the choice is made here, on the digits as
+    written. ``None`` for integer literals and exponents beyond i64, which keep
+    their spelling."""
+    if not any(c in literal for c in ".eE"):
+        return None
+    sign = "-" if literal.startswith("-") else ""
+    unsigned = literal[1:] if sign else literal
+    mantissa, *exponent = re.split("[eE]", unsigned, maxsplit=1)
+    whole, _, fraction = mantissa.partition(".")
+    digits = whole + fraction
+    significant = digits.lstrip("0")
+    if not significant:
+        return None
+    exponent_text = exponent[0] if exponent else "0"
+    shape = re.fullmatch(r"([+-]?)0*([0-9]*)", exponent_text)
+    if shape is None or not exponent_text.lstrip("+-") or len(shape.group(2)) > 19:
+        return None
+    exp = int(shape.group(1) + (shape.group(2) or "0"))
+    # point: how many significant digits precede the decimal point.
+    point = len(whole) - (len(digits) - len(significant)) + exp
+    if not (_I64_MIN <= exp <= _I64_MAX and _I64_MIN <= point - 1 and point <= _I64_MAX):
+        return None
+    if 1 <= point <= 21:
+        integer, rest = significant[:point], significant[point:]
+        if not rest:
+            return None
+        text = f"{integer}.{rest}"
+    elif -5 <= point <= 0:
+        text = "0." + "0" * -point + significant
+    else:
+        scale = point - 1
+        rest = f".{significant[1:]}" if len(significant) > 1 else ""
+        text = f"{significant[0]}{rest}e{'-' if scale < 0 else '+'}{abs(scale)}"
+    return sign + text
+
+
+def _integral_float_text(literal: str) -> str | None:
+    if not any(c in literal for c in ".eE"):
+        return None
+    negative = literal.startswith("-")
+    unsigned = literal[1:] if negative else literal
+    mantissa, *exponent = re.split("[eE]", unsigned, maxsplit=1)
+    whole, _, fraction = mantissa.partition(".")
+    digits = whole + fraction
+    if not digits.strip("0"):
+        return "-0" if negative else "0"
+    try:
+        exp = int(exponent[0]) if exponent else 0
+    except ValueError:
+        return None
+    point = len(whole) + exp
+    split = min(max(point, 0), len(digits))
+    if any(d != "0" for d in digits[split:]):
+        return None
+    padding = min(max(point - len(digits), 0), 22)
+    integer = (digits[:split] + "0" * padding).lstrip("0")
+    if len(integer) > 21:
+        return None
+    return ("-" if negative else "") + (integer or "0")
 
 
 def _normalize_exponent(s: str) -> str:
     if "e" not in s and "E" not in s:
         return s
     mantissa, exp = re.split("[eE]", s, maxsplit=1)
-    sign = ""
+    # An unsigned exponent is positive; spell it like repr() does (e+23).
+    sign = "+"
     if exp.startswith(("+", "-")):
         sign, exp = exp[0], exp[1:]
     exp = exp.lstrip("0") or "0"
@@ -1477,16 +1624,23 @@ def _as_int(value: Any) -> int | None:
     # Accept integral-valued floats (3.0 -> 3): JS/TS cannot distinguish 3 from
     # 3.0 after JSON parsing, so integrality (not lexical form) gates integer
     # suffixes, keeping the four implementations consistent.
-    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
-        return int(value)
+    # A float is read through its shortest spelling (``repr``), the text the
+    # canonical number form prints, so 2.0**60 counts as 1152921504606847000
+    # exactly as a decoded literal of that spelling does in every SDK; int()
+    # of the binary value would give ...846976 and disagree with Rust.
+    if isinstance(value, float) and math.isfinite(value):
+        literal = repr(value)
+        integer = _integral_float_text(literal) if re.search(r"[.eE]", literal) else literal
+        return int(integer) if integer is not None else None
     return None
 
 
 def _raw_as_int(value: Any) -> int | None:
     if isinstance(value, _RawNumber):
-        if re.fullmatch(r"-?\d+", value.literal):
-            return int(value.literal)
-        return _as_int(float(value.literal))
+        if re.fullmatch(r"-?[0-9]+", value.literal):
+            return int(value.literal) if len(value.literal.lstrip("-")) <= 20 else None
+        integer = _integral_float_text(value.literal)
+        return int(integer) if integer is not None else None
     return _as_int(value)
 
 
@@ -1509,37 +1663,46 @@ def _signed_magnitude(value: int) -> tuple[str, int]:
 
 
 def _as_decimal_int(value: Any) -> int | None:
-    if isinstance(value, str) and re.fullmatch(r"-?\d+", value):
-        return int(value)
-    return _as_int(value)
+    text = _decimal_int_text(value)
+    return int(text) if text is not None else None
 
 
 def _decimal_int_text(value: Any) -> str | None:
-    if isinstance(value, str) and re.fullmatch(r"-?\d+", value):
-        return value
-    n = _as_int(value)
-    if n is None:
+    """The exact digits of an integer-valued number or decimal integer string,
+    of any magnitude. Bitcoin amounts and ``_epoch_ns`` only append a unit or
+    divide, so unlike money suffixes they are not bounded by i64: an integer
+    literal keeps its digits, and a float counts when its value is an integer
+    below 1e21 (the canonical number form's integer range). A numeric ``-0``
+    is zero."""
+    if isinstance(value, str):
+        return value if re.fullmatch(r"-?[0-9]+", value) else None
+    if isinstance(value, bool):
         return None
-    return str(n)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        literal = repr(value)
+    elif isinstance(value, _RawNumber):
+        literal = value.literal
+    else:
+        return None
+    integer = _integral_float_text(literal) if re.search(r"[.eE]", literal) else literal
+    if integer is None:
+        return None
+    return "0" if integer == "-0" else integer
 
 
 def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
     """Try suffix-driven processing. Returns (stripped_key, formatted_value) or None."""
-    # Plain-format suffix arithmetic below only works on a native int/float. A
-    # decoded _RawNumber (see decode_protocol_event's fidelity note) is
-    # normalized to a float here for that arithmetic, so an ordinary decoded
-    # value (e.g. cpu_percent: 85.5) keeps formatting exactly as before; this
-    # is Plain's documented lossy/human path. The _epoch_ns/_msats/_sats
-    # branches below keep exactness by reading `value` directly instead of
-    # `numeric` (their _as_decimal_int/_decimal_int_text helpers already
-    # handle plain arbitrary-precision int values, which is what every
-    # decoded integer literal already is -- only floats get wrapped).
-    numeric: Any = float(value.literal) if isinstance(value, _RawNumber) else value
+    # Adding a unit does no arithmetic, so it must not round decoded digits.
+    is_number = _is_number(value) or isinstance(value, _RawNumber)
 
     # Group 1: compound timestamp suffixes
     stripped = _strip_suffix_ci(key, "_epoch_ms")
     if stripped is not None:
-        n = _as_int(numeric)
+        n = _as_i64(value)
         if n is not None:
             formatted = _format_rfc3339_ms(n)
             if formatted is not None:
@@ -1547,7 +1710,7 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
         return None
     stripped = _strip_suffix_ci(key, "_epoch_s")
     if stripped is not None:
-        n = _as_int(numeric)
+        n = _as_i64(value)
         if n is not None:
             formatted = _format_rfc3339_ms(n * 1000)
             if formatted is not None:
@@ -1608,18 +1771,18 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
         return None
     stripped = _strip_suffix_ci(key, "_minutes")
     if stripped is not None:
-        if _is_number(numeric):
-            return stripped, f"{_plain_scalar(numeric)} minutes"
+        if is_number:
+            return stripped, f"{_plain_scalar(value)} minutes"
         return None
     stripped = _strip_suffix_ci(key, "_hours")
     if stripped is not None:
-        if _is_number(numeric):
-            return stripped, f"{_plain_scalar(numeric)} hours"
+        if is_number:
+            return stripped, f"{_plain_scalar(value)} hours"
         return None
     stripped = _strip_suffix_ci(key, "_days")
     if stripped is not None:
-        if _is_number(numeric):
-            return stripped, f"{_plain_scalar(numeric)} days"
+        if is_number:
+            return stripped, f"{_plain_scalar(value)} days"
         return None
 
     # Group 4: single-unit suffixes
@@ -1643,8 +1806,8 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
         return None
     stripped = _strip_suffix_ci(key, "_percent")
     if stripped is not None:
-        if _is_number(numeric):
-            return stripped, f"{_plain_scalar(numeric)}%"
+        if is_number:
+            return stripped, f"{_plain_scalar(value)}%"
         return None
     # Group 5: short suffixes (last to avoid false positives)
     stripped = _strip_suffix_ci(key, "_jpy")
@@ -1656,24 +1819,24 @@ def _try_process_field(key: str, value: Any) -> tuple[str, str] | None:
         return None
     stripped = _strip_suffix_ci(key, "_ns")
     if stripped is not None:
-        if _is_number(numeric):
-            return stripped, f"{_plain_scalar(numeric)}ns"
+        if is_number:
+            return stripped, f"{_plain_scalar(value)}ns"
         return None
     stripped = _strip_suffix_ci(key, "_us")
     if stripped is not None:
-        if _is_number(numeric):
-            return stripped, f"{_plain_scalar(numeric)}\u03bcs"
+        if is_number:
+            return stripped, f"{_plain_scalar(value)}\u03bcs"
         return None
     stripped = _strip_suffix_ci(key, "_ms")
     if stripped is not None:
-        fv = _format_ms_value(numeric)
+        fv = _format_ms_value(value)
         if fv is not None:
             return stripped, fv
         return None
     stripped = _strip_suffix_ci(key, "_s")
     if stripped is not None:
-        if _is_number(numeric):
-            return stripped, f"{_plain_scalar(numeric)}s"
+        if is_number:
+            return stripped, f"{_plain_scalar(value)}s"
         return None
 
     return None
@@ -1745,9 +1908,11 @@ def _format_ms_as_seconds(ms: float) -> str:
 
 def _format_ms_value(value: Any) -> str | None:
     """Format _ms value: < 1000 -> {n}ms, >= 1000 -> seconds."""
-    if not _is_number(value):
+    if not _is_number(value) and not isinstance(value, _RawNumber):
         return None
-    n = float(value)
+    n = float(value.literal) if isinstance(value, _RawNumber) else float(value)
+    if not math.isfinite(n):
+        return None
     if abs(n) >= 1000:
         return _format_ms_as_seconds(n)
     return f"{_plain_scalar(value)}ms"
@@ -1918,11 +2083,11 @@ def _yaml_scalar(value: Any) -> str:
     if isinstance(value, (int, float)):
         return _number_str(value)
     if isinstance(value, _RawNumber):
-        # Decoded number: emit the exact source literal unquoted, matching
-        # JSON's structure-preserving fidelity contract for YAML too.
-        return value.literal
+        # Decoded number: its exact digits, in the same canonical form a
+        # native number gets.
+        return _number_literal_str(value.literal)
     if isinstance(value, (dict, list)):
-        return f'"{_escape_yaml_str(_canonical_json(value))}"'
+        return f'"{_escape_yaml_str(_embedded_json(value))}"'
     return f'"{_escape_yaml_str(str(value))}"'
 
 
@@ -1988,18 +2153,18 @@ def _plain_scalar(value: Any) -> str:
     if isinstance(value, (int, float)):
         return _number_str(value)
     if isinstance(value, _RawNumber):
-        # Decoded number: emit the exact source literal (Plain is documented
-        # lossy for arithmetic-derived formatting, but a bare pass-through
-        # scalar still gets its exact digits, not a float64 round-trip).
-        return value.literal
+        # Decoded number: its exact digits (Plain is documented lossy only
+        # for arithmetic-derived formatting), in the same canonical form a
+        # native number gets.
+        return _number_literal_str(value.literal)
     if isinstance(value, (dict, list)):
-        return _canonical_json(value)
+        return _embedded_json(value)
     return str(value)
 
 
 def _plain_scalar_raw(value: Any) -> str:
     if isinstance(value, (dict, list)):
-        return _canonical_json(value)
+        return _embedded_json(value)
     return _plain_scalar(value)
 
 
@@ -2035,13 +2200,21 @@ def _utf16_sort_key(s: str) -> bytes:
     return s.encode("utf-16-be", "surrogatepass")
 
 
-def _canonical_json(value: Any) -> str:
-    return _encode_json_lossless(_sort_json_value(value))
-
-
-def _sort_json_value(value: Any) -> Any:
+def _embedded_json(value: Any) -> str:
+    """A container nested inside a Plain array (or in a YAML scalar position)
+    is written as compact JSON with sorted keys. Its number leaves take the
+    canonical number form, the same text the value prints as a scalar, so a
+    nested ``1.0`` reads ``1`` and a decoded ``1e5`` reads ``100000`` in every
+    SDK rather than in each runtime's own JSON spelling."""
     if isinstance(value, dict):
-        return {k: _sort_json_value(value[k]) for k in _sorted_object_keys(value)}
+        return "{" + ",".join(
+            f"{json.dumps(k, ensure_ascii=False)}:{_embedded_json(value[k])}"
+            for k in _sorted_object_keys(value)
+        ) + "}"
     if isinstance(value, list):
-        return [_sort_json_value(item) for item in value]
-    return value
+        return "[" + ",".join(_embedded_json(item) for item in value) + "]"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if value is None or isinstance(value, (bool, int, float, _RawNumber)):
+        return _plain_scalar(value)
+    return json.dumps(str(value), ensure_ascii=False)

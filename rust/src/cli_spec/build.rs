@@ -18,10 +18,10 @@ pub(super) fn validate_spec(spec: &CliSpec) -> Result<(), CliSpecError> {
     validate_output(&spec.lifecycle_output)?;
     let mut declared_exit_codes = BTreeSet::new();
     for exit in &spec.exit_codes {
-        // 0/1/2 are AFDATA's own and already in the rendered table. Letting a
+        // 0/1/2/4 are AFDATA's own and already in the rendered table. Letting a
         // CLI redeclare one would either duplicate the row or quietly restate a
         // meaning the protocol fixes.
-        if exit.code <= 2 {
+        if exit.code <= 2 || exit.code == 4 {
             return Err(CliSpecError::new(
                 "reserved_exit_code",
                 format!(
@@ -162,6 +162,15 @@ fn validate_command(
                     return Err(CliSpecError::new(
                         "duplicate_positional_index",
                         format!("duplicate positional index {index}"),
+                    ));
+                }
+                // Help renders arguments in declaration order while the parser
+                // binds positionals by index, so the two orders must agree or
+                // usage would show `<DST> <SRC>` for a call that binds SRC first.
+                if positional_indices.last() != Some(index) {
+                    return Err(CliSpecError::new(
+                        "positionals_out_of_order",
+                        format!("positional index {index} is declared after a higher index"),
                     ));
                 }
             }
@@ -331,6 +340,15 @@ fn validate_argument(argument: &ArgSpec) -> Result<(), CliSpecError> {
             return Err(CliSpecError::new(
                 "empty_enum",
                 format!("enum `{}` has no values", argument.argument_id),
+            ));
+        }
+        if argument.enum_values.iter().any(String::is_empty) {
+            return Err(CliSpecError::new(
+                "empty_enum_value",
+                format!(
+                    "enum `{}` cannot contain an empty value",
+                    argument.argument_id
+                ),
             ));
         }
         let unique: BTreeSet<&String> = argument.enum_values.iter().collect();

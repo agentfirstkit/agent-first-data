@@ -64,6 +64,7 @@ pub struct Redactor {
     policy: RedactionPolicy,
     secret_names: Vec<String>,
     url_names: Vec<String>,
+    reveal_names: Vec<String>,
 }
 
 impl Redactor {
@@ -91,6 +92,14 @@ impl Redactor {
     #[must_use]
     pub fn url_names<I: IntoIterator<Item = S>, S: Into<String>>(mut self, names: I) -> Self {
         self.url_names = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Reveal exactly these structured field names at any depth. Other secrets
+    /// remain masked; URL parameters and argv never use this exception.
+    #[must_use]
+    pub fn reveal_names<I: IntoIterator<Item = S>, S: Into<String>>(mut self, names: I) -> Self {
+        self.reveal_names = names.into_iter().map(Into::into).collect();
         self
     }
 
@@ -239,6 +248,7 @@ impl From<RedactionPolicy> for Redactor {
             policy,
             secret_names: Vec::new(),
             url_names: Vec::new(),
+            reveal_names: Vec::new(),
         }
     }
 }
@@ -311,6 +321,7 @@ pub(crate) const REDACTED_MARKER: &str = "***";
 pub(crate) struct RedactionContext {
     secret_names: HashSet<String>,
     url_names: HashSet<String>,
+    reveal_names: HashSet<String>,
 }
 
 impl RedactionContext {
@@ -320,6 +331,7 @@ impl RedactionContext {
         Self {
             secret_names,
             url_names,
+            reveal_names: redactor.reveal_names.iter().cloned().collect(),
         }
     }
 
@@ -365,7 +377,7 @@ fn redact_secrets_with_context_depth(value: &mut Value, context: &RedactionConte
         Value::Object(map) => {
             let keys: Vec<String> = map.keys().cloned().collect();
             for key in keys {
-                if context.is_secret_key(&key) {
+                if context.is_secret_key(&key) && !context.reveal_names.contains(&key) {
                     // A null secret is an *absent* secret. Masking it would
                     // manufacture the appearance of a configured credential:
                     // readers cannot tell `"***"`-because-set from
@@ -410,7 +422,7 @@ fn redact_url_value_depth(value: &mut Value, context: &RedactionContext, depth: 
         Value::Object(values) => {
             let keys = values.keys().cloned().collect::<Vec<_>>();
             for key in keys {
-                if context.is_secret_key(&key) {
+                if context.is_secret_key(&key) && !context.reveal_names.contains(&key) {
                     if !values.get(&key).is_some_and(Value::is_null) {
                         values.insert(key, Value::String(REDACTED_MARKER.into()));
                     }

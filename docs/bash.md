@@ -78,7 +78,7 @@ use `AFDATA_OUTPUT` (`json` by default) and `AFDATA_OUTPUT_TO` (`split` by
 default).
 
 After loading, `AFDATA_BASH_API_VERSION` contains the integer API version of
-the helper surface (currently `1`). A script that depends on a pinned helper
+the helper surface (currently `2`). A script that depends on a pinned helper
 contract can check this value immediately after sourcing; incompatible helper
 changes increment it. `afdata_cli` is the public escape hatch for invoking the
 selected `AFDATA_BIN` without duplicating its path lookup.
@@ -156,6 +156,7 @@ The event helpers are thin wrappers around `afdata emit`:
 ```bash
 afdata_log info "Starting build"       # log event, stderr under split routing
 afdata_result "Build complete"         # result event, stdout
+afdata_result --json '{"duration_ms":12,"count":3}'  # typed, redacted result
 afdata_error build_failed "Build failed" "Inspect the compiler output"
 ```
 
@@ -168,6 +169,7 @@ The equivalent CLI commands are available without sourcing the library:
 ```bash
 afdata emit log info "Starting build"
 afdata emit result "Build complete"
+afdata emit result --json '{"duration_ms":12,"count":3}'
 afdata emit error build_failed "Build failed" --hint "Inspect compiler output"
 ```
 

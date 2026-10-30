@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 /// Validated registry used for resolution and help generation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BuiltCliSpec {
     pub(super) spec: CliSpec,
 }
@@ -165,7 +165,10 @@ impl BuiltCliSpec {
                 let contract = OutputSpec::raw()
                     .file_sinks(self.spec.lifecycle_output.file_sinks_ref().to_vec());
                 let output = resolve_output(&contract, &parsed.output, &command_path)?;
-                return Ok(CliOutcome::Docs(ResolvedDocs { output }));
+                return Ok(CliOutcome::Docs(ResolvedDocs {
+                    output,
+                    registry: self.clone(),
+                }));
             }
             let output =
                 resolve_output(&self.spec.lifecycle_output, &parsed.output, &command_path)?;
@@ -444,6 +447,18 @@ pub enum BoundOutcome<R> {
     Docs(ResolvedDocs),
 }
 
+impl<R> BoundOutcome<R> {
+    /// The resolved sink plan, available before lifecycle handling or domain I/O.
+    pub fn output_plan(&self) -> &OutputPlan {
+        match self {
+            Self::Run(invocation) => invocation.output_plan(),
+            Self::Docs(docs) => docs.output_plan(),
+            Self::Help(help) => help.output_plan(),
+            Self::Version(version) => version.output_plan(),
+        }
+    }
+}
+
 impl<R> std::fmt::Debug for BoundOutcome<R> {
     /// Written by hand so it does not require `R: Debug`: `R` is whatever the
     /// application's handlers return, and demanding `Debug` of it would make
@@ -628,16 +643,6 @@ impl OutputPlan {
         }
     }
 
-    /// Canonical format spelling retained for string-oriented callers.
-    pub fn format(&self) -> Option<&str> {
-        self.output_format().map(OutputFormat::as_str)
-    }
-
-    /// Canonical destination spelling retained for string-oriented callers.
-    pub fn destination(&self) -> Option<&str> {
-        self.output_to().map(OutputTo::as_str)
-    }
-
     pub fn stdout_file(&self) -> Option<&Path> {
         match self {
             Self::Raw { stdout_file, .. } | Self::Protocol { stdout_file, .. } => {
@@ -735,6 +740,7 @@ fn tokenize(
                         &mut index,
                         inline_value,
                         Some(argument),
+                        &longs,
                         name,
                         command_path,
                     )?)
@@ -765,7 +771,15 @@ fn tokenize(
                 "--output" => {
                     parsed.output.format = Some(set_output_value(
                         parsed.output.format.as_ref(),
-                        take_value(tokens, &mut index, inline_value, None, name, command_path)?,
+                        take_value(
+                            tokens,
+                            &mut index,
+                            inline_value,
+                            None,
+                            &longs,
+                            name,
+                            command_path,
+                        )?,
                         name,
                         command_path,
                     )?);
@@ -773,7 +787,15 @@ fn tokenize(
                 "--output-to" => {
                     parsed.output.destination = Some(set_output_value(
                         parsed.output.destination.as_ref(),
-                        take_value(tokens, &mut index, inline_value, None, name, command_path)?,
+                        take_value(
+                            tokens,
+                            &mut index,
+                            inline_value,
+                            None,
+                            &longs,
+                            name,
+                            command_path,
+                        )?,
                         name,
                         command_path,
                     )?);
@@ -781,7 +803,15 @@ fn tokenize(
                 "--stdout-file" => {
                     parsed.output.stdout_file = Some(PathBuf::from(set_output_value(
                         parsed.output.stdout_file.as_ref(),
-                        take_value(tokens, &mut index, inline_value, None, name, command_path)?,
+                        take_value(
+                            tokens,
+                            &mut index,
+                            inline_value,
+                            None,
+                            &longs,
+                            name,
+                            command_path,
+                        )?,
                         name,
                         command_path,
                     )?));
@@ -789,7 +819,15 @@ fn tokenize(
                 "--stderr-file" => {
                     parsed.output.stderr_file = Some(PathBuf::from(set_output_value(
                         parsed.output.stderr_file.as_ref(),
-                        take_value(tokens, &mut index, inline_value, None, name, command_path)?,
+                        take_value(
+                            tokens,
+                            &mut index,
+                            inline_value,
+                            None,
+                            &longs,
+                            name,
+                            command_path,
+                        )?,
                         name,
                         command_path,
                     )?));
@@ -810,11 +848,15 @@ fn tokenize(
                 .get(positional_index)
                 .is_some_and(|argument| accepts_hyphen_prefixed_value(argument, token));
             if !positional_accepts_value {
-                return Err(CliError::new(
+                let mut error = CliError::new(
                     CliErrorRule::UnknownArgument,
                     command_path.to_string(),
                     "unknown short argument",
-                ));
+                );
+                error.hint = format!(
+                    "flags are long-only; pass `--` before a positional value that starts with `-`, or run `{command_path} --help`"
+                );
+                return Err(error);
             }
         }
         let Some(argument) = positionals.get(positional_index).copied() else {
@@ -856,11 +898,12 @@ fn take_value<'a>(
     index: &mut usize,
     inline_value: Option<&'a str>,
     argument: Option<&ArgSpec>,
+    longs: &BTreeMap<&str, &ArgSpec>,
     name: &str,
     command_path: &str,
 ) -> Result<&'a str, CliError> {
     if let Some(value) = inline_value {
-        if value.is_empty() {
+        if value.is_empty() && argument.is_none() {
             return Err(missing_value(command_path, name));
         }
         return Ok(value);
@@ -872,10 +915,34 @@ fn take_value<'a>(
         && value != "-"
         && !argument.is_some_and(|argument| accepts_hyphen_prefixed_value(argument, value))
     {
-        return Err(missing_value(command_path, name));
+        let mut error = missing_value(command_path, name);
+        // A registered flag next is a value left out, not a value that happens
+        // to start with `-`; the `=` spelling would only pass the flag's name
+        // off as the value.
+        if !names_registered_flag(longs, value) {
+            error.hint = format!("write `{name}=VALUE` for a value that starts with `-`");
+        }
+        return Err(error);
     }
     *index += 1;
     Ok(value)
+}
+
+/// Whether `token` (with or without an inline `=VALUE`) names one of the
+/// command's own long flags or a control flag every command accepts.
+fn names_registered_flag(longs: &BTreeMap<&str, &ArgSpec>, token: &str) -> bool {
+    let name = token.split_once('=').map_or(token, |(name, _)| name);
+    longs.contains_key(name)
+        || matches!(
+            name,
+            "--help"
+                | "--version"
+                | "--docs"
+                | "--output"
+                | "--output-to"
+                | "--stdout-file"
+                | "--stderr-file"
+        )
 }
 
 /// Whether a `-`-prefixed token is this argument's value rather than a flag.
@@ -885,10 +952,17 @@ fn take_value<'a>(
 /// range would be read as "no value supplied" — reporting a missing argument
 /// for a value the caller plainly typed. Range and enum membership are checked
 /// after the token is claimed, where they can say what is actually wrong.
+///
+/// A free-form string takes a negative number too: flags are long-only, so
+/// `-5` can only ever be a value, and a config value or default is routinely
+/// one (`set n -5 --value-type number`, `--default -1`).
 fn accepts_hyphen_prefixed_value(argument: &ArgSpec, value: &str) -> bool {
     match argument.value_type {
         ArgValueType::I64 => value.parse::<i64>().is_ok(),
         ArgValueType::FiniteF64 => value.parse::<f64>().is_ok_and(f64::is_finite),
+        ArgValueType::String => {
+            value.parse::<i64>().is_ok() || value.parse::<f64>().is_ok_and(f64::is_finite)
+        }
         ArgValueType::Json => serde_json::from_str::<serde::de::IgnoredAny>(value).is_ok(),
         _ => false,
     }
@@ -1100,7 +1174,15 @@ fn project_values(
                         values[0].clone()
                     }
                 })
-                .or_else(|| argument.default.clone())
+                .or_else(|| {
+                    argument.default.clone().map(|default| {
+                        if argument.repeatable {
+                            CliValue::List(vec![default])
+                        } else {
+                            default
+                        }
+                    })
+                })
                 .or_else(|| {
                     (argument.value_type == ArgValueType::Flag).then_some(CliValue::Bool(false))
                 });

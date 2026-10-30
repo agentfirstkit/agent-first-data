@@ -21,12 +21,25 @@ pub(super) fn open_read_handle(path: &Path, symlink_policy: SymlinkPolicy) -> Do
         options.custom_flags(flags);
     }
     #[cfg(all(unix, not(feature = "libc")))]
-    if symlink_policy == SymlinkPolicy::NoFollow {
-        return Err(DocumentError::UnsupportedOperation {
-            format: "filesystem".to_string(),
-            operation: "open".to_string(),
-            detail: "atomic no-follow reads require Cargo feature `libc` on unix".to_string(),
-        });
+    {
+        if symlink_policy == SymlinkPolicy::NoFollow {
+            return Err(DocumentError::UnsupportedOperation {
+                format: "filesystem".to_string(),
+                operation: "open".to_string(),
+                detail: "atomic no-follow reads require Cargo feature `libc` on unix".to_string(),
+            });
+        }
+        // Without `O_NONBLOCK`, opening a FIFO blocks until a writer appears,
+        // before handle metadata can reject it. A path check first is racy
+        // but keeps the ordinary case from hanging; the handle is still
+        // checked after the open.
+        if let Ok(metadata) = std::fs::metadata(path)
+            && !metadata.is_file()
+        {
+            return Err(DocumentError::IoError {
+                detail: format!("`{}` is not a regular file", path.display()),
+            });
+        }
     }
     #[cfg(not(unix))]
     if symlink_policy == SymlinkPolicy::NoFollow {

@@ -11,15 +11,14 @@ use crate::document::{DocumentError, DocumentResult, Value};
 /// element or key. Arrays of tables remain deliberately unsupported because
 /// replacing one safely requires an explicit identity policy.
 pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
+    keep_bom(content, |body| set_body(body, path, value))
+}
+
+// Path segments arrive unescaped, and `toml_edit` quotes any key that needs
+// it, so `hosts.example\.com` from `paths` addresses `"example.com"` here
+// exactly as it does in every other format.
+fn set_body(content: &str, path: &str, value: &Value) -> DocumentResult<String> {
     let segments = crate::document::parse_path(path)?;
-    if segments.iter().any(|segment| segment.contains(['.', '\\'])) {
-        return Err(DocumentError::UnsupportedOperation {
-            format: "TOML".to_string(),
-            operation: "set".to_string(),
-            detail: "escaped TOML keys are not supported by the current document path adapter"
-                .to_string(),
-        });
-    }
     let mut document =
         content
             .parse::<toml_edit::DocumentMut>()
@@ -69,6 +68,7 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
                 let mut created = toml_edit::Table::new();
                 created.set_implicit(true);
                 table.insert(parent, toml_edit::Item::Table(created));
+                hand_closing_space_to_new_entry(current);
             }
         }
         current = current
@@ -83,6 +83,28 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
         .and_then(toml_edit::Value::as_array)
         .is_some()
     {
+        if last == "-" {
+            let parent_key = crate::document::join_path(parents);
+            let mut values = match crate::document::get_path(
+                &load(content)?,
+                &parent_key,
+                crate::document::Addressing::INDEX_ONLY,
+            )? {
+                Value::Array(values) => values,
+                _ => return Err(collection_refusal("append target is not an array")),
+            };
+            let unchanged = values.len();
+            values.push(value.clone());
+            let existing = current
+                .as_array()
+                .ok_or_else(|| collection_refusal("append target is not an array"))?;
+            *current = toml_edit::Item::Value(array_value_with_prefix(
+                &values,
+                Some(existing),
+                unchanged,
+            )?);
+            return Ok(preserve_line_endings(content, document.to_string()));
+        }
         let index = last
             .parse::<usize>()
             .map_err(|_| DocumentError::UnregisteredArray {
@@ -94,6 +116,12 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
                 path: path.to_string(),
             })?;
         replace_item_preserving(target, value)?;
+    } else if current.is_array_of_tables() {
+        // The same refusal the parent walk and `unset` give, rather than a
+        // "non-table value" error about a node that is made of tables.
+        return Err(collection_refusal(
+            "editing an array of tables requires an explicit element identity",
+        ));
     } else {
         let table =
             current
@@ -108,23 +136,46 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
             // New leaf: append into the existing parent table.
             None => {
                 table.insert(last, toml_item(value)?);
+                hand_closing_space_to_new_entry(current);
             }
         }
     }
     Ok(preserve_line_endings(content, document.to_string()))
 }
 
+/// After an entry was appended to `item`, move the space before `}` onto it.
+///
+/// In `{ y = 1 }` the space before `}` is the last value's suffix; left there
+/// it ends up before the new comma (`{ y = 1 , z = 2 }`). Hand it to the new
+/// last entry — a new leaf and a new table created on the way to one alike.
+/// Anything other than an inline table has no such space and is left alone.
+fn hand_closing_space_to_new_entry(item: &mut toml_edit::Item) {
+    let Some(inline) = item.as_inline_table_mut() else {
+        return;
+    };
+    let count = inline.len();
+    if count < 2 {
+        return;
+    }
+    let moved = inline.iter_mut().nth(count - 2).and_then(|(_, previous)| {
+        let suffix = previous.decor().suffix()?.as_str()?.to_string();
+        (!suffix.is_empty() && suffix.trim().is_empty()).then(|| {
+            previous.decor_mut().set_suffix("");
+            suffix
+        })
+    });
+    if let Some((_, added)) = inline.iter_mut().last() {
+        added.decor_mut().set_suffix(moved.unwrap_or_default());
+    }
+}
+
 /// Remove an existing TOML item through `toml_edit`, retaining document decor.
 pub fn unset_preserving(content: &str, path: &str) -> DocumentResult<String> {
+    keep_bom(content, |body| unset_body(body, path))
+}
+
+fn unset_body(content: &str, path: &str) -> DocumentResult<String> {
     let segments = crate::document::parse_path(path)?;
-    if segments.iter().any(|segment| segment.contains(['.', '\\'])) {
-        return Err(DocumentError::UnsupportedOperation {
-            format: "TOML".to_string(),
-            operation: "unset".to_string(),
-            detail: "escaped TOML keys are not supported by the current document path adapter"
-                .to_string(),
-        });
-    }
     let (last, parents) = segments.split_last().ok_or(DocumentError::EmptyPath)?;
     let mut document =
         content
@@ -133,13 +184,50 @@ pub fn unset_preserving(content: &str, path: &str) -> DocumentResult<String> {
                 format: "TOML".to_string(),
                 detail: error.to_string(),
             })?;
+    // The same walk `set` makes: an array is entered by index, so the two
+    // verbs reach the same nodes.
     let mut current = document.as_item_mut();
     for parent in parents {
-        current = current
-            .get_mut(parent)
+        if current.is_array_of_tables() {
+            return Err(DocumentError::UnsupportedOperation {
+                format: "TOML".to_string(),
+                operation: "unset".to_string(),
+                detail: "editing an array of tables requires an explicit element identity"
+                    .to_string(),
+            });
+        }
+        let next = if current.as_array().is_some() {
+            parent
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| current.get_mut(index))
+        } else {
+            current.get_mut(parent)
+        };
+        current =
+            next.filter(|item| !item.is_none())
+                .ok_or_else(|| DocumentError::PathNotFound {
+                    path: path.to_string(),
+                })?;
+    }
+    if current.is_array_of_tables() {
+        return Err(DocumentError::UnsupportedOperation {
+            format: "TOML".to_string(),
+            operation: "unset".to_string(),
+            detail: "editing an array of tables requires an explicit element identity".to_string(),
+        });
+    }
+    if let Some(array) = current.as_array_mut() {
+        let index = last
+            .parse::<usize>()
+            .ok()
+            .filter(|index| *index < array.len())
             .ok_or_else(|| DocumentError::PathNotFound {
                 path: path.to_string(),
             })?;
+        let removed = array.remove(index);
+        remove_element_comment(array, index, &removed);
+        return Ok(preserve_line_endings(content, document.to_string()));
     }
     // `as_table_like_mut`, not `as_table_mut`: an inline table is a `Value`, not
     // an `Item::Table`, and reading only the latter made `unset` refuse a key
@@ -178,6 +266,18 @@ pub fn unset_preserving(content: &str, path: &str) -> DocumentResult<String> {
         }
     }
     Ok(preserve_line_endings(content, document.to_string()))
+}
+
+/// `toml_edit` drops a leading byte-order mark, so a one-key edit would
+/// rewrite the file's first bytes. Edit the body and put the mark back.
+fn keep_bom(
+    content: &str,
+    edit: impl FnOnce(&str) -> DocumentResult<String>,
+) -> DocumentResult<String> {
+    match content.strip_prefix('\u{feff}') {
+        Some(body) => edit(body).map(|edited| format!("\u{feff}{edited}")),
+        None => edit(content),
+    }
 }
 
 fn preserve_line_endings(content: &str, rendered: String) -> String {
@@ -237,19 +337,27 @@ fn toml_value(
             .ok_or_else(|| DocumentError::UnsupportedOperation {
                 format: "TOML".to_string(),
                 operation: "set".to_string(),
-                detail: format!("float literal `{text}` is not representable in TOML"),
+                detail: "float literal is not representable in TOML".to_string(),
             }),
-        Value::Number(text) => Err(DocumentError::UnsupportedOperation {
+        Value::Number(_) => Err(DocumentError::UnsupportedOperation {
             format: "TOML".to_string(),
             operation: "set".to_string(),
-            detail: format!("integer literal `{text}` exceeds TOML's 64-bit integer range"),
+            detail: "integer literal exceeds TOML's 64-bit integer range".to_string(),
         }),
         Value::String(value) => {
-            if let Some(existing) = existing.filter(|item| {
+            // Reads report a datetime as its text, so text written back
+            // over a datetime stays one when it still spells a datetime;
+            // otherwise a read-edit-write round trip turns it into a string.
+            let existing_datetime = existing.filter(|item| item.is_datetime());
+            if let Some(existing) = existing_datetime.filter(|item| {
                 item.as_datetime()
                     .is_some_and(|datetime| datetime.to_string() == *value)
             }) {
                 Ok(existing.clone())
+            } else if let Some(datetime) =
+                existing_datetime.and_then(|_| value.parse::<toml_edit::Datetime>().ok())
+            {
+                Ok(toml_edit::Value::from(datetime))
             } else if value.contains('\n') {
                 single_line_string(value)
             } else {
@@ -332,6 +440,91 @@ fn layout_without_comments(decor: &str) -> String {
     kept
 }
 
+/// Re-attach comments after `removed` left `array` at `index`.
+///
+/// An element's own comment is written after its comma, so it is stored in the
+/// *next* element's prefix, or in the array's trailing decor (the removed
+/// element's suffix, without a trailing comma) when it was the last one. Left
+/// alone, removal deletes the comment of the element before it and hands the
+/// removed element's comment to that neighbour. The first line of each decor
+/// is the comment beside the previous value; later lines (own-line comments,
+/// indentation) belong to what follows and stay put.
+///
+/// The first element is the same rule with `[` as the "previous value": the
+/// first line of its prefix is the comment beside the bracket (`[ # header`),
+/// which stays, while its later lines are the removed element's own-line
+/// comments, which go with it.
+fn remove_element_comment(array: &mut toml_edit::Array, index: usize, removed: &toml_edit::Value) {
+    let decor_text = |raw: Option<&toml_edit::RawString>| {
+        raw.and_then(toml_edit::RawString::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let removed_prefix = decor_text(removed.decor().prefix());
+    if index == 0
+        && let Some(first) = array.get_mut(0)
+    {
+        let prefix = decor_text(first.decor().prefix());
+        let beside_bracket = removed_prefix.split('\n').next().unwrap_or_default();
+        let layout = if prefix.contains('\n') {
+            // The new first element keeps its own lines — the own-line
+            // comments above it — and drops its first line, which was the
+            // removed element's comment.
+            format!("{beside_bracket}{}", after_first_line(&prefix))
+        } else if removed_prefix.contains('\n') {
+            // `[\n  1, 2\n]`: the new first element sat on the removed one's
+            // line, so it takes the line break and indentation it had.
+            let indentation = &removed_prefix[removed_prefix.rfind('\n').unwrap_or_default()..];
+            format!("{beside_bracket}{indentation}")
+        } else {
+            // One line (`[ 1, 2 ]`): the space after `[` is the array's
+            // layout, so it stays at the front.
+            removed_prefix
+        };
+        first.decor_mut().set_prefix(layout);
+        return;
+    }
+    // The comment beside the element (or, for the first one, the bracket)
+    // before the removed one, which the removed element's prefix held.
+    let carried = comment_line(&removed_prefix);
+    if let Some(next) = array.get_mut(index) {
+        let prefix = decor_text(next.decor().prefix());
+        let rest = after_first_line(&prefix);
+        match (carried, comment_line(&prefix)) {
+            (Some(comment), _) => next.decor_mut().set_prefix(format!("{comment}{rest}")),
+            (None, Some(_)) => next.decor_mut().set_prefix(rest.to_string()),
+            (None, None) => {}
+        }
+        return;
+    }
+    let tail = format!(
+        "{}{}",
+        decor_text(removed.decor().suffix()),
+        array.trailing().as_str().unwrap_or_default()
+    );
+    let rest = after_first_line(&tail);
+    let trailing = match (carried, comment_line(&tail)) {
+        // A comment must end its line before the closing bracket.
+        (Some(comment), _) if rest.is_empty() => format!("{comment}\n"),
+        (Some(comment), _) => format!("{comment}{rest}"),
+        (None, Some(_)) => rest.to_string(),
+        (None, None) => tail.clone(),
+    };
+    array.set_trailing(trailing);
+}
+
+/// A decor's first line when it carries a comment — the comment written
+/// beside the preceding value — including the spaces before it.
+fn comment_line(decor: &str) -> Option<&str> {
+    let line = decor.split('\n').next().unwrap_or_default();
+    line.contains('#').then_some(line)
+}
+
+/// Everything from a decor's first line break on.
+fn after_first_line(decor: &str) -> &str {
+    decor.find('\n').map_or("", |newline| &decor[newline..])
+}
+
 /// The first comment in a decor string, without its leading whitespace.
 fn first_comment(decor: &str) -> Option<&str> {
     let start = decor.find('#')?;
@@ -365,6 +558,15 @@ fn array_value(
     values: &[Value],
     existing: Option<&toml_edit::Array>,
 ) -> DocumentResult<toml_edit::Value> {
+    array_value_with_prefix(values, existing, 0)
+}
+
+/// `unchanged` leading elements are kept verbatim for an append operation.
+fn array_value_with_prefix(
+    values: &[Value],
+    existing: Option<&toml_edit::Array>,
+    unchanged: usize,
+) -> DocumentResult<toml_edit::Value> {
     let existing_values = existing
         .map(|array| array.iter().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
@@ -392,20 +594,71 @@ fn array_value(
         }
     }
     let length_before_append = array.len();
+    // Without a trailing comma, the comment and line break after the last
+    // element are that element's suffix rather than the array's trailing
+    // decor, so the new comma would land after them (`"y" # c\n,`). Moving
+    // them to the trailing decor lets the branch below treat both spellings
+    // alike.
+    if values.len() > length_before_append
+        && let Some(last) = length_before_append
+            .checked_sub(1)
+            .and_then(|index| array.get_mut(index))
+    {
+        let suffix = last
+            .decor()
+            .suffix()
+            .and_then(toml_edit::RawString::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if suffix.contains(['#', '\n']) {
+            last.decor_mut().set_suffix("");
+            let trailing = array.trailing().as_str().unwrap_or_default().to_string();
+            array.set_trailing(format!("{suffix}{trailing}"));
+        }
+    }
     for (index, value) in values.iter().enumerate() {
+        if index < unchanged {
+            continue;
+        }
         let hint = existing_values.get(index);
         let mut converted = toml_value(value, hint)?;
         if index < array.len() {
             array.replace_formatted(index, converted);
         } else {
-            if let Some(prefix) = existing_values
+            let layout = existing_values
                 .last()
                 .and_then(|item| item.decor().prefix())
                 .and_then(toml_edit::RawString::as_str)
-            {
-                converted
-                    .decor_mut()
-                    .set_prefix(layout_without_comments(prefix));
+                .map(layout_without_comments)
+                .unwrap_or_default();
+            // The first element of `[1]` has no prefix to copy, but a second
+            // one still needs the space after its comma.
+            let layout = if layout.is_empty() && index > 0 {
+                " ".to_string()
+            } else {
+                layout
+            };
+            converted.decor_mut().set_prefix(layout);
+            if index == length_before_append {
+                // A last element's inline comment is held in the array's
+                // trailing decor. Keep it beside that element when extending.
+                let trailing = array.trailing().as_str().unwrap_or_default().to_string();
+                if first_comment(&trailing).is_some() {
+                    let layout = converted
+                        .decor()
+                        .prefix()
+                        .and_then(toml_edit::RawString::as_str)
+                        .unwrap_or_default();
+                    let indent = layout.rsplit('\n').next().unwrap_or_default().to_string();
+                    converted.decor_mut().set_prefix(format!(
+                        "{}{indent}",
+                        trailing.trim_end_matches([' ', '\t'])
+                    ));
+                    // Everything up to the last line break moved in front of
+                    // the new element; only the bracket's own indentation stays.
+                    let bracket_indent = trailing.rsplit('\n').next().unwrap_or_default();
+                    array.set_trailing(format!("\n{bracket_indent}"));
+                }
             }
             array.push_formatted(converted);
         }
@@ -467,9 +720,11 @@ fn inline_table_value(
 
 fn replace_item_preserving(target: &mut toml_edit::Item, value: &Value) -> DocumentResult<()> {
     if target.is_array_of_tables() {
-        return Err(collection_refusal(
-            "editing an array of tables requires an explicit element identity",
-        ));
+        return Err(DocumentError::UnsupportedOperation {
+            format: "TOML".to_string(),
+            operation: "set".to_string(),
+            detail: "editing an array of tables requires an explicit element identity".to_string(),
+        });
     }
     if let (Some(table), Value::Object(values)) = (target.as_table_mut(), value) {
         return sync_table(table, values);
@@ -562,12 +817,12 @@ fn our_value_to_toml_value(v: &Value) -> DocumentResult<toml::Value> {
             .ok_or_else(|| DocumentError::UnsupportedOperation {
                 format: "TOML".to_string(),
                 operation: "save".to_string(),
-                detail: format!("float literal `{text}` is not representable in TOML"),
+                detail: "float literal is not representable in TOML".to_string(),
             }),
-        Value::Number(text) => Err(DocumentError::UnsupportedOperation {
+        Value::Number(_) => Err(DocumentError::UnsupportedOperation {
             format: "TOML".to_string(),
             operation: "save".to_string(),
-            detail: format!("integer literal `{text}` exceeds TOML's 64-bit integer range"),
+            detail: "integer literal exceeds TOML's 64-bit integer range".to_string(),
         }),
         Value::String(s) => Ok(toml::Value::String(s.clone())),
         Value::Array(a) => {

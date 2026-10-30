@@ -297,8 +297,16 @@ mod unix {
     }
 
     fn install_once(config: &StreamRedirectConfig) -> io::Result<InstalledStreamRedirect> {
-        let mut stdout_target = prepare_target(STDOUT_FD, config.stdout_file.as_ref())?;
-        let mut stderr_target = prepare_target(STDERR_FD, config.stderr_file.as_ref())?;
+        let mut stdout_target = prepare_target(
+            STDOUT_FD,
+            super::STDOUT_FILE_ARG,
+            config.stdout_file.as_ref(),
+        )?;
+        let mut stderr_target = prepare_target(
+            STDERR_FD,
+            super::STDERR_FILE_ARG,
+            config.stderr_file.as_ref(),
+        )?;
 
         let _ = io::stdout().flush();
 
@@ -327,14 +335,20 @@ mod unix {
         restore: OwnedFd,
     }
 
+    /// Open the sink for `arg_name`. A failure names the flag and the path:
+    /// an OS error alone ("No such file or directory") does not say which of
+    /// two sinks failed, nor where it was looked for.
     fn prepare_target(
         target_fd: RawFd,
+        arg_name: &str,
         path: Option<&PathBuf>,
     ) -> io::Result<Option<PreparedTarget>> {
         let Some(path) = path else {
             return Ok(None);
         };
-        let file = open_append(path)?;
+        let file = open_append(path).map_err(|err| {
+            io::Error::new(err.kind(), format!("{arg_name} {}: {err}", path.display()))
+        })?;
         let restore = dup_fd(target_fd)?;
         Ok(Some(PreparedTarget { file, restore }))
     }

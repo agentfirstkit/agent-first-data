@@ -180,8 +180,6 @@ fn resolves_one_registered_combination() {
         Some(OutputFormat::Json)
     );
     assert_eq!(invocation.output_plan().output_to(), Some(OutputTo::Split));
-    assert_eq!(invocation.output_plan().format(), Some("json"));
-    assert_eq!(invocation.output_plan().destination(), Some("split"));
 }
 
 #[test]
@@ -625,6 +623,192 @@ fn separated_and_positional_negative_numbers_are_values() {
 }
 
 #[test]
+fn inline_empty_string_is_a_value_just_like_a_separate_empty_argument() {
+    let spec = CliSpec::new("demo", "1")
+        .command(
+            CommandSpec::root()
+                .arg(ArgSpec::option("--text", "TEXT"))
+                .combination(Combination::new("text").action("text").required(["text"])),
+        )
+        .build()
+        .unwrap();
+    for argv in [vec!["demo", "--text="], vec!["demo", "--text", ""]] {
+        let CliOutcome::Run(invocation) = spec.resolve_from(argv.clone()).unwrap() else {
+            panic!("expected run for {argv:?}");
+        };
+        assert_eq!(invocation.required("text").as_str(), Some(""));
+    }
+}
+
+#[test]
+fn repeatable_defaults_have_the_same_shape_as_explicit_values() {
+    let spec = CliSpec::new("demo", "1")
+        .command(
+            CommandSpec::root()
+                .arg(
+                    ArgSpec::option("--tag", "TAG")
+                        .repeatable()
+                        .default("fallback"),
+                )
+                .arg(
+                    ArgSpec::option_i64("--count", "N")
+                        .repeatable()
+                        .default_i64(3),
+                )
+                .combination(
+                    Combination::new("root")
+                        .action("root")
+                        .optional(["tag", "count"]),
+                ),
+        )
+        .build()
+        .unwrap();
+    for argv in [
+        vec!["demo"],
+        vec!["demo", "--tag", "fallback", "--count", "3"],
+    ] {
+        let CliOutcome::Run(invocation) = spec.resolve_from(argv).unwrap() else {
+            panic!("run");
+        };
+        assert_eq!(
+            invocation.repeated("tag"),
+            &[CliValue::String("fallback".into())]
+        );
+        assert_eq!(invocation.repeated("count"), &[CliValue::I64(3)]);
+    }
+}
+
+#[test]
+fn inline_and_separated_empty_values_share_type_validation() {
+    for argument in [
+        ArgSpec::option_enum("--value", ["ready"]),
+        ArgSpec::option_i64("--value", "N"),
+        ArgSpec::option_f64("--value", "N"),
+        ArgSpec::option_json("--value", "JSON"),
+        ArgSpec::option("--value", "UUID").uuid(),
+    ] {
+        let spec = CliSpec::new("demo", "1")
+            .command(
+                CommandSpec::root()
+                    .arg(argument)
+                    .combination(Combination::new("root").action("root").required(["value"])),
+            )
+            .build()
+            .unwrap();
+        let resolve = |args: Vec<&str>| {
+            spec.resolve_from(args)
+                .map(|outcome| {
+                    let CliOutcome::Run(invocation) = outcome else {
+                        panic!("run");
+                    };
+                    invocation.required("value").clone()
+                })
+                .map_err(|error| error.rule)
+        };
+        assert_eq!(
+            resolve(vec!["demo", "--value="]),
+            resolve(vec!["demo", "--value", ""])
+        );
+    }
+}
+
+#[test]
+fn enum_values_respect_the_schemas_non_empty_contract() {
+    let error = CliSpec::new("demo", "1")
+        .command(
+            CommandSpec::root()
+                .arg(ArgSpec::option_enum("--value", ["", "ready"]))
+                .combination(Combination::new("root").action("root").required(["value"])),
+        )
+        .build()
+        .unwrap_err();
+    assert_eq!(error.rule, "empty_enum_value");
+}
+
+#[test]
+fn string_arguments_take_negative_numbers_and_say_how_to_pass_other_dash_values() {
+    let spec = CliSpec::new("demo", "1")
+        .command(
+            CommandSpec::root()
+                .arg(ArgSpec::option("--default", "DEFAULT"))
+                .arg(ArgSpec::positional("value", 0, "VALUE"))
+                .combination(
+                    Combination::new("set")
+                        .action("set")
+                        .required(["value"])
+                        .optional(["default"]),
+                ),
+        )
+        .build()
+        .unwrap();
+
+    for (argv, value, default) in [
+        (vec!["demo", "-5", "--default", "-1"], "-5", "-1"),
+        (
+            vec!["demo", "-1.5e3", "--default", "-0.25"],
+            "-1.5e3",
+            "-0.25",
+        ),
+        (vec!["demo", "--default=-x", "--", "-y"], "-y", "-x"),
+    ] {
+        let CliOutcome::Run(invocation) = spec.resolve_from(argv.clone()).unwrap() else {
+            panic!("expected run for {argv:?}");
+        };
+        assert_eq!(
+            invocation.required("value").as_str(),
+            Some(value),
+            "{argv:?}"
+        );
+        assert_eq!(
+            invocation.optional("default").and_then(|v| v.as_str()),
+            Some(default)
+        );
+    }
+
+    let positional = spec.resolve_from(["demo", "-y"]).unwrap_err();
+    assert_eq!(positional.rule, CliErrorRule::UnknownArgument);
+    assert!(positional.hint.contains("`--`"), "{}", positional.hint);
+    let option = spec
+        .resolve_from(["demo", "v", "--default", "-x"])
+        .unwrap_err();
+    assert_eq!(option.rule, CliErrorRule::MissingArgumentValue);
+    assert!(option.hint.contains("`--default=VALUE`"), "{}", option.hint);
+
+    // A registered flag next means the value was left out; suggesting the `=`
+    // spelling would turn the flag's own name into the value.
+    for next in ["--default", "--output", "--output=json", "--help"] {
+        let flag_next = spec
+            .resolve_from(["demo", "v", "--default", next])
+            .unwrap_err();
+        assert_eq!(flag_next.rule, CliErrorRule::MissingArgumentValue, "{next}");
+        assert!(
+            !flag_next.hint.contains("=VALUE"),
+            "{next}: {}",
+            flag_next.hint
+        );
+        assert!(
+            flag_next.hint.contains("--help"),
+            "{next}: {}",
+            flag_next.hint
+        );
+    }
+}
+
+#[test]
+fn positionals_must_be_declared_in_index_order() {
+    let error = CliSpec::new("demo", "1")
+        .command(
+            CommandSpec::root()
+                .arg(ArgSpec::positional("dst", 1, "DST"))
+                .arg(ArgSpec::positional("src", 0, "SRC"))
+                .combination(Combination::new("cp").action("cp").required(["src", "dst"])),
+        )
+        .build()
+        .unwrap_err();
+    assert_eq!(error.rule, "positionals_out_of_order");
+}
+
+#[test]
 fn malformed_specs_fail_before_resolution() {
     let uncovered = CliSpec::new("demo", "1")
         .command(CommandSpec::root().arg(ArgSpec::flag("--unused")))
@@ -888,8 +1072,8 @@ fn a_cli_cannot_redeclare_or_repeat_an_exit_code() {
         }
         spec.command(CommandSpec::root()).build()
     };
-    // 0/1/2 are the protocol's; a tool restating one could contradict it.
-    for reserved in [0u8, 1, 2] {
+    // 0/1/2/4 are the protocol's; a tool restating one could contradict it.
+    for reserved in [0u8, 1, 2, 4] {
         assert_eq!(
             build(&[(reserved, "mine now")]).unwrap_err().rule,
             "reserved_exit_code",

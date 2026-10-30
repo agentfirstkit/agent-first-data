@@ -6,9 +6,9 @@
 //! `cargo run --example agent_cli -- ping --host example.com`
 
 use agent_first_data::{
-    ArgSpec, BoundOutcome, CliEmitter, CliSpec, Combination, CommandSpec, Event, OutputFormat,
-    OutputPlan, OutputSpec, OutputTo, ResolvedInvocation, build_cli_error, cli_error_event,
-    cli_help_event, cli_version_event, json_error, json_result, render_cli_reference,
+    ArgSpec, CliEmitter, CliSpec, Combination, CommandSpec, Event, OutputFormat, OutputPlan,
+    OutputSpec, OutputTo, ResolvedInvocation, build_cli_error, cli_error_event, json_error,
+    json_result,
 };
 use serde_json::json;
 use std::process::ExitCode;
@@ -105,25 +105,8 @@ fn release(invocation: &ResolvedInvocation) -> Event {
     .build()
 }
 
-fn plan_format(plan: &OutputPlan) -> OutputFormat {
-    plan.output_format().unwrap_or(OutputFormat::Json)
-}
-
-fn plan_destination(plan: &OutputPlan) -> OutputTo {
-    plan.output_to().unwrap_or(OutputTo::Stdout)
-}
-
 fn emit_event(event: Event, plan: &OutputPlan, success_code: u8) -> ExitCode {
-    let mut emitter = CliEmitter::from_output_to(plan_destination(plan), plan_format(plan))
-        .with_strict_protocol();
-    ExitCode::from(emitter.finish(event, success_code))
-}
-
-fn write_text(text: &str, plan: &OutputPlan) -> ExitCode {
-    match agent_first_data::write_raw(text, plan_destination(plan)) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::from(4),
-    }
+    ExitCode::from(CliEmitter::from_plan(plan).finish(event, success_code))
 }
 
 fn write_startup_error(code: &str, message: &str) -> ExitCode {
@@ -157,30 +140,14 @@ fn main() -> ExitCode {
             return ExitCode::from(emitter.finish(cli_error_event(&error), error.exit_code()));
         }
     };
-    match outcome {
-        BoundOutcome::Run(invocation) => {
-            // `run` consumes the invocation, so take the plan first — it is
-            // readable before the handler runs precisely so a caller can set up
-            // its output before anything is emitted.
+    match outcome.into_run() {
+        Ok(invocation) => {
             let plan = invocation.output_plan().clone();
             let event = invocation.run();
-            let exit_code = if event.as_value()["kind"].as_str() == Some("error") {
-                1
-            } else {
-                0
-            };
-            emit_event(event, &plan, exit_code)
+            let code = u8::from(event.as_value()["kind"] == "error");
+            emit_event(event, &plan, code)
         }
-        BoundOutcome::Docs(docs) => write_text(&render_cli_reference(&cli), docs.output_plan()),
-        BoundOutcome::Help(help)
-            if help.output_plan().output_format() == Some(OutputFormat::Plain) =>
-        {
-            write_text(&help.plain(), help.output_plan())
-        }
-        BoundOutcome::Help(help) => emit_event(cli_help_event(&help), help.output_plan(), 0),
-        BoundOutcome::Version(version) => {
-            emit_event(cli_version_event(&version), version.output_plan(), 0)
-        }
+        Err(exit) => exit,
     }
 }
 

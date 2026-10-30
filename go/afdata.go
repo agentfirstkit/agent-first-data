@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 	"regexp"
 	"sort"
@@ -35,8 +36,8 @@ const (
 	LogLevelError LogLevel = "error"
 )
 
-// Event represents a protocol v1 event envelope with strict construction.
-// Events are opaque and strict-valid by construction.
+// Event represents an SDK-built protocol v1 event envelope. Non-error builders
+// retain caller-provided traces verbatim; validate external traces explicitly.
 type Event struct {
 	envelope map[string]any
 }
@@ -58,7 +59,54 @@ func (e *BuilderError) Error() string {
 
 // MarshalJSON implements json.Marshaler, allowing Event to be serialized as JSON.
 func (e Event) MarshalJSON() ([]byte, error) {
-	return json.Marshal(e.envelope)
+	return marshalUnescaped(e.envelope)
+}
+
+// marshalUnescaped is json.Marshal without HTML escaping. The default turns
+// `&`, `<` and `>` into `\u0026`-style escapes, so a URL with a query string
+// would read differently here than in the other three SDKs and would no longer
+// match a plain grep for it. encoding/json also escapes U+2028 and U+2029
+// regardless of that setting; those are restored to raw characters, as the
+// other SDKs write them.
+func marshalUnescaped(value any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(value); err != nil {
+		return nil, err
+	}
+	return unescapeLineSeparators(bytes.TrimSuffix(buf.Bytes(), []byte("\n"))), nil
+}
+
+// unescapeLineSeparators turns encoding/json's   and   escapes back
+// into the raw characters. Escapes are consumed in pairs, so the text
+// `\\u2028` (an escaped backslash followed by "u2028") is left alone.
+func unescapeLineSeparators(encoded []byte) []byte {
+	if !bytes.Contains(encoded, []byte(`\u202`)) {
+		return encoded
+	}
+	out := make([]byte, 0, len(encoded))
+	for i := 0; i < len(encoded); i++ {
+		if encoded[i] != '\\' || i+1 >= len(encoded) {
+			out = append(out, encoded[i])
+			continue
+		}
+		if i+5 < len(encoded) && encoded[i+1] == 'u' {
+			switch string(encoded[i+2 : i+6]) {
+			case "2028":
+				out = append(out, " "...)
+				i += 5
+				continue
+			case "2029":
+				out = append(out, " "...)
+				i += 5
+				continue
+			}
+		}
+		out = append(out, encoded[i], encoded[i+1])
+		i++
+	}
+	return out
 }
 
 // Value returns the underlying envelope as a map for introspection.
@@ -435,6 +483,11 @@ func validateErrorPayload(value any) error {
 			return fmt.Errorf("event.error.hint must be a string when present")
 		}
 	}
+	if retryable, ok := errorPayload["retryable"]; ok {
+		if _, ok := retryable.(bool); !ok {
+			return fmt.Errorf("event.error.retryable must be a boolean when present")
+		}
+	}
 	return nil
 }
 
@@ -549,6 +602,8 @@ type Redactor struct {
 	// URLNames are exact legacy field names whose string leaves receive
 	// URL-aware redaction in addition to _url/_URL fields.
 	URLNames []string
+	// RevealNames exempts exact structured field names; URL parameters and argv stay redacted.
+	RevealNames []string
 	// Policy controls where redaction is applied. Empty means default full redaction.
 	Policy RedactionPolicy
 }
@@ -681,7 +736,7 @@ func renderJSON(value any, options OutputOptions) string {
 }
 
 func marshalOutputJSON(value any) string {
-	out, err := json.Marshal(value)
+	out, err := marshalUnescaped(value)
 	if err != nil {
 		// Last-resort fallback: preserve JSONL contract even for pathological inputs.
 		fallback, _ := json.Marshal(map[string]any{
@@ -1028,6 +1083,7 @@ const redactedMarker = "***"
 type redactionContext struct {
 	secretNames map[string]struct{}
 	urlNames    map[string]struct{}
+	revealNames map[string]struct{}
 }
 
 func newRedactionContext(r Redactor) redactionContext {
@@ -1039,7 +1095,16 @@ func newRedactionContext(r Redactor) redactionContext {
 	for _, name := range r.URLNames {
 		urlNames[name] = struct{}{}
 	}
-	return redactionContext{secretNames: names, urlNames: urlNames}
+	revealNames := make(map[string]struct{}, len(r.RevealNames))
+	for _, name := range r.RevealNames {
+		revealNames[name] = struct{}{}
+	}
+	return redactionContext{secretNames: names, urlNames: urlNames, revealNames: revealNames}
+}
+
+func (c redactionContext) reveals(key string) bool {
+	_, ok := c.revealNames[key]
+	return ok
 }
 
 func (c redactionContext) isURLKey(key string) bool {
@@ -1091,7 +1156,7 @@ func redactSecretsWithContextDepth(value any, context redactionContext, depth in
 	case map[string]any:
 		for k := range v {
 			switch {
-			case context.isSecretKey(k):
+			case context.isSecretKey(k) && !context.reveals(k):
 				// A null secret is an absent secret. Masking it would
 				// manufacture the appearance of a configured credential —
 				// readers cannot tell "***"-because-set from
@@ -1131,7 +1196,7 @@ func redactURLValueDepth(value any, context redactionContext, depth int) any {
 		return v
 	case map[string]any:
 		for key, item := range v {
-			if context.isSecretKey(key) {
+			if context.isSecretKey(key) && !context.reveals(key) {
 				if item != nil {
 					v[key] = redactedMarker
 				}
@@ -1645,11 +1710,7 @@ func tryProcessField(key string, value any) (string, string, bool) {
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_epoch_ns"); ok {
-		if n, ok := asDecimalInt64(value); ok {
-			ms := n / 1_000_000
-			if n%1_000_000 < 0 {
-				ms--
-			}
+		if ms, ok := epochNsToMs(value); ok {
 			if formatted, ok := formatRFC3339Ms(ms); ok {
 				return stripped, formatted, true
 			}
@@ -1695,19 +1756,19 @@ func tryProcessField(key string, value any) (string, string, bool) {
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_minutes"); ok {
-		if _, ok := asFloat64(value); ok {
+		if isNumeric(value) {
 			return stripped, plainScalar(value) + " minutes", true
 		}
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_hours"); ok {
-		if _, ok := asFloat64(value); ok {
+		if isNumeric(value) {
 			return stripped, plainScalar(value) + " hours", true
 		}
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_days"); ok {
-		if _, ok := asFloat64(value); ok {
+		if isNumeric(value) {
 			return stripped, plainScalar(value) + " days", true
 		}
 		return "", "", false
@@ -1733,7 +1794,7 @@ func tryProcessField(key string, value any) (string, string, bool) {
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_percent"); ok {
-		if _, ok := asFloat64(value); ok {
+		if isNumeric(value) {
 			return stripped, plainScalar(value) + "%", true
 		}
 		return "", "", false
@@ -1747,13 +1808,13 @@ func tryProcessField(key string, value any) (string, string, bool) {
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_ns"); ok {
-		if _, ok := asFloat64(value); ok {
+		if isNumeric(value) {
 			return stripped, plainScalar(value) + "ns", true
 		}
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_us"); ok {
-		if _, ok := asFloat64(value); ok {
+		if isNumeric(value) {
 			return stripped, plainScalar(value) + "\u03bcs", true
 		}
 		return "", "", false
@@ -1765,7 +1826,7 @@ func tryProcessField(key string, value any) (string, string, bool) {
 		return "", "", false
 	}
 	if stripped, ok := stripSuffixCI(key, "_s"); ok {
-		if _, ok := asFloat64(value); ok {
+		if isNumeric(value) {
 			return stripped, plainScalar(value) + "s", true
 		}
 		return "", "", false
@@ -2121,13 +2182,11 @@ func yamlScalar(value any) string {
 	case int64:
 		return strconv.FormatInt(v, 10)
 	case float64:
-		// 'f', -1 yields the shortest round-trip form and drops the trailing
-		// ".0" from integral floats (3.0 -> "3"), matching Rust/TS/Python.
 		return formatFloatCanonical(v)
 	case json.Number:
-		return v.String()
+		return formatNumberLiteral(v.String())
 	case map[string]any, []any:
-		return fmt.Sprintf(`"%s"`, escapeYamlStr(canonicalJSON(value)))
+		return fmt.Sprintf(`"%s"`, escapeYamlStr(embeddedJSON(value)))
 	default:
 		return fmt.Sprintf(`"<unsupported:%T>"`, value)
 	}
@@ -2227,13 +2286,11 @@ func plainScalar(value any) string {
 	case int64:
 		return strconv.FormatInt(v, 10)
 	case float64:
-		// 'f', -1 yields the shortest round-trip form and drops the trailing
-		// ".0" from integral floats (3.0 -> "3"), matching Rust/TS/Python.
 		return formatFloatCanonical(v)
 	case json.Number:
-		return v.String()
+		return formatNumberLiteral(v.String())
 	case map[string]any, []any:
-		return canonicalJSON(value)
+		return embeddedJSON(value)
 	default:
 		return fmt.Sprintf("<unsupported:%T>", value)
 	}
@@ -2242,7 +2299,7 @@ func plainScalar(value any) string {
 func plainScalarRaw(value any) string {
 	switch value.(type) {
 	case map[string]any, []any:
-		return canonicalJSON(value)
+		return embeddedJSON(value)
 	}
 	return plainScalar(value)
 }
@@ -2251,10 +2308,128 @@ func formatFloatCanonical(v float64) string {
 	if math.IsInf(v, 0) || math.IsNaN(v) {
 		return strconv.FormatFloat(v, 'g', -1, 64)
 	}
-	if math.Trunc(v) == v && math.Abs(v) < 1e21 {
-		return strconv.FormatFloat(v, 'f', 0, 64)
+	return formatNumberLiteral(strconv.FormatFloat(v, 'g', -1, 64))
+}
+
+// formatNumberLiteral renders a number's literal canonically for YAML/plain:
+// a float literal whose value is an integer below 1e21 in magnitude renders
+// as that integer ("3.0" -> "3", "-0.0" -> "-0"); anything else keeps its
+// digits, placed by placeDecimalPoint. Native floats (via their shortest
+// form) and decoded json.Number literals share it, and it works on the text
+// so a digit is never lost to a float64 round trip.
+func formatNumberLiteral(literal string) string {
+	if integral, ok := integralFloatText(literal); ok {
+		return integral
 	}
-	return normalizeExponent(strconv.FormatFloat(v, 'g', -1, 64))
+	if placed, ok := placeDecimalPoint(literal); ok {
+		return placed
+	}
+	return normalizeExponent(literal)
+}
+
+// placeDecimalPoint spells a non-integral float literal with the notation
+// ECMAScript's Number#toString picks: positional when the value lies in
+// [1e-6, 1e21), exponent form otherwise. strconv's shortest 'g' form switches
+// below 1e-4 and from 1e6, so the choice is made here, on the digits as
+// written. It declines integer literals and exponents beyond int64, which
+// keep their spelling.
+func placeDecimalPoint(literal string) (string, bool) {
+	if !strings.ContainsAny(literal, ".eE") {
+		return "", false
+	}
+	sign := ""
+	unsigned := literal
+	if strings.HasPrefix(literal, "-") {
+		sign, unsigned = "-", literal[1:]
+	}
+	mantissa, exponentText := unsigned, "0"
+	if e := strings.IndexAny(unsigned, "eE"); e >= 0 {
+		mantissa, exponentText = unsigned[:e], unsigned[e+1:]
+	}
+	whole, fraction, _ := strings.Cut(mantissa, ".")
+	digits := whole + fraction
+	significant := strings.TrimLeft(digits, "0")
+	if significant == "" {
+		return "", false
+	}
+	exponent, err := strconv.ParseInt(exponentText, 10, 64)
+	if err != nil {
+		return "", false
+	}
+	// point: how many significant digits precede the decimal point.
+	shift := int64(len(whole) - (len(digits) - len(significant)))
+	if (shift > 0 && exponent > math.MaxInt64-shift) || (shift < 0 && exponent < math.MinInt64-shift) {
+		return "", false
+	}
+	point := shift + exponent
+	var text string
+	switch {
+	case point >= 1 && point <= 21:
+		split := min(int(point), len(significant))
+		integer, rest := significant[:split], significant[split:]
+		if rest == "" {
+			return "", false
+		}
+		text = integer + "." + rest
+	case point >= -5 && point <= 0:
+		text = "0." + strings.Repeat("0", int(-point)) + significant
+	default:
+		if point == math.MinInt64 {
+			return "", false
+		}
+		scale := point - 1
+		marker, magnitude := "+", strconv.FormatUint(uint64(scale), 10)
+		if scale < 0 {
+			marker, magnitude = "-", strconv.FormatUint(uint64(-(scale+1))+1, 10)
+		}
+		rest := ""
+		if len(significant) > 1 {
+			rest = "." + significant[1:]
+		}
+		text = significant[:1] + rest + "e" + marker + magnitude
+	}
+	return sign + text, true
+}
+
+func integralFloatText(literal string) (string, bool) {
+	if !strings.ContainsAny(literal, ".eE") {
+		return "", false
+	}
+	negative := strings.HasPrefix(literal, "-")
+	unsigned := strings.TrimPrefix(literal, "-")
+	mantissa, exponentText := unsigned, "0"
+	if e := strings.IndexAny(unsigned, "eE"); e >= 0 {
+		mantissa, exponentText = unsigned[:e], unsigned[e+1:]
+	}
+	whole, fraction, _ := strings.Cut(mantissa, ".")
+	digits := whole + fraction
+	if strings.Trim(digits, "0") == "" {
+		if negative {
+			return "-0", true
+		}
+		return "0", true
+	}
+	exponent, err := strconv.Atoi(exponentText)
+	if err != nil {
+		return "", false
+	}
+	point := len(whole) + exponent
+	split := min(max(point, 0), len(digits))
+	if strings.Trim(digits[split:], "0") != "" {
+		return "", false
+	}
+	padding := min(max(point-len(digits), 0), 22)
+	integer := strings.TrimLeft(digits[:split]+strings.Repeat("0", padding), "0")
+	if len(integer) > 21 {
+		return "", false
+	}
+	if integer == "" {
+		integer = "0"
+	}
+	if negative {
+		return "-" + integer, true
+	}
+	return integer, true
 }
 
 func normalizeExponent(s string) string {
@@ -2264,7 +2439,8 @@ func normalizeExponent(s string) string {
 	}
 	mantissa := s[:e]
 	exp := s[e+1:]
-	sign := ""
+	// An unsigned exponent is positive; spell it like FormatFloat does (e+23).
+	sign := "+"
 	if strings.HasPrefix(exp, "+") || strings.HasPrefix(exp, "-") {
 		sign = exp[:1]
 		exp = exp[1:]
@@ -2300,31 +2476,57 @@ func quoteLogfmtValue(value string) string {
 	return `"` + escaped + `"`
 }
 
-func canonicalJSON(value any) string {
-	b, err := json.Marshal(sortJSONValue(value))
-	if err != nil {
-		return fmt.Sprintf("<unsupported:%T>", value)
-	}
-	return string(b)
+// embeddedJSON writes a container nested inside a Plain array (or in a YAML
+// scalar position) as compact JSON with sorted keys. Its number leaves take
+// the canonical number form, the same text the value prints as a scalar, so a
+// nested 1.0 reads 1 and a decoded 1e5 reads 100000 in every SDK rather than
+// in each runtime's own JSON spelling.
+func embeddedJSON(value any) string {
+	var out strings.Builder
+	writeEmbeddedJSON(value, &out)
+	return out.String()
 }
 
-func sortJSONValue(value any) any {
+func writeEmbeddedJSON(value any, out *strings.Builder) {
 	switch v := value.(type) {
 	case map[string]any:
-		out := make(map[string]any, len(v))
-		for _, key := range sortedObjectKeys(v) {
-			out[key] = sortJSONValue(v[key])
+		out.WriteByte('{')
+		for i, key := range sortedObjectKeys(v) {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			writeJSONString(key, out)
+			out.WriteByte(':')
+			writeEmbeddedJSON(v[key], out)
 		}
-		return out
+		out.WriteByte('}')
 	case []any:
-		out := make([]any, len(v))
+		out.WriteByte('[')
 		for i, item := range v {
-			out[i] = sortJSONValue(item)
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			writeEmbeddedJSON(item, out)
 		}
-		return out
+		out.WriteByte(']')
+	case string:
+		writeJSONString(v, out)
+	case nil, bool, int, int64, float64, json.Number:
+		out.WriteString(plainScalar(v))
 	default:
-		return value
+		b, err := marshalUnescaped(v)
+		if err != nil {
+			out.WriteString(fmt.Sprintf("%q", fmt.Sprintf("<unsupported:%T>", value)))
+			return
+		}
+		out.Write(b)
 	}
+}
+
+func writeJSONString(text string, out *strings.Builder) {
+	// Marshaling a string cannot fail.
+	b, _ := marshalUnescaped(text)
+	out.Write(b)
 }
 
 // ═══════════════════════════════════════════
@@ -2338,34 +2540,36 @@ func asInt64(value any) (int64, bool) {
 	case int64:
 		return v, true
 	case float64:
-		// Converting a float64 outside int64's range is implementation-defined
-		// in Go, and in practice saturates to MaxInt64 — so `1e21` on an
-		// `_jpy` field rendered as ¥9,223,372,036,854,775,807: a plausible
-		// number that is wrong by any measure, on the one class of field where
-		// a wrong number is worst. Out of range now means "not an integer",
-		// and every caller already falls through to the raw value.
-		//
-		// The bounds are the powers of two either side, because MaxInt64
-		// itself is not representable as a float64 — comparing against it
-		// would round up and let 2^63 through.
-		const minInt64AsFloat = -9223372036854775808.0 // -2^63, exact
-		const beyondMaxInt64 = 9223372036854775808.0   // 2^63, exact
-		if v == math.Trunc(v) && v >= minInt64AsFloat && v < beyondMaxInt64 {
-			return int64(v), true
-		}
+		// A native float is read through its shortest decimal spelling, the
+		// text the canonical number form prints, so 2^60 counts as
+		// 1152921504606847000 exactly as a decoded literal of that spelling
+		// does in every SDK. Converting the binary value instead would give
+		// ...846976 here and not in Rust, which cannot tell the two apart.
+		// The text path also refuses anything outside int64 rather than
+		// saturating.
+		return asInt64(nativeFloatNumber(v))
 	case json.Number:
 		if n, err := v.Int64(); err == nil {
 			return n, true
 		}
-		// A decoded integral float (`3.0`) is an integer like any other; an
-		// integer literal Int64 rejected is out of range, not a float.
-		if !isDecimalIntegerString(string(v)) {
-			if f, err := v.Float64(); err == nil {
-				return asInt64(f)
-			}
+		// Check exact digits before conversion: float64 could round a fraction
+		// into an integer or change the amount by one currency unit.
+		if text, ok := integralFloatText(string(v)); ok {
+			n, err := strconv.ParseInt(text, 10, 64)
+			return n, err == nil
 		}
 	}
 	return 0, false
+}
+
+// nativeFloatNumber spells a native float as the decimal literal the
+// canonical number form starts from. A non-finite float gets a spelling no
+// integer check accepts.
+func nativeFloatNumber(v float64) json.Number {
+	if math.IsInf(v, 0) || math.IsNaN(v) {
+		return json.Number("NaN")
+	}
+	return json.Number(strconv.FormatFloat(v, 'g', -1, 64))
 }
 
 // asUint64 accepts the full unsigned 64-bit range that `_bytes` covers.
@@ -2374,18 +2578,18 @@ func asUint64(value any) (uint64, bool) {
 	case uint64:
 		return v, true
 	case float64:
-		// 2^64 is exact as a float64; MaxUint64 is not.
-		if v == math.Trunc(v) && v >= 0 && v < 18446744073709551616.0 {
-			return uint64(v), true
-		}
+		// Read through the shortest spelling, as asInt64 does.
+		return asUint64(nativeFloatNumber(v))
 	case json.Number:
 		if n, err := strconv.ParseUint(string(v), 10, 64); err == nil {
 			return n, true
 		}
-		if !isDecimalIntegerString(string(v)) {
-			if f, err := v.Float64(); err == nil {
-				return asUint64(f)
+		if text, ok := integralFloatText(string(v)); ok {
+			if text == "-0" {
+				return 0, true
 			}
+			n, err := strconv.ParseUint(text, 10, 64)
+			return n, err == nil
 		}
 	}
 	if n, ok := asInt64(value); ok && n >= 0 {
@@ -2401,22 +2605,75 @@ func signedMagnitude(value int64) (string, uint64) {
 	return "", uint64(value)
 }
 
-func asDecimalInt64(value any) (int64, bool) {
-	if s, ok := value.(string); ok && isDecimalIntegerString(s) {
-		n, err := strconv.ParseInt(s, 10, 64)
-		return n, err == nil
+// decimalIntText returns the exact digits of an integer-valued number or
+// decimal integer string, of any magnitude. Bitcoin amounts and _epoch_ns
+// only append a unit or divide, so unlike money suffixes they are not bounded
+// by int64: an integer literal keeps its digits, and a float counts when its
+// value is an integer below 1e21 (the canonical number form's integer range).
+// A numeric -0 is zero.
+func decimalIntText(value any) (string, bool) {
+	var literal string
+	switch v := value.(type) {
+	case string:
+		return v, isDecimalIntegerString(v)
+	case int:
+		return strconv.Itoa(v), true
+	case int64:
+		return strconv.FormatInt(v, 10), true
+	case uint64:
+		return strconv.FormatUint(v, 10), true
+	case float64:
+		if math.IsInf(v, 0) || math.IsNaN(v) {
+			return "", false
+		}
+		literal = strconv.FormatFloat(v, 'g', -1, 64)
+	case json.Number:
+		literal = string(v)
+	default:
+		return "", false
 	}
-	return asInt64(value)
+	integer := literal
+	if strings.ContainsAny(literal, ".eE") {
+		text, ok := integralFloatText(literal)
+		if !ok {
+			return "", false
+		}
+		integer = text
+	}
+	if integer == "-0" {
+		integer = "0"
+	}
+	return integer, true
 }
 
-func decimalIntText(value any) (string, bool) {
-	if s, ok := value.(string); ok && isDecimalIntegerString(s) {
-		return s, true
+// epochNsToMs floor-divides an integer nanosecond count of any size to
+// milliseconds. A count beyond int64 nanoseconds is still a representable
+// instant (int64 ns ends in 2262), so the division runs on big integers.
+func epochNsToMs(value any) (int64, bool) {
+	text, ok := decimalIntText(value)
+	if !ok {
+		return 0, false
 	}
-	if n, ok := asInt64(value); ok {
-		return strconv.FormatInt(n, 10), true
+	ns, ok := new(big.Int).SetString(text, 10)
+	if !ok {
+		return 0, false
 	}
-	return "", false
+	// Euclidean division floors for a positive divisor.
+	ms := new(big.Int).Div(ns, big.NewInt(1_000_000))
+	if !ms.IsInt64() {
+		return 0, false
+	}
+	return ms.Int64(), true
+}
+
+// isNumeric reports whether a value is a number of any kind. Appending a unit
+// does no arithmetic, so a decoded literal beyond float64's range qualifies.
+func isNumeric(value any) bool {
+	switch value.(type) {
+	case int, int64, uint64, float64, json.Number:
+		return true
+	}
+	return false
 }
 
 func isDecimalIntegerString(s string) bool {

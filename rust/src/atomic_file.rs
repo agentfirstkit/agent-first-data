@@ -13,11 +13,46 @@
 //! theirs: the pre-write guard (what may be overwritten is a policy question,
 //! and different writers answer it differently) and the error type. Failures
 //! name the step that failed through [`AtomicError`], whose `Display` is the
-//! tail of a caller's own message — `write` + `atomic replace \`p\`: …`.
+//! tail of a caller's own message — `write: ` + `install \`p\`: …`.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+
+/// Atomically replace a regular file, preserving its permissions. On Unix a
+/// new file starts owner-only (`0600`); Windows has no mode bits, so a new file
+/// takes the directory's inherited ACL. Symbolic links and special files are refused; parent
+/// directories must already exist. A directory-sync error reports an uncertain
+/// durable commit through [`AtomicError::commit_uncertain`].
+///
+/// Hard links are not checked. The new file is renamed over the path, so a
+/// target with other hard links is split from them: this path gets the new
+/// bytes and every other link keeps the old file. A caller that needs a
+/// hard-linked target refused writes through
+/// [`DocumentFile`](crate::document::DocumentFile) instead, whose
+/// [`ensure_mutable`](crate::document::DocumentFile::ensure_mutable) guard (run
+/// by `save` and by a replacing `create_atomic`) refuses one on Unix.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AtomicError> {
+    let permissions = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Some(metadata.permissions()),
+        Ok(_) => {
+            return Err(AtomicError::at(
+                AtomicStep::Guard,
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "atomic target must be a regular file, not a symlink, directory, or special file",
+                ),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(AtomicError::at(AtomicStep::Guard, path, error)),
+    };
+    install(
+        path,
+        AtomicInstall::replacing(bytes).with_permissions(permissions),
+    )
+}
 
 /// How the finished temporary file becomes the target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +109,9 @@ impl<'a> AtomicInstall<'a> {
 
 /// The step of an atomic installation that failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AtomicStep {
+pub enum AtomicStep {
+    /// Inspecting the target without following links.
+    Guard,
     /// The target has no parent directory to write the temporary file into.
     NoParent,
     /// The target's own file name is not valid UTF-8.
@@ -103,7 +140,7 @@ pub(crate) enum AtomicStep {
 
 /// A failed atomic installation: which step, which path, and the OS error.
 #[derive(Debug)]
-pub(crate) struct AtomicError {
+pub struct AtomicError {
     /// The step that failed.
     pub step: AtomicStep,
     /// The path that step was about — the target, its temporary file, or the
@@ -123,7 +160,9 @@ impl AtomicError {
     }
 
     /// Whether this is [`InstallMode::NewOnly`] refusing an existing target,
-    /// which is a caller-visible outcome rather than an I/O fault.
+    /// which is a caller-visible outcome rather than an I/O fault. Crate-only:
+    /// the public [`write_atomic`] always replaces, so it could never be true
+    /// there.
     pub(crate) fn target_exists(&self) -> bool {
         self.step == AtomicStep::Install
             && self
@@ -138,7 +177,7 @@ impl AtomicError {
     /// succeeded: the file is complete and in place, but its survival across a
     /// crash is unconfirmed. Every other step fails before the install and
     /// leaves the original untouched.
-    pub(crate) fn commit_uncertain(&self) -> bool {
+    pub fn commit_uncertain(&self) -> bool {
         self.step == AtomicStep::SyncParent
     }
 }
@@ -147,6 +186,7 @@ impl std::fmt::Display for AtomicError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let path = self.path.display();
         let phrase = match self.step {
+            AtomicStep::Guard => "inspect",
             AtomicStep::NoParent => {
                 return write!(formatter, "has no parent directory for `{path}`");
             }
@@ -264,9 +304,9 @@ fn write_temp(
     temp_path: &Path,
     target: &Path,
     request: &AtomicInstall<'_>,
+    write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
 ) -> Result<(), AtomicError> {
-    temp_file
-        .write_all(request.bytes)
+    write(&mut temp_file, request.bytes)
         .map_err(|error| AtomicError::at(AtomicStep::Write, target, error))?;
     if let Some(permissions) = request.permissions.clone() {
         temp_file
@@ -293,10 +333,21 @@ fn write_temp(
 /// directory fsync — the one [`AtomicError::commit_uncertain`] reports — means
 /// the new file may already be in place without confirmed durability.
 pub(crate) fn install(path: &Path, request: AtomicInstall<'_>) -> Result<(), AtomicError> {
+    install_with_writer(path, request, |file, bytes| file.write_all(bytes))
+}
+
+// The writer seam keeps disk-full, short-write, and interrupted-process
+// regressions at the primitive that owns publication, without exposing a
+// callback or partial-file API to callers.
+fn install_with_writer(
+    path: &Path,
+    request: AtomicInstall<'_>,
+    write: impl FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+) -> Result<(), AtomicError> {
     let (parent, file_name) = parent_and_name(path)?;
     let (temp_path, temp_file) = allocate_private_temp(parent, &file_name)?;
     let result = (|| -> Result<(), AtomicError> {
-        write_temp(temp_file, &temp_path, path, &request)?;
+        write_temp(temp_file, &temp_path, path, &request, write)?;
         match request.mode {
             InstallMode::Replace => {
                 fs::rename(&temp_path, path)
@@ -323,6 +374,12 @@ pub(crate) fn install(path: &Path, request: AtomicInstall<'_>) -> Result<(), Ato
         }
     }
     result
+}
+
+impl std::error::Error for AtomicError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_ref().map(|error| error as _)
+    }
 }
 
 #[cfg(test)]
@@ -435,5 +492,86 @@ mod tests {
         assert_eq!(error.step, AtomicStep::Temp);
         assert!(!error.commit_uncertain());
         assert!(!path.exists());
+    }
+    #[test]
+    fn failed_writes_preserve_previous_bytes_and_remove_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        fs::write(&path, b"old complete value").unwrap();
+        for error in [
+            std::io::Error::from_raw_os_error(28),
+            std::io::Error::from(std::io::ErrorKind::Interrupted),
+            std::io::Error::from(std::io::ErrorKind::WriteZero),
+        ] {
+            let error = install_with_writer(&path, AtomicInstall::replacing(b"new"), |file, _| {
+                file.write_all(b"partial")?;
+                Err(error)
+            })
+            .unwrap_err();
+            assert_eq!(error.step, AtomicStep::Write);
+            assert!(!error.commit_uncertain());
+            assert_eq!(fs::read(&path).unwrap(), b"old complete value");
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn write_all_retries_short_writes_and_interruptions_before_publish() {
+        struct ShortWriter<'a> {
+            file: &'a mut File,
+            interrupted: bool,
+        }
+        impl std::io::Write for ShortWriter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                self.file.write(&bytes[..bytes.len().min(2)])
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.file.flush()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let bytes = b"new complete value";
+        install_with_writer(&path, AtomicInstall::replacing(bytes), |file, bytes| {
+            ShortWriter {
+                file,
+                interrupted: false,
+            }
+            .write_all(bytes)
+        })
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn interrupted_process_leaves_uncommitted_temporary_file_not_target() {
+        const CHILD_PATH: &str = "AFDATA_TEST_INTERRUPTED_ATOMIC_PATH";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let _ = install_with_writer(
+                Path::new(&path),
+                AtomicInstall::replacing(b"new"),
+                |file, _| {
+                    file.write_all(b"partial")?;
+                    file.sync_all()?;
+                    std::process::exit(86);
+                },
+            );
+            panic!("child did not reach the interrupted write");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        write_atomic(&path, b"old complete value").unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "atomic_file::tests::interrupted_process_leaves_uncommitted_temporary_file_not_target"])
+            .env(CHILD_PATH, &path).status().unwrap();
+        assert_eq!(status.code(), Some(86));
+        assert_eq!(fs::read(&path).unwrap(), b"old complete value");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        write_atomic(&path, b"new complete value").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new complete value");
     }
 }

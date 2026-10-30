@@ -9,7 +9,7 @@
 //! VALUE                    the value itself
 //! literal:VALUE            …when it starts with one of the prefixes below
 //! env:NAME                 an environment variable
-//! file:PATH#DOT_PATH       one address inside a supported document
+//! file:PATH[#DOT_PATH]     a whole file, or one address inside a document
 //! file+FORMAT:PATH#DOT     …when the filename cannot say which (`.conf`, no extension)
 //! stdin                    the whole of standard input
 //! fd:N                     the whole of an inherited file descriptor
@@ -121,7 +121,7 @@ impl SourceScheme {
     pub const fn syntax(self) -> &'static str {
         match self {
             Self::Env => "env:NAME",
-            Self::File => "file[+FORMAT]:PATH#DOT_PATH",
+            Self::File => "file[+FORMAT]:PATH[#DOT_PATH]",
             Self::Stdin => "stdin",
             Self::Fd => "fd:N",
             Self::Prompt => "prompt",
@@ -302,14 +302,15 @@ impl SourceSet {
             // so a filesystem path may itself contain `#`. A DOT_PATH in this
             // source spelling therefore cannot contain `#`; use another source
             // for that uncommon external key.
-            let Some((path, dot_path)) = rest.rsplit_once('#') else {
-                return Err(SourceError::invalid(
-                    "`file` source must be file:PATH#DOT_PATH",
-                ));
-            };
-            if path.is_empty() || dot_path.is_empty() {
+            let (path, dot_path) = rest.rsplit_once('#').unwrap_or((rest, ""));
+            if path.is_empty() || (rest.contains('#') && dot_path.is_empty()) {
                 return Err(SourceError::invalid(
                     "`file` source requires both PATH and DOT_PATH",
+                ));
+            }
+            if format.is_some() && dot_path.is_empty() {
+                return Err(SourceError::invalid(
+                    "`file+FORMAT:` needs a `#DOT_PATH`; use `file:PATH` to read the whole file",
                 ));
             }
             return Ok(ValueSource::File {
@@ -394,10 +395,17 @@ impl ValueSource {
                 path,
                 dot_path,
                 format,
-            } => match format {
-                Some(format) => format!("file+{format}:{}#{dot_path}", path.display()),
-                None => format!("file:{}#{dot_path}", path.display()),
-            },
+            } => {
+                let suffix = if dot_path.is_empty() {
+                    String::new()
+                } else {
+                    format!("#{dot_path}")
+                };
+                match format {
+                    Some(format) => format!("file+{format}:{}{suffix}", path.display()),
+                    None => format!("file:{}{suffix}", path.display()),
+                }
+            }
             Self::Stdin => "stdin".to_string(),
             Self::Fd(number) => format!("fd:{number}"),
             Self::Prompt => "prompt".to_string(),
@@ -440,6 +448,27 @@ mod tests {
         assert_eq!(
             set.parse("postgres://u:p@h/db").expect("url"),
             ValueSource::Literal("postgres://u:p@h/db".to_string())
+        );
+    }
+
+    #[test]
+    fn a_file_without_an_address_is_a_whole_document_source() {
+        let source = SourceSet::config()
+            .parse("file:/tmp/request.json")
+            .expect("whole file");
+        assert_eq!(
+            source,
+            ValueSource::File {
+                path: PathBuf::from("/tmp/request.json"),
+                dot_path: String::new(),
+                format: None
+            }
+        );
+        assert_eq!(source.describe(), "file:/tmp/request.json");
+        assert!(
+            SourceSet::config()
+                .parse("file+json:/tmp/request.json")
+                .is_err()
         );
     }
 
@@ -493,7 +522,6 @@ mod tests {
             "fd:x",
             "fd:2",
             "file:",
-            "file:/etc/app.json",
             "file:#a.b",
             "file:/etc/app.json#",
         ] {
@@ -543,7 +571,7 @@ mod tests {
             .syntax_summary();
         assert_eq!(
             summary,
-            "the value, or where to read it: env:NAME, file[+FORMAT]:PATH#DOT_PATH, container:NAME, \
+            "the value, or where to read it: env:NAME, file[+FORMAT]:PATH[#DOT_PATH], container:NAME, \
              literal:VALUE"
         );
     }

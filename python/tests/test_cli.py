@@ -448,9 +448,39 @@ def test_finish_returns_0_on_broken_pipe():
     assert emitter.finish(json_result({"rows": 1}).build(), 0) == 0
 
 
-def test_finish_returns_4_on_other_write_failure():
+def _assert_output_write_failed(text: str) -> None:
+    reported = json.loads(text)
+    assert reported["kind"] == "error"
+    assert reported["error"]["code"] == "output_write_failed"
+
+
+def test_finish_returns_4_on_other_write_failure(monkeypatch):
+    # Event-stream mode reports the failure on the process's stderr.
+    err = StringIO()
+    monkeypatch.setattr("sys.stderr", err)
     emitter = CliEmitter.stream(_FailingWriter(), OutputFormat.JSON)
     assert emitter.finish(json_result({"rows": 1}).build(), 0) == 4
+    _assert_output_write_failed(err.getvalue())
+
+
+def test_finish_reports_an_unwritable_result_on_the_diagnostic_sink():
+    diagnostic = StringIO()
+    emitter = CliEmitter.finite_with(_FailingWriter(), diagnostic, OutputFormat.JSON)
+    assert emitter.finish_result({"rows": 2}) == 4
+    _assert_output_write_failed(diagnostic.getvalue())
+
+    # A closed reader stays silent success.
+    diagnostic = StringIO()
+    emitter = CliEmitter.finite_with(_BrokenPipeWriter(), diagnostic, OutputFormat.JSON)
+    assert emitter.finish_result({}) == 0
+    assert diagnostic.getvalue() == ""
+
+
+def test_finish_returns_1_on_a_protocol_violation():
+    buf = StringIO()
+    emitter = CliEmitter.stream(buf, OutputFormat.JSON).with_strict_protocol()
+    assert emitter.finish({"kind": "error", "error": {"code": "failed", "message": "Failed"}}, 2) == 1
+    assert buf.getvalue() == ""
 
 
 def test_finish_result_returns_0_on_broken_pipe():
@@ -458,12 +488,13 @@ def test_finish_result_returns_0_on_broken_pipe():
     assert emitter.finish_result({"ok": True}) == 0
 
 
-def test_finish_returns_4_on_lifecycle_violation():
-    # A non-BrokenPipe failure (here a duplicate terminal) resolves to 4.
+def test_finish_returns_1_on_lifecycle_violation():
+    # An event the emitter refuses (here a second terminal event) is the
+    # command's failure, not output's.
     buf = StringIO()
     emitter = CliEmitter.stream(buf, OutputFormat.JSON)
     assert emitter.finish(json_result({"rows": 1}).build(), 0) == 0
-    assert emitter.finish(json_error("late", "too late").build(), 1) == 4
+    assert emitter.finish(json_error("late", "too late").build(), 2) == 1
 
 
 # ── version helpers ───────────────────────────────────────────────────────────

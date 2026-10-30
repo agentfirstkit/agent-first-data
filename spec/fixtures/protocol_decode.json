@@ -18,5 +18,102 @@
     "name": "non_json_trailer_is_trailing_data",
     "input_line": "{\"kind\":\"result\",\"result\":{},\"trace\":{}} garbage",
     "valid": false
+  },
+  {
+    "name": "base_result_without_trace",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"a\":1}}",
+    "valid": true
+  },
+  {
+    "name": "base_error_without_retryable",
+    "input_line": "{\"kind\":\"error\",\"error\":{\"code\":\"failed\",\"message\":\"Failed\"}}",
+    "valid": true
+  },
+  {
+    "name": "base_error_with_string_retryable",
+    "input_line": "{\"kind\":\"error\",\"error\":{\"code\":\"failed\",\"message\":\"Failed\",\"retryable\":\"false\"}}",
+    "valid": false
+  },
+  {
+    "name": "base_error_with_null_retryable",
+    "input_line": "{\"kind\":\"error\",\"error\":{\"code\":\"failed\",\"message\":\"Failed\",\"retryable\":null}}",
+    "valid": false
+  },
+  {
+    "name": "nan_is_not_json",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"x\":NaN}}",
+    "valid": false
+  },
+  {
+    "name": "infinity_is_not_json",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"x\":-Infinity}}",
+    "valid": false
+  },
+  {
+    "name": "duplicate_keys_take_the_last_value",
+    "description": "A repeated object key is not an error; the last occurrence wins, as in JSON.parse and every SDK's native decoder.",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"a\":1,\"a\":2},\"trace\":{}}",
+    "valid": true,
+    "expected_result_json": "{\"a\":2}"
+  },
+  {
+    "name": "duplicate_envelope_keys_take_the_last_value",
+    "input_line": "{\"kind\":\"error\",\"result\":{\"x\":1},\"kind\":\"result\"}",
+    "valid": true,
+    "expected_result_json": "{\"x\":1}"
+  },
+  {
+    "name": "surrogate_pair_escape_is_one_character",
+    "input_line": "{\"kind\":\"result\",\"result\":\"\\ud83d\\ude00\",\"trace\":{}}",
+    "valid": true,
+    "expected_result_json": "\"😀\""
+  },
+  {
+    "name": "lone_high_surrogate_escape_is_invalid",
+    "description": "A \\u escape naming half a surrogate pair is not a character; decoders that would keep it or swap in U+FFFD reject it instead.",
+    "input_line": "{\"kind\":\"result\",\"result\":\"\\ud800\",\"trace\":{}}",
+    "valid": false
+  },
+  {
+    "name": "lone_low_surrogate_escape_is_invalid",
+    "input_line": "{\"kind\":\"result\",\"result\":\"\\udc00\",\"trace\":{}}",
+    "valid": false
+  },
+  {
+    "name": "high_surrogate_followed_by_a_non_surrogate_escape_is_invalid",
+    "input_line": "{\"kind\":\"result\",\"result\":\"\\ud800\\u0041\",\"trace\":{}}",
+    "valid": false
+  },
+  {
+    "name": "lone_surrogate_escape_in_a_key_is_invalid",
+    "input_line": "{\"kind\":\"result\",\"result\":{\"\\udfff\":1},\"trace\":{}}",
+    "valid": false
+  },
+  {
+    "name": "escaped_backslash_before_u_is_not_an_escape",
+    "input_line": "{\"kind\":\"result\",\"result\":\"\\\\ud800\",\"trace\":{}}",
+    "valid": true,
+    "expected_result_json": "\"\\\\ud800\""
+  },
+  {
+    "name": "nesting_at_the_limit_is_valid",
+    "description": "A line may nest arrays and objects 127 deep, counting the envelope object.",
+    "input_line": "{\"kind\":\"result\",\"result\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"trace\":{}}",
+    "valid": true
+  },
+  {
+    "name": "nesting_beyond_the_limit_is_invalid",
+    "input_line": "{\"kind\":\"result\",\"result\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"trace\":{}}",
+    "valid": false
+  },
+  {
+    "name": "deep_nesting_is_invalid",
+    "input_line": "{\"kind\":\"result\",\"result\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]],\"trace\":{}}",
+    "valid": false
+  },
+  {
+    "name": "brackets_inside_strings_do_not_nest",
+    "input_line": "{\"kind\":\"result\",\"result\":\"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{\",\"trace\":{}}",
+    "valid": true
   }
 ]

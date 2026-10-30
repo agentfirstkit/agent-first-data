@@ -230,7 +230,7 @@ impl fmt::Display for DocumentError {
             DocumentError::FormatUnknown { path } => {
                 write!(
                     f,
-                    "cannot detect format from file extension `{}`; pass an explicit format",
+                    "cannot detect the format of `{}` from its extension; pass an explicit format",
                     path
                 )
             }
@@ -310,23 +310,14 @@ impl DocumentError {
         // Searching the whole detail — from either end — can read the echo:
         // from the end it finds `at line 999`, which is the file's own text.
         let head = detail.split('\n').next().unwrap_or(detail);
-        let rest = match head.find(" at line ") {
-            Some(start) => &head[start + " at line ".len()..],
+        let rest = match head.split_once(" at line ") {
+            Some((_, rest)) => rest,
             None => head.strip_prefix("line ")?,
         };
-        let line: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        if line.is_empty() {
-            return None;
-        }
+        let line = leading_ascii_digits(rest)?;
         let column = rest
-            .find("column ")
-            .map(|start| &rest[start + 7..])
-            .map(|tail| {
-                tail.chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect::<String>()
-            })
-            .filter(|value| !value.is_empty());
+            .split_once("column ")
+            .and_then(|(_, tail)| leading_ascii_digits(tail));
         Some(match column {
             Some(column) => format!("line {line} column {column}"),
             None => format!("line {line}"),
@@ -406,6 +397,11 @@ impl From<io::Error> for DocumentError {
             detail: err.to_string(),
         }
     }
+}
+
+fn leading_ascii_digits(text: &str) -> Option<&str> {
+    let end = text.bytes().take_while(u8::is_ascii_digit).count();
+    (end > 0).then_some(&text[..end])
 }
 
 #[cfg(test)]

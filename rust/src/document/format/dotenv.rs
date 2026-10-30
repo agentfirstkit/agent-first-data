@@ -179,8 +179,18 @@ pub fn unset_preserving(content: &str, key: &str) -> DocumentResult<String> {
 }
 
 fn edit_line(content: &str, key: &str, replacement: Option<&str>) -> DocumentResult<String> {
+    // The path is at fault here, not the file: a parse error would send the
+    // caller looking for a malformed line that does not exist.
     if !valid_key(key) {
-        return Err(parse_error(0, "invalid variable name"));
+        let operation = if replacement.is_some() {
+            "set"
+        } else {
+            "unset"
+        };
+        return Err(unsupported(
+            operation,
+            &format!("`{key}` is not a dotenv variable name"),
+        ));
     }
     let document = DotenvDocument::parse(content).map_err(|error| with_path(error, key))?;
     let mut output = String::with_capacity(content.len());
@@ -249,22 +259,42 @@ fn edit_line(content: &str, key: &str, replacement: Option<&str>) -> DocumentRes
     Ok(output)
 }
 
+/// Encode a value so the file reads back the same here and when a shell
+/// sources it (`set -a; . ./.env`): bare only for characters no shell treats
+/// specially, plain double quotes when nothing inside would expand or need an
+/// escape, single quotes (no expansion at all) when the value allows them, and
+/// double quotes with `$` and `` ` `` escaped otherwise.
+///
+/// Newlines and tabs are written literally inside the quotes, since a shell
+/// reads `\n` in double quotes as two characters. A carriage return is the
+/// one exception: written as `\r`, so editors and line-ending conversion
+/// cannot silently change the value, at the cost of a shell seeing `\r`.
 fn encode_value(value: &str) -> String {
     if !value.is_empty()
-        && value
-            .chars()
-            .all(|c| !c.is_whitespace() && !matches!(c, '#' | '\\' | '\'' | '"'))
+        && value.chars().all(|c| {
+            c.is_alphanumeric()
+                || matches!(c, '_' | '.' | '/' | ':' | '@' | '%' | '+' | ',' | '=' | '-')
+        })
     {
         return value.to_string();
+    }
+    // Double quotes need nothing escaped here, and nothing in them expands.
+    if !value.contains(['$', '`', '\\', '"', '\r']) {
+        return format!("\"{value}\"");
+    }
+    // The reader treats `\'` inside single quotes as an escaped quote, so a
+    // trailing backslash would swallow the closing quote.
+    if !value.contains(['\'', '\r']) && !value.ends_with('\\') {
+        return format!("'{value}'");
     }
     format!(
         "\"{}\"",
         value
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
-            .replace('\n', "\\n")
+            .replace('$', "\\$")
+            .replace('`', "\\`")
             .replace('\r', "\\r")
-            .replace('\t', "\\t")
     )
 }
 
@@ -307,6 +337,8 @@ fn parse_quoted(input: &str, quote: char, line_number: usize) -> DocumentResult<
                 ('"', 't') => output.push('\t'),
                 ('"', '\\') => output.push('\\'),
                 ('"', '"') => output.push('"'),
+                ('"', '$') => output.push('$'),
+                ('"', '`') => output.push('`'),
                 ('\'', '\'') => output.push('\''),
                 (_, other) => {
                     output.push('\\');
@@ -490,6 +522,51 @@ mod tests {
             set_preserving("A=\"old # value\"\n", "A", &Value::String("new".into())).unwrap(),
             "A=new\n"
         );
+    }
+
+    /// A written value must mean the same thing to a shell that sources the
+    /// file as it does to this reader, and must never run anything there.
+    #[cfg(unix)]
+    #[test]
+    fn written_values_are_inert_when_a_shell_sources_the_file() {
+        let dir = std::env::temp_dir().join(format!("afdata-dotenv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("t.env");
+        for value in [
+            "x;touch pwned",
+            "a $(touch pwned)",
+            "`touch pwned`",
+            "it's $HOME",
+            "it's `x` \\ $y\\",
+            "~/path",
+            "a|b&c>d<e*f?g[h]",
+            "plain-value_1.2",
+            "line1\nline2\tend",
+            "it's\nmulti $x",
+            "a\\\nb",
+        ] {
+            let value = Value::String(value.into());
+            let edited = set_preserving("", "A", &value).unwrap();
+            let Value::Object(values) = load(&edited).unwrap() else {
+                panic!("expected an object");
+            };
+            assert_eq!(values["A"], value, "{edited}");
+            std::fs::write(&file, &edited).unwrap();
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("set -a; . ./t.env; printf %s \"$A\"")
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{edited}");
+            assert_eq!(
+                Value::String(String::from_utf8(output.stdout).unwrap()),
+                value,
+                "{edited}"
+            );
+            assert!(!dir.join("pwned").exists(), "{edited}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

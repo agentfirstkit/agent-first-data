@@ -35,7 +35,7 @@ use crate::document::{DocumentFile, Format, Value};
 ///
 /// Library callers of [`DocumentFile::open_capped`] choose their own budget.
 pub const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
-/// A stream named by a source carries one value, not a document.
+/// Credential streams and prompts retain their smaller bound.
 const MAX_STREAM_BYTES: usize = 1024 * 1024;
 
 type Result<T> = std::result::Result<T, SourceError>;
@@ -123,8 +123,20 @@ fn read_with(source: &ValueSource, policy: Policy) -> Result<String> {
             dot_path,
             format,
         } => read_file(path, dot_path, format.as_deref(), policy),
-        ValueSource::Stdin => read_stream(std::io::stdin().lock(), "stdin"),
-        ValueSource::Fd(number) => read_fd(*number),
+        ValueSource::Stdin if policy == Policy::Secret => {
+            read_stream(std::io::stdin().lock(), "stdin")
+        }
+        ValueSource::Stdin => {
+            read_stream_with_limit(std::io::stdin().lock(), "stdin", MAX_FILE_BYTES as usize)
+        }
+        ValueSource::Fd(number) => read_fd(
+            *number,
+            if policy == Policy::Secret {
+                MAX_STREAM_BYTES
+            } else {
+                MAX_FILE_BYTES as usize
+            },
+        ),
         ValueSource::Prompt => read_prompt(),
         ValueSource::Host { scheme, .. } => Err(SourceError::unreadable(format!(
             "`{scheme}` is a host-defined source; this crate cannot read it"
@@ -144,6 +156,32 @@ fn read_file(
     named_format: Option<&str>,
     policy: Policy,
 ) -> Result<String> {
+    // A named format only says how to parse a document, and a whole-file read
+    // parses nothing; accepting one would silently ignore it.
+    if let Some(name) = named_format
+        && dot_path.is_empty()
+    {
+        return Err(SourceError::invalid(format!(
+            "`file+{name}:` needs a `#DOT_PATH`; use `file:PATH` to read the whole file"
+        )));
+    }
+    if let Some(name) = named_format
+        && Format::from_cli_name(name).is_none()
+    {
+        return Err(SourceError::invalid(format!(
+            "`file+{name}:` is not a format this build reads"
+        )));
+    }
+    // No document address means the complete UTF-8 file, without parsing or
+    // scalar conversion. This also supports documents passed to typed callers.
+    if dot_path.is_empty() {
+        return crate::document::file::read_capped_file(
+            path,
+            MAX_FILE_BYTES,
+            crate::document::SymlinkPolicy::Follow,
+        )
+        .map_err(|error| SourceError::unreadable(error.redacted_message()));
+    }
     // A named format is resolved here rather than in the grammar: the CLI core
     // that parses argv is not allowed to know what a document format is, so it
     // carries the caller's word and this is where the word becomes a parser.
@@ -224,15 +262,23 @@ fn scalar(value: Value, path: &Path, dot_path: &str, policy: Policy) -> Result<S
 /// whitespace, and this crate cannot tell that from a shell that added one.
 /// Use `printf '%s'` rather than `echo`.
 fn read_stream<R: std::io::Read>(reader: R, source: &str) -> Result<String> {
+    read_stream_with_limit(reader, source, MAX_STREAM_BYTES)
+}
+
+fn read_stream_with_limit<R: std::io::Read>(
+    reader: R,
+    source: &str,
+    max_bytes: usize,
+) -> Result<String> {
     use std::io::Read;
     let mut bytes = Vec::new();
     reader
-        .take((MAX_STREAM_BYTES + 1) as u64)
+        .take((max_bytes + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|error| SourceError::unreadable(format!("read from {source}: {error}")))?;
-    if bytes.len() > MAX_STREAM_BYTES {
+    if bytes.len() > max_bytes {
         return Err(SourceError::unreadable(format!(
-            "{source} exceeds {MAX_STREAM_BYTES} bytes"
+            "{source} exceeds {max_bytes} bytes"
         )));
     }
     String::from_utf8(bytes)
@@ -240,7 +286,7 @@ fn read_stream<R: std::io::Read>(reader: R, source: &str) -> Result<String> {
 }
 
 #[cfg(unix)]
-fn read_fd(number: i32) -> Result<String> {
+fn read_fd(number: i32, max_bytes: usize) -> Result<String> {
     #[cfg(feature = "libc")]
     let file = {
         use std::os::fd::FromRawFd;
@@ -266,11 +312,11 @@ fn read_fd(number: i32) -> Result<String> {
     let file = std::fs::File::open(format!("/dev/fd/{number}")).map_err(|error| {
         SourceError::unreadable(format!("open file descriptor {number}: {error}"))
     })?;
-    read_stream(file, "file descriptor")
+    read_stream_with_limit(file, "file descriptor", max_bytes)
 }
 
 #[cfg(not(unix))]
-fn read_fd(_number: i32) -> Result<String> {
+fn read_fd(_number: i32, _max_bytes: usize) -> Result<String> {
     Err(SourceError::unreadable(
         "the `fd` source is unsupported on this platform",
     ))
@@ -628,6 +674,31 @@ impl Drop for EchoGuard {
 mod tests {
     use super::*;
 
+    #[test]
+    fn whole_file_sources_preserve_text_and_accept_large_documents() {
+        let directory = tempfile::tempdir().expect("temporary source directory");
+        let path = directory.path().join("request.json");
+        let text = format!("{{\"text\":\"{}\"}}\n", "x".repeat(1300 * 1024));
+        std::fs::write(&path, &text).expect("write source");
+        let source = ValueSource::File {
+            path,
+            dot_path: String::new(),
+            format: None,
+        };
+        assert_eq!(source.read().expect("read complete file"), text);
+        assert_eq!(
+            read_stream_with_limit(text.as_bytes(), "stdin", MAX_FILE_BYTES as usize)
+                .expect("read stream"),
+            text
+        );
+        let directory_source = ValueSource::File {
+            path: directory.path().to_owned(),
+            dot_path: String::new(),
+            format: None,
+        };
+        assert!(directory_source.read().is_err());
+    }
+
     #[cfg(all(unix, feature = "libc"))]
     #[test]
     fn terminal_echo_control_goes_to_the_terminal_not_to_a_program() {
@@ -889,6 +960,17 @@ mod tests {
             bad.message().contains("not a format this build reads"),
             "{bad}"
         );
+    }
+
+    #[test]
+    fn a_named_format_without_an_address_is_refused_not_ignored() {
+        let source = ValueSource::File {
+            path: PathBuf::from("does-not-matter.cfg"),
+            dot_path: String::new(),
+            format: Some("toml".to_string()),
+        };
+        let error = source.read().expect_err("a format with nothing to parse");
+        assert!(error.message().contains("#DOT_PATH"), "{error}");
     }
 
     /// The policy difference, in one place: an ordinary value may be a port; a

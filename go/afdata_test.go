@@ -63,6 +63,11 @@ func redactorFromCase(tc map[string]any) Redactor {
 			redactor.URLNames = append(redactor.URLNames, name.(string))
 		}
 	}
+	if names, ok := opts["reveal_names"].([]any); ok {
+		for _, name := range names {
+			redactor.RevealNames = append(redactor.RevealNames, name.(string))
+		}
+	}
 	return redactor
 }
 
@@ -247,7 +252,7 @@ func TestRedactFixtures(t *testing.T) {
 		name := tc["name"].(string)
 		t.Run(name, func(t *testing.T) {
 			// Use RedactedValue instead of in-place redaction
-			got := RedactedValue(tc["input"])
+			got := redactorFromCase(tc).Value(tc["input"])
 
 			b2, _ := json.Marshal(tc["expected"])
 			var expected any
@@ -634,6 +639,9 @@ func TestOutputFormatFixtures(t *testing.T) {
 			expJSONBytes, _ := json.Marshal(expectedJSON)
 			if string(gotJSONBytes) != string(expJSONBytes) {
 				t.Errorf("json mismatch: got %s, want %s", gotJSONBytes, expJSONBytes)
+			}
+			if expectedText, ok := tc["expected_json_text"].(string); ok && jsonLine != expectedText {
+				t.Errorf("json text mismatch: got %q, want %q", jsonLine, expectedText)
 			}
 
 			if got := Render(input, OutputFormatYaml, OutputOptions{}); got != expectedYAML {
@@ -1384,5 +1392,22 @@ func TestOutOfRangeFiatLiteralSurvivesDecodeAsRawValue(t *testing.T) {
 	}
 	if got := Render(decoded, OutputFormatPlain, OutputOptions{}); got != "chargeback=-$92233720368547758.08" {
 		t.Errorf("i64::MIN should format: got %q", got)
+	}
+}
+
+// JSON output keeps `&`, `<` and `>` literal, as the other SDKs do; the
+// fixture runner compares JSON semantically and cannot see the escapes.
+func TestJSONOutputDoesNotHTMLEscape(t *testing.T) {
+	input := map[string]any{"url": "https://example.test/a?b=1&c=<2>"}
+	want := `{"url":"https://example.test/a?b=1&c=<2>"}`
+	if got := Render(input, OutputFormatJson, OutputOptions{}); got != want {
+		t.Errorf("Render json = %s, want %s", got, want)
+	}
+	line, err := NewJSONResult(input).Build().MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(line), `b=1&c=<2>`) {
+		t.Errorf("event JSON escaped HTML characters: %s", line)
 	}
 }

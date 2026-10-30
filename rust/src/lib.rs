@@ -5,12 +5,12 @@
 //! here — it drifts out of sync with a hand-maintained count otherwise):
 //! - Protocol v1 builders: [`json_result`], [`json_error`], [`json_progress`], [`json_log`]
 //!   (each returns a builder; call `.build()`)
-//! - Protocol reader: [`decode_protocol_event`] parses and strict-validates one protocol
+//! - Protocol reader: [`decode_protocol_event`] parses and base-validates one protocol
 //!   line into a typed [`DecodedEvent`]
 //! - Redaction: [`redacted_value`] / [`Redactor::value`] (JSON values), [`redact_url_secrets`] /
 //!   [`Redactor::url`] (URL strings), [`redact_urls_in_text`] / [`Redactor::urls_in_text`]
 //!   (explicit prose URL spans), [`redact_argv`] / [`Redactor::argv`] (command lines) —
-//!   `Redactor` carries custom `secret_names`/`url_names`/`policy`
+//!   `Redactor` carries custom `secret_names`/`url_names`/`reveal_names`/`policy`
 //! - Output rendering: [`render`] — the single `value × format × options → String` entry point
 //!   for JSON, YAML, and plain (logfmt) output
 //! - Parse utilities: [`normalize_utc_offset`], [`is_valid_rfc3339_date`],
@@ -97,12 +97,13 @@ mod validation;
 #[cfg(feature = "cli")]
 pub use cli::{
     CliEmitter, CliEmitterError, LogFilters, build_cli_version, cli_parse_log_filters,
-    cli_parse_output, cli_render_version, write_raw,
+    cli_parse_output, cli_render_version, write_raw, write_raw_exit,
 };
 #[cfg(feature = "cli")]
 pub use cli_afdata::{
     build_afdata_cli, cli_error_event, cli_help_event, cli_invocation_invalid_event,
-    cli_version_event, render_cli_reference,
+    cli_output_setup_failed_event, cli_output_write_failed_event, cli_version_event,
+    render_cli_reference,
 };
 #[cfg(feature = "cli")]
 pub use cli_spec::{

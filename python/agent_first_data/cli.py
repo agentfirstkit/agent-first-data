@@ -210,6 +210,7 @@ class CliEmitter:
         self._output_options = output_options or OutputOptions()
         self._strict_protocol = strict_protocol
         self._terminal_emitted = False
+        self._write_failed = False
 
     def with_strict_protocol(self) -> CliEmitter:
         """Opt this emitter into the AFDATA recommended strict profile."""
@@ -277,6 +278,7 @@ class CliEmitter:
 
     def emit(self, event: Event | dict) -> None:
         """Emit a typed Event or a dict (for compatibility)."""
+        self._write_failed = False
         if isinstance(event, Event):
             envelope = event.to_dict()
         else:
@@ -319,6 +321,10 @@ class CliEmitter:
                         os.dup2(null_descriptor, descriptor)
                     finally:
                         os.close(null_descriptor)
+            raise
+        except Exception:
+            # Marks the failure as output's, not the event's, for finish().
+            self._write_failed = True
             raise
         if kind in ("result", "error"):
             self._terminal_emitted = True
@@ -363,18 +369,39 @@ class CliEmitter:
         process exit code, so a one-shot CLI need not hand-roll the
         emit-then-exit dance.
 
-        Returns ``success_code`` on a successful write; ``0`` if the write failed
-        because the reader hung up (broken pipe); ``4`` on any other emit,
-        validation, or write failure. A library never calls :func:`sys.exit`
-        itself — return this code from the program's entry point.
+        Returns ``success_code`` on a successful write; ``0``, saying nothing,
+        if the write failed because the reader hung up (broken pipe). Any other
+        write failure returns ``4`` after reporting ``output_write_failed`` as
+        an ``error`` event: on the diagnostic writer in finite mode, on
+        ``sys.stderr`` in event-stream mode, whose only writer is the one that
+        just failed. That report is best effort. An event the emitter refuses
+        (a protocol violation or a second terminal event) is the command's own
+        failure, not an output one, and returns ``1``. A library never calls
+        :func:`sys.exit` itself — return this code from the program's entry
+        point.
         """
         try:
             self.emit(event)
         except BrokenPipeError:
             return 0
         except Exception:
+            if not self._write_failed:
+                return 1
+            self._report_output_write_failed()
             return 4
         return success_code
+
+    def _report_output_write_failed(self) -> None:
+        event = json_error("output_write_failed", "could not write command output").build()
+        try:
+            if self._diagnostic is not None:
+                self.emit(event)
+            else:
+                # Event-stream mode has no diagnostic writer, so the report
+                # goes to the process's stderr through an emitter of its own.
+                CliEmitter.stream(sys.stderr, self._format).with_strict_protocol().emit(event)
+        except Exception:
+            pass
 
     def finish_result(self, payload: Any) -> int:
         """Convenience over :meth:`finish`: emit a ``result`` payload and return

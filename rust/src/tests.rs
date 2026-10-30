@@ -98,7 +98,17 @@ fn redactor_from_case(case: &Value) -> Redactor {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let mut redactor = Redactor::new();
+    let reveal_names = options
+        .and_then(|obj| obj.get("reveal_names"))
+        .and_then(Value::as_array)
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| name.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut redactor = Redactor::new().reveal_names(reveal_names);
     if !secret_names.is_empty() {
         redactor = redactor.secret_names(secret_names);
     }
@@ -195,7 +205,7 @@ fn test_redact_fixtures() {
         let name = case["name"].as_str().expect("missing name");
         let input = case["input"].clone();
         let expected = &case["expected"];
-        let got = redacted_value(&input);
+        let got = redactor_from_case(case).value(&input);
         assert_eq!(&got, expected, "[redact/{name}]");
     }
 }
@@ -712,6 +722,12 @@ fn test_output_format_fixtures() {
         let parsed_json: Value = serde_json::from_str(&json_out)
             .unwrap_or_else(|e| panic!("[output/{name}] invalid json output: {e}"));
         assert_eq!(parsed_json, expected_json, "[output/{name}] json mismatch");
+        if let Some(expected_text) = case.get("expected_json_text").and_then(Value::as_str) {
+            assert_eq!(
+                json_out, expected_text,
+                "[output/{name}] json text mismatch"
+            );
+        }
 
         let expected_yaml = case["expected_yaml"]
             .as_str()
@@ -2158,6 +2174,43 @@ mod cli_emitter_tests {
         // Any other write failure maps to 4.
         let mut other = CliEmitter::new(OtherFailWriter, OutputFormat::Json);
         assert_eq!(other.finish_result(json!({})), 4);
+
+        // An event the emitter refuses is the command's failure, not output's.
+        let mut twice = CliEmitter::new(Vec::new(), OutputFormat::Json);
+        assert_eq!(twice.finish_result(json!({})), 0);
+        assert_eq!(twice.finish_result(json!({})), 1);
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedSink(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cli_emitter_finish_reports_an_unwritable_result_on_the_diagnostic_sink() {
+        let diagnostic = SharedSink::default();
+        let mut emitter =
+            CliEmitter::finite_with(OtherFailWriter, diagnostic.clone(), OutputFormat::Json);
+        assert_eq!(emitter.finish_result(json!({"rows": 2})), 4);
+        let reported: Value =
+            serde_json::from_slice(&diagnostic.0.borrow()).expect("diagnostic is one JSON event");
+        assert_eq!(reported["kind"], "error");
+        assert_eq!(reported["error"]["code"], "output_write_failed");
+
+        // A closed reader stays silent success.
+        let diagnostic = SharedSink::default();
+        let mut emitter =
+            CliEmitter::finite_with(FailingWriter, diagnostic.clone(), OutputFormat::Json);
+        assert_eq!(emitter.finish_result(json!({})), 0);
+        assert!(diagnostic.0.borrow().is_empty());
     }
 
     struct FailOnceWriter {
@@ -2390,7 +2443,7 @@ fn decode_error_event_with_extension_fields() {
         DecodedEvent::Error(decoded) => {
             assert_eq!(decoded.code, "not_found");
             assert_eq!(decoded.message, "missing");
-            assert!(decoded.retryable);
+            assert_eq!(decoded.retryable, Some(true));
             assert_eq!(decoded.hint.as_deref(), Some("try again"));
             assert_eq!(decoded.fields.get("attempt"), Some(&json!(3)));
             assert_eq!(decoded.trace, Some(json!({})));
@@ -2445,12 +2498,14 @@ fn decode_protocol_event_rejects_invalid_json() {
 }
 
 #[test]
-fn decode_protocol_event_rejects_non_strict_event() {
-    // Missing trace fails the strict profile that decode_protocol_event enforces.
-    let err = decode_protocol_event(r#"{"kind":"result","result":{}}"#)
-        .expect_err("non-strict event must fail");
-    assert!(matches!(err, EventDecodeError::InvalidEvent(_)));
-    assert!(err.to_string().contains("invalid protocol event"));
+fn decode_protocol_event_accepts_base_event() {
+    let event =
+        decode_protocol_event(r#"{"kind":"error","error":{"code":"failed","message":"Failed"}}"#)
+            .unwrap();
+    let DecodedEvent::Error(error) = event else {
+        panic!("expected error")
+    };
+    assert_eq!(error.retryable, None);
 }
 
 #[test]
@@ -2467,11 +2522,22 @@ fn protocol_decode_fixtures() {
         let name = case["name"].as_str().expect("name");
         let input = case["input_line"].as_str().expect("input_line");
         let valid = case["valid"].as_bool().expect("valid");
-        assert_eq!(
-            decode_protocol_event(input).is_ok(),
-            valid,
-            "[protocol_decode/{name}]"
-        );
+        let decoded = decode_protocol_event(input);
+        assert_eq!(decoded.is_ok(), valid, "[protocol_decode/{name}]");
+        if let Some(expected) = case.get("expected_result_json").and_then(Value::as_str) {
+            let Ok(DecodedEvent::Result(result)) = decoded else {
+                panic!("[protocol_decode/{name}] expected a result event");
+            };
+            assert_eq!(
+                render(
+                    &result.result,
+                    OutputFormat::Json,
+                    &OutputOptions::default()
+                ),
+                expected,
+                "[protocol_decode/{name}] result mismatch"
+            );
+        }
     }
 }
 
@@ -2489,22 +2555,11 @@ fn protocol_decode_fixtures() {
 // serializes that stored text directly, so no library code change was needed
 // for JSON.
 //
-// YAML/plain are a narrower story: format_number() (this file's
-// yaml_scalar/plain_scalar helper) canonicalizes an *integral-valued* float
-// by reformatting through f64 and dropping a trailing ".0", to match
-// Go/TS/Python's own native-number formatting for hand-built values (see its
-// doc comment). Go/TS/Python can tell a *decoded* number apart from a
-// hand-built one (json.Number / LosslessNumber / _RawNumber wrapper types)
-// and skip that canonicalization for decoded values, preserving exact
-// spelling even in YAML. serde_json::Number carries no such decoded-vs-hand-
-// built distinction, so format_number cannot do the same. This is invisible
-// for every fixture case here except one: a decoded "-0.0" loses its trailing
-// zero in YAML/plain ("-0.0" -> "-0", value-preserving — IEEE-754 negative
-// zero survives — but spelling-lossy), which is why number_fidelity.json's
-// "negative_zero" case has no expected_yaml (nor does "negative_zero_integer",
-// whose bare "-0" is an integer literal the renderers need not canonicalize
-// but whose JSON retention is the point). Every other case's YAML is
-// asserted and exact, since only integral-valued floats hit this path.
+// YAML/plain apply the spec's canonical number form (format_number): a float
+// literal whose value is an integer below 1e21 renders as that integer. It is
+// decided on the literal's text, which serde_json::Number holds for decoded
+// and hand-built values alike, so Rust needs no decoded-vs-hand-built
+// distinction to agree with Go/TS/Python, and no digit is lost to f64.
 
 #[test]
 fn number_fidelity_fixtures() {
@@ -2517,8 +2572,11 @@ fn number_fidelity_fixtures() {
         let input_line = case["input_line"]
             .as_str()
             .expect("input_line must be a string");
-        let expected_json = case["expected_json"]
+        // serde_json re-spells an exponent while scanning it (`6.022e23` is
+        // stored as `6.022e+23`), so a case may record Rust's JSON separately.
+        let expected_json = case["expected_json_rust"]
             .as_str()
+            .or_else(|| case["expected_json"].as_str())
             .expect("expected_json must be a string");
 
         let decoded = decode_protocol_event(input_line)

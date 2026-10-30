@@ -195,3 +195,9 @@ afdata_result "Build complete"
 
 In a repository checkout, consult `docs/bash.md` only when an API detail or
 edge case is not covered here.
+
+Use `afdata_result --json '{"duration_ms":12,"count":3}'` for typed result
+payloads; the JSON value is parsed and redacted before emission, and
+`afdata_result "message"` stays the form for a plain message. Successful child
+results become redacted diagnostic text so the outer script remains the
+terminal-result owner.

@@ -6,7 +6,7 @@ Field names encode units and semantics. Agents read `latency_ms` and know millis
 
 ## Overview
 
-Agent-First Data has three parts:
+Agent-First Data is made of these parts:
 
 1. **[Naming Convention](#part-1-naming-convention)** (required) — encode units and semantics in field names
 2. **[Output Processing](#part-2-output-processing)** (required) — suffix-driven formatting and automatic secret protection
@@ -14,13 +14,13 @@ Agent-First Data has three parts:
 
 **Parts 1 and 2 are the core.** Part 3 is optional — a recommended structure that works well with Parts 1 and 2, but you can use AFDATA naming with any JSON structure (REST APIs, GraphQL, databases, etc.).
 
-**Four SDKs, one contract.** Naming, output processing, the protocol template,
+**One contract across SDKs.** Naming, output processing, the protocol template,
 and the established core helpers are implemented in Rust, Go, Python, and
-TypeScript. Rust is the reference compiler for the new closed-world
-`cli-spec-v1` registry and `cli-help-v2`; the other SDK compilers follow the
-same serialized model and fixtures. The Rust crate also bundles
+TypeScript. Rust provides the closed-world `cli-spec-v1` registry compiler
+and `cli-help-v2`. The other SDKs provide emitters and readers; their applications
+own argv parsing. The Rust crate also bundles
 `skill`/`skill-admin`, `stream-redirect`, and tracing integration. The exact
-shared legacy surface is enumerated in `spec/api-surface.json`.
+shared core is enumerated in `spec/api-surface.json`.
 
 **Jump to:**
 - [Quick Reference: All Suffixes](#quick-reference-all-suffixes)
@@ -184,6 +184,15 @@ logs. Keep live secrets out of argv. A CLI that records its invocation must
 call `redact_argv` before logging argv, but that only protects the resulting
 structured log; it cannot retroactively protect the process boundary.
 
+A serialization boundary may deliberately reveal exact structured field names via
+`Redactor::reveal_names` (Rust), `Redactor.RevealNames` (Go), `reveal_names`
+(Python options), or `redaction.revealNames` (TypeScript). Matching is exact and
+case-sensitive at any depth, including legacy names listed in `secret_names`.
+Only the matching field's whole-value mask is skipped; its children still pass
+through normal redaction. This does not exempt URL parameters, URL credentials,
+or argv values. A revealed `_url` field still receives URL redaction. Use this
+option only at the output boundary that intentionally delivers that value.
+
 The marker `***` has exactly one meaning in AFDATA output: a value was redacted because its field name, URL query parameter name, explicit `secret_names` entry, or exact `url_names` URL context made it sensitive. It is not used for serialization failures, truncation, unsupported types, or arbitrary “maybe secret” guesses.
 
 #### Secrets inside URLs
@@ -264,7 +273,7 @@ the spans is copied through unchanged.
 
 **A nested URL in a parameter value is redacted too.** A redirect target (`?next=https://b/cb?token_secret=x`) carries its own parameters. When a parameter value, form-decoded, is itself a single URL whose redaction changes it, the redacted URL replaces the value in place if the value was not encoded, and `***` replaces the whole value if it was, since its encoded bytes cannot be edited surgically. Inspection follows at most 16 URLs in a chain, counting the outer URL; any deeper URL value becomes `***` without further inspection so untrusted redirect chains cannot exhaust the call stack.
 
-**A password containing an unencoded delimiter.** Hand-written connection strings put `?`, `#` or `/` inside a password, which ends the authority early and leaves the rest of the password in the query, fragment or path. Two rules keep it from leaking:
+**A password containing an unencoded delimiter.** Hand-written connection strings put `?`, `#` or `/` inside a password, which ends the authority early and leaves the rest of the password in the query, fragment or path. These rules keep it from leaking:
 - When a `:` precedes the first `?`/`#` and an `@` follows it before the first `/`, the userinfo runs to that `@` (how libpq reads the string): `postgres://u:p#x@h/db` → `postgres://u:***@h/db`.
 - When the authority has no `@` and its text after the last `:` is not a port number (and it is not a bracketed IPv6 literal), while an `@` appears later in the URL, where the password ends cannot be known and the whole value becomes `***`: `https://u:p/x@h/` → `***`.
 
@@ -378,7 +387,7 @@ does not protect shell history, `/proc`, parent-process inspection, or logs
 written by code that bypasses the AFDATA redactor; prefer a non-argv secret
 source.
 
-**Closed-world invocation registry.** An AFDATA CLI MUST be compiled from one
+**Closed-world invocation registry.** A CLI claiming help-v2 or closed-world compatibility MUST be compiled from one
 serializable `cli-spec-v1` registry. Each command declares local `ArgSpec`s and
 one or more named `Combination`s. A combination consists only of fixed finite
 enum values, explicitly required arguments, optional arguments whose arbitrary
@@ -405,12 +414,20 @@ are never ambiguous. Where a subcommand declares neither, `--version` and
 
 **Declared value sources.** A string argument MAY declare a non-empty `sources`
 set when its value can be supplied indirectly. The built-in schemes are
-`env:NAME`, `file:PATH#DOT_PATH`, `stdin`, `fd:N`, and `prompt`;
+`env:NAME`, `file:PATH[#DOT_PATH]`, `stdin`, `fd:N`, and `prompt`;
 `file+FORMAT:PATH#DOT_PATH` names any document format the build supports when
 the filename does not. A bare argument remains the literal value, and
 `literal:VALUE` escapes a value beginning with a recognized prefix. Source
 arguments cannot declare defaults: a default is a value, never an instruction
 to read the host's environment or filesystem.
+
+A file value source without `#DOT_PATH` reads the complete UTF-8 file verbatim,
+without document parsing or scalar conversion. An explicit `#` requires a
+non-empty document address. Whole files and stream sources (`stdin`, `fd:N`)
+read through `read()` are capped at 16 MiB and preserve trailing whitespace;
+credential streams through `read_secret()` and terminal prompts retain their
+1 MiB bound. File sources require regular files. Addressed file sources retain
+their typed scalar semantics.
 
 The registry classifies sources but does not read them. It MUST reject a
 recognized scheme outside the argument's declared set as
@@ -580,7 +597,7 @@ FROM requests;
 
 Transform JSON values for CLI/log output with suffix-driven formatting and automatic secret protection. This applies to any JSON data, regardless of structure.
 
-## Two Output Paths
+## Output Paths
 
 ### Path 1: Raw JSON Serialization
 
@@ -636,13 +653,13 @@ JSON is the canonical format. YAML mirrors it exactly — same keys, same values
 **Stripping the `_secret` suffix is the companion of having redacted the value, never an unconditional rename.** Plain drops the suffix only from a field whose value is the `***` marker. Where redaction did not apply — `Off`, or a field outside `trace` under `TraceOnly` — the suffix stays, because removing it would emit the live secret *and* delete the only mark saying it is one, leaving nothing downstream to protect. So `Off` renders `api_key_secret=sk-live-xxx`, not `api_key=sk-live-xxx`. This makes the registry's `strip_key: true` for `_secret` a statement about the default policy, under which every such value is redacted.
 
 **Format characteristics:**
-- **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted
+- **JSON** — single-line, original keys, raw values, no sorting (machine-readable), secrets redacted; strings are escaped only where JSON requires it, so `&`, `<`, `>`, U+2028 and U+2029 are written as themselves
 - **YAML** — multi-line, original keys, raw values (same semantics as JSON), keys sorted, secrets redacted by default
 - **Plain** — single-line logfmt, human-readable, formatting suffixes stripped, values formatted, secrets redacted by default
 
 ### yaml
 
-Each JSON line becomes a YAML document, separated by `---`. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float). YAML is **structure-preserving**, like JSON: it keeps every key and value exactly as written — no suffix stripping, no value reformatting — regardless of `PlainStyle`. **Secrets automatically redacted.**
+Each JSON line becomes a YAML document, separated by `---`. Strings always quoted to avoid YAML pitfalls (`no` → `false`, `3.0` → float). YAML is **structure-preserving**, like JSON: it keeps every key and value as written — no suffix stripping, no value reformatting beyond the canonical number form under *Number rendering* below — regardless of `PlainStyle`. **Secrets automatically redacted.**
 
 ```yaml
 ---
@@ -670,7 +687,7 @@ Single-line [logfmt](https://brandur.org/logfmt) style. In the default readable 
 
 - Nested keys use dot notation: `trace.duration=1.28s`
 - Values containing ASCII space, tab, newline, carriage return, form feed, vertical tab, NBSP, `=`, `"`, or `\` are quoted; `\`, `"`, newline, carriage return, tab, form feed, and vertical tab are escaped so each record stays one physical line
-- Arrays are comma-joined: `fields=email,age`
+- Arrays are comma-joined: `fields=email,age`. An object or array inside an array is written as compact JSON with keys sorted as below and every number in the canonical form under *Number rendering*: `[{"b":1.0,"a":1e5}]` → `{"a":100000,"b":1}`
 - Null values are empty: `RUST_LOG=`
 
 ```
@@ -737,9 +754,9 @@ Strict string fields such as `_bcp47`, `_utc_offset`, `_rfc3339_date`, and `_rfc
 
 A `_url` field value is preserved byte-for-byte in Plain output except for the redacted secret spans (userinfo password, `_secret`-suffixed/`secret_names` query parameters): the `_url` key is not stripped, and formatting suffixes that appear *inside* the URL — `?timeout_ms=5000`, `?size_bytes=1048576` — are **not** reformatted (`5s`, `1.0MiB`) or stripped, because the URL must round-trip to its server exactly. URL key-stripping/value-formatting applies to JSON object keys, never to query parameters inside a string value. YAML never strips or reformats any key/value in the first place, so a `_url` field renders there exactly like any other field. This is pinned by the `url_params_redacted_not_reformatted` case in [`spec/fixtures/output_formats.json`](fixtures/output_formats.json).
 
-**Type constraints**: `_bytes` requires a non-negative integer; `_epoch_*` and fiat suffixes (`_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents`, `_{code}_micro`) require integers, with fiat explicitly allowing either sign. Duration, Bitcoin, and `_percent` suffixes accept any number. When the value type doesn't match, formatting falls through to the raw value with the original key preserved. An **integral-valued float** counts as an integer for the integer-required suffixes (`3.0` is treated as `3`): a JSON number's value, not its lexical form, decides, because JavaScript cannot distinguish `3` from `3.0` after parsing.
+**Type constraints**: `_bytes` requires a non-negative integer; `_epoch_*` and fiat suffixes (`_usd_cents`, `_eur_cents`, `_jpy`, `_{code}_cents`, `_{code}_micro`) require integers, with fiat explicitly allowing either sign. Fiat amounts, `_epoch_ms` and `_epoch_s` are bounded by signed 64-bit and `_bytes` by unsigned 64-bit. Bitcoin suffixes (`_sats`, `_msats`) and `_epoch_ns` take an integer of any size, as a number or a decimal integer string: a Bitcoin amount keeps its exact digits, and `_epoch_ns` formats whenever the instant falls in RFC 3339's years 0001–9999. Duration and `_percent` suffixes accept any number, including a decoded literal beyond float64's range, since appending a unit does no arithmetic; only `_ms`, which converts to seconds from 1000, needs a finite value. When the value type doesn't match, formatting falls through to the raw value with the original key preserved. An **integral-valued float** counts as an integer for the integer-required suffixes (`3.0` is treated as `3`): a JSON number's value, not its lexical form, decides, because JavaScript cannot distinguish `3` from `3.0` after parsing. That value is read from the number's decimal text: a decoded literal as written, and a native float through its shortest round-trip spelling, the same text *Number rendering* starts from, never its exact binary value. A float64 of 2⁶⁰ is spelled `1.152921504606847e+18`, so `_jpy` reads it as `¥1,152,921,504,606,847,000` in every SDK, exactly as it reads a decoded literal of that spelling; Rust's `serde_json` stores a native float as that same text and could not do otherwise.
 
-**Number rendering**: a number is rendered for YAML/plain by the shared fixture-defined decimal form: integral-valued floats drop their trailing `.0` (`3.0` → `3`), exponent markers use lowercase `e`, and exponent signs/leading zeroes are normalized (`1e-07` → `1e-7`). Integers beyond 2⁵³ are preserved exactly by Rust, Go, and Python; JavaScript loses precision on them (see the `_epoch_ns` precision note above).
+**Number rendering**: a number is rendered for YAML/plain by the shared fixture-defined decimal form, applied alike to native numbers and to numbers decoded from JSON. A float whose value is an integer below 10²¹ in magnitude renders as that integer, sign included (`3.0` → `3`, `-0.0` → `-0`, `1.5e+2` → `150`); every other number keeps its digits and takes one notation: positional when its magnitude lies in [10⁻⁶, 10²¹), the range ECMAScript's `Number#toString` uses, and exponent form otherwise, with a lowercase exponent marker, an explicit exponent sign, and no leading zeroes in the exponent (`1234567.5` → `1234567.5`, `1e-5` → `0.00001`, `1e-07` → `1e-7`, `6.022e23` → `6.022e+23`). Each runtime's own shortest-float formatter switches notation at a different magnitude, so the SDK decides it rather than inheriting it. JSON keeps a decoded number's literal as written, with one Rust exception: `serde_json` re-spells an exponent while scanning it, so Rust's JSON writes a decoded `6.022e23` as `6.022e+23` and `1.5E030` as `1.5e+030`. The rule is decided on the number's decimal text, never through float64, so rendering can change a number's spelling but not its digits (`9007199254740993.0` → `9007199254740993`). A decoded number keeps its digits in every SDK, TypeScript included, and so does a native integer type (a Python `int`, a Go `int64`, a JavaScript `bigint`). A native float renders by the same rule in every SDK, and a JavaScript `number` is a float like any other: `1e21` renders `1e+21` and `2**53` renders `9007199254740992`, never a refusal. What JavaScript loses happens earlier, when a `number` is created: the literal `9007199254740993` is already `9007199254740992` by the time it reaches a renderer, so a JavaScript producer that needs an exact integer beyond 2⁵³ passes a `bigint` (see the `_epoch_ns` precision note above).
 
 ### Key ordering
 
@@ -794,7 +811,7 @@ how each event is framed depends on `--output`:
 Agent-facing machine input remains JSON. YAML and plain are display formats.
 
 Channel policy — the stream an event lands on follows the **consumption mode**,
-not the event's shape. There are two modes:
+not the event's shape. The modes are:
 
 **Finite one-shot commands (the default).** A command that runs, emits at most
 one terminal event, and exits. Its events split by `kind`, following Unix
@@ -819,6 +836,14 @@ A multiplex transport owns lifecycle state per request or logical stream.
 `CliEmitter` represents one such logical stream; AFDATA does not provide a
 global keyed-emitter registry or treat the whole multiplex connection as one
 finite CLI invocation.
+
+Rust registry adapters own standard output completion: `CliEmitter::from_plan`
+uses a resolved plan; `BoundOutcome::into_run` emits lifecycle responses and
+returns domain invocations. Hosts install any file sinks before this call.
+`write_raw_exit` treats a closed reader as success and other write failures as
+exit **4**, with `output_write_failed` as the standard error code.
+`cli_output_setup_failed_event` constructs an `output_setup_failed` diagnostic.
+Codes 0, 1, 2, and 4 are reserved and appear in generated CLI references.
 
 **Choosing the mode.** A command is an event stream when it produces **more than
 one caller-needed output over time**; otherwise it is finite. Two shapes qualify
@@ -1017,6 +1042,32 @@ The `validate_protocol_event(event, strict)` / `validate_protocol_stream(events,
 
 Passing the base validator proves mandatory conformance only. Use the strict validator when claiming conformance with these recommendations. Structured version metadata may intentionally use the base profile when no execution trace exists.
 
+The typed protocol reader accepts the base profile. An absent `error.retryable`
+is represented as an optional/nullable value, distinct from `false`; callers
+requiring strict recommendations validate explicitly before decoding. A
+present `retryable` that is not a boolean (`"false"`, `null`) fails base
+validation in every SDK rather than reading as absent. Every reader also
+refuses `NaN` and `Infinity`, which are not JSON numbers.
+
+Every reader decodes a line by the same rules, so a line one SDK accepts is
+accepted by all four and reads the same:
+
+- A repeated object key is not an error; its last value wins, as with
+  `JSON.parse`. That includes the envelope's own keys, so
+  `{"kind":"error",…,"kind":"result"}` is a result event.
+- A `\u` escape that names half of a UTF-16 surrogate pair without its other
+  half (`"\ud800"`, `"\udc00"`, `"\ud800A"`) is invalid JSON. It encodes
+  no character, and readers would otherwise disagree on keeping it, replacing
+  it with U+FFFD, or rejecting it. An escaped pair (`"😀"`) is one
+  character.
+- Arrays and objects nest at most 127 deep, counting the envelope object;
+  a deeper line is invalid. The bound keeps a hostile line from exhausting a
+  recursive decoder's stack, and 127 is where `serde_json`, the Rust reader,
+  stops; the other readers check it before parsing. Brackets inside strings
+  do not count.
+
+These rules are pinned by `spec/fixtures/protocol_decode.json`.
+
 ### Agent consumption
 
 1. Read `kind` on every line and read the same-named payload (`event[kind]`).
@@ -1090,7 +1141,7 @@ Framing for both modes and the `--output-to` selector.
 
 # Complete Example: CLI Tool
 
-A complete example showing all three parts working together. A backup tool that uploads files to cloud storage.
+A complete example showing every part working together. A backup tool that uploads files to cloud storage.
 
 ## CLI Invocation
 

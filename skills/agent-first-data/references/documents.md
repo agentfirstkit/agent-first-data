@@ -32,13 +32,16 @@ preserve unrelated comments, order, quoting, anchors, and body text.
 | Remove a slug-keyed item | `remove FILE KEY SLUG` |
 | Remove one dot-path | `unset FILE KEY` |
 
-The first positional is always the file. Reads accept `-` for explicit stdin;
-mutations reject stdin.
+The first positional is always the file. Reads accept `-` for explicit stdin,
+parsed as JSON unless `--input-format` names another format; mutations reject
+stdin.
 
 ## Read safely
 
 `get` always redacts a directly targeted `_secret` leaf to `***`. Pass
 `--secret-name FIELD` for every exact legacy secret name.
+An absent (`null`) secret stays null. Targeting an `_url` field, or a child of
+an `_url` collection, retains the same URL scrubbing as whole-document reads.
 
 `value` writes a scalar with no envelope and no forced newline. It rejects
 containers. On failure its stdout is empty and the structured error goes to
@@ -48,7 +51,8 @@ stderr, so shell substitution cannot capture an error as data:
 port="$(afdata value config.toml server.port --default 8080)"
 ```
 
-Secret leaves require the explicit, auditable `--reveal-secret` option.
+Secret leaves and URL values containing credentials require the explicit,
+auditable `--reveal-secret` option. Credential-free URLs remain readable.
 `--default VALUE` applies only when the path is absent or null; an empty string
 is a real value.
 
@@ -71,7 +75,12 @@ read, pass `--max-file-bytes BYTES`; stdin (`-`) is not capped.
 
 Consume either line stream with `while IFS= read -r`; never use command
 substitution in a `for` loop. Path grammar escapes a literal dot as `\.` and a
-literal backslash as `\\`. Unknown escapes and empty segments are errors.
+literal backslash as `\\`, and a literal star as `\*`. Unknown escapes are
+errors. Empty segments address empty-string keys (`packages..version`); an
+empty-string key at the document root has no standalone path spelling.
+`keys` and `paths` refuse secret subtrees. Names containing a newline require
+`--null`; NUL-containing names cannot be emitted by either framing. An
+unrepresentable name returns `document_unframeable_name` with empty stdout.
 
 For untrusted or secret-bearing paths in Rust, prefer
 `DocumentFile::open_capped`. It opens once, checks regular-file metadata on
@@ -109,6 +118,17 @@ existing scalar or incompatible container in the middle of the path; that is a
 path/type error. Treat parent creation as part of the requested mutation and
 review the full path before writing.
 
+For an existing array, `set FILE features.- c` appends one typed element while
+preserving existing comments. On an array, `-` always names that append
+position and never an element, even under `--slug-field` when an element's
+slug is `-` (address that one by index): it is valid only as the last segment
+of a `set` path, and `get`, `value`, `unset` or a mid-path `-` fail with
+`document_invalid_path`. Object key `-` is ordinary; out-of-range numeric
+indices still fail. A YAML flow sequence (`features: [a, b]`) is refused like
+any non-empty YAML flow collection; rewrite it as a block sequence first.
+Missing object parents are created, including YAML block mappings. No array
+parents or holes are created.
+
 TOML source-preserving edits support arrays, numeric array elements, inline
 tables, and ordinary tables. They retain surrounding comments, decor, key
 order, trailing-comma style, and untouched datetime syntax. Arrays of tables
@@ -128,6 +148,8 @@ in-memory handle and disk state.
 
 For secrets, do not put values in argv. Use
 `--secret-from stdin|prompt|fd:<N>|env:<VAR>`. There is no inline argv form.
+`stdin` and `fd:<N>` store the bytes exactly, a trailing newline included, so
+feed them with `printf %s`, not `echo`.
 
 ## Keyed lists
 
@@ -176,7 +198,7 @@ rule and switches to exact matching.
 
 ## Markdown
 
-A `.md` file has three valid readings, so none of them is ever auto-detected —
+A `.md` file has several valid readings, so none of them is ever auto-detected —
 name the one you want:
 
 - `--input-format toml-frontmatter` edits a `+++` metadata block;
@@ -217,10 +239,22 @@ with normal secret redaction.
 
 Each block carries `type`, `text`, and 1-based inclusive `source_start_line` /
 `source_end_line`, plus `language` on a code block, `format` on a
-frontmatter block, and `ordered` on a list. Prose is
-flattened (emphasis unwrapped, links reduced to text, wrapped lines joined);
-code and HTML remain verbatim, while frontmatter text is empty. Block kinds:
-`paragraph`, `code`, `blockquote`, `list`, `html`, `rule`, `frontmatter`.
+frontmatter block, and `ordered` on a list. Prose `text` is flattened plain
+text: emphasis unwrapped, code spans reduced to their content, links to their
+text, images to their alt text, inline HTML tags dropped, and line breaks
+joined. Code and HTML blocks remain verbatim, while frontmatter text is empty.
+Block kinds: `paragraph`, `code`, `blockquote`, `list`, `item`, `html`, `rule`,
+`frontmatter`.
+
+What flattening drops is kept in `inlines`, on every paragraph, heading, and
+section: an ordered tree of `text`, `code`, `html`, `line_break`, and
+`emphasis`/`strong`/`link`, which nest their own `inlines`. `link` and `image`
+carry `destination_url`; an image's alt text is its flattened `text`. Each
+node has a `text`, so a word addresses a link too:
+
+```bash
+afdata value README.md 'h1.0.h2.bash.paragraph.kit guide.inlines.guide.destination_url' --input-format markdown
+```
 
 Section `source_start_line` / `source_end_line` cover the heading and everything
 the section owns, including child sections. The heading begins at the same
@@ -268,8 +302,9 @@ is an `h2`, or which has no heading at all, has no `h1` key, and reading
 
 Pure CommonMark only: no GFM tables, footnotes, task lists, or strikethrough
 (table rows read as a paragraph, which is the specification's answer). Heading
-sections nest, but blocks do not — a blockquote or list reports its flattened
-text, not its inner structure.
+sections nest by level; a blockquote, a list, and each list `item` also report
+their child blocks under `blocks`, so walk `blocks` recursively to find every
+`code` fence, including one inside a list item.
 
 `paragraph` means exactly what CommonMark parsed as a paragraph. Badge syntax
 and GFM-looking table rows are therefore paragraphs, not magically skipped
@@ -286,6 +321,15 @@ that error means durability is unconfirmed, so reopen the path to determine
 the committed state before retrying. Saves are last-writer-wins: if two handles
 edit the same file, the later save replaces the earlier one. Callers must
 serialize concurrent edits themselves.
+
+Rust `document::write_atomic(path, bytes)` exposes the same durable atomic file
+replacement primitive: existing regular-file permissions survive, new files
+start owner-only on Unix (Windows inherits the directory ACL), and
+symlinks/special files are refused. Unlike the document mutations it does not
+check hard links, so a hard-linked target is split from its other links; write
+through `DocumentFile` when that must be refused. Parent directories
+must exist; inspect `AtomicError::commit_uncertain()` after a directory-sync
+failure because installation has already happened.
 
 For a Rust library caller's first write, use
 `DocumentFile::create_atomic(path, document, CreateOptions::new())`. It accepts
@@ -316,7 +360,7 @@ Branch on stable `error.code`, not message text. Common runtime codes include:
 - `document_not_container`
 - `document_secret_redacted`
 
-Four codes describe four different things that all read as "it did not parse",
+These codes describe different things that all read as "it did not parse",
 and the difference is what to fix:
 
 - `document_format_unknown` — the file's extension named no format, so nothing
@@ -373,7 +417,13 @@ and position, a type mismatch reports the path and the type it found. Branch on
 the code and the path, never on a value you expect to see echoed back.
 
 Malformed invocation is `document_usage_error` with exit 2; runtime document
-errors exit 1. A successful mutation result includes the path written.
+errors exit 1. A `cli_*` code (also exit 2) means the arguments did not parse
+into a registered command shape — an unknown flag, a missing positional — and
+nothing was read. `document_usage_error` means the shape parsed but a value is
+unusable for the command: `-` given to a mutation, an invalid
+`--max-file-bytes`, a missing `--secret-from` source, or a bare value that would
+overwrite a non-string without `--value-type`. A successful mutation result
+includes the path written.
 
 ## Exit criteria
 

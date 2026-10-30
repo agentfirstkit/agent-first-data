@@ -196,7 +196,7 @@
   {
     "name": "url_field_whitespace_ideographic_space",
     "input": {
-      "callback_url": "\u94fe\u63a5\u3000https://h/?token_secret=x"
+      "callback_url": "链接　https://h/?token_secret=x"
     },
     "expected": {
       "callback_url": "***"
@@ -205,7 +205,7 @@
   {
     "name": "url_field_whitespace_nbsp",
     "input": {
-      "callback_url": "see\u00a0https://h/?token_secret=x"
+      "callback_url": "see https://h/?token_secret=x"
     },
     "expected": {
       "callback_url": "***"
@@ -214,7 +214,7 @@
   {
     "name": "url_field_bom_prefix_fails_closed",
     "input": {
-      "callback_url": "\ufeffhttps://h/?token_secret=x"
+      "callback_url": "﻿https://h/?token_secret=x"
     },
     "expected": {
       "callback_url": "***"
@@ -223,7 +223,7 @@
   {
     "name": "url_field_whitespace_nel",
     "input": {
-      "callback_url": "\u0085https://h/?token_secret=x"
+      "callback_url": "https://h/?token_secret=x"
     },
     "expected": {
       "callback_url": "https://h/?token_secret=***"
@@ -250,7 +250,7 @@
   {
     "name": "url_field_zero_width_space_prefix_fails_closed",
     "input": {
-      "callback_url": "\u200bhttps://h/?token_secret=x"
+      "callback_url": "​https://h/?token_secret=x"
     },
     "expected": {
       "callback_url": "***"
@@ -259,7 +259,7 @@
   {
     "name": "url_field_label_prefix_fails_closed",
     "input": {
-      "callback_url": "\u94fe\u63a5https://h/?token_secret=x"
+      "callback_url": "链接https://h/?token_secret=x"
     },
     "expected": {
       "callback_url": "***"
@@ -281,6 +281,49 @@
     },
     "expected": {
       "callback_url": "/cb?page=2"
+    }
+  },
+  {
+    "name": "reveal exact structured names without widening URL redaction",
+    "options": {
+      "reveal_names": [
+        "handoff_secret",
+        "legacy",
+        "service_url"
+      ],
+      "secret_names": [
+        "legacy"
+      ]
+    },
+    "input": {
+      "handoff_secret": "shown",
+      "other_secret": "hidden",
+      "HANDOFF_SECRET": "hidden",
+      "legacy": "shown",
+      "nested": [
+        {
+          "handoff_secret": {
+            "inner_secret": "hidden",
+            "text": "shown"
+          }
+        }
+      ],
+      "service_url": "https://u:p@h/?handoff_secret=hidden"
+    },
+    "expected": {
+      "handoff_secret": "shown",
+      "other_secret": "***",
+      "HANDOFF_SECRET": "***",
+      "legacy": "shown",
+      "nested": [
+        {
+          "handoff_secret": {
+            "inner_secret": "***",
+            "text": "shown"
+          }
+        }
+      ],
+      "service_url": "https://u:***@h/?handoff_secret=***"
     }
   }
 ]

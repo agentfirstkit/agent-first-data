@@ -210,15 +210,48 @@ pub enum SkillReport {
     },
 }
 
+/// What kind of failure a [`SkillError`] is, so a caller can pick an exit
+/// status and a stable code without parsing the message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkillErrorKind {
+    /// The options cannot name a target: `--skills-dir` with every agent, or
+    /// no usable home directory. Nothing was touched.
+    Usage,
+    /// The embedding program's [`SkillSpec`] is malformed — a defect in the
+    /// program, not in the call.
+    InvalidSpec,
+    /// A target holds something afdata will not overwrite or remove: an
+    /// unmanaged or invalid skill, a symlink, a path outside the skills
+    /// directory.
+    Refused,
+    /// The filesystem failed while reading or writing a target.
+    Io,
+}
+
+impl SkillErrorKind {
+    /// The stable `error.code` for this kind.
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Usage => "skill_usage_error",
+            Self::InvalidSpec => "skill_spec_invalid",
+            Self::Refused => "skill_refused",
+            Self::Io => "skill_io_failed",
+        }
+    }
+}
+
 /// A skill admin failure with an operator-facing message and optional hint.
 #[derive(Clone, Debug)]
 pub struct SkillError {
+    /// What kind of failure this is.
+    pub kind: SkillErrorKind,
     /// What went wrong.
     pub message: String,
     /// Optional remediation hint.
     pub hint: Option<String>,
     /// Per-target report captured after a multi-target operation failed.
-    pub partial_report: Option<SkillReport>,
+    pub partial_report: Option<Box<SkillReport>>,
 }
 
 impl std::fmt::Display for SkillError {
@@ -230,8 +263,9 @@ impl std::fmt::Display for SkillError {
 impl std::error::Error for SkillError {}
 
 impl SkillError {
-    fn invalid_request(message: String, hint: Option<String>) -> Self {
+    fn new(kind: SkillErrorKind, message: String, hint: Option<String>) -> Self {
         Self {
+            kind,
             message,
             hint,
             partial_report: None,
@@ -240,6 +274,7 @@ impl SkillError {
 
     fn io(action: &str, err: std::io::Error) -> Self {
         Self {
+            kind: SkillErrorKind::Io,
             message: format!("{action} failed: {err}"),
             hint: None,
             partial_report: None,
@@ -256,6 +291,7 @@ impl SkillError {
             "the file is installed but its durability is unconfirmed; re-run to be sure".to_string()
         });
         Self {
+            kind: SkillErrorKind::Io,
             message: format!("{action} failed: {err}"),
             hint,
             partial_report: None,
@@ -263,7 +299,7 @@ impl SkillError {
     }
 
     fn with_partial_report(mut self, report: SkillReport) -> Self {
-        self.partial_report = Some(report);
+        self.partial_report = Some(Box::new(report));
         self
     }
 }
@@ -301,7 +337,7 @@ fn status(spec: &SkillSpec, options: &SkillOptions) -> Result<SkillReport, Skill
 }
 
 fn install(spec: &SkillSpec, options: &SkillOptions) -> Result<SkillReport, SkillError> {
-    validate_skill_text(spec, spec.source)?;
+    validate_skill_text(spec, spec.source, SkillErrorKind::InvalidSpec)?;
     for asset in spec.assets {
         validate_asset_path(asset.path)?;
     }
@@ -332,6 +368,36 @@ fn preflight_install_targets(
             failures.push(err);
             escaped = true;
             continue;
+        }
+        // An asset path is checked before anything is written, for the same
+        // reason the skill file is: a directory found there halfway through
+        // leaves `SKILL.md` installed beside a missing reference, and a file the
+        // user put there is theirs until a managed `SKILL.md` claims the
+        // directory. Byte-equal content is already what install would write.
+        let skill_dir_managed = skill_path_file_type(&target.skill_path)?
+            .is_some_and(|kind| kind.is_file())
+            && is_managed_or_bundled_skill(spec, &target.skill_path)?;
+        for asset in spec.assets {
+            let dest = asset_target_path(&target.skill_dir, asset.path);
+            let Some(kind) = skill_path_file_type(&dest)? else {
+                continue;
+            };
+            if !kind.is_file() && !kind.is_symlink() {
+                failures.push(format!(
+                    "refusing to overwrite non-regular skill asset at {}",
+                    dest.display()
+                ));
+            } else if !skill_dir_managed
+                && !options.force
+                && (kind.is_symlink()
+                    || std::fs::read(&dest).map_err(|e| SkillError::io("read skill asset", e))?
+                        != asset.contents.as_bytes())
+            {
+                failures.push(format!(
+                    "refusing to overwrite unmanaged skill asset at {}",
+                    dest.display()
+                ));
+            }
         }
         if let Some(kind) = skill_path_file_type(&target.skill_path)? {
             if kind.is_symlink() {
@@ -369,10 +435,12 @@ fn preflight_install_targets(
     } else {
         "pass --force to replace unmanaged files or symlinks"
     };
-    Err(
-        SkillError::invalid_request(failures.join("; "), Some(hint.to_string()))
-            .with_partial_report(install_report_lossy(spec, targets, false)),
+    Err(SkillError::new(
+        SkillErrorKind::Refused,
+        failures.join("; "),
+        Some(hint.to_string()),
     )
+    .with_partial_report(install_report_lossy(spec, targets, false)))
 }
 
 fn install_targets(
@@ -416,7 +484,8 @@ fn uninstall(spec: &SkillSpec, options: &SkillOptions) -> Result<SkillReport, Sk
             continue;
         };
         if !kind.is_file() && !kind.is_symlink() {
-            let err = SkillError::invalid_request(
+            let err = SkillError::new(
+                SkillErrorKind::Refused,
                 format!(
                     "refusing to remove non-regular skill at {}",
                     target.skill_path.display()
@@ -428,24 +497,24 @@ fn uninstall(spec: &SkillSpec, options: &SkillOptions) -> Result<SkillReport, Sk
         if let Err(err) = ensure_no_symlinked_dirs(&target.skills_dir, &target.skill_path) {
             return Err(err.with_partial_report(uninstall_report_lossy(spec, &targets, &removed)));
         }
-        if let Err(err) =
-            std::fs::remove_file(&target.skill_path).map_err(|e| SkillError::io("remove skill", e))
-        {
-            return Err(err.with_partial_report(uninstall_report_lossy(spec, &targets, &removed)));
-        }
-        // The skill file is gone from here on, so a target that fails below is
-        // half-removed. Reporting that precisely is the point: the next
-        // `status` reads `SKILL.md`, finds nothing, and would otherwise call
-        // this target uninstalled while its references sat there.
+        // Assets go first and `SKILL.md` last, so `SKILL.md` keeps marking the
+        // directory as this tool's until everything else is gone. A target that
+        // fails partway therefore still reads as installed, and running
+        // uninstall again finishes the job instead of skipping a directory whose
+        // marker was already removed.
         let assets_removed = match remove_target_assets(spec, target) {
             Ok(assets_removed) => assets_removed,
             Err(err) => {
-                removed.push(target_uninstall_status(target, true));
                 return Err(
                     err.with_partial_report(uninstall_report_lossy(spec, &targets, &removed))
                 );
             }
         };
+        if let Err(err) =
+            std::fs::remove_file(&target.skill_path).map_err(|e| SkillError::io("remove skill", e))
+        {
+            return Err(err.with_partial_report(uninstall_report_lossy(spec, &targets, &removed)));
+        }
         let _ = std::fs::remove_dir(&target.skill_dir);
         removed.push(SkillUninstallStatus {
             assets_removed,
@@ -523,8 +592,10 @@ fn preflight_uninstall_targets(
             spec.marker_slug
         )
     };
-    Err(SkillError::invalid_request(failures.join("; "), Some(hint))
-        .with_partial_report(uninstall_report_lossy(spec, targets, &[])))
+    Err(
+        SkillError::new(SkillErrorKind::Refused, failures.join("; "), Some(hint))
+            .with_partial_report(uninstall_report_lossy(spec, targets, &[])),
+    )
 }
 
 struct SkillTarget {
@@ -540,7 +611,8 @@ fn resolve_targets(
     options: &SkillOptions,
 ) -> Result<Vec<SkillTarget>, SkillError> {
     if options.skills_dir.is_some() && options.agent == SkillAgentSelection::All {
-        return Err(SkillError::invalid_request(
+        return Err(SkillError::new(
+            SkillErrorKind::Usage,
             "--skills-dir requires a single --agent".to_string(),
             Some("custom skills directories are ambiguous when --agent all is used".to_string()),
         ));
@@ -615,8 +687,8 @@ fn resolve_target(
 fn default_skills_dir(agent: SkillAgent, scope: SkillScope) -> Result<PathBuf, SkillError> {
     match (agent, scope) {
         (SkillAgent::Codex, SkillScope::Personal) => {
-            if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-                Ok(PathBuf::from(codex_home).join("skills"))
+            if let Some(codex_home) = env_dir("CODEX_HOME") {
+                Ok(codex_home.join("skills"))
             } else {
                 Ok(home_dir()?.join(".codex").join("skills"))
             }
@@ -627,16 +699,16 @@ fn default_skills_dir(agent: SkillAgent, scope: SkillScope) -> Result<PathBuf, S
         }
         (SkillAgent::ClaudeCode, SkillScope::Workspace) => workspace_skills_dir(".claude"),
         (SkillAgent::Opencode, SkillScope::Personal) => {
-            if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-                Ok(PathBuf::from(xdg).join("opencode").join("skills"))
+            if let Some(xdg) = env_dir("XDG_CONFIG_HOME") {
+                Ok(xdg.join("opencode").join("skills"))
             } else {
                 Ok(home_dir()?.join(".config").join("opencode").join("skills"))
             }
         }
         (SkillAgent::Opencode, SkillScope::Workspace) => workspace_skills_dir(".opencode"),
         (SkillAgent::Hermes, SkillScope::Personal) => {
-            if let Some(hermes_home) = std::env::var_os("HERMES_HOME") {
-                Ok(PathBuf::from(hermes_home).join("skills"))
+            if let Some(hermes_home) = env_dir("HERMES_HOME") {
+                Ok(hermes_home.join("skills"))
             } else {
                 Ok(home_dir()?.join(".hermes").join("skills"))
             }
@@ -696,7 +768,7 @@ fn target_status(spec: &SkillSpec, target: &SkillTarget) -> Result<SkillTargetSt
         managed = skill_text_is_managed_or_bundled(spec, &text);
         current = normalized_content_hash(spec, &text) == source_hash(spec)
             && assets_current(spec, &target.skill_dir);
-        match validate_skill_text(spec, &text) {
+        match validate_skill_text(spec, &text, SkillErrorKind::Refused) {
             Ok(()) => valid = true,
             Err(err) => validation_error = Some(err.message),
         }
@@ -848,12 +920,19 @@ fn managed_skill_contents(spec: &SkillSpec) -> String {
 fn validate_installed_skill(spec: &SkillSpec, path: &Path) -> Result<(), SkillError> {
     let text =
         std::fs::read_to_string(path).map_err(|e| SkillError::io("read installed skill", e))?;
-    validate_skill_text(spec, &text)
+    // The source was validated before writing, so a rejection here means the
+    // file on disk is not what was written.
+    validate_skill_text(spec, &text, SkillErrorKind::Io)
 }
 
-fn validate_skill_text(spec: &SkillSpec, text: &str) -> Result<(), SkillError> {
+fn validate_skill_text(
+    spec: &SkillSpec,
+    text: &str,
+    kind: SkillErrorKind,
+) -> Result<(), SkillError> {
     crate::skill::validate_skill_named(text, spec.name).map_err(|err| {
-        SkillError::invalid_request(
+        SkillError::new(
+            kind,
             format!("invalid {} skill front matter: {err}", spec.title),
             Some(format!(
                 "make SKILL.md metadata conform to the Agent Skills specification and set name to {}",
@@ -869,7 +948,8 @@ fn is_managed_or_bundled_skill(spec: &SkillSpec, path: &Path) -> Result<bool, Sk
         return Ok(false);
     };
     if kind.is_symlink() {
-        return Err(SkillError::invalid_request(
+        return Err(SkillError::new(
+            SkillErrorKind::Refused,
             format!("refusing to inspect symlinked skill at {}", path.display()),
             Some("pass --force to replace or remove the symlink itself".to_string()),
         ));
@@ -980,14 +1060,15 @@ fn normalize_skill_text(spec: &SkillSpec, text: &str) -> String {
 fn validate_spec(spec: &SkillSpec) -> Result<(), SkillError> {
     validate_slug("skill name", spec.name)?;
     validate_slug("marker slug", spec.marker_slug)?;
-    validate_skill_text(spec, spec.source)
+    validate_skill_text(spec, spec.source, SkillErrorKind::InvalidSpec)
 }
 
 fn validate_slug(field: &str, value: &str) -> Result<(), SkillError> {
     if slug_is_valid(value) {
         return Ok(());
     }
-    Err(SkillError::invalid_request(
+    Err(SkillError::new(
+        SkillErrorKind::InvalidSpec,
         format!(
             "invalid {field} {value:?}: expected a lowercase slug matching [a-z0-9][a-z0-9-]*[a-z0-9]"
         ),
@@ -1041,7 +1122,8 @@ fn skill_path_file_type(path: &Path) -> Result<Option<std::fs::FileType>, SkillE
 /// win that race can already write inside the tree being installed into.
 fn ensure_no_symlinked_dirs(root: &Path, path: &Path) -> Result<(), SkillError> {
     let Ok(relative) = path.strip_prefix(root) else {
-        return Err(SkillError::invalid_request(
+        return Err(SkillError::new(
+            SkillErrorKind::Refused,
             format!(
                 "{} is not inside the skills directory {}",
                 path.display(),
@@ -1061,7 +1143,8 @@ fn ensure_no_symlinked_dirs(root: &Path, path: &Path) -> Result<(), SkillError> 
         }
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(SkillError::invalid_request(
+                return Err(SkillError::new(
+                    SkillErrorKind::Refused,
                     format!(
                         "refusing to reach {} through the symlinked directory {}",
                         path.display(),
@@ -1101,7 +1184,7 @@ fn containment_failure(spec: &SkillSpec, target: &SkillTarget) -> Result<(), Str
 
 fn write_skill_atomic(target: &SkillTarget, content: &str) -> Result<(), SkillError> {
     ensure_no_symlinked_dirs(&target.skills_dir, &target.skill_path)?;
-    write_file_atomic(&target.skill_path, content)
+    write_file_atomic(&target.skill_path, content, "install skill file")
 }
 
 /// Atomically install `content` at `path` through the crate's one atomic file
@@ -1111,7 +1194,7 @@ fn write_skill_atomic(target: &SkillTarget, content: &str) -> Result<(), SkillEr
 ///
 /// An existing regular file keeps its own permissions; a file created here is
 /// world-readable, which is what a skill an agent must load has to be.
-fn write_file_atomic(path: &Path, content: &str) -> Result<(), SkillError> {
+fn write_file_atomic(path: &Path, content: &str, action: &str) -> Result<(), SkillError> {
     let preserved = match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => Some(metadata.permissions()),
         _ => None,
@@ -1127,7 +1210,7 @@ fn write_file_atomic(path: &Path, content: &str) -> Result<(), SkillError> {
             .with_permissions(preserved)
             .with_unix_mode(unix_mode),
     )
-    .map_err(|err| SkillError::write_failed("install skill file", err))
+    .map_err(|err| SkillError::write_failed(action, err))
 }
 
 /// Reject an asset path that is absolute or carries a `.`/`..`/empty segment, so
@@ -1139,7 +1222,8 @@ fn validate_asset_path(path: &str) -> Result<(), SkillError> {
             .split(['/', '\\'])
             .any(|seg| seg.is_empty() || seg == "." || seg == "..");
     if bad {
-        return Err(SkillError::invalid_request(
+        return Err(SkillError::new(
+            SkillErrorKind::InvalidSpec,
             format!("invalid skill asset path: {path}"),
             Some(
                 "asset paths must be relative to the skill directory with no `.`/`..` segments"
@@ -1173,7 +1257,7 @@ fn install_target_assets(spec: &SkillSpec, target: &SkillTarget) -> Result<(), S
             std::fs::create_dir_all(parent)
                 .map_err(|e| SkillError::io("create skill asset dir", e))?;
         }
-        write_file_atomic(&dest, asset.contents)?;
+        write_file_atomic(&dest, asset.contents, "install skill asset")?;
     }
     Ok(())
 }
@@ -1235,12 +1319,20 @@ fn remove_target_assets(spec: &SkillSpec, target: &SkillTarget) -> Result<Vec<St
     Ok(removed)
 }
 
-fn home_dir() -> Result<PathBuf, SkillError> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
+/// An environment variable naming a directory, ignored when empty or
+/// relative: either would put a personal skill under the current directory.
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
         .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+fn home_dir() -> Result<PathBuf, SkillError> {
+    env_dir("HOME")
+        .or_else(|| env_dir("USERPROFILE"))
         .ok_or_else(|| {
-            SkillError::invalid_request(
+            SkillError::new(
+                SkillErrorKind::Usage,
                 "cannot determine home directory".to_string(),
                 Some("pass --skills-dir explicitly".to_string()),
             )
@@ -1613,7 +1705,7 @@ mod tests {
                 .contains("refusing to overwrite unmanaged skill")
         );
         assert!(!dir.join("codex").join("agent-first-test").exists());
-        let partial_report = err.partial_report;
+        let partial_report = err.partial_report.map(|report| *report);
         assert!(matches!(partial_report, Some(SkillReport::Install { .. })));
         let Some(SkillReport::Install {
             installed, targets, ..
@@ -1663,7 +1755,7 @@ mod tests {
                 .join(SKILL_FILE_NAME)
                 .exists()
         );
-        let partial_report = err.partial_report;
+        let partial_report = err.partial_report.map(|report| *report);
         assert!(matches!(
             partial_report,
             Some(SkillReport::Uninstall { .. })
@@ -1908,6 +2000,86 @@ mod tests {
             "a directory holding the user's own file survives, and the report says so"
         );
         assert_eq!(std::fs::read_to_string(&mine).unwrap_or_default(), "mine");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn install_leaves_a_users_own_reference_alone_without_force() {
+        let dir = temp_skills_dir("unmanaged-asset");
+        let opts = options(SkillAgentSelection::Codex, &dir, false);
+        let skill_dir = dir.join("agent-first-test");
+        let guide = skill_dir.join("references").join("guide.md");
+        std::fs::create_dir_all(guide.parent().unwrap()).unwrap();
+        std::fs::write(&guide, "my notes\n").unwrap();
+
+        let err = run_skill_admin(&spec_with_assets(), SkillAction::Install, &opts)
+            .expect_err("a file the user put there is not this tool's to replace");
+        assert!(
+            err.message.contains("unmanaged skill asset"),
+            "{}",
+            err.message
+        );
+        assert_eq!(std::fs::read_to_string(&guide).unwrap(), "my notes\n");
+        assert!(!skill_dir.join(SKILL_FILE_NAME).exists());
+
+        // Content identical to the bundle is already what install would write.
+        std::fs::write(&guide, "# guide\n").unwrap();
+        assert!(run_skill_admin(&spec_with_assets(), SkillAction::Install, &opts).is_ok());
+
+        // Once a managed SKILL.md owns the directory, a changed asset is a
+        // stale copy to refresh, not the user's file.
+        std::fs::write(&guide, "older bundle\n").unwrap();
+        assert!(run_skill_admin(&spec_with_assets(), SkillAction::Install, &opts).is_ok());
+        assert_eq!(std::fs::read_to_string(&guide).unwrap(), "# guide\n");
+
+        std::fs::remove_file(skill_dir.join(SKILL_FILE_NAME)).unwrap();
+        std::fs::write(&guide, "my notes\n").unwrap();
+        let forced = options(SkillAgentSelection::Codex, &dir, true);
+        assert!(run_skill_admin(&spec_with_assets(), SkillAction::Install, &forced).is_ok());
+        assert_eq!(std::fs::read_to_string(&guide).unwrap(), "# guide\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn install_refuses_a_directory_at_an_asset_path_before_writing_anything() {
+        let dir = temp_skills_dir("asset-is-dir");
+        let opts = options(SkillAgentSelection::Codex, &dir, true);
+        let skill_dir = dir.join("agent-first-test");
+        std::fs::create_dir_all(skill_dir.join("references").join("guide.md")).unwrap();
+
+        let err = run_skill_admin(&spec_with_assets(), SkillAction::Install, &opts)
+            .expect_err("a directory cannot be replaced by an asset file");
+        assert!(
+            err.message.contains("non-regular skill asset"),
+            "{}",
+            err.message
+        );
+        assert!(!skill_dir.join(SKILL_FILE_NAME).exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `SKILL.md` is the marker uninstall goes by, so it has to be the last
+    /// thing removed: a run that fails on an asset must leave a target the
+    /// next run still recognises and can finish.
+    #[cfg(unix)]
+    #[test]
+    fn an_uninstall_that_fails_partway_can_be_run_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_skills_dir("uninstall-retry");
+        let opts = options(SkillAgentSelection::Codex, &dir, false);
+        let skill_dir = dir.join("agent-first-test");
+        let references = skill_dir.join("references");
+        assert!(run_skill_admin(&spec_with_assets(), SkillAction::Install, &opts).is_ok());
+
+        std::fs::set_permissions(&references, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = run_skill_admin(&spec_with_assets(), SkillAction::Uninstall, &opts);
+        std::fs::set_permissions(&references, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(failed.is_err());
+        assert!(skill_dir.join(SKILL_FILE_NAME).is_file());
+
+        assert!(run_skill_admin(&spec_with_assets(), SkillAction::Uninstall, &opts).is_ok());
+        assert!(!references.join("guide.md").exists());
+        assert!(!skill_dir.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

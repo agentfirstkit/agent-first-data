@@ -35,6 +35,15 @@ use std::path::{Path, PathBuf};
 
 use crate::document::{Addressing, DocumentError, DocumentResult, Format, KeyedList, Value};
 
+pub(crate) fn read_capped_file(
+    path: &Path,
+    max_bytes: u64,
+    symlink_policy: SymlinkPolicy,
+) -> DocumentResult<String> {
+    let file = open_read_handle(path, symlink_policy)?;
+    read_capped_source(file, path, max_bytes)
+}
+
 /// Whether a capped file read may follow a symbolic link.
 ///
 /// [`NoFollow`](SymlinkPolicy::NoFollow) is implemented with the operating
@@ -359,16 +368,13 @@ impl DocumentFile {
     ) -> DocumentResult<DocumentFile> {
         let path = path.as_ref().to_path_buf();
         let format = resolve_format(&path, format_override)?;
-        let file = open_read_handle(&path, symlink_policy)?;
-        let source = read_capped_source(file, &path, max_bytes)?;
+        let source = read_capped_file(&path, max_bytes, symlink_policy)?;
         Ok(DocumentFile {
             doc: Document::parse(&source, format)?,
             path,
         })
     }
 
-    /// Safely create and commit a new file-backed document.
-    ///
     /// Safely create and commit a new file-backed document.
     ///
     /// The document must already have passed a supported parser through
@@ -461,10 +467,11 @@ impl Document {
         addressing: Addressing<'_>,
     ) -> DocumentResult<()> {
         self.ensure_writable("set")?;
-        let key = &crate::document::resolve_path(&self.value, key, addressing)?;
-        let mut new_doc = self.value.clone();
+        let base = self.set_base();
+        let key = &crate::document::resolve_path(&base, key, addressing)?;
+        let mut new_doc = base;
         crate::document::set_path(&mut new_doc, key, &value, Addressing::INDEX_ONLY)?;
-        let target = crate::document::get_path(&new_doc, key, Addressing::INDEX_ONLY)?;
+        let target = value;
         #[allow(unreachable_patterns)]
         let output = match self.format {
             #[cfg(feature = "toml")]
@@ -511,6 +518,31 @@ impl Document {
         self.source = output;
         self.value = new_doc;
         Ok(())
+    }
+
+    /// The value a `set` edits. A YAML document with no node in it reads as
+    /// null, and a `set` starts its mapping — as an empty TOML, dotenv, or INI
+    /// file already does.
+    fn set_base(&self) -> Value {
+        #[cfg(feature = "yaml")]
+        if self.value.is_null() && self.blank_yaml_document() {
+            return Value::Object(Default::default());
+        }
+        self.value.clone()
+    }
+
+    /// Whether this is YAML (or YAML frontmatter) holding no node at all.
+    #[cfg(feature = "yaml")]
+    fn blank_yaml_document(&self) -> bool {
+        match self.format {
+            Format::Yaml => crate::document::format::yaml::is_blank_document(&self.source),
+            Format::YamlFrontmatter => crate::document::format::frontmatter::split(
+                &self.source,
+                crate::document::format::frontmatter::Delimiter::Dash,
+            )
+            .is_ok_and(|parts| crate::document::format::yaml::is_blank_document(parts.frontmatter)),
+            _ => false,
+        }
     }
 
     /// Add a new element to the keyed list at `key`, identified by
@@ -711,6 +743,9 @@ impl Document {
                 if !object.contains_key(leaf) {
                     return Ok(false);
                 }
+            }
+            Value::Array(_) if leaf == "-" => {
+                return Err(crate::document::append_position_refused(parents, true));
             }
             Value::Array(array) => {
                 let index =
@@ -1370,7 +1405,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             grown.source(),
-            "paths = [\n  \"a\", # first\n  \"b\",\n  \"c\", # second\n]\n",
+            "paths = [\n  \"a\", # first\n  \"b\", # second\n  \"c\",\n]\n",
             "an appended element must carry no comment of its own"
         );
 

@@ -109,6 +109,11 @@ fn assert_document_too_large(output: &std::process::Output, command: &str) {
         response["error"]["code"], "document_too_large",
         "{command}: {response}"
     );
+    // Mutations refuse `-`, so the hint offers only the flag.
+    assert_eq!(
+        response["error"]["hint"], "raise the limit with --max-file-bytes BYTES",
+        "{command}: {response}"
+    );
     assert!(
         !String::from_utf8_lossy(&output.stderr).contains(OVERSIZED_DOCUMENT_CANARY),
         "{command} echoed document contents"
@@ -302,6 +307,252 @@ fn max_file_bytes_must_be_a_positive_byte_count() {
         std::fs::read_to_string(&config_path).unwrap(),
         r#"{"plain_value":1}"#
     );
+}
+
+/// `-` is the append position `set` writes to. Any other verb that reaches it
+/// gets an address error saying so, not a hint to register a naming rule.
+#[test]
+fn append_position_is_refused_outside_set() {
+    let dir = TempDir::new().unwrap();
+    for (name, contents) in [
+        ("list.json", "{\"a\":[1,2]}\n"),
+        ("list.toml", "a = [1, 2]\n"),
+    ] {
+        let path = write_temp(&dir, name, contents);
+        for arguments in [
+            vec!["unset", path.as_str(), "a.-"],
+            vec!["get", path.as_str(), "a.-"],
+        ] {
+            let output = run(&arguments);
+            assert_eq!(output.status.code(), Some(1), "{arguments:?}: {output:?}");
+            let response = json_stderr(&output);
+            assert_eq!(
+                response["error"]["code"], "document_invalid_path",
+                "{response}"
+            );
+            let message = response["error"]["message"].as_str().unwrap();
+            assert!(
+                message.contains("only valid as the last segment of a `set` path"),
+                "{message}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+    }
+}
+
+/// A final `-` is the append position in every verb, even when an element's
+/// slug is literally `-`; were it a name for `get` and `unset`, `get a.-`
+/// would read an element that `set a.-` then appends beside.
+#[test]
+fn append_position_is_reserved_even_against_a_slug_named_dash() {
+    let dir = TempDir::new().unwrap();
+    let contents = "{\"a\":[{\"id\":\"-\",\"v\":1},{\"id\":\"z\",\"v\":2}]}\n";
+    let path = write_temp(&dir, "list.json", contents);
+    for arguments in [
+        vec!["get", path.as_str(), "a.-", "--slug-field", "id"],
+        vec!["value", path.as_str(), "a.-", "--slug-field", "id"],
+        vec!["unset", path.as_str(), "a.-", "--slug-field", "id"],
+    ] {
+        let output = run(&arguments);
+        assert_eq!(output.status.code(), Some(1), "{arguments:?}: {output:?}");
+        let response = json_stderr(&output);
+        assert_eq!(
+            response["error"]["code"], "document_invalid_path",
+            "{arguments:?}: {response}"
+        );
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("`-` names the append position")
+                && message.contains("only valid as the last segment of a `set` path"),
+            "{arguments:?}: {message}"
+        );
+    }
+    // Inside a path it is not an element name either.
+    for arguments in [
+        vec!["get", path.as_str(), "a.-.v", "--slug-field", "id"],
+        vec!["set", path.as_str(), "a.-.v", "3", "--slug-field", "id"],
+        vec!["unset", path.as_str(), "a.-.v", "--slug-field", "id"],
+    ] {
+        let output = run(&arguments);
+        assert_eq!(output.status.code(), Some(1), "{arguments:?}: {output:?}");
+        let response = json_stderr(&output);
+        assert_eq!(
+            response["error"]["code"], "document_invalid_path",
+            "{arguments:?}: {response}"
+        );
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("can only be the last segment of a path"),
+            "{arguments:?}: {message}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+}
+
+/// `set` is the verb that writes `-`, so when `-` sits mid-path the refusal
+/// says where `-` may go, not which verb may use it.
+#[test]
+fn append_position_inside_a_set_path_names_the_segment_rule() {
+    let dir = TempDir::new().unwrap();
+    for (name, contents) in [
+        ("list.json", "{\"a\":[{\"b\":1}]}\n"),
+        ("list.toml", "a = [{ b = 1 }]\n"),
+        ("list.yaml", "a:\n  - b: 1\n"),
+    ] {
+        let path = write_temp(&dir, name, contents);
+        let output = run(&["set", path.as_str(), "a.-.b", "2"]);
+        assert_eq!(output.status.code(), Some(1), "{name}: {output:?}");
+        let response = json_stderr(&output);
+        assert_eq!(
+            response["error"]["code"], "document_invalid_path",
+            "{response}"
+        );
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("can only be the last segment of a path")
+                && !message.contains("only `set`"),
+            "{name}: {message}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+    }
+}
+
+/// Removing the first element of a commented TOML array keeps every comment
+/// that is not the removed element's own, and grows a table inside an inline
+/// table with ordinary spacing.
+#[cfg(feature = "toml")]
+#[test]
+fn toml_edits_keep_comments_and_inline_spacing() {
+    let dir = TempDir::new().unwrap();
+    for (contents, expected) in [
+        (
+            "a = [\n  1, # one\n  # about two\n  2,\n]\n",
+            "a = [\n  # about two\n  2,\n]\n",
+        ),
+        (
+            "a = [ # header\n  # about one\n  1,\n  2,\n]\n",
+            "a = [ # header\n  2,\n]\n",
+        ),
+        ("a = [ 1, 2 ]\n", "a = [ 2 ]\n"),
+    ] {
+        let path = write_temp(&dir, "array.toml", contents);
+        let output = run(&["unset", path.as_str(), "a.0"]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    }
+
+    let path = write_temp(&dir, "inline.toml", "a = { b = 1 }\n");
+    let output = run(&["set", path.as_str(), "a.c.d", "2", "--value-type", "number"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "a = { b = 1, c = { d = 2 } }\n"
+    );
+}
+
+/// Appending to an array of tables is refused with the array-of-tables reason,
+/// not as a key lookup inside a non-table value.
+#[cfg(feature = "toml")]
+#[test]
+fn toml_append_to_an_array_of_tables_explains_the_refusal() {
+    let dir = TempDir::new().unwrap();
+    let contents = "[[x]]\nk = 1\n";
+    let path = write_temp(&dir, "tables.toml", contents);
+    let output = run(&["set", path.as_str(), "x.-", "{}", "--value-type", "json"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let response = json_stderr(&output);
+    assert_eq!(
+        response["error"]["code"], "document_unsupported_operation",
+        "{response}"
+    );
+    let message = response["error"]["message"].as_str().unwrap();
+    assert!(message.contains("array of tables"), "{message}");
+    assert!(!message.contains("non-table"), "{message}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+}
+
+/// An empty YAML flow sequence takes any string, including one with a
+/// character YAML only allows escaped, and reads it back unchanged.
+#[cfg(feature = "yaml")]
+#[test]
+fn yaml_append_to_an_empty_flow_sequence_escapes_what_yaml_forbids_raw() {
+    let dir = TempDir::new().unwrap();
+    for (contents, append, element) in [
+        ("[]\n", "-", "0"),
+        ("- []\n", "0.-", "0.0"),
+        ("items: []\n", "items.-", "items.0"),
+    ] {
+        for text in ["a\u{7f}b", "c1\u{85}\u{9f}", "plain"] {
+            let path = write_temp(&dir, "list.yaml", contents);
+            let output = run(&["set", path.as_str(), append, text]);
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{contents:?} {text:?}: {output:?}"
+            );
+            let read = run(&["value", path.as_str(), element]);
+            assert_eq!(read.status.code(), Some(0), "{read:?}");
+            assert_eq!(String::from_utf8(read.stdout).unwrap(), text);
+        }
+    }
+}
+
+/// `{ }` is as empty as `{}`, so parents grow inside either.
+#[cfg(feature = "yaml")]
+#[test]
+fn yaml_creates_parents_inside_an_empty_flow_mapping_with_inner_space() {
+    let dir = TempDir::new().unwrap();
+    for contents in ["α: {}\n", "α: { }\n"] {
+        let path = write_temp(&dir, "map.yaml", contents);
+        let output = run(&["set", path.as_str(), "α.γ.δ", "x"]);
+        assert_eq!(output.status.code(), Some(0), "{contents:?}: {output:?}");
+        let read = run(&["value", path.as_str(), "α.γ.δ"]);
+        assert_eq!(read.stdout, b"x", "{contents:?}: {read:?}");
+    }
+}
+
+/// An edit that would land behind a YAML alias names the alias and the rule,
+/// and leaks nothing of the YAML library's own vocabulary.
+#[cfg(feature = "yaml")]
+#[test]
+fn yaml_edits_through_an_alias_name_the_alias() {
+    let dir = TempDir::new().unwrap();
+    for (contents, arguments) in [
+        ("a: &x {k: 1}\nb: *x\n", vec!["set", "b.n", "v"]),
+        (
+            "a: &x {k: 1}\nb: *x\n",
+            vec!["set", "b.k", "2", "--value-type", "number"],
+        ),
+        ("a: &x {k: 1}\nb: *x\n", vec!["unset", "b.k"]),
+        (
+            "a: &x {k: 1}\nb: *x\n",
+            vec!["set", "b", "[]", "--value-type", "json"],
+        ),
+        ("- &x {k: 1}\n- *x\n", vec!["set", "1.n", "v"]),
+        ("l:\n  - &x [1]\n  - *x\n", vec!["set", "l.1.-", "2"]),
+    ] {
+        let path = write_temp(&dir, "alias.yaml", contents);
+        let mut full = vec![arguments[0], path.as_str()];
+        full.extend(&arguments[1..]);
+        let output = run(&full);
+        assert_eq!(output.status.code(), Some(1), "{full:?}: {output:?}");
+        let response = json_stderr(&output);
+        assert_eq!(
+            response["error"]["code"], "document_unsupported_operation",
+            "{full:?}: {response}"
+        );
+        let message = response["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("reached through the alias `*x`")
+                && message.contains("does not edit through YAML aliases"),
+            "{full:?}: {message}"
+        );
+        assert!(
+            !message.contains("materialise") && !message.contains("parse error"),
+            "{full:?}: {message}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+    }
 }
 
 /// Stdin is a stream the caller chose to send, so no file budget applies to it.
@@ -502,7 +753,7 @@ fn test_file_extension_inference_and_explicit_override() {
     assert!(
         response["error"]["message"]
             .as_str()
-            .is_some_and(|m| m.contains("cannot detect format"))
+            .is_some_and(|m| m.contains("cannot detect the format"))
     );
 
     let overridden = run(&["get", "--input-format", "json", &config_path, "name"]);
@@ -1036,15 +1287,20 @@ fn test_paths_and_keys_missing_ok_and_null_separator() {
     assert!(null_sep.status.success(), "{:?}", null_sep);
     assert_eq!(null_sep.stdout, b"a\0b\0");
 
-    // A key may contain a newline, which is exactly why the line-separated
-    // default is unsafe for machine consumption.
+    // A key containing a newline needs NUL framing; the default refuses it.
     let newline_key = run_with_stdin(&["paths", "-", "--null"], br#"{"a":1,"b\nc":2}"#);
     assert!(newline_key.status.success(), "{:?}", newline_key);
     assert_eq!(newline_key.stdout, b"a\0b\nc\0");
 
-    // `-0` is not an alias: AFDATA spells its flags out in full.
+    // `-0` is not an alias: AFDATA spells its flags out in full, so a
+    // number-shaped token is a value — here the key `-0`, which is absent.
     let short_form = run_with_stdin(&["paths", "-", "-0"], br#"{"a":1}"#);
-    assert_eq!(short_form.status.code(), Some(2));
+    assert_eq!(short_form.status.code(), Some(1));
+    assert!(short_form.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&short_form)["error"]["code"],
+        "document_path_not_found"
+    );
 }
 
 #[test]
@@ -1210,6 +1466,34 @@ fn test_malformed_field_value_is_usage_error() {
         json_stderr(&output)["error"]["code"],
         "document_usage_error"
     );
+}
+
+/// An empty slug or slug field would write an element keyed `""` that no read
+/// can address; both are usage errors and the file is left untouched.
+#[test]
+fn add_rejects_an_empty_slug_or_slug_field() {
+    let temp_dir = TempDir::new().unwrap();
+    let source = "{\"items\":[]}\n";
+    let config_path = write_temp(&temp_dir, "config.json", source);
+    for (slug, slug_field, message) in [
+        ("b", "", "--slug-field must not be empty"),
+        ("", "id", "SLUG must not be empty"),
+    ] {
+        let output = run(&[
+            "add",
+            &config_path,
+            "items",
+            slug,
+            "--slug-field",
+            slug_field,
+        ]);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let error = json_stderr(&output);
+        assert_eq!(error["error"]["code"], "document_usage_error");
+        assert_eq!(error["error"]["message"], message);
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), source);
+    }
 }
 
 // ═══════════════════════════════════════════
@@ -2148,6 +2432,30 @@ fn test_secret_from_fd_rejects_low_and_non_numeric_descriptors() {
     assert!(String::from_utf8_lossy(&error.stderr).contains("numeric descriptor"));
 }
 
+/// The flag exists so a secret never sits on argv; its error must not point
+/// at `literal:`, the one form it refuses.
+#[test]
+fn test_secret_from_errors_never_suggest_a_literal() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = write_temp(&temp_dir, "secrets.json", "{}\n");
+    for source in ["file:/etc/hosts", "bogus", "literal:x"] {
+        let error = run(&[
+            "set",
+            &config_path,
+            "password_secret",
+            "--secret-from",
+            source,
+        ]);
+        assert_eq!(error.status.code(), Some(2), "{source}");
+        let message = json_stderr(&error)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(message.contains("env:<VAR>"), "{source}: {message}");
+        assert!(!message.contains("literal"), "{source}: {message}");
+    }
+}
+
 #[test]
 fn test_invalid_secret_source_is_rejected_before_target_io_without_echoing_it() {
     let temp_dir = TempDir::new().unwrap();
@@ -2511,6 +2819,55 @@ fn test_markdown_reads_a_readme_as_sections() {
         "markdown",
     ]);
     assert_eq!(String::from_utf8_lossy(&lead_end.stdout), "6");
+}
+
+#[cfg(feature = "markdown")]
+#[test]
+fn test_markdown_reports_inline_structure_and_nested_code() {
+    let temp_dir = TempDir::new().unwrap();
+    let readme = write_temp(
+        &temp_dir,
+        "README.md",
+        "# Run `serve`\n\nRead [the docs](https://u:inline_canary@h/docs).\n\n\
+         - step\n\n  ```bash\n  afdata nested\n  ```\n",
+    );
+    let code = run(&[
+        "value",
+        &readme,
+        "h1.0.inlines.1.type",
+        "--input-format",
+        "markdown",
+    ]);
+    assert_eq!(String::from_utf8_lossy(&code.stdout), "code", "{code:?}");
+
+    // A link's destination is a `_url` field, so its credentials are redacted
+    // like any other.
+    let link = run(&[
+        "get",
+        &readme,
+        "h1.0.paragraph.0.inlines.docs",
+        "--input-format",
+        "markdown",
+    ]);
+    assert!(link.status.success(), "{link:?}");
+    let value = &json_stdout(&link)["result"]["value"];
+    assert_eq!(value["type"], "link");
+    assert_eq!(value["destination_url"], "https://u:***@h/docs");
+    assert!(!String::from_utf8_lossy(&link.stdout).contains("inline_canary"));
+
+    // A fence inside a list item stays a `code` block.
+    let nested = run(&[
+        "get",
+        &readme,
+        "h1.0.blocks.1.blocks.0.blocks.1",
+        "--input-format",
+        "markdown",
+    ]);
+    assert!(nested.status.success(), "{nested:?}");
+    let value = &json_stdout(&nested)["result"]["value"];
+    assert_eq!(value["type"], "code");
+    assert_eq!(value["language"], "bash");
+    assert_eq!(value["text"], "afdata nested");
 }
 
 #[cfg(feature = "markdown")]
@@ -3255,4 +3612,451 @@ fn value_succeeds_when_stdout_reader_has_closed() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+/// The raw-output commands follow the same exit contract as every other
+/// command: a write that fails for any reason but a closed reader is exit 4
+/// with `output_write_failed` on stderr, never a bare exit 1.
+#[cfg(unix)]
+#[test]
+fn raw_output_that_cannot_be_written_exits_4_with_a_diagnostic() {
+    let dir = TempDir::new().unwrap();
+    let file = write_temp(&dir, "doc.json", r#"{"a":[1,2],"s":"text"}"#);
+    for args in [
+        vec!["paths", file.as_str()],
+        vec!["keys", file.as_str()],
+        vec!["value", file.as_str(), "s"],
+    ] {
+        // A zero file-size limit makes the first stdout write fail with EFBIG.
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(r#"trap '' XFSZ; ulimit -f 0; exec "$0" "$@" > "$OUT""#)
+            .arg(env!("CARGO_BIN_EXE_afdata"))
+            .args(&args)
+            .env("OUT", dir.path().join("out.txt"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(4), "{args:?}");
+        assert_eq!(
+            json_stderr(&output)["error"]["code"],
+            "output_write_failed",
+            "{args:?}"
+        );
+    }
+}
+
+/// The protocol-event commands keep the same promise as the raw ones: an
+/// unwritable stdout is exit 4 with `output_write_failed` on stderr, not a
+/// silent exit 4 that leaves the caller guessing what failed.
+#[cfg(unix)]
+#[test]
+fn event_output_that_cannot_be_written_exits_4_with_a_diagnostic() {
+    let dir = TempDir::new().unwrap();
+    let file = write_temp(&dir, "doc.json", r#"{"a":[1,2],"s":"text"}"#);
+    for args in [
+        vec!["get", file.as_str()],
+        vec!["get", file.as_str(), "--output", "yaml"],
+        vec!["emit", "result", "--json", "{}"],
+        vec!["--version"],
+    ] {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(r#"trap '' XFSZ; ulimit -f 0; exec "$0" "$@" > "$OUT""#)
+            .arg(env!("CARGO_BIN_EXE_afdata"))
+            .args(&args)
+            .env("OUT", dir.path().join("out.txt"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(4), "{args:?}: {output:?}");
+        assert_eq!(
+            json_stderr(&output)["error"]["code"],
+            "output_write_failed",
+            "{args:?}"
+        );
+    }
+}
+
+/// A closed reader stays success with nothing on stderr for event output too.
+#[cfg(unix)]
+#[test]
+fn event_output_to_a_closed_reader_is_silent_success() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+
+    let dir = TempDir::new().unwrap();
+    let file = write_temp(&dir, "doc.json", r#"{"a":1}"#);
+    for args in [
+        vec!["get", file.as_str()],
+        vec!["emit", "result", "--json", "{}"],
+    ] {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        drop(reader);
+        let output = afdata()
+            .args(&args)
+            .stdout(Stdio::from(OwnedFd::from(writer)))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+    }
+}
+
+/// An output sink that cannot be opened names the flag and the path, not just
+/// the OS error, so a caller passing both sinks knows which one to fix.
+#[cfg(all(unix, feature = "stream-redirect"))]
+#[test]
+fn an_unopenable_output_file_names_its_flag_and_path() {
+    let temp = TempDir::new().unwrap();
+    let missing_dir = temp.path().join("no_such_dir");
+    for flag in ["--stdout-file", "--stderr-file"] {
+        let sink = missing_dir.join("x").to_str().unwrap().to_string();
+        let output = run(&["emit", "result", "--json", "{}", flag, &sink]);
+        assert_eq!(output.status.code(), Some(1), "{flag}: {output:?}");
+        assert!(output.stdout.is_empty(), "{flag}: {output:?}");
+        let error = json_stderr(&output);
+        assert_eq!(error["error"]["code"], "output_setup_failed", "{flag}");
+        let message = error["error"]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with(&format!("{flag} {sink}: ")),
+            "{flag}: {message}"
+        );
+    }
+}
+
+#[cfg(feature = "stream-redirect")]
+#[test]
+fn invalid_emit_json_is_rejected_before_output_files_are_opened() {
+    let temp = TempDir::new().unwrap();
+    let stdout_file = write_temp(&temp, "stdout.txt", "keep stdout\n");
+    let stderr_file = write_temp(&temp, "stderr.txt", "keep stderr\n");
+    let output = run(&[
+        "emit",
+        "result",
+        "--json",
+        "{\"token_secret\":\"invalid_json_canary\",",
+        "--output",
+        "yaml",
+        "--stdout-file",
+        &stdout_file,
+        "--stderr-file",
+        &stderr_file,
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let error = json_stderr(&output);
+    assert_eq!(error["error"]["code"], "cli_invalid_argument_value");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("invalid_json_canary"));
+    assert_eq!(
+        std::fs::read_to_string(stdout_file).unwrap(),
+        "keep stdout\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(stderr_file).unwrap(),
+        "keep stderr\n"
+    );
+}
+
+#[test]
+fn targeted_get_retains_url_redaction_context_and_absent_secrets() {
+    let source = br#"{"connection_url":"https://u:targeted_url_canary@h/?token_secret=targeted_query_canary","pool_url":[{"endpoint":"https://u:nested_url_canary@h/"}],"token_secret":null}"#;
+    let whole = run_with_stdin(&["get", "-"], source);
+    let whole = json_stdout(&whole);
+    for (key, expected) in [
+        (
+            "connection_url",
+            whole["result"]["value"]["connection_url"].clone(),
+        ),
+        (
+            "pool_url.0.endpoint",
+            whole["result"]["value"]["pool_url"][0]["endpoint"].clone(),
+        ),
+        ("token_secret", serde_json::Value::Null),
+    ] {
+        let output = run_with_stdin(&["get", "-", key], source);
+        assert!(output.status.success(), "{key}: {output:?}");
+        assert_eq!(json_stdout(&output)["result"]["value"], expected, "{key}");
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("canary"),
+            "{key}: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn raw_url_credentials_require_explicit_reveal() {
+    let source = br#"{"connection_url":"https://u:raw_url_canary@h/?token_secret=raw_query_canary","public_url":"https://h/","pool_url":["https://u:nested_url_canary@h/"]}"#;
+    for command in ["value", "values"] {
+        for key in ["connection_url", "pool_url.0"] {
+            let output = run_with_stdin(&[command, "-", key], source);
+            assert_eq!(output.status.code(), Some(1), "{command} {key}: {output:?}");
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                json_stderr(&output)["error"]["code"],
+                "document_secret_redacted"
+            );
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("canary"));
+        }
+        let public = run_with_stdin(&[command, "-", "public_url"], source);
+        assert!(public.status.success(), "{public:?}");
+        let fallback = run_with_stdin(
+            &[
+                command,
+                "-",
+                "missing_url",
+                "--default",
+                "https://u:fallback_url_canary@h/",
+            ],
+            source,
+        );
+        assert_eq!(fallback.status.code(), Some(1), "{fallback:?}");
+        assert!(fallback.stdout.is_empty());
+        assert_eq!(
+            json_stderr(&fallback)["error"]["code"],
+            "document_secret_redacted"
+        );
+        let message = json_stderr(&fallback)["error"]["message"].to_string();
+        assert!(message.contains("--default for `missing_url`"), "{message}");
+        assert!(!message.contains("canary"), "{message}");
+        let revealed = run_with_stdin(&[command, "-", "connection_url", "--reveal-secret"], source);
+        assert!(revealed.status.success(), "{revealed:?}");
+        assert!(String::from_utf8_lossy(&revealed.stdout).contains("raw_url_canary"));
+    }
+}
+
+/// `get` redacts a URL value it cannot read cleanly in full, but `value` asked
+/// for that one string refuses only when a credential is actually in it.
+#[test]
+fn raw_url_without_credentials_is_returned_even_when_get_redacts_it() {
+    let source = br#"{"contact_url":"mailto:x@y.z","page_url":"https://h/a b","dsn_url":"user:dsn_canary@host/db","spaced_url":"https://u:spaced_canary@h/a b","query_url":"https://h/a b?token_secret=query_canary","redirect_url":"https://h/a b?next=https://u:redirect_canary@i/","email_url":"sip:alice:sip_canary@host"}"#;
+
+    let whole = json_stdout(&run_with_stdin(&["get", "-"], source));
+    for key in ["contact_url", "page_url"] {
+        assert_eq!(
+            whole["result"]["value"][key], "***",
+            "{key}: get is unchanged"
+        );
+    }
+
+    for command in ["value", "values"] {
+        for (key, expected) in [
+            ("contact_url", "mailto:x@y.z"),
+            ("page_url", "https://h/a b"),
+        ] {
+            let output = run_with_stdin(&[command, "-", key], source);
+            assert!(output.status.success(), "{command} {key}: {output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim_end(),
+                expected,
+                "{command} {key}"
+            );
+        }
+        for key in [
+            "dsn_url",
+            "spaced_url",
+            "query_url",
+            "redirect_url",
+            "email_url",
+        ] {
+            let output = run_with_stdin(&[command, "-", key], source);
+            assert_eq!(output.status.code(), Some(1), "{command} {key}: {output:?}");
+            assert!(output.stdout.is_empty(), "{command} {key}");
+            assert_eq!(
+                json_stderr(&output)["error"]["code"],
+                "document_secret_redacted",
+                "{command} {key}"
+            );
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("canary"));
+        }
+    }
+}
+
+#[cfg(feature = "toml")]
+#[test]
+fn rejected_numeric_edits_do_not_echo_the_value_in_diagnostics() {
+    let temp = TempDir::new().unwrap();
+    let source = "amount_secret = 1\n";
+    let file = write_temp(&temp, "config.toml", source);
+    let canary = "987654321098765432109876543210";
+    let output = run(&[
+        "set",
+        &file,
+        "amount_secret",
+        canary,
+        "--value-type",
+        "number",
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "document_unsupported_operation"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains(canary),
+        "{output:?}"
+    );
+    assert_eq!(std::fs::read_to_string(file).unwrap(), source);
+}
+
+#[test]
+fn enumeration_rejects_names_that_would_split_or_truncate_output_records() {
+    for command in ["keys", "paths"] {
+        for (source, options) in [
+            (br#"{"a":1,"b\nc":2}"#.as_slice(), vec![]),
+            (br#"{"a":1,"b\u0000c":2}"#.as_slice(), vec!["--null"]),
+            (br#"{"a":1,"b\u0000c":2}"#.as_slice(), vec![]),
+        ] {
+            let mut args = vec![command, "-"];
+            args.extend(options);
+            let output = run_with_stdin(&args, source);
+            assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+            assert!(
+                output.stdout.is_empty(),
+                "no partially framed records: {output:?}"
+            );
+            assert_eq!(
+                json_stderr(&output)["error"]["code"],
+                "document_unframeable_name"
+            );
+        }
+    }
+}
+
+#[test]
+fn enumeration_cannot_expose_keys_inside_a_secret_subtree() {
+    let source = br#"{"vault_secret":{"credential_key_canary":{"nested_key_canary":1}}}"#;
+    for command in ["keys", "paths"] {
+        for key in ["vault_secret", "vault_secret.credential_key_canary"] {
+            let output = run_with_stdin(&[command, "-", key, "--missing-ok"], source);
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                json_stderr(&output)["error"]["code"],
+                "document_secret_redacted"
+            );
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("canary"));
+        }
+    }
+}
+
+#[test]
+fn a_flag_left_without_its_value_is_not_told_to_use_the_equals_spelling() {
+    let flag_next = run(&["emit", "result", "--json", "--output", "json"]);
+    assert_eq!(flag_next.status.code(), Some(2), "{flag_next:?}");
+    let error = &json_stderr(&flag_next)["error"];
+    assert_eq!(error["code"], "cli_missing_argument_value");
+    assert_eq!(
+        error["hint"],
+        "run `afdata emit result --help` and choose one registered combination"
+    );
+
+    let dash_value = run(&["emit", "result", "--json", "-x"]);
+    assert_eq!(dash_value.status.code(), Some(2), "{dash_value:?}");
+    assert_eq!(
+        json_stderr(&dash_value)["error"]["hint"],
+        "write `--json=VALUE` for a value that starts with `-`"
+    );
+}
+
+#[test]
+fn get_keeps_the_sign_of_a_json_negative_zero() {
+    let output = run_with_stdin(&["get", "-", "a"], br#"{"a":-0}"#);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("-0"),
+        "get lost the sign of -0: {output:?}"
+    );
+}
+
+#[test]
+fn traversal_errors_name_the_scalar_that_blocked_them() {
+    let dir = TempDir::new().unwrap();
+    let path = write_temp(&dir, "k.json", r#"{"x":{"n":1},"s":1}"#);
+    for arguments in [
+        vec!["get", path.as_str(), "x.n.z.w"],
+        vec!["value", path.as_str(), "x.n.z.w"],
+        vec!["keys", path.as_str(), "x.n.z.w"],
+    ] {
+        let output = run(&arguments);
+        assert_eq!(output.status.code(), Some(1), "{arguments:?}: {output:?}");
+        let response = json_stderr(&output);
+        assert_eq!(
+            response["error"]["message"], "path `x.n` is integer, cannot traverse further",
+            "{arguments:?}: {response}"
+        );
+    }
+    let output = run(&["add", path.as_str(), "s.y", "z", "--slug-field", "id"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let response = json_stderr(&output);
+    assert_eq!(
+        response["error"]["message"], "path `s` is integer, cannot traverse further",
+        "{response}"
+    );
+}
+
+#[test]
+fn add_rejects_a_repeated_field() {
+    let dir = TempDir::new().unwrap();
+    let original = "{\"items\":[]}";
+    let path = write_temp(&dir, "k.json", original);
+    let output = run(&[
+        "add",
+        path.as_str(),
+        "items",
+        "a",
+        "email=1",
+        "email=2",
+        "--slug-field",
+        "id",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let response = json_stderr(&output);
+    assert_eq!(
+        response["error"]["code"], "document_usage_error",
+        "{response}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}
+
+#[test]
+fn an_unknown_format_names_the_flag_to_pass() {
+    let dir = TempDir::new().unwrap();
+    let path = write_temp(&dir, "x.conf", "a=1\n");
+    let output = run(&["get", path.as_str()]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let response = json_stderr(&output);
+    assert_eq!(
+        response["error"]["code"], "document_format_unknown",
+        "{response}"
+    );
+    assert_eq!(
+        response["error"]["hint"], "pass --input-format FORMAT",
+        "{response}"
+    );
+}
+
+#[cfg(feature = "yaml")]
+#[test]
+fn a_secret_never_replaces_a_collection_or_a_non_string() {
+    let dir = TempDir::new().unwrap();
+    for (name, original) in [("s.yaml", "db:\n  host: h\n"), ("n.yaml", "db: 1\n")] {
+        let path = write_temp(&dir, name, original);
+        let output = afdata()
+            .args([
+                "set",
+                path.as_str(),
+                "db",
+                "--secret-from",
+                "env:AFDATA_TEST_SECRET",
+            ])
+            .env("AFDATA_TEST_SECRET", "x")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{name}: {output:?}");
+        let response = json_stderr(&output);
+        assert_eq!(
+            response["error"]["code"], "document_usage_error",
+            "{response}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original, "{name}");
+    }
 }

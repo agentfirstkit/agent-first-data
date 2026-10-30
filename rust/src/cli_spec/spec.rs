@@ -27,9 +27,9 @@ pub struct CliSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shared_arguments: Vec<ArgSpec>,
     pub lifecycle_output: OutputSpec,
-    /// Exit codes this CLI returns beyond the 0/1/2 AFDATA defines, rendered
+    /// Exit codes this CLI returns beyond the 0/1/2/4 AFDATA defines, rendered
     /// into the reference's exit-code table. Without this the published
-    /// reference documents only AFDATA's three, so a tool that also returns,
+    /// reference documents only AFDATA's standard codes, so a tool that also returns,
     /// say, a partial-success code ships a document that contradicts its own
     /// binary — on exactly the code a caller needs to branch on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -37,7 +37,7 @@ pub struct CliSpec {
     pub commands: Vec<CommandSpec>,
 }
 
-/// One exit code a CLI defines for itself, beyond AFDATA's 0/1/2.
+/// One exit code a CLI defines for itself, beyond AFDATA's 0/1/2/4.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExitCodeSpec {
     pub code: u8,
@@ -89,7 +89,7 @@ impl CliSpec {
         self
     }
 
-    /// Declare an exit code this CLI returns beyond AFDATA's 0/1/2, so the
+    /// Declare an exit code this CLI returns beyond AFDATA's 0/1/2/4, so the
     /// rendered reference documents what the binary actually does.
     pub fn exit_code(mut self, code: u8, meaning: impl Into<String>) -> Self {
         self.exit_codes.push(ExitCodeSpec {

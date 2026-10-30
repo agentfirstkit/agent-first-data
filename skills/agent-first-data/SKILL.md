@@ -94,6 +94,9 @@ afdata skill validate skills/example-skill
   serialized output.
 - Run `validate` for protocol events and finite event streams.
 - Use `render` to apply AFDATA redaction and formatting.
+- `skill validate` checks metadata and directory naming, not the Markdown body's
+  instructions, links, or bundled references. Review those and verify an actual
+  install when changing a skill's resources.
 - If a required check cannot run, state that explicitly.
 
 ## Review exit criteria

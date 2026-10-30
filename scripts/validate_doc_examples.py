@@ -12,12 +12,12 @@ relative to the repo root, with no shell plumbing and no mutation.
 
 from __future__ import annotations
 
-import re
 import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+
+from markdown_blocks import code_blocks
 
 ROOT = Path(__file__).resolve().parent.parent
 # Everything an agent or a reader is handed. The skill files are the first thing
@@ -50,55 +50,9 @@ MUST_HAVE_EXAMPLES = {
 }
 # Read verbs only: a doc example must never mutate the tree it is checked in.
 READ_VERBS = {"get", "value", "values", "keys", "paths", "lint", "render", "validate"}
-FENCE_OPEN = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
-
-
-def fenced_blocks(text: str) -> list[str]:
-    """Extract CommonMark-style backtick and tilde fenced code blocks."""
-    blocks = []
-    block: Optional[list[str]] = None
-    fence_char = ""
-    fence_width = 0
-
-    for line in text.splitlines():
-        if block is None:
-            match = FENCE_OPEN.fullmatch(line)
-            if not match:
-                continue
-            fence = match.group("fence")
-            info = match.group("info")
-            # CommonMark forbids a backtick in a backtick fence's info string.
-            if fence[0] == "`" and "`" in info:
-                continue
-            block = []
-            fence_char = fence[0]
-            fence_width = len(fence)
-            continue
-
-        candidate = line.lstrip(" ")
-        indent = len(line) - len(candidate)
-        candidate = candidate.rstrip(" \t")
-        if (
-            indent <= 3
-            and len(candidate) >= fence_width
-            and all(char == fence_char for char in candidate)
-        ):
-            blocks.append("\n".join(block))
-            block = None
-            fence_char = ""
-            fence_width = 0
-        else:
-            block.append(line)
-
-    # An unclosed fence continues to EOF in CommonMark.
-    if block is not None:
-        blocks.append("\n".join(block))
-    return blocks
-
-
-def examples(text: str) -> list[str]:
+def examples(path: Path) -> list[str]:
     found = []
-    for block in fenced_blocks(text):
+    for block in (block["text"] for block in code_blocks(path)):
         # Join backslash continuations first. Docs wrap a long command across
         # lines to stay readable, and treating each physical line separately
         # skipped exactly those — the longest, most easily broken examples, and
@@ -128,7 +82,7 @@ def main() -> int:
             failures.append(f"{source.relative_to(ROOT)}: source file is missing")
             continue
         source_checked = 0
-        for line in examples(source.read_text(encoding="utf-8")):
+        for line in examples(source):
             # `comments=True` drops the trailing `# what this shows` the docs
             # put on each example; without it the comment words arrive as
             # positional arguments and every line "fails" for the wrong reason.

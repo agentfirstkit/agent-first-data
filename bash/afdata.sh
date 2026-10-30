@@ -34,11 +34,17 @@ afdata_cli() {
   command "$afdata_bin" "$@"
 }
 
+# Usage: _afdata_emit KIND [OPTION...] -- [POSITIONAL...]
+# Callers put `--` before the positionals they forward, so a message such as
+# "-5 files" reaches `emit` as a value rather than being parsed as a flag.
 _afdata_emit() {
+  local kind="$1"
+  shift
   afdata_cli \
-    emit "$@" \
+    emit "$kind" \
     --output "${AFDATA_OUTPUT:-json}" \
-    --output-to "${AFDATA_OUTPUT_TO:-split}"
+    --output-to "${AFDATA_OUTPUT_TO:-split}" \
+    "$@"
 }
 
 afdata_log() {
@@ -48,24 +54,40 @@ afdata_log() {
       "usage: afdata_log <debug|info|warn|error> <MESSAGE>"
     return 2
   fi
-  _afdata_emit log "$1" "$2"
+  _afdata_emit log -- "$1" "$2"
 }
 
 afdata_result() {
-  if [ "$#" -ne 1 ]; then
+  # A lone `--json` is a payload left out, not a message spelled `--json`.
+  if ! { [ "$#" -eq 1 ] && [ "$1" != "--json" ]; } \
+    && ! { [ "$#" -eq 2 ] && [ "$1" = "--json" ]; }; then
     _afdata_function_error \
-      "afdata_result requires MESSAGE" \
-      "usage: afdata_result <MESSAGE>"
+      "afdata_result requires MESSAGE or --json JSON" \
+      "usage: afdata_result <MESSAGE> | --json <JSON>"
     return 2
   fi
   # A child invoked through afdata_call participates in its parent's finite
   # event stream. The outermost script owns the unique terminal result, so a
   # successful child completion is diagnostic rather than terminal.
   if [ "${_AFDATA_BASH_CHILD:-0}" = "1" ]; then
-    afdata_log info "$1"
+    if [ "$#" -eq 2 ]; then
+      # Redact the structured payload before demoting it to diagnostic text.
+      # Never interpolate the caller's raw JSON into a log message.
+      local child_result
+      # Split, not stdout: a rejected payload's error event must reach stderr
+      # rather than vanish into the discarded capture.
+      child_result="$(afdata_cli emit result --json="$2" --output json --output-to split)" || return $?
+      afdata_log info "$child_result"
+    else
+      afdata_log info "$1"
+    fi
     return $?
   fi
-  _afdata_emit result "$1"
+  if [ "$#" -eq 2 ]; then
+    _afdata_emit result --json="$2"
+  else
+    _afdata_emit result -- "$1"
+  fi
 }
 
 afdata_error() {
@@ -76,16 +98,16 @@ afdata_error() {
     return 2
   fi
   if [ "$#" -eq 3 ]; then
-    _afdata_emit error "$1" "$2" --hint "$3"
+    _afdata_emit error --hint="$3" -- "$1" "$2"
   else
-    _afdata_emit error "$1" "$2"
+    _afdata_emit error -- "$1" "$2"
   fi
 }
 
 _afdata_function_error() {
   local message="$1"
   local hint="$2"
-  if ! _afdata_emit error cli_error "$message" --hint "$hint"; then
+  if ! _afdata_emit error --hint="$hint" -- cli_error "$message"; then
     :
   fi
   return 2
