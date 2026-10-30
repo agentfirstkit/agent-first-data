@@ -1923,7 +1923,12 @@ def _format_rfc3339_ms(ms: int) -> str | None:
         return None
     try:
         dt = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=ms)
-        return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms % 1000:03d}Z"
+        # Not strftime: glibc's `%Y` does not pad a year below 1000, so year 1
+        # printed as `1-01-01` on Linux while macOS printed `0001-01-01`.
+        return (
+            f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}T"
+            f"{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}.{ms % 1000:03d}Z"
+        )
     except (OverflowError, ValueError):
         return None
 

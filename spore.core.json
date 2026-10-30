@@ -20,7 +20,7 @@
     "Keep JSON -0 on read, name the blocking scalar in traversal errors, and reject a repeated add field",
     "Report skill admin failures with their own codes, exiting 1 unless the call was malformed",
     "Never install a personal skill into the current directory when HOME is empty",
-    "Read only ASCII digit strings as integers in Python, and round seconds like printf in TypeScript",
+    "Read only ASCII digit strings as integers in Python, round seconds like printf in TypeScript, and pad years below 1000 in Python on Linux",
     "Tag the Go module so go get resolves this release"
   ],
   "bonds": [],
