@@ -1548,7 +1548,7 @@ fn run_emit(action: EmitCommand, format: OutputFormat) -> ExitCode {
             if message.is_empty() {
                 return emit_cli_usage_error(
                     "log MESSAGE must not be empty",
-                    "run `afdata emit log --help` and choose one registered combination",
+                    "pass a nonempty MESSAGE; `afdata emit log --help` shows the shape",
                     format,
                 );
             }
@@ -1571,7 +1571,7 @@ fn run_emit(action: EmitCommand, format: OutputFormat) -> ExitCode {
             if message.is_empty() {
                 return emit_cli_usage_error(
                     "result MESSAGE must not be empty",
-                    "run `afdata emit result --help` and choose one registered combination",
+                    "pass a nonempty MESSAGE; `afdata emit result --help` shows the shape",
                     format,
                 );
             }
@@ -1587,7 +1587,7 @@ fn run_emit(action: EmitCommand, format: OutputFormat) -> ExitCode {
             if code.is_empty() || message.is_empty() {
                 return emit_cli_usage_error(
                     "error CODE and MESSAGE must not be empty",
-                    "run `afdata emit error --help` and choose one registered combination",
+                    "pass a nonempty CODE and MESSAGE; `afdata emit error --help` shows the shape",
                     format,
                 );
             }

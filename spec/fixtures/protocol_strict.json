@@ -180,7 +180,7 @@
         "error": {
           "code": "cli_unknown_argument",
           "message": "unknown argument `--bogus`",
-          "hint": "run `afdata get --help` and choose one registered combination",
+          "hint": "run `afdata get --help` to list the arguments each shape accepts",
           "retryable": false
         },
         "trace": {}

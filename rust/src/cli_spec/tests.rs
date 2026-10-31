@@ -353,6 +353,32 @@ fn output_contract_is_checked_after_shape_selection() {
 }
 
 #[test]
+fn each_rejection_hint_names_the_remedy_for_its_own_rule() {
+    // Only a mixture of known arguments is fixed by choosing a combination; a
+    // caller who typed one wrong value must not be sent to compare shapes.
+    let spec = sample_spec().unwrap();
+    for (argv, rule, hint) in [
+        (
+            vec![
+                "demo", "query", "--mode", "pipe", "--dsn", "x", "--output", "yaml",
+            ],
+            CliErrorRule::InvalidArgumentValue,
+            "pass a value of the type and range `demo query --help` lists for that argument",
+        ),
+        (
+            vec!["demo", "nope"],
+            CliErrorRule::UnknownCommand,
+            "run `demo --help` to list the registered commands",
+        ),
+    ] {
+        let error = spec.resolve_from(argv.clone()).unwrap_err();
+        assert_eq!(error.rule, rule, "{argv:?}");
+        assert_eq!(error.hint, hint, "{argv:?}");
+        assert!(!error.hint.contains("combination"), "{argv:?}");
+    }
+}
+
+#[test]
 fn raw_output_rejects_format_as_unregistered() {
     let spec = CliSpec::new("demo", "1")
         .command(CommandSpec::root())

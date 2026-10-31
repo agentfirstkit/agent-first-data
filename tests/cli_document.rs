@@ -3946,7 +3946,7 @@ fn a_flag_left_without_its_value_is_not_told_to_use_the_equals_spelling() {
     assert_eq!(error["code"], "cli_missing_argument_value");
     assert_eq!(
         error["hint"],
-        "run `afdata emit result --help` and choose one registered combination"
+        "pass a value right after the argument; `afdata emit result --help` shows its value name"
     );
 
     let dash_value = run(&["emit", "result", "--json", "-x"]);

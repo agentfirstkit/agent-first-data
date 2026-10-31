@@ -67,7 +67,34 @@ impl CliError {
         command_path: String,
         message: impl Into<String>,
     ) -> Self {
-        let hint = format!("run `{command_path} --help` and choose one registered combination");
+        // The remedy follows the rule: only a mixture of known arguments is
+        // fixed by choosing among the registered combinations. A bad or
+        // missing value, a repeat, or an unknown name each has its own next
+        // step, and pointing them all at "combinations" sends a caller who
+        // typed one wrong number off to compare argument sets.
+        let hint = match rule {
+            CliErrorRule::UnregisteredCombination => {
+                format!("run `{command_path} --help` and choose one registered combination")
+            }
+            CliErrorRule::UnknownCommand => {
+                format!("run `{command_path} --help` to list the registered commands")
+            }
+            CliErrorRule::UnknownArgument | CliErrorRule::UnexpectedPositional => {
+                format!("run `{command_path} --help` to list the arguments each shape accepts")
+            }
+            CliErrorRule::InvalidArgumentValue => format!(
+                "pass a value of the type and range `{command_path} --help` lists for that argument"
+            ),
+            CliErrorRule::MissingArgumentValue => format!(
+                "pass a value right after the argument; `{command_path} --help` shows its value name"
+            ),
+            CliErrorRule::DuplicateArgument => format!(
+                "pass the argument once; `{command_path} --help` shows which arguments repeat"
+            ),
+            CliErrorRule::InvalidUtf8 => {
+                format!("pass every argument as valid UTF-8; `{command_path} --help` lists them")
+            }
+        };
         Self {
             rule,
             message: message.into(),
