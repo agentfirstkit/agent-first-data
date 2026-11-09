@@ -404,6 +404,9 @@ afdata_timeout 30 some-command arg             # 124 when it ran past 30 seconds
   does not affect the deadline. Its own process group is not the terminal's
   foreground group, so a command that reads the terminal (a password prompt)
   is stopped until the deadline; give it non-interactive input instead.
+- A command started by `afdata_spawn` or `afdata_timeout` never carries the
+  caller's `EXIT` trap, so stopping it early cannot run the caller's cleanup
+  in the child.
 
 Deadlines count `sleep 0.1` ticks rather than reading a clock, because Bash 3.2
 has no sub-second clock; a deadline can arrive late but never early. Job-control

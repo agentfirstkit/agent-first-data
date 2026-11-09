@@ -17,7 +17,8 @@
     "Read XML and binary property lists (read-only); a path through a scalar means no value; empty input reports document_empty",
     "Split --slugs (listing) from --slug-field (addressing) on keys and paths",
     "afdata_timeout stops the whole process group; add afdata_spawn, afdata_wait_line, afdata_stop, afdata_mktemp, afdata_try, afdata_into",
-    "afdata_args_raw_output replaces the AFDATA_RAW_OUTPUT environment variable"
+    "afdata_args_raw_output replaces the AFDATA_RAW_OUTPUT environment variable",
+    "Children started by afdata_spawn and afdata_timeout no longer carry the caller's EXIT trap"
   ],
   "bonds": [],
   "tree": {

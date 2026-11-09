@@ -840,6 +840,35 @@ afdata_run() {
 # reading a clock: bash 3.2 has no sub-second clock, so a deadline can arrive
 # late but never early.
 
+# A forked background child holds the caller's EXIT trap until it execs. If a
+# signal stops it in that window (a spawn followed at once by a stop, on a slow
+# machine), the shell runs the caller's cleanup in the child and deletes what
+# the caller still needs. The trap is therefore cleared around the fork and put
+# back, so the child never has one. Callers use the two halves as a pair.
+_afdata_exit_trap_suspend() {
+  _AFDATA_SUSPENDED_EXIT_TRAP=""
+  # In a subshell the caller's EXIT trap is not armed, yet `trap -p` can still
+  # print it, and putting it back would arm it there. The shell running this
+  # code is the main one only when its pid is $$: BASHPID says so on Bash 4+,
+  # and on Bash 3.2 the parent of an exec'd child is the shell evaluating the
+  # substitution.
+  local _afdata_internal_self="${BASHPID:-}"
+  if [ -z "$_afdata_internal_self" ]; then
+    _afdata_internal_self="$(exec sh -c 'echo "$PPID"')"
+  fi
+  if [ "$_afdata_internal_self" = "$$" ]; then
+    _AFDATA_SUSPENDED_EXIT_TRAP="$(trap -p EXIT)"
+    trap - EXIT
+  fi
+}
+
+_afdata_exit_trap_resume() {
+  if [ -n "$_AFDATA_SUSPENDED_EXIT_TRAP" ]; then
+    eval "$_AFDATA_SUSPENDED_EXIT_TRAP"
+  fi
+  _AFDATA_SUSPENDED_EXIT_TRAP=""
+}
+
 # Start COMMAND detached from stdin, with stdout to OUT and stderr to ERR
 # (the literal &1 merges it into OUT), in its own process group so a signal can
 # reach its descendants. The pid is returned in AFDATA_SPAWN_PID. The caller's
@@ -856,11 +885,13 @@ afdata_spawn() {
   shift 2
   case "$-" in *m*) _afdata_internal_monitor=true ;; esac
   set -m
+  _afdata_exit_trap_suspend
   if [ "$_afdata_internal_err" = "&1" ]; then
     "$@" </dev/null >"$_afdata_internal_out" 2>&1 &
   else
     "$@" </dev/null >"$_afdata_internal_out" 2>"$_afdata_internal_err" &
   fi
+  _afdata_exit_trap_resume
   # Read by the caller.
   # shellcheck disable=SC2034
   AFDATA_SPAWN_PID=$!
@@ -980,7 +1011,9 @@ afdata_timeout() {
   # Job control gives the background command its own process group, whose id
   # is its pid; `setsid` is not available on macOS.
   set -m
+  _afdata_exit_trap_suspend
   "$@" <&0 &
+  _afdata_exit_trap_resume
   _afdata_internal_pid=$!
   if [ "$_afdata_internal_monitor" = false ]; then
     set +m

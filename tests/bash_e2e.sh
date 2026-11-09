@@ -1179,6 +1179,25 @@ afdata_spawn "$TEST_TMP/m.out" "&1" sleep 30
 case "$-" in *m*) fail "afdata_spawn left set -m on" ;; esac
 afdata_stop TERM "-$AFDATA_SPAWN_PID" 5
 
+# A spawned or timed-out child never carries the caller's EXIT trap: stopped
+# before it execs, it would otherwise run the caller's cleanup in the child.
+trap_script="$TEST_TMP/spawn-trap.sh"
+cat > "$trap_script" <<'CASE'
+set -euo pipefail
+source "$1"
+trap 'printf "x\n" >> "$2"' EXIT
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  afdata_spawn "$3" "&1" sleep 30
+  afdata_stop TERM "-$AFDATA_SPAWN_PID" 5
+  afdata_timeout 0 sleep 30 || :
+done
+CASE
+: > "$TEST_TMP/spawn-trap.marks"
+"$legacy_bash" "$trap_script" "$ROOTPATH/bash/afdata.sh" "$TEST_TMP/spawn-trap.marks" "$TEST_TMP/spawn-trap.out" 2>/dev/null \
+  || fail "spawn/stop loop with an EXIT trap failed"
+[ "$(wc -l < "$TEST_TMP/spawn-trap.marks" | tr -d ' ')" = 1 ] \
+  || fail "a spawned child ran the caller's EXIT trap ($(wc -l < "$TEST_TMP/spawn-trap.marks" | tr -d ' ') runs)"
+
 # afdata_into reads an enumeration into a Bash array through NUL framing.
 into_doc="$TEST_TMP/into.json"
 printf '%s' '{"names":["a","b\nc",""],"obj":{"x":1,"y":2},"empty":[]}' > "$into_doc"
