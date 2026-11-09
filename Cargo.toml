@@ -1,8 +1,8 @@
 [package]
 name = "agent-first-data"
-version = "0.36.1"
+version = "0.37.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 description = "A naming convention that lets AI agents understand your data without being told what it means, plus the afdata CLI and a Rust library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents."
 license = "MIT"
 repository = "https://github.com/agentfirstkit/agent-first-data"
@@ -43,6 +43,7 @@ default = [
     "dotenv",
     "ini",
     "markdown",
+    "plist",
 ]
 # The whole CLI surface: the closed-world compiler (`cli_spec`), the AFDATA
 # adapter that turns a resolved outcome into a protocol event (`cli_afdata`),
@@ -69,6 +70,9 @@ ini = []
 # backends so an installed CLI reads a README out of the box; `default-features
 # = false` drops it and `pulldown-cmark` with it.
 markdown = ["dep:pulldown-cmark"]
+# Read-only XML property lists (`.plist`, `ioreg -a` output). In `default` like
+# the other format backends; binary property lists are refused with a hint.
+plist = ["dep:plist"]
 schema = []
 
 [dependencies]
@@ -94,6 +98,8 @@ toml_edit = { version = "0.25", optional = true }
 # binary, neither of which a block reader uses; what is left is the pull parser
 # over three small pure-Rust crates (bitflags, memchr, unicase).
 pulldown-cmark = { version = "0.13", default-features = false, optional = true }
+# XML reader only; the serde bridge is not used.
+plist = { version = "1", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -157,14 +157,19 @@ fn input_format_arg() -> ArgSpec {
             "toml-frontmatter",
             "yaml-frontmatter",
             "markdown",
+            "plist",
         ],
     )
     .value_name("FORMAT")
     .about("Document format override")
 }
 
-/// The same, minus `markdown`: the formats whose value tree the document's
-/// author actually wrote.
+/// The same, minus `markdown` and `plist`: the formats whose value tree the
+/// document's author actually wrote and that afdata can write back.
+///
+/// A plist is read-only for a different reason than Markdown: its value is the
+/// author's, but afdata has no source-preserving XML writer, so a mutating verb
+/// refuses `plist` at argv time like it refuses `markdown`.
 ///
 /// Markdown's tree is one afdata synthesizes — `type`, `text`, `level`,
 /// `blocks` are afdata's field names over prose, not the author's data — and
@@ -188,6 +193,28 @@ fn authored_input_format_arg() -> ArgSpec {
             "ini",
             "toml-frontmatter",
             "yaml-frontmatter",
+        ],
+    )
+    .value_name("FORMAT")
+    .about("Document format override")
+}
+
+/// `lint` reads a document and never writes it, so it accepts `plist` on top of
+/// the authored formats; Markdown stays out for the reason given above.
+fn lint_input_format_arg() -> ArgSpec {
+    ArgSpec::option_enum(
+        "--input-format",
+        [
+            "json",
+            "toml",
+            "yaml",
+            "yml",
+            "dotenv",
+            "env",
+            "ini",
+            "toml-frontmatter",
+            "yaml-frontmatter",
+            "plist",
         ],
     )
     .value_name("FORMAT")
@@ -244,7 +271,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                     "INPUT",
                     "Input file, or - for stdin",
                 ))
-                .arg(authored_input_format_arg())
+                .arg(lint_input_format_arg())
                 .arg(max_file_bytes_arg())
                 .arg(
                     ArgSpec::option_enum("--min-severity", ["warning", "error"])
@@ -408,7 +435,10 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
         )
         .command(
             CommandSpec::new(["value"])
-                .about("Read one scalar as raw stdout bytes")
+                .about(
+                    "Read one scalar as raw stdout bytes: exact bytes, no trailing newline; \
+                     for one value per line use values",
+                )
                 .arg(positional(
                     "file",
                     0,
@@ -417,7 +447,7 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                 ))
                 .arg(positional("key", 1, "KEY", "Dot-path to one scalar"))
                 .arg(ArgSpec::flag("--reveal-secret").about("Allow secret values and URL credentials"))
-                .arg(ArgSpec::option("--default", "VALUE").about("Fallback for missing or null"))
+                .arg(ArgSpec::option("--default", "VALUE").about("Fallback when the path leads to no value (missing, through a scalar, or null)"))
                 .arg(input_format_arg())
                 .arg(max_file_bytes_arg())
                 .arg(read_slug_field_arg())
@@ -449,10 +479,23 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                 .arg(
                     ArgSpec::positional("key", 1, "KEY")
                         .repeatable()
-                        .about("Dot-path to one scalar; repeat for each value wanted"),
+                        .about(
+                            "Dot-path to one scalar; repeat for each value wanted. A `*` \
+                             segment expands to every child in index or key order, so \
+                             `items.*.name` yields one line per element; with --default a \
+                             missing or null field gives an empty line and the line count \
+                             stays aligned",
+                        ),
                 )
                 .arg(ArgSpec::flag("--reveal-secret").about("Allow secret values and URL credentials"))
-                .arg(ArgSpec::option("--default", "VALUE").about("Fallback for missing or null"))
+                .arg(ArgSpec::option("--default", "VALUE").about("Fallback when the path leads to no value (missing, through a scalar, or null)"))
+                .arg(ArgSpec::flag("--missing-ok").about(
+                    "A KEY whose `*` container, or any segment before it, is missing \
+                     contributes no records; a missing leaf is still governed by --default",
+                ))
+                .arg(ArgSpec::flag("--null").about(
+                    "Use NUL separators, so values containing newlines are framed intact",
+                ))
                 .arg(input_format_arg())
                 .arg(max_file_bytes_arg())
                 .arg(read_slug_field_arg())
@@ -464,11 +507,183 @@ fn afdata_cli_spec() -> Result<agent_first_data::BuiltCliSpec, agent_first_data:
                         .optional([
                             "reveal_secret",
                             "default",
+                            "missing_ok",
+                            "null",
                             "input_format",
                             "max_file_bytes",
                             "slug_field",
                             "secret_name",
                         ])
+                        .output(raw.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["json"])
+                .about(
+                    "Read a document or subtree as one line of compact JSON with a trailing \
+                     newline, no envelope; secrets are redacted as in get",
+                )
+                .arg(positional(
+                    "file",
+                    0,
+                    "FILE",
+                    "Document file, or - for stdin (read as JSON unless --input-format is given)",
+                ))
+                .arg(positional("key", 1, "KEY", "Optional dot-path; omitted means the whole document"))
+                .arg(ArgSpec::flag("--reveal-secret").about("Allow secret values and URL credentials"))
+                .arg(ArgSpec::option("--default", "JSON").about(
+                    "Fallback JSON text, printed as compact JSON, when the path leads to no value (missing, through a scalar, or null)",
+                ))
+                .arg(input_format_arg())
+                .arg(max_file_bytes_arg())
+                .arg(read_slug_field_arg())
+                .arg(secret_name_arg())
+                .combination(
+                    Combination::new("json-document")
+                        .action("json")
+                        .about("Read the entire document")
+                        .required(["file"])
+                        .optional([
+                            "reveal_secret",
+                            "input_format",
+                            "max_file_bytes",
+                            "secret_name",
+                        ])
+                        .output(raw.clone()),
+                )
+                .combination(
+                    Combination::new("json-value")
+                        .action("json")
+                        .about("Read the subtree at KEY")
+                        .required(["file", "key"])
+                        .optional([
+                            "reveal_secret",
+                            "default",
+                            "input_format",
+                            "max_file_bytes",
+                            "slug_field",
+                            "secret_name",
+                        ])
+                        .output(raw.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["path"])
+                .about(
+                    "Join literal key segments into one dot-path, escaping backslash, `.` and \
+                     `*`; raw stdout bytes with no trailing newline",
+                )
+                .arg(
+                    ArgSpec::positional("segment", 0, "SEGMENT")
+                        .repeatable()
+                        .about("One literal key or index; must not be empty"),
+                )
+                .combination(
+                    Combination::new("path")
+                        .action("path")
+                        .required(["segment"])
+                        .output(raw.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["has"])
+                .about(
+                    "Print true or false, with no trailing newline, for whether KEY exists; \
+                     null counts as present",
+                )
+                .arg(positional(
+                    "file",
+                    0,
+                    "FILE",
+                    "Document file, or - for stdin (read as JSON unless --input-format is given)",
+                ))
+                .arg(positional("key", 1, "KEY", "Dot-path to test"))
+                .arg(input_format_arg())
+                .arg(max_file_bytes_arg())
+                .arg(read_slug_field_arg())
+                .combination(
+                    Combination::new("has")
+                        .action("has")
+                        .required(["file", "key"])
+                        .optional(["input_format", "max_file_bytes", "slug_field"])
+                        .output(raw.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["count"])
+                .about(
+                    "Print how many direct children the container at KEY has, as a decimal \
+                     integer with no trailing newline",
+                )
+                .arg(positional(
+                    "file",
+                    0,
+                    "FILE",
+                    "Document file, or - for stdin (read as JSON unless --input-format is given)",
+                ))
+                .arg(positional("key", 1, "KEY", "Optional dot-path to an object or array; omitted means the document root"))
+                .arg(ArgSpec::flag("--missing-ok").about(
+                    "Print 0 when the path leads to no container (missing, through a scalar, or null)",
+                ))
+                .arg(input_format_arg())
+                .arg(max_file_bytes_arg())
+                .arg(read_slug_field_arg())
+                .combination(
+                    Combination::new("count-root")
+                        .action("count")
+                        .about("Count the document root's immediate children")
+                        .required(["file"])
+                        .optional(["input_format", "max_file_bytes"])
+                        .output(raw.clone()),
+                )
+                .combination(
+                    Combination::new("count-container")
+                        .action("count")
+                        .about("Count one addressed container's immediate children")
+                        .required(["file", "key"])
+                        .optional(["missing_ok", "input_format", "max_file_bytes", "slug_field"])
+                        .output(raw.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["object"])
+                .about(
+                    "Build one JSON object from arguments, as one line of compact JSON with a \
+                     trailing newline",
+                )
+                .arg(
+                    ArgSpec::positional("fields", 0, "FIELD=VALUE")
+                        .repeatable()
+                        .about("String field; the key is literal and split at the first ="),
+                )
+                .arg(
+                    ArgSpec::option("--json", "FIELD=JSON")
+                        .repeatable()
+                        .about("Field whose value is embedded JSON text (number, bool, null, array, object)"),
+                )
+                .combination(
+                    Combination::new("object")
+                        .action("object")
+                        .optional(["fields", "json"])
+                        .output(raw.clone()),
+                ),
+        )
+        .command(
+            CommandSpec::new(["array"])
+                .about(
+                    "Build one JSON array from arguments, as one line of compact JSON with a \
+                     trailing newline",
+                )
+                .arg(
+                    ArgSpec::positional("values", 0, "VALUE")
+                        .repeatable()
+                        .about("Element; a string unless --json is given"),
+                )
+                .arg(ArgSpec::flag("--json").about("Parse every VALUE as JSON text"))
+                .combination(
+                    Combination::new("array")
+                        .action("array")
+                        .optional(["values", "json"])
                         .output(raw.clone()),
                 ),
         )
@@ -689,7 +904,12 @@ fn enumerate_command(name: &str, action: &str, about: &str, output: &OutputSpec)
         .arg(input_format_arg())
         .arg(max_file_bytes_arg())
         .arg(read_slug_field_arg())
-        .arg(ArgSpec::flag("--missing-ok").about("Succeed with no output when KEY is absent"))
+        .arg(ArgSpec::flag("--missing-ok").about(
+            "Print nothing and succeed when the path leads to no container (missing, through a scalar, or null)",
+        ))
+        .arg(ArgSpec::flag("--slugs").about(
+            "When KEY is an array, list each element's --slug-field value instead of its index",
+        ))
         .arg(ArgSpec::flag("--null").about("Use NUL separators"))
         .combination(
             Combination::new(format!("{name}-root"))
@@ -711,6 +931,14 @@ fn enumerate_command(name: &str, action: &str, about: &str, output: &OutputSpec)
                     "missing_ok",
                     "null",
                 ])
+                .output(output.clone()),
+        )
+        .combination(
+            Combination::new(format!("{name}-slugs"))
+                .action(action)
+                .about("List one addressed array's elements by their --slug-field value")
+                .required(["file", "key", "slug_field", "slugs"])
+                .optional(["input_format", "max_file_bytes", "missing_ok", "null"])
                 .output(output.clone()),
         )
 }
@@ -813,6 +1041,12 @@ fn closed_world_main() -> ExitCode {
         ("get", dispatch_invocation),
         ("value", dispatch_invocation),
         ("guard", dispatch_invocation),
+        ("json", dispatch_invocation),
+        ("has", dispatch_invocation),
+        ("count", dispatch_invocation),
+        ("path", dispatch_invocation),
+        ("object", dispatch_invocation),
+        ("array", dispatch_invocation),
         ("paths", dispatch_invocation),
         ("keys", dispatch_invocation),
         ("set", dispatch_invocation),
@@ -1097,6 +1331,12 @@ fn dispatch_invocation(invocation: &ResolvedInvocation) -> ExitCode {
         "value" => dispatch_value(invocation, format),
         "values" => dispatch_values(invocation, format),
         "guard" => dispatch_guard(invocation),
+        "json" => dispatch_json(invocation, format),
+        "has" => dispatch_has(invocation, format),
+        "count" => dispatch_count(invocation, format),
+        "path" => dispatch_path(invocation, format),
+        "object" => dispatch_object(invocation, format),
+        "array" => dispatch_array(invocation, format),
         "paths" | "keys" => dispatch_enumerate(invocation, format),
         "set" => dispatch_set(invocation, format),
         "unset" => dispatch_unset(invocation, format),
@@ -1125,6 +1365,7 @@ fn dispatch_get(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
         &DocumentContext {
             input_format: input_format.as_deref(),
             slug_field: slug_field.as_deref(),
+            list_slugs: None,
             secret_names: &secret_names,
             format,
             max_file_bytes: invocation_max_file_bytes(invocation),
@@ -1142,6 +1383,7 @@ fn dispatch_values(invocation: &ResolvedInvocation, format: OutputFormat) -> Exi
     let ctx = DocumentContext {
         input_format: input_format.as_deref(),
         slug_field: slug_field.as_deref(),
+        list_slugs: None,
         secret_names: &secret_names,
         format,
         max_file_bytes: invocation_max_file_bytes(invocation),
@@ -1152,10 +1394,311 @@ fn dispatch_values(invocation: &ResolvedInvocation, format: OutputFormat) -> Exi
             &keys,
             invocation_flag(invocation, "reveal_secret"),
             default.as_deref(),
+            invocation_flag(invocation, "missing_ok"),
+            invocation_flag(invocation, "null"),
             &ctx,
         ),
         &ctx,
     )
+}
+
+fn raw_read_context<'a>(
+    invocation: &ResolvedInvocation,
+    input_format: Option<&'a str>,
+    slug_field: Option<&'a str>,
+    secret_names: &'a [String],
+    format: OutputFormat,
+) -> DocumentContext<'a> {
+    DocumentContext {
+        input_format,
+        slug_field,
+        list_slugs: None,
+        secret_names,
+        format,
+        max_file_bytes: invocation_max_file_bytes(invocation),
+    }
+}
+
+fn dispatch_json(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let file = required_string!(invocation, "file");
+    let key = invocation_optional_string(invocation, "key");
+    let input_format = invocation_optional_string(invocation, "input_format");
+    let slug_field = invocation_optional_string(invocation, "slug_field");
+    let secret_names = invocation_strings(invocation, "secret_name");
+    let ctx = raw_read_context(
+        invocation,
+        input_format.as_deref(),
+        slug_field.as_deref(),
+        &secret_names,
+        format,
+    );
+    let default = invocation_optional_string(invocation, "default");
+    finish_raw(
+        compute_json(
+            Path::new(&file),
+            key.as_deref(),
+            invocation_flag(invocation, "reveal_secret"),
+            default.as_deref(),
+            &ctx,
+        ),
+        &ctx,
+    )
+}
+
+fn dispatch_has(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let file = required_string!(invocation, "file");
+    let key = required_string!(invocation, "key");
+    let input_format = invocation_optional_string(invocation, "input_format");
+    let slug_field = invocation_optional_string(invocation, "slug_field");
+    let ctx = raw_read_context(
+        invocation,
+        input_format.as_deref(),
+        slug_field.as_deref(),
+        &[],
+        format,
+    );
+    finish_raw(compute_has(Path::new(&file), &key, &ctx), &ctx)
+}
+
+fn dispatch_count(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let file = required_string!(invocation, "file");
+    let key = invocation_optional_string(invocation, "key");
+    let input_format = invocation_optional_string(invocation, "input_format");
+    let slug_field = invocation_optional_string(invocation, "slug_field");
+    let ctx = raw_read_context(
+        invocation,
+        input_format.as_deref(),
+        slug_field.as_deref(),
+        &[],
+        format,
+    );
+    finish_raw(
+        compute_count(
+            Path::new(&file),
+            key.as_deref(),
+            invocation_flag(invocation, "missing_ok"),
+            &ctx,
+        ),
+        &ctx,
+    )
+}
+
+/// `path`: join literal segments into an escaped dot-path, the inverse of
+/// what `value`/`get` parse. An empty segment cannot be addressed, so it is
+/// refused rather than joined into a path that reads as something else.
+fn dispatch_path(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let segments = invocation_strings(invocation, "segment");
+    let ctx = raw_read_context(invocation, None, None, &[], format);
+    let result = if segments.is_empty() || segments.iter().any(String::is_empty) {
+        Err(CliDocError::Document(DocumentError::EmptyPath))
+    } else {
+        Ok(join_path(&segments).into_bytes())
+    };
+    finish_raw(result, &ctx)
+}
+
+fn dispatch_object(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let fields = invocation_strings(invocation, "fields");
+    let embedded = invocation_strings(invocation, "json");
+    let ctx = raw_read_context(invocation, None, None, &[], format);
+    finish_raw(compute_object(&fields, &embedded), &ctx)
+}
+
+fn dispatch_array(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
+    let values = invocation_strings(invocation, "values");
+    let ctx = raw_read_context(invocation, None, None, &[], format);
+    finish_raw(
+        compute_array(&values, invocation_flag(invocation, "json")),
+        &ctx,
+    )
+}
+
+fn compact_json_line(value: &Value) -> Result<Vec<u8>, CliDocError> {
+    let mut text = serde_json::to_string(value)
+        .map_err(|err| CliDocError::runtime("json_serialize_failed", err.to_string()))?;
+    text.push('\n');
+    Ok(text.into_bytes())
+}
+
+fn parse_embedded_json(text: &str, what: &str) -> Result<Value, CliDocError> {
+    serde_json::from_str::<Value>(text).map_err(|err| {
+        CliDocError::runtime(
+            "json_parse_failed",
+            format!("{what} is not valid JSON: {err}"),
+        )
+    })
+}
+
+/// `object`: argv-built JSON object. `FIELD=VALUE` is a string, `--json
+/// FIELD=JSON` embeds parsed JSON; keys are literal (a `.` is not a path) and
+/// split at the first `=`, as in `add`. Nothing is redacted: every byte came
+/// from the caller's own argv. A `_secret` key is accepted exactly as `set`
+/// accepts a bare VALUE for one; only `set --secret-from` keeps a secret out
+/// of argv.
+fn compute_object(fields: &[String], embedded: &[String]) -> Result<Vec<u8>, CliDocError> {
+    let mut object = serde_json::Map::new();
+    let mut insert = |name: &str, value: Value| -> Result<(), CliDocError> {
+        if name.is_empty() {
+            return Err(CliDocError::Usage(
+                "field name must not be empty".to_string(),
+            ));
+        }
+        if object.insert(name.to_string(), value).is_some() {
+            return Err(CliDocError::Usage(format!(
+                "field `{name}` is given more than once"
+            )));
+        }
+        Ok(())
+    };
+    for field in fields {
+        let Some((name, value)) = field.split_once('=') else {
+            return Err(CliDocError::Usage(format!(
+                "field `{field}` must use FIELD=VALUE"
+            )));
+        };
+        insert(name, Value::String(value.to_string()))?;
+    }
+    for field in embedded {
+        let Some((name, text)) = field.split_once('=') else {
+            return Err(CliDocError::Usage(format!(
+                "--json `{field}` must use FIELD=JSON"
+            )));
+        };
+        let value = parse_embedded_json(text, &format!("--json value for `{name}`"))?;
+        insert(name, value)?;
+    }
+    compact_json_line(&Value::Object(object))
+}
+
+/// `array`: argv-built JSON array; each VALUE is a string unless `--json`
+/// parses every one as JSON text.
+fn compute_array(values: &[String], as_json: bool) -> Result<Vec<u8>, CliDocError> {
+    let mut items = Vec::with_capacity(values.len());
+    for value in values {
+        items.push(if as_json {
+            parse_embedded_json(value, "array element")?
+        } else {
+            Value::String(value.clone())
+        });
+    }
+    compact_json_line(&Value::Array(items))
+}
+
+/// `json`: the value at KEY (the whole document without KEY) as compact JSON.
+/// Redaction matches `get`; `--reveal-secret` lifts it for the whole subtree.
+/// `--default` is JSON text that replaces a missing (`is_addressing_miss`) or
+/// `null` KEY; it is parsed and re-serialized like `array --json`, and is the
+/// caller's own bytes, so it is not redacted. Ambiguity never falls back.
+fn compute_json(
+    file: &Path,
+    key: Option<&str>,
+    reveal_secret: bool,
+    default: Option<&str>,
+    ctx: &DocumentContext<'_>,
+) -> Result<Vec<u8>, CliDocError> {
+    let fallback = default
+        .map(|text| parse_embedded_json(text, "--default"))
+        .transpose()?;
+    let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
+    let (root, doc_format) = read_document_input(file, input_format, ctx.file_cap()?)?;
+    let mut value = match key {
+        None => Value::try_from(root)?,
+        Some(key) => match get_path(&root, key, ctx.addressing(doc_format)) {
+            Ok(target) if target.is_null() && fallback.is_some() => {
+                return compact_json_line(&fallback.unwrap_or(Value::Null));
+            }
+            Ok(target) => {
+                if reveal_secret {
+                    Value::try_from(&target)?
+                } else {
+                    redacted_document_target(&target, key, ctx.secret_names)?
+                }
+            }
+            Err(err) => {
+                let err = CliDocError::Document(err);
+                return match fallback {
+                    Some(fallback) if is_addressing_miss(&err) => compact_json_line(&fallback),
+                    _ => Err(err),
+                };
+            }
+        },
+    };
+    if !reveal_secret {
+        Redactor::new()
+            .secret_names(ctx.secret_names.iter().cloned())
+            .redact_in_place(&mut value);
+    }
+    compact_json_line(&value)
+}
+
+/// `count`: how many direct children the container at KEY (the document root
+/// without KEY) has. Objects count keys, arrays count elements, nothing
+/// recurses. A scalar is `document_not_container`, as in `keys`; a `null` is
+/// `document_null_value`. A missing KEY, a path through a scalar, or a `null`
+/// is an error unless `--missing-ok`, which answers `0` — what `keys
+/// --missing-ok` would have listed.
+fn compute_count(
+    file: &Path,
+    key: Option<&str>,
+    missing_ok: bool,
+    ctx: &DocumentContext<'_>,
+) -> Result<Vec<u8>, CliDocError> {
+    let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
+    let (root, doc_format) = read_document_input(file, input_format, ctx.file_cap()?)?;
+    let target = match key {
+        None => root,
+        Some(key) => match get_path(&root, key, ctx.addressing(doc_format)) {
+            Ok(target) => target,
+            Err(err) => {
+                let err = CliDocError::Document(err);
+                return if missing_ok && is_addressing_miss(&err) {
+                    Ok(b"0".to_vec())
+                } else {
+                    Err(err)
+                };
+            }
+        },
+    };
+    let count = match &target {
+        DocumentValue::Object(map) => map.len(),
+        DocumentValue::Array(items) => items.len(),
+        DocumentValue::Null if missing_ok && key.is_some() => return Ok(b"0".to_vec()),
+        DocumentValue::Null => return Err(null_container_error(key)),
+        _ => {
+            return Err(CliDocError::runtime(
+                "document_not_container",
+                format!(
+                    "path `{}` is a scalar; nothing to count; read it with `value`",
+                    key.unwrap_or("<root>")
+                ),
+            ));
+        }
+    };
+    Ok(count.to_string().into_bytes())
+}
+
+/// `has`: `true`/`false` for whether KEY addresses anything. `null` is
+/// present; a missing segment or a path through a scalar is `false`. Only an
+/// unreadable document or a malformed or ambiguous path is an error.
+fn compute_has(file: &Path, key: &str, ctx: &DocumentContext<'_>) -> Result<Vec<u8>, CliDocError> {
+    let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
+    let (root, doc_format) = read_document_input(file, input_format, ctx.file_cap()?)?;
+    let present = match get_path(&root, key, ctx.addressing(doc_format)) {
+        Ok(_) => true,
+        Err(err) => {
+            let err = CliDocError::Document(err);
+            if is_addressing_miss(&err) {
+                false
+            } else {
+                return Err(err);
+            }
+        }
+    };
+    Ok(if present {
+        b"true".to_vec()
+    } else {
+        b"false".to_vec()
+    })
 }
 
 fn dispatch_value(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCode {
@@ -1173,6 +1716,7 @@ fn dispatch_value(invocation: &ResolvedInvocation, format: OutputFormat) -> Exit
         &DocumentContext {
             input_format: input_format.as_deref(),
             slug_field: slug_field.as_deref(),
+            list_slugs: None,
             secret_names: &secret_names,
             format,
             max_file_bytes: invocation_max_file_bytes(invocation),
@@ -1229,6 +1773,11 @@ fn dispatch_enumerate(invocation: &ResolvedInvocation, format: OutputFormat) -> 
         &DocumentContext {
             input_format: input_format.as_deref(),
             slug_field: slug_field.as_deref(),
+            list_slugs: if invocation_flag(invocation, "slugs") {
+                slug_field.as_deref()
+            } else {
+                None
+            },
             secret_names: &[],
             format,
             max_file_bytes: invocation_max_file_bytes(invocation),
@@ -1263,6 +1812,7 @@ fn dispatch_set(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
         &DocumentContext {
             input_format: input_format.as_deref(),
             slug_field: slug_field.as_deref(),
+            list_slugs: None,
             secret_names: &[],
             format,
             max_file_bytes: invocation_max_file_bytes(invocation),
@@ -1281,6 +1831,7 @@ fn dispatch_unset(invocation: &ResolvedInvocation, format: OutputFormat) -> Exit
         &DocumentContext {
             input_format: input_format.as_deref(),
             slug_field: slug_field.as_deref(),
+            list_slugs: None,
             secret_names: &[],
             format,
             max_file_bytes: invocation_max_file_bytes(invocation),
@@ -1306,6 +1857,7 @@ fn dispatch_add(invocation: &ResolvedInvocation, format: OutputFormat) -> ExitCo
             // `add`/`remove` take their own `--slug-field` as a positional
             // concern of the edit; this context drives output only.
             slug_field: None,
+            list_slugs: None,
             secret_names: &[],
             format,
             max_file_bytes: invocation_max_file_bytes(invocation),
@@ -1329,6 +1881,7 @@ fn dispatch_remove(invocation: &ResolvedInvocation, format: OutputFormat) -> Exi
             // `add`/`remove` take their own `--slug-field` as a positional
             // concern of the edit; this context drives output only.
             slug_field: None,
+            list_slugs: None,
             secret_names: &[],
             format,
             max_file_bytes: invocation_max_file_bytes(invocation),
@@ -2214,6 +2767,9 @@ struct DocumentContext<'a> {
     /// `--slug-field` on a read command: the element field a non-numeric path
     /// segment is matched against. See [`read_slug_field_arg`].
     slug_field: Option<&'a str>,
+    /// `--slugs` on `keys`/`paths`: list an array's elements by this field
+    /// (the `--slug-field` value) instead of by index.
+    list_slugs: Option<&'a str>,
     secret_names: &'a [String],
     format: OutputFormat,
     /// `--max-file-bytes` as given; [`file_cap`](Self::file_cap) validates it.
@@ -2276,6 +2832,36 @@ impl From<DocumentError> for CliDocError {
     }
 }
 
+/// The error for a container position (the target of `count`/`keys`/`paths`, or
+/// the container a `*` expands) that holds `null`. `null` is "no value", so
+/// `--missing-ok` reads it as empty; without the flag it says so. At the
+/// document root (`key` is `None` or empty) there is no path to name, and no
+/// flag helps, so it is a plain not-a-container error about the empty document.
+fn null_container_error(key: Option<&str>) -> CliDocError {
+    match key.filter(|key| !key.is_empty()) {
+        Some(key) => CliDocError::runtime(
+            "document_null_value",
+            format!("path `{key}` is null; pass --missing-ok to read it as empty"),
+        ),
+        None => CliDocError::runtime(
+            "document_not_container",
+            "the document is empty (its root is null); there are no children",
+        ),
+    }
+}
+
+/// Whether `err` is [`null_container_error`] for a path, which `--missing-ok`
+/// swallows like a missing container.
+fn is_null_container(err: &CliDocError) -> bool {
+    matches!(
+        err,
+        CliDocError::Runtime {
+            code: "document_null_value",
+            ..
+        }
+    )
+}
+
 /// Whether `err` means "nothing is at that address" — the family `value
 /// --default` and `paths`/`keys --missing-ok` are allowed to swallow.
 ///
@@ -2284,6 +2870,12 @@ impl From<DocumentError> for CliDocError {
 /// by name rather than by position — no element matched — and a caller that
 /// supplied a fallback for "the README has no synopsis" means it just as much
 /// when the address was a word as when it was an index.
+///
+/// A third shape qualifies: the path runs *through* a scalar (`b.version` when
+/// `b` is a string or number). Nothing is at that address either, and "read the
+/// `version` key if there is one, otherwise the bare value" is an ordinary
+/// config spelling, so it is the same answer as a missing key. Only
+/// `NotTraversable` counts; a `TypeMismatch` raised elsewhere is a real fault.
 ///
 /// `document_ambiguous_match` deliberately does **not**: several elements
 /// matched, so the document is not missing anything — the address is. Falling
@@ -2295,7 +2887,7 @@ fn is_addressing_miss(err: &CliDocError) -> bool {
             if matches!(
                 doc_err.code(),
                 "document_path_not_found" | "document_slug_not_found"
-            )
+            ) || matches!(doc_err, DocumentError::NotTraversable { .. })
     )
 }
 
@@ -2307,6 +2899,9 @@ fn document_error_builder(err: &DocumentError) -> ErrorBuilder {
         // No stdin alternative here: `set`/`unset`/`add`/`remove` refuse `-`.
         "document_too_large" => builder.hint("raise the limit with --max-file-bytes BYTES"),
         "document_format_unknown" => builder.hint("pass --input-format FORMAT"),
+        "document_io_failed" if err.redacted_message().ends_with("is not a regular file") => {
+            builder.hint("pass `-` to read stdin")
+        }
         _ => builder,
     }
 }
@@ -2395,7 +2990,7 @@ fn parse_document_format(name: &str) -> Result<DocumentFormat, String> {
     DocumentFormat::from_cli_name(name).ok_or_else(|| {
         format!(
             "unsupported --input-format `{name}`; expected json, toml, yaml, yml, dotenv, env, \
-             ini, toml-frontmatter, yaml-frontmatter, or markdown"
+             ini, toml-frontmatter, yaml-frontmatter, markdown, or plist"
         )
     })
 }
@@ -2417,7 +3012,13 @@ fn read_document_input(
 ) -> Result<(DocumentValue, DocumentFormat), DocumentError> {
     if file == Path::new("-") {
         let format = input_format.unwrap_or(DocumentFormat::Json);
-        let doc = Document::from_reader(std::io::stdin().lock(), format)?;
+        let doc =
+            Document::from_reader(std::io::stdin().lock(), format).map_err(|err| match err {
+                DocumentError::EmptyInput { .. } => DocumentError::EmptyInput {
+                    source: "stdin".to_string(),
+                },
+                other => other,
+            })?;
         return Ok((doc.value().clone(), doc.format()));
     }
     let doc = DocumentFile::open_capped(file, input_format, max_bytes)?;
@@ -2448,7 +3049,10 @@ fn document_scalar_bytes(value: &DocumentValue, key: &str) -> Result<Vec<u8>, St
         DocumentValue::Number(text) => return Ok(text.clone().into_bytes()),
         DocumentValue::Null => return Err(format!("path `{key}` is null")),
         DocumentValue::Array(_) | DocumentValue::Object(_) => {
-            return Err(format!("path `{key}` is not a scalar"));
+            return Err(format!(
+                "path `{key}` is a collection, not a scalar; list its children with `keys` \
+                 or read it whole with `get`"
+            ));
         }
     };
     Ok(text.into_bytes())
@@ -2664,6 +3268,8 @@ fn compute_values(
     keys: &[String],
     reveal_secret: bool,
     default: Option<&str>,
+    missing_ok: bool,
+    null_separated: bool,
     ctx: &DocumentContext<'_>,
 ) -> Result<Vec<u8>, CliDocError> {
     let input_format = resolve_input_format(ctx.input_format).map_err(CliDocError::Usage)?;
@@ -2671,21 +3277,30 @@ fn compute_values(
     let addressing = ctx.addressing(doc_format);
     let mut expanded = Vec::new();
     for key in keys {
-        expanded.extend(expand_pattern(&root, key, addressing)?);
+        expanded.extend(expand_pattern(&root, key, missing_ok, addressing)?);
     }
+    let separator: u8 = if null_separated { 0 } else { b'\n' };
     let mut out = Vec::new();
     for key in &expanded {
         let bytes = scalar_bytes_at(&root, key, reveal_secret, default, addressing, ctx)?;
-        if bytes.contains(&b'\n') {
+        if null_separated && bytes.contains(&0) {
+            return Err(CliDocError::runtime(
+                "document_unframeable_value",
+                format!(
+                    "path `{key}` holds a value containing a NUL byte, which --null output cannot frame; read that path with `value`"
+                ),
+            ));
+        }
+        if !null_separated && bytes.contains(&b'\n') {
             return Err(CliDocError::runtime(
                 "document_multiline_value",
                 format!(
-                    "path `{key}` holds a value containing a newline, which one-per-line output cannot frame; read that path with `value`"
+                    "path `{key}` holds a value containing a newline, which one-per-line output cannot frame; read that path with `value` or pass --null"
                 ),
             ));
         }
         out.extend_from_slice(&bytes);
-        out.push(b'\n');
+        out.push(separator);
     }
     Ok(out)
 }
@@ -2696,9 +3311,14 @@ fn compute_values(
 /// wildcard expands to every child of the container at that point, in document
 /// order, and the addresses it produces are ordinary paths — they read back
 /// through `value`, and a literal star key inside one is escaped as `\*`.
+///
+/// With `missing_ok`, a container that does not exist at a wildcard (or any
+/// segment before it) expands to nothing instead of failing; a scalar there
+/// still fails, and the leaf reads that follow are not affected.
 fn expand_pattern(
     root: &DocumentValue,
     pattern: &str,
+    missing_ok: bool,
     addressing: Addressing<'_>,
 ) -> Result<Vec<String>, CliDocError> {
     let segments = parse_path_pattern(pattern)?;
@@ -2722,12 +3342,27 @@ fn expand_pattern(
                 }
                 PatternSegment::Wildcard => {
                     let here = join_path(&prefix);
+                    let found;
                     let target = if prefix.is_empty() {
                         root
                     } else {
-                        &get_path(root, &here, addressing).map_err(CliDocError::Document)?
+                        found = match get_path(root, &here, addressing) {
+                            Ok(target) => target,
+                            Err(err) => {
+                                let err = CliDocError::Document(err);
+                                if missing_ok && is_addressing_miss(&err) {
+                                    continue;
+                                }
+                                return Err(err);
+                            }
+                        };
+                        &found
                     };
                     let names: Vec<String> = match target {
+                        DocumentValue::Null if missing_ok => continue,
+                        DocumentValue::Null => {
+                            return Err(null_container_error(Some(&here)));
+                        }
                         DocumentValue::Object(map) => map.keys().cloned().collect(),
                         DocumentValue::Array(items) => {
                             (0..items.len()).map(|index| index.to_string()).collect()
@@ -2861,12 +3496,79 @@ fn run_enumerate(
             }
             write_raw_exit(&bytes)
         }
-        Err(err) if missing_ok && is_addressing_miss(&err) => write_raw_exit(&[]),
+        Err(err) if missing_ok && (is_addressing_miss(&err) || is_null_container(&err)) => {
+            write_raw_exit(&[])
+        }
         Err(err) => {
             let (event, code) = document_error_event(&err);
             emit_document_event(event, ctx, code, error_stream(output_to()))
         }
     }
+}
+
+/// The slug of every element of an array, in order, for `keys`/`paths` under an
+/// explicit `--slug-field`. All-or-nothing: an element lacking the field (or
+/// holding a non-string) fails the command with its index, and a repeated slug
+/// fails with every index that shares it. Slug text never appears in an error.
+fn array_slugs(
+    items: &[DocumentValue],
+    field: &str,
+    location: &str,
+) -> Result<Vec<String>, CliDocError> {
+    let mut slugs = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            DocumentValue::Object(map) => match map.get(field) {
+                Some(DocumentValue::String(slug)) => slugs.push(slug.clone()),
+                _ => {
+                    return Err(CliDocError::runtime(
+                        "document_type_mismatch",
+                        format!(
+                            "element {index} of `{location}` has no string field `{field}`; \
+                             --slug-field needs a string on every element"
+                        ),
+                    ));
+                }
+            },
+            _ => {
+                return Err(CliDocError::runtime(
+                    "document_type_mismatch",
+                    format!(
+                        "element {index} of `{location}` is not an object with a string \
+                         field `{field}`"
+                    ),
+                ));
+            }
+        }
+    }
+    let mut indices_by_slug: std::collections::HashMap<&str, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, slug) in slugs.iter().enumerate() {
+        indices_by_slug
+            .entry(slug.as_str())
+            .or_default()
+            .push(index);
+    }
+    // Report the repeated slug that appears first, so the error is stable.
+    if let Some(same) = indices_by_slug
+        .into_values()
+        .filter(|same| same.len() > 1)
+        .min_by_key(|same| same[0])
+    {
+        let indices = same
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(CliDocError::runtime(
+            "document_ambiguous_match",
+            format!(
+                "field `{field}` repeats a slug {} times in `{location}` at indices {indices}",
+                same.len()
+            ),
+        ));
+    }
+    Ok(slugs)
 }
 
 fn compute_enumerate(
@@ -2894,13 +3596,17 @@ fn compute_enumerate(
         None => root,
     };
     let names: Vec<String> = match &target {
+        DocumentValue::Null => return Err(null_container_error(key)),
         DocumentValue::Object(map) => map.keys().cloned().collect(),
-        DocumentValue::Array(items) => (0..items.len()).map(|index| index.to_string()).collect(),
+        DocumentValue::Array(items) => match ctx.list_slugs {
+            Some(field) => array_slugs(items, field, key.unwrap_or("<root>"))?,
+            None => (0..items.len()).map(|index| index.to_string()).collect(),
+        },
         _ => {
             return Err(CliDocError::runtime(
                 "document_not_container",
                 format!(
-                    "path `{}` is a scalar; nothing to enumerate",
+                    "path `{}` is a scalar; nothing to enumerate; read it with `value`",
                     key.unwrap_or("<root>")
                 ),
             ));
@@ -2914,6 +3620,21 @@ fn compute_enumerate(
                 let mut segments = base_segments.clone();
                 segments.push(name);
                 let path = join_path(&segments);
+                if ctx.list_slugs.is_some()
+                    && matches!(target, DocumentValue::Array(_))
+                    && segments.last().is_none_or(|slug| {
+                        slug.is_empty() || slug.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                {
+                    return Err(CliDocError::runtime(
+                        "document_unaddressable_key",
+                        format!(
+                            "an element slug under `{}` is empty or all digits, which a path \
+                             reads as an index; use `keys` to list slugs",
+                            key.unwrap_or("<root>")
+                        ),
+                    ));
+                }
                 // Never hand back an address this tool cannot then read. A
                 // `""` key at the document root joins to the empty string,
                 // which names no path at all — emitting it would repeat the

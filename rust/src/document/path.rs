@@ -77,7 +77,7 @@ pub fn parse_path(path: &str) -> DocumentResult<Vec<String>> {
     if wrote_bare_star {
         return Err(DocumentError::PathSyntax {
             detail: "a bare `*` segment is a pattern; write `\\*` for a literal star key, or use \
-                     a command that expands patterns"
+                     `values`, which expands patterns"
                 .to_string(),
         });
     }

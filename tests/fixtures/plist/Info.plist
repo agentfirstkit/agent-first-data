@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>org.example.sample</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.4.0</string>
+	<key>CFBundleVersion</key>
+	<integer>42</integer>
+	<key>MinimumOSVersion</key>
+	<real>17.5</real>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UIStatusBarHidden</key>
+	<false/>
+	<key>BuildDate</key>
+	<date>2026-11-08T03:00:00Z</date>
+	<key>Fingerprint</key>
+	<data>aGVsbG8=</data>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+		<string>metal</string>
+	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>org.example.sample.link</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>sample</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

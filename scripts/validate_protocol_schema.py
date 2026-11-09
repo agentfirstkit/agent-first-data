@@ -5,7 +5,7 @@
 bundled into every language package and into the installed skill, and it is what
 an external consumer validates AFDATA events against. Nothing in this repository
 ever validated an event against it. It appeared in exactly two roles — a file
-`sync_offline_assets.py` copies, and an asset `test.sh` asserts is packaged — so
+`sync_offline_assets.sh` copies, and an asset `test.sh` asserts is packaged — so
 it could say anything at all and every gate stayed green. It did: it required
 `retryable` on error payloads, which the spec lists as a strict-profile
 recommendation, so a base-profile-conformant error event was rejected by the

@@ -12,9 +12,11 @@ preserve unrelated comments, order, quoting, anchors, and body text.
 - [Select the command](#select-the-command)
 - [Read safely](#read-safely)
 - [Write exact types](#write-exact-types)
+- [Building JSON in a shell](#building-json-in-a-shell)
 - [Keyed lists](#keyed-lists)
 - [Addressing an array element by content](#addressing-an-array-element-by-content)
 - [Markdown](#markdown)
+- [Property lists](#property-lists)
 - [Mutation safety and errors](#mutation-safety-and-errors)
 - [Exit criteria](#exit-criteria)
 
@@ -24,7 +26,11 @@ preserve unrelated comments, order, quoting, anchors, and body text.
 |---|---|
 | Whole document or subtree as an AFDATA record | `get FILE [KEY]` |
 | One raw scalar for shell use | `value FILE KEY` |
-| Many scalars from a single parse | `values FILE KEY...` |
+| Whole document or subtree as bare compact JSON | `json FILE` or `json FILE KEY [--default JSON]` |
+| Whether a key exists | `has FILE KEY` |
+| How many direct children a container has | `count FILE [KEY [--missing-ok]]` |
+| Build a JSON object or array from arguments | `object [FIELD=VALUE]... [--json FIELD=JSON]...`, `array [VALUE]... [--json]` |
+| Many scalars from a single parse | `values FILE KEY... [--missing-ok] [--null]` |
 | Immediate children as reusable dot-paths | `paths FILE [KEY]` |
 | Immediate children as literal external names | `keys FILE [KEY]` |
 | Write one value | `set FILE KEY VALUE` |
@@ -43,8 +49,9 @@ stdin.
 An absent (`null`) secret stays null. Targeting an `_url` field, or a child of
 an `_url` collection, retains the same URL scrubbing as whole-document reads.
 
-`value` writes a scalar with no envelope and no forced newline. It rejects
-containers. On failure its stdout is empty and the structured error goes to
+`value` writes a scalar with no envelope and no trailing newline: the output is
+the exact bytes, so two calls in a terminal run together. Use `values` when you
+want one value per line. It rejects containers. On failure its stdout is empty and the structured error goes to
 stderr, so shell substitution cannot capture an error as data:
 
 ```bash
@@ -53,8 +60,13 @@ port="$(afdata value config.toml server.port --default 8080)"
 
 Secret leaves and URL values containing credentials require the explicit,
 auditable `--reveal-secret` option. Credential-free URLs remain readable.
-`--default VALUE` applies only when the path is absent or null; an empty string
-is a real value.
+
+Build a path from free text (URLs, file paths, versions) with
+`afdata path -- SEGMENT...`, never with a hand-written replacement: it escapes
+`\`, `.` and `*` exactly as the path parser reads them back, and prints the
+path with no trailing newline. Assign it first, then read:
+`p="$(afdata path -- "$url")"; afdata value urls.json -- "$p"`. Zero segments is a usage
+error (exit 2); an empty segment is `document_invalid_argument`.
 
 `get` preserves JSON types and structure inside its result envelope. `value`
 deliberately stringifies one scalar into raw shell bytes. Use `get` (or the
@@ -63,24 +75,9 @@ consumer explicitly wants a scalar string. For a CLI round trip, take the
 typed value from `get` and write it with the matching `set --value-type`
 (`json` for a container); never feed `value` output back when type matters.
 
-`paths` emits root-relative grammar-escaped paths that feed back into every read
-and write verb — `get`/`value`/`set`/`unset` — unchanged. Pass the same
-`--slug-field` you listed with, or a content-addressed path arrives at a verb
-that cannot resolve it. `keys` emits raw immediate names for external tools.
-They differ when a key contains a dot or space.
-
 CLI document file reads and edits (and `lint`) accept regular files up to
 16 MiB by default. When a `document_too_large` error names a file you mean to
 read, pass `--max-file-bytes BYTES`; stdin (`-`) is not capped.
-
-Consume either line stream with `while IFS= read -r`; never use command
-substitution in a `for` loop. Path grammar escapes a literal dot as `\.` and a
-literal backslash as `\\`, and a literal star as `\*`. Unknown escapes are
-errors. Empty segments address empty-string keys (`packages..version`); an
-empty-string key at the document root has no standalone path spelling.
-`keys` and `paths` refuse secret subtrees. Names containing a newline require
-`--null`; NUL-containing names cannot be emitted by either framing. An
-unrepresentable name returns `document_unframeable_name` with empty stdout.
 
 For untrusted or secret-bearing paths in Rust, prefer
 `DocumentFile::open_capped`. It opens once, checks regular-file metadata on
@@ -93,6 +90,144 @@ and platforms without an atomic no-follow open refuse that policy instead of
 simulating it with a racy precheck. Without `libc`, a normal `Follow` read
 retains the single-handle and byte-cap guarantees, but opening a special file
 can block before its type is rejected.
+
+### Existence and null
+
+`has` answers "is the key there"; `--default` and `--missing-ok` answer "is there a
+readable value".
+
+`has` prints `true` or `false` (no trailing newline) and exits 0 either way:
+`present="$(afdata has config.toml server.port)"; [ "$present" = true ]`. Assign
+first: inside `[ "$(...)" = true ]` an unreadable file would read as "absent"
+and the script would go on. A key holding `null`
+exists (`has` prints `true`), but it is not a readable value: `count`, `keys`,
+`paths` and a `*` container read it as empty only with `--missing-ok`, and
+without it fail with `document_null_value`. A missing segment, or a path that runs
+through a scalar, is `false`.
+Only an unreadable or unparseable document, or a malformed path, is an error
+(empty stdout, exit 1). Do not test existence with `get ... || ...`, which
+reads every failure as "absent".
+
+### Defaults
+
+`--default VALUE` applies when the path leads to no value (absent, running through
+a scalar such as `b.version` when `b` is a string, or null); an empty string is a
+real value. Without `--default` that same path is `document_type_mismatch`.
+
+`json` writes the value at KEY (the whole document without KEY) as one line of
+compact JSON and a newline, with no envelope: the shell equivalent of
+`jq '.key'`, and it converts TOML, YAML and the other readable formats to JSON.
+Redaction matches `get`; `--reveal-secret` lifts it. Reach for `json` when the
+next consumer wants a document or subtree as JSON, `value` when it wants a
+scalar's bytes. A missing KEY is `document_path_not_found`; `--default JSON`
+prints the given JSON (re-serialized compact) for a missing, scalar-blocked or null KEY instead,
+so a missing subtree can read as `[]` in one call. An invalid default is
+`json_parse_failed`, and an ambiguous match never falls back. `value` never
+prints a container, so the string `{}` and the object `{}` stay distinguishable.
+
+### Counting
+
+`count` prints how many direct children an object or array has, as a decimal
+integer with no trailing newline: `n="$(afdata count config.toml servers)"`. It
+does not recurse, a scalar is `document_not_container`, and a missing KEY is
+`document_path_not_found` unless `--missing-ok`, which answers `0`. Without
+KEY it counts the document root: `n="$(cmd | afdata count -)"`.
+
+### Iteration
+
+`values` takes `--missing-ok` when a `*` container (or any segment before it)
+may be absent: that KEY then contributes no records. It never forgives a
+missing leaf; that stays with `--default`. `--null` separates records with NUL,
+so a value holding a newline stays one record.
+
+`paths` emits root-relative grammar-escaped paths that feed back into every read
+and write verb — `get`/`value`/`set`/`unset` — unchanged. Pass the same
+`--slug-field` you listed with, or a content-addressed path arrives at a verb
+that cannot resolve it. `keys` emits raw immediate names for external tools.
+They differ when a key contains a dot or space.
+
+Consume either line stream with `while IFS= read -r`; never use command
+substitution in a `for` loop. Path grammar escapes a literal dot as `\.` and a
+literal backslash as `\\`, and a literal star as `\*`. Unknown escapes are
+errors. Empty segments address empty-string keys (`packages..version`); an
+empty-string key at the document root has no standalone path spelling.
+`keys` and `paths` refuse secret subtrees. Names containing a newline require
+`--null`; NUL-containing names cannot be emitted by either framing. An
+unrepresentable name returns `document_unframeable_name` with empty stdout.
+
+#### Iterating an array
+
+Prefer one `values` call per field with a `*` segment. `*` expands to every
+child in index order, so each field comes back as a column and line N is
+element N. With `--default ''` a missing or null field is an empty line:
+
+```bash
+afdata values Cargo.toml 'bin.*.name' 'bin.*.path' --default ''
+```
+
+With several patterns, all lines of the first pattern come first, then all of
+the second; they are not interleaved per element.
+
+Never assign a column to a variable and feed the loop with `<<<`. `$(...)`
+strips every trailing newline, so trailing empty values disappear, and `<<<`
+adds one back, so an empty result still runs the loop once. Columns of
+different length, or a phantom empty element, arrive with exit 0.
+
+In a script that sources the kit, read each column into a Bash array with
+`afdata_into` and loop over the index. Entries are NUL-framed, so empty values
+and values holding a newline stay intact, and an empty array runs zero times:
+
+```bash
+afdata_into names values config.json 'items.*.name'
+afdata_into emails values config.json 'items.*.email' --default ''
+i=0
+while [ "$i" -lt "${#names[@]}" ]; do
+  printf '%s %s\n' "${names[$i]}" "${emails[$i]}"
+  i=$((i + 1))
+done
+```
+
+Without the kit, write each column to a file and redirect the file into the
+loop. `afdata values … > "$file"` is a plain command, so its failure reaches
+`set -e`:
+
+```bash
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+afdata values config.json 'items.*.name' > "$tmp/names"
+afdata values config.json 'items.*.email' --default '' > "$tmp/emails"
+while IFS= read -r name <&3 && IFS= read -r email <&4; do
+  printf '%s %s\n' "$name" "$email"
+done 3< "$tmp/names" 4< "$tmp/emails"
+```
+
+A value holding a newline cannot be one line: `values` fails with
+`document_multiline_value` and names the path. Use `afdata_into`, or add
+`--null` and read with `read -r -d ''`.
+
+Boundaries. If an element is a scalar where the path needs to go deeper
+(`items.*.name.first` with `name` a string), that is `document_type_mismatch`
+without `--default`; with it, that element yields the default, the same as an
+absent or `null` one. Only a pattern that ends on a collection (`items.*` where
+an element is an object) is not covered: it is `document_not_scalar` either way.
+
+Second choice, when the loop must stop early on a condition: take the indices
+from `keys`, never from probing for a missing field, and read each element with
+one `values` call. Data arriving on stdin can be read only once, so write it to
+a file first:
+
+```bash
+afdata_mktemp file
+cat > "$file"   # stdin is consumed once; keep it for every pass below
+afdata_into indices keys "$file" identities
+for index in ${indices[@]+"${indices[@]}"}; do
+  afdata_into fields values "$file" "identities.$index.id" "identities.$index.email" --default ''
+  printf '%s %s\n' "${fields[0]}" "${fields[1]}"
+done
+```
+
+To find an element by one of its field values instead of walking all of them,
+see [Addressing an array element by content](#addressing-an-array-element-by-content).
 
 ## Write exact types
 
@@ -151,6 +286,44 @@ For secrets, do not put values in argv. Use
 `stdin` and `fd:<N>` store the bytes exactly, a trailing newline included, so
 feed them with `printf %s`, not `echo`.
 
+## Building JSON in a shell
+
+Do not splice shell variables into a `printf '{"k":"%s"}'` template: a quote,
+backslash or newline in the value yields invalid JSON. `object` and `array`
+build the text from arguments and escape it. Each prints one line of compact
+JSON with a trailing newline, so the result can go straight to `> file`, a
+JSONL stream, or `afdata json -`. Both are raw-output verbs: no `--output` or
+`--output-to`, and no redaction, because every byte came from your own argv.
+
+`object` takes `FIELD=VALUE` strings (split at the first `=`; the key is
+literal, a `.` is not a path) and `--json FIELD=JSON` for anything that is not
+a string. Invalid JSON text is `json_parse_failed`; a repeated key is an error;
+no fields prints `{}`.
+
+```bash
+# a config file
+afdata object name="$name" root="$dir" --json port=8080 --json debug=false > config.json
+
+# a result event payload
+payload="$(afdata object path="$file" --json bytes="$size")"
+afdata_result --json "$payload"
+
+# a string array from the positional parameters
+files="$(afdata array -- "$@")"
+afdata object --json files="$files"
+```
+
+When a positional argument comes from a variable (`"$@"`, a file name, a URL, a
+version), write `--` before it: flags may appear between positionals and apply
+to all of them, so a value that happens to be `--json` or `-x` would otherwise
+change the result or fail. `object`'s `FIELD=VALUE` begins with a literal field
+name and needs no `--`.
+
+`array` makes every VALUE a string; with `--json` every VALUE is parsed as JSON
+text (do not mix the two). No elements prints `[]`. A `_secret` key is accepted
+as given, the same as `set` with a bare VALUE, but argv is visible to other
+processes: write secrets with `set --secret-from`.
+
 ## Keyed lists
 
 `add` and `remove` operate on arrays of objects addressed by a slug and always
@@ -195,6 +368,30 @@ the declared field contains the same digits.
 Markdown needs no declaration: its value is a tree afdata built, so the format
 states its own rule (see below). Passing `--slug-field` anyway overrides that
 rule and switches to exact matching.
+
+### Enumerate first, then address by name
+
+`--slug-field` alone only declares how a slug segment on the path is matched;
+`keys` and `paths` on an array still list indices. Add `--slugs` (accepted only
+together with `--slug-field`) and `keys` lists each element's slug instead,
+while `paths` prints the escaped path that `value`/`get` accept back (with the
+same `--slug-field`). `--slugs` is all-or-nothing: an element without a string
+in that field is `document_type_mismatch` (the message names the index), a
+repeated slug is `document_ambiguous_match` (with the indices), and `paths` on
+an empty or all-digit slug is `document_unaddressable_key` (`keys` lists it);
+stdout stays empty in every case. Predicates stay in the shell:
+
+```bash
+afdata_into listed paths runtimes.json runtimes --slug-field name --slugs
+for path in ${listed[@]+"${listed[@]}"}; do
+  case "$path" in runtimes.iOS\ 27*) ;; *) continue ;; esac
+  available="$(afdata value runtimes.json --slug-field name -- "$path.isAvailable")"
+  [ "$available" = true ] && echo "$path"
+done
+```
+
+Without `--slugs`, `keys`/`paths` list indices, and Markdown's own array
+rule does not switch them to slugs.
 
 ## Markdown
 
@@ -311,6 +508,29 @@ and GFM-looking table rows are therefore paragraphs, not magically skipped
 decoration. If your layout says the first paragraph is a synopsis, enforce that
 badge/table syntax does not occupy that position.
 
+## Property lists
+
+`.plist` files are detected from the extension; `-` reads stdin with
+`--input-format plist`. The format is **read-only**: `set`/`unset`/`add`/`remove` reject
+`--input-format plist` while parsing argv (`cli_invalid_argument_value`, exit 2);
+`lint` reads it. A write verb on a plist detected by extension fails at runtime
+with `document_unsupported_operation`. Values map one to one:
+
+| plist | value |
+|---|---|
+| `dict` | object |
+| `array` | array |
+| `string` | string |
+| `integer` | integer |
+| `real` | float |
+| `true` / `false` | bool |
+| `date` | RFC 3339 string in UTC, e.g. `2026-11-08T03:00:00Z` |
+| `data` | standard base64 string |
+
+XML and binary property lists (`bplist` magic) are both read, with the same
+value mapping. A binary plist read as another format fails with
+`document_parse_failed` and a message pointing at `--input-format plist`.
+
 ## Mutation safety and errors
 
 Mutations are atomic and source-preserving. They refuse symlink targets and,
@@ -356,9 +576,19 @@ Branch on stable `error.code`, not message text. Common runtime codes include:
 - `document_too_large`
 - `document_write_would_corrupt`
 - `document_io_failed`
-- `document_not_scalar`
-- `document_not_container`
+- `document_not_scalar` — `value` was pointed at a collection; list its
+  children with `keys` or read it whole with `get`.
+- `document_not_container` — `keys`/`paths` was pointed at a scalar; read it
+  with `value`.
 - `document_secret_redacted`
+- `document_multiline_value` — `values` met a value holding a newline; read that
+  path with `value`, or use `--null`.
+- `document_unframeable_value` — `values --null` met a value holding a NUL byte;
+  read that path with `value`.
+- `document_unaddressable_key` — `paths` would print a path that cannot be read
+  back (an empty or all-digit slug, or an empty-string key at the root); use
+  `keys`.
+- `document_empty` — the file or stdin was empty, so there was nothing to parse.
 
 These codes describe different things that all read as "it did not parse",
 and the difference is what to fix:

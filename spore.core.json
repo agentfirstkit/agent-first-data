@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.36.1",
+  "version": "0.37.0",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus the afdata CLI and a Rust library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,8 +13,11 @@
   ],
   "license": "MIT",
   "mutations": [
-    "Give each CLI rejection a hint for its own rule instead of always pointing at registered combinations",
-    "Say what to pass when afdata emit gets an empty MESSAGE or CODE"
+    "Add json --default, count, path, object and array verbs for reading and building values without shell glue",
+    "Read XML and binary property lists (read-only); a path through a scalar means no value; empty input reports document_empty",
+    "Split --slugs (listing) from --slug-field (addressing) on keys and paths",
+    "afdata_timeout stops the whole process group; add afdata_spawn, afdata_wait_line, afdata_stop, afdata_mktemp, afdata_try, afdata_into",
+    "afdata_args_raw_output replaces the AFDATA_RAW_OUTPUT environment variable"
   ],
   "bonds": [],
   "tree": {

@@ -13,6 +13,7 @@ custom long-option parsing or ad hoc JSON.
 - [Config and events](#config-and-events)
 - [Destructive operands](#destructive-operands)
 - [Child processes](#child-processes)
+- [Scripts that print a bare value](#scripts-that-print-a-bare-value)
 - [Forwarding trailing arguments](#forwarding-trailing-arguments)
 - [Minimal pattern](#minimal-pattern)
 
@@ -52,6 +53,7 @@ usage error. Preserve both properties in wrapper diagnostics.
 ## Config and events
 
 - `afdata_config_get` reads a raw scalar config value.
+- `afdata_into ARRAY VERB ARGS...` reads `values`, `keys` or `paths` into a Bash array, NUL-framed; call it as a plain command, not in `$(...)`.
 - `afdata_log LEVEL MESSAGE` emits a structured log.
 - `afdata_result MESSAGE` emits terminal success.
 - `afdata_error CODE MESSAGE` emits terminal failure.
@@ -155,6 +157,40 @@ prompts, interactive commands, or servers.
 When an AFDATA Bash parent calls another AFDATA Bash script and the parent must
 own the only terminal result, use `afdata_call`. It preserves child logs and
 errors but converts a successful child result to an informational log.
+
+For a background process (a daemon under acceptance test) use the lifecycle
+helpers, never hand-rolled `kill` loops: `afdata_spawn OUT ERR COMMAND ...`
+(pid in `AFDATA_SPAWN_PID`, own process group, `ERR` may be `&1`),
+`afdata_wait_line OUT PID SECONDS` (first line; `1` on timeout, `3` when the process
+exited without a complete line),
+`afdata_stop SIGNAL TARGET [SECONDS]` (`-pid` signals the group, escalates to
+KILL, always reaps) and `afdata_timeout SECONDS COMMAND ...` (`124` on timeout).
+SECONDS are whole numbers; a fraction or non-number is a usage error (status `2`).
+Always stop what you spawn before the script exits.
+
+`afdata_timeout` stops the whole process group of the command, and the command
+runs in a subshell, so a function's assignments do not reach the caller. For
+scratch space use `afdata_mktemp [-d] VAR` (guarded, removed at exit, chained onto
+your EXIT trap) instead of hand-written `mktemp` plus a trap. To capture a
+command's output and status without tripping `set -e`, use
+`afdata_try OUT_VAR STATUS_VAR COMMAND ...`. `afdata_remove --quiet` removes
+without emitting the guard's rejection event.
+
+## Scripts that print a bare value
+
+A script whose stdout is captured by a caller's `$(...)` (one path or token)
+declares it with `afdata_args_raw_output` between `afdata_args_begin` and
+`afdata_args_parse` (any other position is a usage error, status 2), then writes the value with `printf '%s'`. Kit events go to
+stderr, `--output` and `--output-to` are rejected, and `afdata_result` is a
+usage error. Capture it directly, not through `afdata_call`.
+
+```bash
+afdata_args_begin "locate.sh [OPTIONS] NAME"
+afdata_args_raw_output
+afdata_args_positional name NAME "Name to locate"
+afdata_args_parse "$@"
+printf '%s' "/opt/tools/${name}"
+```
 
 ## Forwarding trailing arguments
 

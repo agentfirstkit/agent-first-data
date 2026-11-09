@@ -16,6 +16,8 @@ pub mod ini;
 pub mod json;
 #[cfg(feature = "markdown")]
 pub mod markdown;
+#[cfg(feature = "plist")]
+pub mod plist;
 #[cfg(feature = "toml")]
 pub mod toml;
 #[cfg(feature = "yaml")]
@@ -54,6 +56,10 @@ pub enum Format {
     /// valid readings is not something an extension can decide.
     #[cfg(feature = "markdown")]
     Markdown,
+    /// An XML or binary property list. Read-only: afdata reads the value and
+    /// never writes a plist back. Detected from the `.plist` extension.
+    #[cfg(feature = "plist")]
+    Plist,
 }
 
 impl Format {
@@ -76,20 +82,26 @@ impl Format {
             Self::YamlFrontmatter => "YAML frontmatter",
             #[cfg(feature = "markdown")]
             Self::Markdown => "Markdown",
+            #[cfg(feature = "plist")]
+            Self::Plist => "plist",
         }
     }
 
     /// Whether this format can be written at all.
     ///
-    /// Markdown is the one reader-only format: its parsed value is a flattened
-    /// view of prose, so re-rendering a document from it would discard
-    /// everything the flattening dropped. Every mutating verb refuses up front
-    /// rather than producing that file.
+    /// Markdown and plist are reader-only. Markdown's parsed value is a
+    /// flattened view of prose, so re-rendering a document from it would
+    /// discard everything the flattening dropped; a plist value has no
+    /// source-preserving XML writer behind it. Every mutating verb refuses up
+    /// front rather than producing that file.
     #[must_use]
     pub const fn is_read_only(self) -> bool {
         match self {
             #[cfg(feature = "markdown")]
             Self::Markdown => true,
+            #[cfg(feature = "plist")]
+            Self::Plist => true,
+            #[allow(unreachable_patterns)]
             _ => false,
         }
     }
@@ -166,6 +178,8 @@ impl Format {
             Self::YamlFrontmatter => "yaml-frontmatter",
             #[cfg(feature = "markdown")]
             Self::Markdown => "markdown",
+            #[cfg(feature = "plist")]
+            Self::Plist => "plist",
         }
     }
 
@@ -194,6 +208,8 @@ impl Format {
             "yaml-frontmatter" => Some(Self::YamlFrontmatter),
             #[cfg(feature = "markdown")]
             "markdown" => Some(Self::Markdown),
+            #[cfg(feature = "plist")]
+            "plist" => Some(Self::Plist),
             _ => None,
         }
     }
@@ -210,6 +226,8 @@ impl Format {
             "yaml" => Some(Format::Yaml),
             #[cfg(feature = "ini")]
             "ini" => Some(Format::Ini),
+            #[cfg(feature = "plist")]
+            "plist" => Some(Format::Plist),
             _ => None,
         }
     }
@@ -231,6 +249,7 @@ impl Format {
             "toml" => Some("toml"),
             "yaml" => Some("yaml"),
             "ini" => Some("ini"),
+            "plist" => Some("plist"),
             // JSON is a core dependency; there is no feature to be missing.
             _ => None,
         }
@@ -263,6 +282,7 @@ impl Format {
             "toml" => Some("toml"),
             "yaml" | "yml" => Some("yaml"),
             "ini" => Some("ini"),
+            "plist" => Some("plist"),
             _ => None,
         }
     }
@@ -296,6 +316,9 @@ impl Format {
 
             #[cfg(feature = "markdown")]
             Format::Markdown => markdown::load(content),
+
+            #[cfg(feature = "plist")]
+            Format::Plist => plist::load(content),
         }
     }
 
@@ -329,6 +352,8 @@ impl Format {
             // non-preserving one. See `Format::is_read_only`.
             #[cfg(feature = "markdown")]
             Format::Markdown => Err(self.read_only_error("save")),
+            #[cfg(feature = "plist")]
+            Format::Plist => Err(self.read_only_error("save")),
         }
     }
 }
@@ -338,6 +363,8 @@ pub use dotenv::load as load_dotenv;
 pub use json::{load as load_json, save as save_json};
 #[cfg(feature = "markdown")]
 pub use markdown::load as load_markdown;
+#[cfg(feature = "plist")]
+pub use plist::load as load_plist;
 #[cfg(feature = "toml")]
 pub use toml::{load as load_toml, save as save_toml};
 #[cfg(feature = "yaml")]

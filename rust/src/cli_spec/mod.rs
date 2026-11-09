@@ -25,7 +25,7 @@
 //!
 //! `crate::cli_afdata` is the adapter that turns [`ResolvedHelp`],
 //! [`ResolvedVersion`] and [`CliError`] into AFDATA events and owns the
-//! `_secret` policy. `scripts/validate_cli_core_boundary.py` enforces the
+//! `_secret` policy. `scripts/validate_cli_core_boundary.sh` enforces the
 //! rules above.
 
 mod build;

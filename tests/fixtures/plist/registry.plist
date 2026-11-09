@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+	<dict>
+		<key>IORegistryEntryName</key>
+		<string>Root</string>
+		<key>IORegistryEntryID</key>
+		<integer>4294967296</integer>
+		<key>IOBusyState</key>
+		<false/>
+		<key>IOProbeScore</key>
+		<real>0.5</real>
+		<key>IOLastUpdate</key>
+		<date>2026-11-08T03:00:00Z</date>
+		<key>IOAddress</key>
+		<data>AQID</data>
+		<key>IORegistryEntryChildren</key>
+		<array>
+			<dict>
+				<key>IORegistryEntryName</key>
+				<string>Bus0</string>
+				<key>IOActive</key>
+				<true/>
+				<key>IORegistryEntryChildren</key>
+				<array>
+					<dict>
+						<key>IORegistryEntryName</key>
+						<string>Port0</string>
+					</dict>
+				</array>
+			</dict>
+		</array>
+	</dict>
+</array>
+</plist>

@@ -54,6 +54,7 @@ pub(super) fn open_read_handle(path: &Path, symlink_policy: SymlinkPolicy) -> Do
     })
 }
 
+#[cfg(any(feature = "cli", all(test, unix)))]
 pub(super) fn read_capped_source(
     file: File,
     path: &Path,
@@ -61,6 +62,15 @@ pub(super) fn read_capped_source(
 ) -> DocumentResult<String> {
     inspect_capped_source(&file, path, max_bytes)?;
     read_capped_contents(file, path, max_bytes)
+}
+
+pub(super) fn read_capped_source_bytes(
+    file: File,
+    path: &Path,
+    max_bytes: u64,
+) -> DocumentResult<Vec<u8>> {
+    inspect_capped_source(&file, path, max_bytes)?;
+    read_capped_bytes(file, path, max_bytes)
 }
 
 pub(super) fn inspect_capped_source(
@@ -85,11 +95,27 @@ pub(super) fn inspect_capped_source(
     Ok(())
 }
 
+#[cfg(any(feature = "cli", all(test, unix)))]
 pub(super) fn read_capped_contents(
     file: File,
     path: &Path,
     max_bytes: u64,
 ) -> DocumentResult<String> {
+    let bytes = read_capped_bytes(file, path, max_bytes)?;
+    String::from_utf8(bytes).map_err(|error| DocumentError::IoError {
+        detail: format!(
+            "read `{}`: document is not UTF-8 (valid through byte {})",
+            path.display(),
+            error.utf8_error().valid_up_to()
+        ),
+    })
+}
+
+pub(super) fn read_capped_bytes(
+    file: File,
+    path: &Path,
+    max_bytes: u64,
+) -> DocumentResult<Vec<u8>> {
     let read_limit = max_bytes.saturating_add(1);
     // A budget is a ceiling, not an allocation hint: small configuration files
     // must not allocate a megabyte merely because that much would be allowed.
@@ -105,11 +131,5 @@ pub(super) fn read_capped_contents(
             max_bytes,
         });
     }
-    String::from_utf8(bytes).map_err(|error| DocumentError::IoError {
-        detail: format!(
-            "read `{}`: document is not UTF-8 (valid through byte {})",
-            path.display(),
-            error.utf8_error().valid_up_to()
-        ),
-    })
+    Ok(bytes)
 }

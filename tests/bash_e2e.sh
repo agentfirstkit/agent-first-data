@@ -71,29 +71,29 @@ cat > "$TEST_TMP/config.toml" <<'TOML'
 host = "example.com"
 TOML
 
-[ "$(afdata_config_get "$TEST_TMP/config.toml" server.host)" = example.com ] \
+actual="$(afdata_config_get "$TEST_TMP/config.toml" server.host)"; [ "$actual" = example.com ] \
   || fail "afdata_config_get did not read the configured value"
-[ "$(afdata_config_get "$TEST_TMP/config.toml" server.port 8080)" = 8080 ] \
+actual="$(afdata_config_get "$TEST_TMP/config.toml" server.port 8080)"; [ "$actual" = 8080 ] \
   || fail "afdata_config_get did not apply the default"
 
 result_output="$(afdata_result "Build complete")"
-[ "$(printf '%s' "$result_output" | afdata_cli value - kind)" = result ] \
+actual="$(printf '%s' "$result_output" | afdata_cli value - kind)"; [ "$actual" = result ] \
   || fail "afdata_result did not emit a result event"
-[ "$(printf '%s' "$result_output" | afdata_cli value - result.message)" = "Build complete" ] \
+actual="$(printf '%s' "$result_output" | afdata_cli value - result.message)"; [ "$actual" = "Build complete" ] \
   || fail "afdata_result changed the message"
 
 structured_result="$(afdata_result --json '{"duration_ms":12,"count":3,"token_secret":"hidden-canary"}')"
-[ "$(printf '%s' "$structured_result" | afdata_cli value - result.duration_ms)" = 12 ] \
+actual="$(printf '%s' "$structured_result" | afdata_cli value - result.duration_ms)"; [ "$actual" = 12 ] \
   || fail "structured result lost its numeric value"
 printf '%s\n' "$structured_result" > "$TEST_TMP/structured.jsonl"
 afdata_cli lint "$TEST_TMP/structured.jsonl" > "$TEST_TMP/structured-lint.json"
-[ "$(afdata_cli value "$TEST_TMP/structured-lint.json" result.ok)" = true ] \
+actual="$(afdata_cli value "$TEST_TMP/structured-lint.json" result.ok)"; [ "$actual" = true ] \
   || fail "structured result failed lint"
 case "$structured_result" in *hidden-canary*) fail "structured result leaked a secret" ;; esac
 _AFDATA_BASH_CHILD=1 afdata_result --json '{"duration_ms":12,"token_secret":"hidden-canary"}' \
   > "$TEST_TMP/child-json.stdout" 2> "$TEST_TMP/child-json.stderr"
 [ ! -s "$TEST_TMP/child-json.stdout" ] || fail "child emitted a terminal result"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/child-json.stderr" kind)" = log ] || fail "child result was not diagnostic"
+actual="$(afdata_cli value --input-format json "$TEST_TMP/child-json.stderr" kind)"; [ "$actual" = log ] || fail "child result was not diagnostic"
 case "$(cat "$TEST_TMP/child-json.stderr")" in *hidden-canary*) fail "child result leaked a secret" ;; esac
 
 json_error_status=0
@@ -108,7 +108,7 @@ _AFDATA_BASH_CHILD=1 afdata_result --json '{"token_secret":"child-invalid-canary
   > "$TEST_TMP/child-invalid.stdout" 2> "$TEST_TMP/child-invalid.stderr" || child_json_error_status=$?
 [ "$child_json_error_status" -eq 2 ] || fail "child malformed JSON did not return a usage error"
 [ ! -s "$TEST_TMP/child-invalid.stdout" ] || fail "child malformed JSON wrote to stdout"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/child-invalid.stderr" error.code)" = cli_invalid_argument_value ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/child-invalid.stderr" error.code)"; [ "$actual" = cli_invalid_argument_value ] \
   || fail "child malformed JSON failed without saying why"
 case "$(cat "$TEST_TMP/child-invalid.stderr")" in *child-invalid-canary*) fail "child JSON parse error echoed the payload" ;; esac
 
@@ -121,7 +121,8 @@ for child_mode in 0 1; do
     > "$TEST_TMP/missing-json.stdout" 2> "$TEST_TMP/missing-json.stderr" || missing_json_status=$?
   [ "$missing_json_status" -eq 2 ] || fail "afdata_result --json (child=$child_mode) did not return a usage error"
   [ ! -s "$TEST_TMP/missing-json.stdout" ] || fail "afdata_result --json (child=$child_mode) wrote to stdout"
-  [ "$(afdata_cli value --input-format json "$TEST_TMP/missing-json.stderr" error.message)" \
+  actual="$(afdata_cli value --input-format json "$TEST_TMP/missing-json.stderr" error.message)"
+  [ "$actual" \
     = "afdata_result requires MESSAGE or --json JSON" ] \
     || fail "afdata_result --json (child=$child_mode) failed with someone else's error"
 done
@@ -129,26 +130,26 @@ done
 # Messages are forwarded as values, so one that starts with `-` is not read
 # as a flag.
 dash_result="$(afdata_result "-5 files")" || fail "afdata_result rejected a message starting with -"
-[ "$(printf '%s' "$dash_result" | afdata_cli value - result.message)" = "-5 files" ] \
+actual="$(printf '%s' "$dash_result" | afdata_cli value - result.message)"; [ "$actual" = "-5 files" ] \
   || fail "afdata_result changed a message starting with -"
 afdata_log warn "--dry-run set" 2> "$TEST_TMP/dash-log.stderr" \
   || fail "afdata_log rejected a message starting with -"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/dash-log.stderr" log.message)" = "--dry-run set" ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/dash-log.stderr" log.message)"; [ "$actual" = "--dry-run set" ] \
   || fail "afdata_log changed a message starting with -"
 dash_error_status=0
 afdata_error build_failed "-x is unsupported" "--no-x instead" \
   2> "$TEST_TMP/dash-error.stderr" || dash_error_status=$?
 [ "$dash_error_status" -eq 1 ] || fail "afdata_error with dash-led text did not return status 1"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/dash-error.stderr" error.message)" = "-x is unsupported" ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/dash-error.stderr" error.message)"; [ "$actual" = "-x is unsupported" ] \
   || fail "afdata_error changed a message starting with -"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/dash-error.stderr" error.hint)" = "--no-x instead" ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/dash-error.stderr" error.hint)"; [ "$actual" = "--no-x instead" ] \
   || fail "afdata_error changed a hint starting with -"
 
 afdata_log info "Building project" > "$TEST_TMP/log.stdout" 2> "$TEST_TMP/log.stderr"
 [ ! -s "$TEST_TMP/log.stdout" ] || fail "afdata_log wrote to stdout under split routing"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/log.stderr" kind)" = log ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/log.stderr" kind)"; [ "$actual" = log ] \
   || fail "afdata_log did not emit a log event"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/log.stderr" log.level)" = info ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/log.stderr" log.level)"; [ "$actual" = info ] \
   || fail "afdata_log changed the level"
 
 if afdata_error build_failed "Build failed" "Inspect child output" \
@@ -159,7 +160,7 @@ else
 fi
 [ "$error_status" -eq 1 ] || fail "afdata_error did not return status 1"
 [ ! -s "$TEST_TMP/error.stdout" ] || fail "afdata_error wrote to stdout under split routing"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/error.stderr" error.code)" = build_failed ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/error.stderr" error.code)"; [ "$actual" = build_failed ] \
   || fail "afdata_error changed the code"
 
 config_path=""
@@ -199,7 +200,7 @@ else
 fi
 [ "$help_output_status" -eq 2 ] || fail "--help with --output did not return status 2"
 [ ! -s "$TEST_TMP/help-output.stdout" ] || fail "--help with --output wrote raw help to stdout"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/help-output.stderr" error.code)" = cli_error ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/help-output.stderr" error.code)"; [ "$actual" = cli_error ] \
   || fail "--help with --output did not emit a structured error"
 
 # An AFDATA Bash child contributes logs to its parent's stream, but only the
@@ -278,7 +279,7 @@ else
 fi
 [ "$args_status" -eq 2 ] || fail "unknown argument did not return status 2"
 [ ! -s "$TEST_TMP/args.stdout" ] || fail "argument error wrote to stdout under split routing"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/args.stderr" error.code)" = cli_error ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/args.stderr" error.code)"; [ "$actual" = cli_error ] \
   || fail "argument error was not structured"
 
 # Parser failures identify argument names and categories without copying raw
@@ -325,7 +326,7 @@ fi
 [ "$unresolved_output_status" -eq 2 ] || fail "unresolved output selector case did not exit 2"
 [ ! -s "$TEST_TMP/unresolved-output.stdout" ] \
   || fail "unresolved output selector redirected its own parser error"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/unresolved-output.stderr" error.code)" = cli_error ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/unresolved-output.stderr" error.code)"; [ "$actual" = cli_error ] \
   || fail "unresolved output selector reformatted its own parser error"
 if grep -q 'positional-canary-secret' "$TEST_TMP/unresolved-output.stderr"; then
   fail "unresolved output selector error copied the raw positional value"
@@ -342,7 +343,7 @@ else
   run_status=$?
 fi
 [ "$run_status" -eq 7 ] || fail "afdata_run changed the child exit status"
-[ "$(cat "$TEST_TMP/run.stdout")" = "child stdout" ] \
+actual="$(cat "$TEST_TMP/run.stdout")"; [ "$actual" = "child stdout" ] \
   || fail "afdata_run changed child stdout"
 grep -qx 'child stderr' "$TEST_TMP/run.stderr" \
   || fail "afdata_run changed child stderr"
@@ -350,7 +351,7 @@ grep -qx 'child stderr' "$TEST_TMP/run.stderr" \
   || fail "afdata_run did not emit its start log"
 [ "$(grep -c '"kind":"error"' "$TEST_TMP/run.stderr")" -eq 1 ] \
   || fail "afdata_run did not emit one terminal failure"
-[ "$(grep '"kind":"error"' "$TEST_TMP/run.stderr" | afdata_cli value - error.code)" = child_process_failed ] \
+actual="$(grep '"kind":"error"' "$TEST_TMP/run.stderr" | afdata_cli value - error.code)"; [ "$actual" = child_process_failed ] \
   || fail "afdata_run used the wrong child failure code"
 
 afdata_run --quiet bash -c '
@@ -440,7 +441,7 @@ guard_form() {
 guard_plain="$TEST_TMP/guard-plain"
 mkdir -p "$guard_plain"
 guard_plain_canonical="$(guard_form "$(cd "$guard_plain" && pwd -P)")"
-[ "$(afdata_cli guard path "$guard_plain")" = "$guard_plain_canonical" ] \
+actual="$(afdata_cli guard path "$guard_plain")"; [ "$actual" = "$guard_plain_canonical" ] \
   || fail "afdata guard path did not print the normalized target"
 
 # Two-step form: the guard's own exit status and stderr are not swallowed
@@ -453,7 +454,7 @@ else
 fi
 [ "$guard_empty_status" -eq 1 ] || fail "afdata guard empty VALUE did not exit 1"
 [ -z "$guard_empty_out" ] || fail "afdata guard empty VALUE wrote to stdout"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/guard-empty.stderr" error.code)" = guard_empty_value ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/guard-empty.stderr" error.code)"; [ "$actual" = guard_empty_value ] \
   || fail "afdata guard empty VALUE used the wrong error code"
 
 # Nested composition: a value read out of a document, guarded before it ever
@@ -464,9 +465,10 @@ mkdir -p "$guard_nested_root/output"
 cat > "$guard_nested_root/build.json" <<'JSON'
 {"output_dir": "output"}
 JSON
+guard_nested_dir="$(afdata_cli value "$guard_nested_root/build.json" output_dir)"
 guard_nested_result="$(
   cd "$guard_nested_root" \
-    && afdata_cli guard cwd_path "$(afdata_cli value build.json output_dir)"
+    && afdata_cli guard cwd_path "$guard_nested_dir"
 )"
 guard_nested_expected="$(guard_form "$(cd "$guard_nested_root/output" && pwd -P)")"
 [ "$guard_nested_result" = "$guard_nested_expected" ] \
@@ -516,7 +518,7 @@ guard_blank_out="$(afdata_cli guard path "   " 2>/dev/null)" || true
 guard_anchor="$TEST_TMP/guard-anchor"
 mkdir -p "$guard_anchor/build"
 guard_anchor_child="$(guard_form "$(cd "$guard_anchor/build" && pwd -P)")"
-[ "$(afdata_cli guard path "$guard_anchor/build" --under "$guard_anchor")" = "$guard_anchor_child" ] \
+actual="$(afdata_cli guard path "$guard_anchor/build" --under "$guard_anchor")"; [ "$actual" = "$guard_anchor_child" ] \
   || fail "afdata guard --under did not accept a child of the anchor"
 
 guard_outside_anchor="$TEST_TMP/guard-outside-anchor"
@@ -529,7 +531,7 @@ guard_under_out="$(afdata_cli guard path "$guard_outside_anchor" --under "$guard
 guard_blank_root_out="$(afdata_cli guard path "$guard_anchor/build" --under "" \
   2>"$TEST_TMP/guard-blank-root.stderr")" || true
 [ -z "$guard_blank_root_out" ] || fail "afdata guard accepted a blank --under root"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/guard-blank-root.stderr" error.code)" = guard_invalid_root ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/guard-blank-root.stderr" error.code)"; [ "$actual" = guard_invalid_root ] \
   || fail "a blank --under root used the wrong error code"
 
 # A symlink sitting inside the containment root but pointing out of it: `rm`
@@ -541,13 +543,15 @@ ln -s "$guard_outside_anchor" "$guard_anchor/escape_link"
 guard_escape_out="$(afdata_cli guard path "$guard_anchor/escape_link" --under "$guard_anchor" \
   2>"$TEST_TMP/guard-escape.stderr")" || true
 [ -z "$guard_escape_out" ] || fail "afdata guard accepted a symlink escaping the containment root"
-[ "$(afdata_cli value --input-format json "$TEST_TMP/guard-escape.stderr" error.code)" = guard_symlink_escapes_containment ] \
+actual="$(afdata_cli value --input-format json "$TEST_TMP/guard-escape.stderr" error.code)"; [ "$actual" = guard_symlink_escapes_containment ] \
   || fail "a containment-escaping symlink used the wrong error code"
 
 # A symlink that stays inside the root still passes, and still passes as the
 # link itself rather than as its target.
 ln -s "$guard_anchor/build" "$guard_anchor/inside_link"
-[ "$(afdata_cli guard path "$guard_anchor/inside_link" --under "$guard_anchor")" = "$(guard_form "$(cd "$guard_anchor" && pwd -P)/inside_link")" ] \
+actual="$(afdata_cli guard path "$guard_anchor/inside_link" --under "$guard_anchor")"
+expected="$(guard_form "$(cd "$guard_anchor" && pwd -P)/inside_link")"
+[ "$actual" = "$expected" ] \
   || fail "afdata guard did not pass a contained symlink through as itself"
 
 # `set -e` contrast, both recommended forms. These run in real child shells:
@@ -650,7 +654,7 @@ afdata_remove path "$remove_sentinel" --under "$remove_other_root" 2>/dev/null \
   || remove_status=$?
 [ "$remove_status" -ne 0 ] || fail "afdata_remove reported success on a rejected value"
 [ -e "$remove_sentinel/marker" ] || fail "a rejected afdata_remove still reached its target"
-[ "$(cat "$remove_sentinel/marker")" = intact ] \
+actual="$(cat "$remove_sentinel/marker")"; [ "$actual" = intact ] \
   || fail "a rejected afdata_remove modified its target"
 
 remove_status=0
@@ -870,5 +874,398 @@ esac
 
 OSTYPE="$trash_saved_ostype"
 rm -f "$trash_stub_dir/cygpath" "$trash_stub_dir/powershell"
+
+# Raw-output scripts: stdout carries only the script's own bare value.
+raw_script="$TEST_TMP/raw-script.sh"
+cat > "$raw_script" <<'RAW'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$AFDATA_TEST_LIB"
+afdata_args_begin "raw-script.sh [OPTIONS]"
+afdata_args_raw_output
+afdata_args_parse "$@"
+afdata_log info "resolving"
+printf '%s' "bare-value"
+RAW
+raw_run() {
+  AFDATA_TEST_LIB="$ROOTPATH/bash/afdata.sh" bash "$raw_script" "$@"
+}
+
+for raw_flag in "--output-to stdout" "--output=plain" "--output yaml" "--output-to=split"; do
+  raw_status=0
+  # shellcheck disable=SC2086
+  raw_run $raw_flag > "$TEST_TMP/raw.stdout" 2> "$TEST_TMP/raw.stderr" || raw_status=$?
+  [ "$raw_status" -eq 2 ] || fail "raw script accepted '$raw_flag' (status $raw_status)"
+  [ ! -s "$TEST_TMP/raw.stdout" ] || fail "raw script rejection wrote to stdout"
+  grep -q cli_error "$TEST_TMP/raw.stderr" || fail "raw script rejection was not a cli_error"
+done
+
+AFDATA_OUTPUT_TO=stdout raw_run > "$TEST_TMP/raw.stdout" 2> "$TEST_TMP/raw.stderr" \
+  || fail "raw script failed under inherited AFDATA_OUTPUT_TO=stdout"
+actual="$(cat "$TEST_TMP/raw.stdout")"; [ "$actual" = bare-value ] \
+  || fail "raw script stdout was not only the bare value: $(cat "$TEST_TMP/raw.stdout")"
+grep -q resolving "$TEST_TMP/raw.stderr" || fail "raw script log did not reach stderr"
+
+raw_help="$(raw_run --help)"
+case "$raw_help" in
+  *--output*) fail "raw script help advertises --output" ;;
+esac
+
+raw_status=0
+bash -c '
+  source "$1"
+  afdata_args_begin "raw.sh"
+  afdata_args_raw_output
+  afdata_args_parse
+  afdata_result "done"
+' bash "$ROOTPATH/bash/afdata.sh" > "$TEST_TMP/raw.stdout" 2> "$TEST_TMP/raw.stderr" \
+  || raw_status=$?
+[ "$raw_status" -eq 2 ] || fail "afdata_result in a raw script returned $raw_status, not 2"
+[ ! -s "$TEST_TMP/raw.stdout" ] || fail "afdata_result in a raw script wrote to stdout"
+
+# The declaration is only meaningful between begin and parse; any other
+# position is a usage error rather than a silently dropped declaration.
+for raw_order in before after; do
+  raw_status=0
+  bash -c '
+    set -e
+    source "$1"
+    if [ "$2" = before ]; then
+      afdata_args_raw_output
+      afdata_args_begin "raw.sh"
+      afdata_args_parse
+    else
+      afdata_args_begin "raw.sh"
+      afdata_args_parse
+      afdata_args_raw_output
+    fi
+    printf "reached"
+  ' bash "$ROOTPATH/bash/afdata.sh" "$raw_order" > "$TEST_TMP/raw.stdout" 2> "$TEST_TMP/raw.stderr" \
+    || raw_status=$?
+  [ "$raw_status" -eq 2 ] || fail "afdata_args_raw_output $raw_order returned $raw_status, not 2"
+  grep -q 'cli_error' "$TEST_TMP/raw.stderr" \
+    || fail "afdata_args_raw_output $raw_order was not a cli_error"
+done
+
+# The documented file-based loop: trailing elements missing a field give three
+# iterations, an empty array none. The scratch directory sits under TEST_TMP,
+# which this test already removes; the documented EXIT trap is top-level code
+# and would name a function-local variable that is gone when a subshell exits.
+afdata() { "$AFDATA_BIN" "$@"; }
+file_loop() {
+  local tmp
+  tmp="$(mktemp -d "$TEST_TMP/file-loop.XXXXXX")"
+  afdata values "$1" 'items.*.name' > "$tmp/names"
+  afdata values "$1" 'items.*.email' --default '' > "$tmp/emails"
+  while IFS= read -r name <&3 && IFS= read -r email <&4; do
+    printf '%s %s\n' "$name" "$email"
+  done 3< "$tmp/names" 4< "$tmp/emails"
+}
+printf '{"items":[{"name":"a","email":"a@x"},{"name":"b"},{"name":"c"}]}' > "$TEST_TMP/items3.json"
+printf '{"items":[]}' > "$TEST_TMP/items0.json"
+[ "$( file_loop "$TEST_TMP/items3.json" | wc -l | tr -d ' ')" = 3 ] \
+  || fail "file-based loop did not run 3 times"
+[ "$( file_loop "$TEST_TMP/items0.json" | wc -l | tr -d ' ')" = 0 ] \
+  || fail "file-based loop did not run 0 times on an empty array"
+
+# The old environment declaration no longer exists: an exported variable must
+# not turn an ordinary child script into a raw-output one.
+plain_script="$TEST_TMP/plain-script.sh"
+cat > "$plain_script" <<'PLAIN'
+#!/usr/bin/env bash
+set -euo pipefail
+source "$AFDATA_TEST_LIB"
+afdata_args_begin "plain-script.sh"
+afdata_args_parse "$@"
+afdata_result "plain-done"
+PLAIN
+AFDATA_RAW_OUTPUT=true AFDATA_TEST_LIB="$ROOTPATH/bash/afdata.sh" bash "$plain_script" \
+  > "$TEST_TMP/plain.stdout" 2> "$TEST_TMP/plain.stderr" \
+  || fail "AFDATA_RAW_OUTPUT in the environment broke an ordinary script"
+actual="$(afdata_cli value --input-format json "$TEST_TMP/plain.stdout" result.message)"
+[ "$actual" = plain-done ] || fail "ordinary script result was not emitted on stdout: $actual"
+
+# Background process lifecycle.
+afdata_spawn "$TEST_TMP/spawn.out" "&1" bash -c 'echo first; echo second; sleep 30'
+spawn_pid="$AFDATA_SPAWN_PID"
+actual="$(afdata_wait_line "$TEST_TMP/spawn.out" "$spawn_pid" 10)"; [ "$actual" = first ] \
+  || fail "afdata_wait_line did not return the first line"
+afdata_stop TERM "-$spawn_pid" 5 || fail "afdata_stop did not report the group gone"
+kill -0 "$spawn_pid" 2>/dev/null && fail "afdata_stop left the process running"
+
+afdata_spawn "$TEST_TMP/quiet.out" "$TEST_TMP/quiet.err" sleep 30
+quiet_pid="$AFDATA_SPAWN_PID"
+wait_status=0
+afdata_wait_line "$TEST_TMP/quiet.out" "$quiet_pid" 1 >/dev/null || wait_status=$?
+[ "$wait_status" -eq 1 ] || fail "afdata_wait_line did not time out with status 1 ($wait_status)"
+afdata_stop TERM "$quiet_pid" 5 || fail "afdata_stop failed on a plain pid"
+
+afdata_spawn "$TEST_TMP/gone.out" "&1" bash -c 'printf partial'
+gone_pid="$AFDATA_SPAWN_PID"
+wait_status=0
+actual="$(afdata_wait_line "$TEST_TMP/gone.out" "$gone_pid" 10)" || wait_status=$?
+[ "$wait_status" -eq 3 ] || fail "afdata_wait_line on a half line returned $wait_status, not 3"
+[ -z "$actual" ] || fail "afdata_wait_line printed a half line: $actual"
+afdata_stop TERM "$gone_pid" 5 || fail "afdata_stop failed on an exited process"
+
+afdata_spawn "$TEST_TMP/dead.out" "&1" bash -c 'exit 7'
+dead_pid="$AFDATA_SPAWN_PID"
+wait_status=0
+actual="$(afdata_wait_line "$TEST_TMP/dead.out" "$dead_pid" 10)" || wait_status=$?
+[ "$wait_status" -eq 3 ] || fail "afdata_wait_line on a dead silent process returned $wait_status, not 3"
+[ -z "$actual" ] || fail "afdata_wait_line printed output for a silent process: $actual"
+afdata_stop TERM "$dead_pid" 5 || fail "afdata_stop failed on an exited process"
+
+afdata_spawn "$TEST_TMP/short.out" "&1" bash -c 'echo whole; exit 0'
+short_pid="$AFDATA_SPAWN_PID"
+actual="$(afdata_wait_line "$TEST_TMP/short.out" "$short_pid" 10)"; [ "$actual" = whole ] \
+  || fail "afdata_wait_line did not print the line of an exited process"
+afdata_stop TERM "$short_pid" 5 || fail "afdata_stop failed on an exited process"
+
+for seconds_case in "afdata_wait_line $TEST_TMP/x 1 0.5" "afdata_wait_line $TEST_TMP/x 1 abc" \
+  "afdata_stop TERM 1 0.5" "afdata_stop TERM 1 abc" \
+  "afdata_timeout 0.5 true" "afdata_timeout abc true"; do
+  seconds_status=0
+  # shellcheck disable=SC2086
+  $seconds_case > "$TEST_TMP/seconds.stdout" 2> "$TEST_TMP/seconds.stderr" || seconds_status=$?
+  [ "$seconds_status" -eq 2 ] || fail "'$seconds_case' returned $seconds_status, not 2"
+  actual="$(afdata_cli value --input-format json "$TEST_TMP/seconds.stderr" error.code)"
+  [ "$actual" = cli_error ] || fail "'$seconds_case' error.code was $actual"
+done
+
+afdata_spawn "$TEST_TMP/stubborn.out" "&1" bash -c 'trap "" TERM; echo ready; while :; do sleep 0.1; done'
+stubborn_pid="$AFDATA_SPAWN_PID"
+actual="$(afdata_wait_line "$TEST_TMP/stubborn.out" "$stubborn_pid" 10)"; [ "$actual" = ready ] \
+  || fail "stubborn child did not start"
+afdata_stop TERM "-$stubborn_pid" 1 2>"$TEST_TMP/stubborn.err" \
+  || fail "afdata_stop did not escalate to KILL"
+kill -0 "$stubborn_pid" 2>/dev/null && fail "TERM-ignoring child survived afdata_stop"
+grep -q 'sent KILL' "$TEST_TMP/stubborn.err" || fail "afdata_stop escalation was not logged"
+wait "$stubborn_pid" 2>/dev/null && fail "afdata_stop left a child to reap" || :
+
+timeout_status=0
+afdata_timeout 1 sleep 5 || timeout_status=$?
+[ "$timeout_status" -eq 124 ] || fail "afdata_timeout returned $timeout_status, not 124"
+timeout_status=0
+afdata_timeout 1 bash -c 'trap "" TERM; while :; do sleep 0.1; done' 2>"$TEST_TMP/timeout.err" || timeout_status=$?
+[ "$timeout_status" -eq 124 ] || fail "afdata_timeout on a TERM-ignoring command returned $timeout_status, not 124"
+timeout_status=0
+afdata_timeout 5 bash -c 'exit 7' || timeout_status=$?
+[ "$timeout_status" -eq 7 ] || fail "afdata_timeout did not pass the command status ($timeout_status)"
+actual="$(printf 'piped' | afdata_timeout 5 cat)"; [ "$actual" = piped ] \
+  || fail "afdata_timeout did not pass stdin through"
+
+# afdata_timeout stops the command's whole process group, so a child it started
+# neither outlives the deadline nor holds the `$(...)` pipe open.
+timeout_child="$TEST_TMP/timeout-child.sh"
+cat > "$timeout_child" <<'CHILD'
+#!/usr/bin/env bash
+sleep 31 &
+sleep 31
+CHILD
+chmod +x "$timeout_child"
+timeout_status=0
+timeout_started="$(date +%s)"
+timeout_out="$(afdata_timeout 1 "$timeout_child" 2>"$TEST_TMP/group.err")" || timeout_status=$?
+timeout_elapsed=$(($(date +%s) - timeout_started))
+[ "$timeout_status" -eq 124 ] || fail "afdata_timeout on a forking script returned $timeout_status, not 124"
+[ "$timeout_elapsed" -lt 8 ] || fail "afdata_timeout waited ${timeout_elapsed}s on a child the command started"
+[ -z "$timeout_out" ] || fail "afdata_timeout let a forking script print after the deadline"
+grep -q 'timed out after 1s' "$TEST_TMP/group.err" || fail "afdata_timeout did not log the timeout"
+sleep 0.3
+if pgrep -f 'sleep 31' >/dev/null 2>&1; then fail "afdata_timeout left a child process running"; fi
+
+timeout_fn_sleep() { sleep 32; }
+timeout_status=0
+timeout_started="$(date +%s)"
+timeout_fn_out="$(afdata_timeout 1 timeout_fn_sleep 2>/dev/null)" || timeout_status=$?
+timeout_elapsed=$(($(date +%s) - timeout_started))
+[ "$timeout_status" -eq 124 ] || fail "afdata_timeout on a shell function returned $timeout_status, not 124"
+[ -z "$timeout_fn_out" ] || fail "afdata_timeout let a function print after the deadline"
+[ "$timeout_elapsed" -lt 8 ] || fail "afdata_timeout waited ${timeout_elapsed}s on a function's external command"
+sleep 0.3
+if pgrep -f 'sleep 32' >/dev/null 2>&1; then fail "afdata_timeout left a function's child running"; fi
+
+# A caller-defined `sleep` function must not turn the deadline into a spin.
+(
+  # Shadows sleep on purpose, to prove the deadline does not depend on it.
+  # shellcheck disable=SC2329
+  sleep() { :; }
+  timeout_status=0
+  timeout_started="$(date +%s)"
+  afdata_timeout 1 "$legacy_bash" -c 'while :; do command sleep 0.1; done' 2>/dev/null || timeout_status=$?
+  timeout_elapsed=$(($(date +%s) - timeout_started))
+  [ "$timeout_status" -eq 124 ] || exit 11
+  [ "$timeout_elapsed" -ge 1 ] || exit 12
+) || fail "afdata_timeout deadline is not wall-clock when sleep is a function ($?)"
+
+# afdata_mktemp, afdata_try and afdata_remove --quiet.
+mktemp_script="$TEST_TMP/mktemp-case.sh"
+cat > "$mktemp_script" <<'CASE'
+set -euo pipefail
+source "$1"
+trap 'printf "caller-trap\n"' EXIT
+afdata_mktemp scratch_file
+afdata_mktemp -d scratch_dir
+[ -f "$scratch_file" ] || exit 21
+[ -d "$scratch_dir" ] || exit 22
+printf '%s\n%s\n' "$scratch_file" "$scratch_dir" > "$2"
+bad_rc=0; afdata_mktemp 1bad 2>/dev/null || bad_rc=$?
+[ "$bad_rc" -eq 2 ] || exit 23
+CASE
+mktemp_out="$("$legacy_bash" "$mktemp_script" "$ROOTPATH/bash/afdata.sh" "$TEST_TMP/mktemp.paths")"
+[ "$mktemp_out" = caller-trap ] || fail "afdata_mktemp displaced the caller's EXIT trap: $mktemp_out"
+while IFS= read -r mktemp_path; do
+  [ ! -e "$mktemp_path" ] || fail "afdata_mktemp did not remove $mktemp_path at exit"
+done < "$TEST_TMP/mktemp.paths"
+
+# No caller trap: cleanup still registers. Outside the temp area: refused, and
+# nothing is left behind.
+outside_dir="$(mktemp -d "$ROOTPATH/.afdata-outside.XXXXXX")"
+mktemp_status=0
+# The single-quoted program is expanded by the child Bash.
+# shellcheck disable=SC2016
+mktemp_err="$(TMPDIR="$outside_dir" "$legacy_bash" -c '
+  set -euo pipefail
+  source "$1"
+  afdata_mktemp x
+' bash "$ROOTPATH/bash/afdata.sh" 2>&1)" || mktemp_status=$?
+leftovers="$(ls -A "$outside_dir")"
+rmdir "$outside_dir" 2>/dev/null || rm -rf "$outside_dir"
+[ "$mktemp_status" -ne 0 ] || fail "afdata_mktemp accepted a TMPDIR outside the platform temp area"
+case "$mktemp_err" in *tmpdir_outside_platform_temp*) ;; *) fail "afdata_mktemp did not report tmpdir_outside_platform_temp: $mktemp_err" ;; esac
+[ -z "$leftovers" ] || fail "afdata_mktemp left $leftovers behind after refusing"
+
+# afdata_try keeps the status and merged output, and never trips set -e. It also
+# works with an empty array expanded under set -u on the oldest Bash.
+# shellcheck disable=SC2016
+"$legacy_bash" -c '
+  set -euo pipefail
+  source "$1"
+  empty=()
+  afdata_try out status bash -c "echo to-out; echo to-err >&2; exit 3" ${empty[@]+"${empty[@]}"}
+  [ "$status" -eq 3 ] || exit 31
+  [ "$out" = "to-out
+to-err" ] || exit 32
+  afdata_try out status true
+  [ "$status" -eq 0 ] || exit 33
+  afdata_try out status "$(command -v false)"
+  [ "$status" -eq 1 ] || exit 34
+  afdata_try out status afdata_no_such_command_here
+  [ "$status" -eq 127 ] || exit 35
+  bad_rc=0; afdata_try only 2>/dev/null || bad_rc=$?
+  [ "$bad_rc" -eq 2 ] || exit 36
+  echo survived
+' bash "$ROOTPATH/bash/afdata.sh" > "$TEST_TMP/try.out" 2>&1 || fail "afdata_try case failed ($(cat "$TEST_TMP/try.out"))"
+grep -q survived "$TEST_TMP/try.out" || fail "afdata_try aborted a set -e script"
+
+quiet_dir="$TEST_TMP/quiet-remove"
+mkdir -p "$quiet_dir"
+afdata_remove --quiet tmp_path "$quiet_dir" > "$TEST_TMP/quiet.out" 2>&1 || fail "afdata_remove --quiet failed on an approved path"
+[ ! -e "$quiet_dir" ] || fail "afdata_remove --quiet did not remove the path"
+[ ! -s "$TEST_TMP/quiet.out" ] || fail "afdata_remove --quiet produced output"
+quiet_status=0
+afdata_remove --quiet path "$TEST_TMP" --under "$ROOTPATH/docs" > "$TEST_TMP/quiet.out" 2>&1 || quiet_status=$?
+[ "$quiet_status" -ne 0 ] || fail "afdata_remove --quiet reported success on a rejected value"
+[ ! -s "$TEST_TMP/quiet.out" ] || fail "afdata_remove --quiet printed a rejection event"
+
+# afdata_spawn restores the caller's monitor-mode state either way.
+set -m
+afdata_spawn "$TEST_TMP/m.out" "&1" sleep 30
+case "$-" in *m*) ;; *) fail "afdata_spawn cleared the caller's set -m" ;; esac
+afdata_stop TERM "-$AFDATA_SPAWN_PID" 5
+set +m
+afdata_spawn "$TEST_TMP/m.out" "&1" sleep 30
+case "$-" in *m*) fail "afdata_spawn left set -m on" ;; esac
+afdata_stop TERM "-$AFDATA_SPAWN_PID" 5
+
+# afdata_into reads an enumeration into a Bash array through NUL framing.
+into_doc="$TEST_TMP/into.json"
+printf '%s' '{"names":["a","b\nc",""],"obj":{"x":1,"y":2},"empty":[]}' > "$into_doc"
+into_tmp="$TEST_TMP/into-tmp"
+mkdir "$into_tmp"
+(
+  export TMPDIR="$into_tmp"
+  afdata_into items values "$into_doc" 'names.*'
+  [ "${#items[@]}" -eq 3 ] || fail "afdata_into values gave ${#items[@]} elements, not 3"
+  [ "${items[0]}" = a ] || fail "afdata_into values lost the first element"
+  [ "${items[1]}" = $'b\nc' ] || fail "afdata_into split a value holding a newline"
+  [ -z "${items[2]}" ] || fail "afdata_into did not keep an empty record"
+  afdata_into items keys "$into_doc" obj
+  [ "${#items[@]}" -eq 2 ] && [ "${items[0]}" = x ] && [ "${items[1]}" = y ] \
+    || fail "afdata_into keys read the wrong keys"
+  afdata_into items paths "$into_doc" obj
+  [ "${#items[@]}" -eq 2 ] && [ "${items[0]}" = obj.x ] && [ "${items[1]}" = obj.y ] \
+    || fail "afdata_into paths read the wrong paths"
+  items=(stale)
+  afdata_into items values "$into_doc" 'empty.*'
+  [ "${#items[@]}" -eq 0 ] || fail "afdata_into did not empty the array for an empty container"
+  items=(stale)
+  afdata_into items values "$into_doc" 'nope.*' --missing-ok
+  [ "${#items[@]}" -eq 0 ] || fail "afdata_into did not honor --missing-ok"
+  items=(stale)
+  afdata_into items values "$into_doc" 'names.*' --default 'd'
+  [ "${#items[@]}" -eq 3 ] || fail "afdata_into with --default changed the element count"
+  printf '%s' '{"rows":[{"n":"a"},{}]}' > "$TEST_TMP/into-rows.json"
+  afdata_into items values "$TEST_TMP/into-rows.json" 'rows.*.n' --default ''
+  [ "${#items[@]}" -eq 2 ] && [ "${items[0]}" = a ] && [ -z "${items[1]}" ] \
+    || fail "afdata_into dropped the empty element a --default '' produced"
+
+  into_status=0
+  items=(stale)
+  afdata_into items values "$TEST_TMP/no-such-into.json" k 2>"$TEST_TMP/into.err" || into_status=$?
+  [ "$into_status" -eq 1 ] || fail "afdata_into returned $into_status for an unreadable file, not 1"
+  [ "${#items[@]}" -eq 0 ] || fail "afdata_into left elements after an afdata failure"
+  grep -q '"code":"document_io_failed"' "$TEST_TMP/into.err" \
+    || fail "afdata_into hid afdata's error event: $(cat "$TEST_TMP/into.err")"
+  [ -z "$(ls -A "$into_tmp")" ] || fail "afdata_into left its temporary file behind"
+)
+
+# Bad calls are function errors (status 2) that never run the verb.
+into_marker="$TEST_TMP/into-ran"
+for bad_name in "a b" 1a a-b "a;touch $into_marker" "" _afdata_internal_item; do
+  into_status=0
+  afdata_into "$bad_name" values "$into_doc" 'names.*' \
+    2>"$TEST_TMP/into.err" || into_status=$?
+  [ "$into_status" -eq 2 ] || fail "afdata_into accepted array name '$bad_name' (status $into_status)"
+  grep -q '"code":"cli_error"' "$TEST_TMP/into.err" \
+    || fail "afdata_into array name '$bad_name' gave no cli_error"
+done
+[ ! -e "$into_marker" ] || fail "afdata_into evaluated a bad array name"
+into_status=0
+afdata_into items set "$into_doc" k 2>"$TEST_TMP/into.err" || into_status=$?
+[ "$into_status" -eq 2 ] || fail "afdata_into accepted VERB set (status $into_status)"
+into_status=0
+afdata_into items values 2>"$TEST_TMP/into.err" || into_status=$?
+[ "$into_status" -eq 2 ] || fail "afdata_into accepted a call with no verb arguments"
+
+# The array-iteration pattern documented in references/documents.md, run
+# verbatim: a missing trailing field must not drop rows, and an empty array
+# must not run the body.
+iter_out() {
+  local doc="$1" i=0 names emails
+  afdata_into names values "$doc" 'items.*.name'
+  afdata_into emails values "$doc" 'items.*.email' --default ''
+  while [ "$i" -lt "${#names[@]}" ]; do
+    printf '%s %s\n' "${names[$i]}" "${emails[$i]}"
+    i=$((i + 1))
+  done
+}
+iter_doc="$TEST_TMP/iter.json"
+printf '%s' '{"items":[{"name":"a","email":"a@x"},{"name":"b"},{"name":"c"}]}' > "$iter_doc"
+iter_result="$(iter_out "$iter_doc")"
+[ "$(printf '%s\n' "$iter_result" | wc -l | tr -d ' ')" -eq 3 ] \
+  || fail "documented array iteration did not run 3 times: $iter_result"
+[ "$iter_result" = "$(printf 'a a@x\nb \nc ')" ] \
+  || fail "documented array iteration misaligned its columns: $iter_result"
+printf '%s' '{"items":[]}' > "$iter_doc"
+iter_result="$(iter_out "$iter_doc")"
+[ -z "$iter_result" ] || fail "documented array iteration ran for an empty array: $iter_result"
+
+# Positional arguments from variables go after `--`: flag-shaped text stays text.
+set -- --json -x 3
+array_out="$(afdata array -- "$@")"
+[ "$array_out" = '["--json","-x","3"]' ] \
+  || fail "afdata array -- \"\$@\" altered flag-shaped arguments: $array_out"
 
 printf 'Bash authoring kit checks passed.\n'

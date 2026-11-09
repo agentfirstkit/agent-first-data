@@ -37,13 +37,33 @@ afdata_cli() {
 # Usage: _afdata_emit KIND [OPTION...] -- [POSITIONAL...]
 # Callers put `--` before the positionals they forward, so a message such as
 # "-5 files" reaches `emit` as a value rather than being parsed as a flag.
+#
+# A script that called afdata_args_raw_output writes a bare value on stdout
+# itself, so every event goes to stderr and the inherited AFDATA_OUTPUT_TO is
+# ignored. The state is deliberately not exported: a child script is an
+# ordinary kit script.
+_AFDATA_RAW_OUTPUT=false
+
+_afdata_raw_output() {
+  [ "$_AFDATA_RAW_OUTPUT" = true ]
+}
+
+# A non-negative whole number of seconds.
+_afdata_seconds_valid() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
 _afdata_emit() {
   local kind="$1"
+  local output_to="${AFDATA_OUTPUT_TO:-split}"
   shift
+  if _afdata_raw_output; then
+    output_to=stderr
+  fi
   afdata_cli \
     emit "$kind" \
     --output "${AFDATA_OUTPUT:-json}" \
-    --output-to "${AFDATA_OUTPUT_TO:-split}" \
+    --output-to "$output_to" \
     "$@"
 }
 
@@ -58,6 +78,12 @@ afdata_log() {
 }
 
 afdata_result() {
+  if _afdata_raw_output; then
+    _afdata_function_error \
+      "afdata_result is not available in a raw-output script" \
+      "write the bare value with printf '%s' instead"
+    return 2
+  fi
   # A lone `--json` is a payload left out, not a message spelled `--json`.
   if ! { [ "$#" -eq 1 ] && [ "$1" != "--json" ]; } \
     && ! { [ "$#" -eq 2 ] && [ "$1" = "--json" ]; }; then
@@ -127,6 +153,66 @@ afdata_config_get() {
   fi
 }
 
+# Read an enumeration into a Bash array: afdata_into ARRAY_NAME VERB ARGS...
+#
+# VERB is values, keys or paths; ARGS are that verb's own arguments, and
+# `--null` is added here. Use it as a plain command, never inside `$(...)`:
+#
+#     afdata_into names values "$file" 'names.*' --missing-ok
+#
+# so afdata's exit status reaches `set -e` instead of being discarded by a
+# substitution. On failure the array is left empty and afdata's status is
+# returned unchanged. Records are NUL-framed, so a value holding a newline stays
+# one element and an empty record stays one empty element.
+#
+# NUL cannot live in a shell variable, so the output goes through a temporary
+# file rather than a command substitution; it is removed before returning on
+# every path. No `mapfile` and no namerefs, which Bash 3.2 lacks, hence the
+# validated name and `eval`. Locals carry the reserved prefix because Bash has
+# dynamic scope: a plain local named like the caller's array would swallow the
+# assignment.
+afdata_into() {
+  if [ "$#" -lt 3 ]; then
+    _afdata_function_error \
+      "afdata_into requires ARRAY_NAME, VERB, and the verb's arguments" \
+      "usage: afdata_into <ARRAY_NAME> <values|keys|paths> <ARGS>..."
+    return 2
+  fi
+  case "$1" in
+    '' | [!A-Za-z_]* | *[!A-Za-z0-9_]* | _afdata_internal_*)
+      _afdata_function_error \
+        "afdata_into ARRAY_NAME must be a plain shell variable name" \
+        "usage: afdata_into <ARRAY_NAME> <values|keys|paths> <ARGS>..."
+      return 2
+      ;;
+  esac
+  case "$2" in
+    values | keys | paths) ;;
+    *)
+      _afdata_function_error \
+        "afdata_into VERB must be values, keys, or paths" \
+        "usage: afdata_into <ARRAY_NAME> <values|keys|paths> <ARGS>..."
+      return 2
+      ;;
+  esac
+
+  local _afdata_internal_array="$1"
+  local _afdata_internal_verb="$2"
+  local _afdata_internal_tmp _afdata_internal_status=0 _afdata_internal_item
+  shift 2
+  eval "$_afdata_internal_array=()"
+  _afdata_internal_tmp="$(mktemp)" || return 1
+  afdata_cli "$_afdata_internal_verb" --null "$@" > "$_afdata_internal_tmp" \
+    || _afdata_internal_status=$?
+  if [ "$_afdata_internal_status" -eq 0 ]; then
+    while IFS= read -r -d '' _afdata_internal_item; do
+      eval "$_afdata_internal_array+=(\"\$_afdata_internal_item\")"
+    done < "$_afdata_internal_tmp"
+  fi
+  rm -f -- "$_afdata_internal_tmp"
+  return "$_afdata_internal_status"
+}
+
 # Remove one path, but only after `guard` has approved it.
 #
 # Exists because the obvious spelling cannot be made to fail loudly:
@@ -155,17 +241,143 @@ afdata_config_get() {
 # failure aborts the trap and later paths are never reached, so append `|| :`
 # to each call when every path must be attempted.
 afdata_remove() {
+  # --quiet is a leading option: it silences the guard's rejection event so a
+  # cleanup run inside an asserted stream adds nothing to it. The status is
+  # unchanged, so a rejection still stops a `set -e` script.
+  local _afdata_internal_quiet=false
+  if [ "${1:-}" = "--quiet" ]; then
+    _afdata_internal_quiet=true
+    shift
+  fi
   if [ "$#" -lt 2 ]; then
     _afdata_function_error \
       "afdata_remove requires TYPE and VALUE" \
-      "usage: afdata_remove <path|tmp_path|cwd_path> <VALUE> [--under <ROOT>]"
+      "usage: afdata_remove [--quiet] <path|tmp_path|cwd_path> <VALUE> [--under <ROOT>]"
     return 2
   fi
   # Declared separately: `local target="$(...)"` would make `local` the command
   # whose status the shell sees, masking the very exit code this exists to keep.
   local _afdata_internal_target
-  _afdata_internal_target="$(afdata_cli guard "$@")" || return
+  if [ "$_afdata_internal_quiet" = true ]; then
+    _afdata_internal_target="$(afdata_cli guard "$@" 2>/dev/null)" || return
+  else
+    _afdata_internal_target="$(afdata_cli guard "$@")" || return
+  fi
   rm -rf -- "$_afdata_internal_target"
+}
+
+# Create a temporary file (or directory with -d) under $TMPDIR, store its path
+# in the variable named VAR, and remove it when the shell exits.
+#
+# The path goes through `guard tmp_path` before anything trusts it: a $TMPDIR
+# that resolves outside the platform temp area is reported as
+# `tmpdir_outside_platform_temp` (and the file just created is deleted), so the
+# later cleanup can never be the first place that discovers it.
+#
+# Cleanup is chained onto any EXIT trap the caller already set: the existing
+# command runs first, then the registered paths are removed. A caller that
+# replaces the EXIT trap afterwards drops the cleanup; the next afdata_mktemp
+# call re-attaches it. Call this in the main shell, never inside `$(...)`,
+# where neither VAR nor the trap would survive.
+_AFDATA_TMP_PATHS=()
+
+_afdata_cleanup_tmp() {
+  local _afdata_internal_path
+  # `${arr[@]+...}` keeps an empty array valid under `set -u` on Bash 3.2.
+  for _afdata_internal_path in ${_AFDATA_TMP_PATHS[@]+"${_AFDATA_TMP_PATHS[@]}"}; do
+    afdata_remove --quiet tmp_path "$_afdata_internal_path" || :
+  done
+  _AFDATA_TMP_PATHS=()
+}
+
+afdata_mktemp() {
+  local _afdata_internal_dir=false
+  if [ "${1:-}" = "-d" ]; then
+    _afdata_internal_dir=true
+    shift
+  fi
+  if [ "$#" -ne 1 ]; then
+    _afdata_function_error \
+      "afdata_mktemp requires VAR" \
+      "usage: afdata_mktemp [-d] <VAR>"
+    return 2
+  fi
+  case "$1" in
+    '' | [0-9]* | *[!A-Za-z0-9_]*)
+      _afdata_function_error \
+        "afdata_mktemp VAR is not a variable name: $1" \
+        "usage: afdata_mktemp [-d] <VAR>"
+      return 2
+      ;;
+  esac
+  local _afdata_internal_var="$1" _afdata_internal_path
+  if [ "$_afdata_internal_dir" = true ]; then
+    _afdata_internal_path="$(mktemp -d "${TMPDIR:-/tmp}/afdata.XXXXXX")" || return
+  else
+    _afdata_internal_path="$(mktemp "${TMPDIR:-/tmp}/afdata.XXXXXX")" || return
+  fi
+  if ! afdata_cli guard tmp_path "$_afdata_internal_path" >/dev/null 2>&1; then
+    # mktemp created it a moment ago, so deleting it directly is not the
+    # unguarded removal afdata_remove exists to prevent.
+    rm -rf -- "$_afdata_internal_path"
+    afdata_error tmpdir_outside_platform_temp \
+      "\$TMPDIR resolves outside the platform temp area that guard tmp_path accepts" \
+      "unset TMPDIR, or point it back inside the system temp area" || :
+    return 1
+  fi
+  _AFDATA_TMP_PATHS+=("$_afdata_internal_path")
+  _afdata_attach_tmp_trap
+  printf -v "$_afdata_internal_var" '%s' "$_afdata_internal_path"
+}
+
+# Make sure the current EXIT trap runs _afdata_cleanup_tmp, keeping whatever
+# command the caller already installed.
+_afdata_attach_tmp_trap() {
+  local _afdata_internal_current
+  _afdata_internal_current="$(trap -p EXIT)"
+  case "$_afdata_internal_current" in
+    *_afdata_cleanup_tmp*) return 0 ;;
+  esac
+  if [ -z "$_afdata_internal_current" ]; then
+    trap '_afdata_cleanup_tmp' EXIT
+    return 0
+  fi
+  # `trap -p` prints `trap -- 'COMMAND' EXIT` already shell-quoted; re-reading
+  # it as an array yields COMMAND as element 2.
+  local -a _afdata_internal_words
+  eval "_afdata_internal_words=($_afdata_internal_current)"
+  trap "${_afdata_internal_words[2]}"'
+_afdata_cleanup_tmp' EXIT
+}
+
+# Run COMMAND with stdout and stderr merged into the variable named OUT_VAR and
+# its exit status in STATUS_VAR, and return 0 whatever the command did, so
+# `set -e` never fires on the captured failure and the caller asserts on the
+# values instead:
+#
+#     afdata_try out status some-command --flag
+#     [ "$status" -eq 3 ] || fail "..."
+#
+# COMMAND runs in a subshell (command substitution), so a shell function's
+# variable assignments do not reach the caller. Returns 2 on a usage error.
+afdata_try() {
+  if [ "$#" -lt 3 ]; then
+    _afdata_function_error \
+      "afdata_try requires OUT_VAR, STATUS_VAR and a command" \
+      "usage: afdata_try <OUT_VAR> <STATUS_VAR> COMMAND [ARG ...]"
+    return 2
+  fi
+  local _afdata_internal_out_var="$1" _afdata_internal_status_var="$2"
+  local _afdata_internal_out _afdata_internal_status
+  shift 2
+  if _afdata_internal_out="$("$@" 2>&1)"; then
+    _afdata_internal_status=0
+  else
+    _afdata_internal_status=$?
+  fi
+  printf -v "$_afdata_internal_out_var" '%s' "$_afdata_internal_out"
+  printf -v "$_afdata_internal_status_var" '%s' "$_afdata_internal_status"
+  return 0
 }
 
 # Name the platform's own trash entry point, or fail. Never invents one, and
@@ -624,6 +836,167 @@ afdata_run() {
   fi
 }
 
+# Background process lifecycle. Deadlines count `sleep 0.1` ticks instead of
+# reading a clock: bash 3.2 has no sub-second clock, so a deadline can arrive
+# late but never early.
+
+# Start COMMAND detached from stdin, with stdout to OUT and stderr to ERR
+# (the literal &1 merges it into OUT), in its own process group so a signal can
+# reach its descendants. The pid is returned in AFDATA_SPAWN_PID. The caller's
+# monitor-mode (`set -m`) state is restored before returning.
+afdata_spawn() {
+  if [ "$#" -lt 3 ]; then
+    _afdata_function_error \
+      "afdata_spawn requires OUT, ERR and a command" \
+      "usage: afdata_spawn OUT ERR COMMAND [ARG ...]"
+    return 2
+  fi
+  local _afdata_internal_out="$1" _afdata_internal_err="$2"
+  local _afdata_internal_monitor=false
+  shift 2
+  case "$-" in *m*) _afdata_internal_monitor=true ;; esac
+  set -m
+  if [ "$_afdata_internal_err" = "&1" ]; then
+    "$@" </dev/null >"$_afdata_internal_out" 2>&1 &
+  else
+    "$@" </dev/null >"$_afdata_internal_out" 2>"$_afdata_internal_err" &
+  fi
+  # Read by the caller.
+  # shellcheck disable=SC2034
+  AFDATA_SPAWN_PID=$!
+  if [ "$_afdata_internal_monitor" = false ]; then
+    set +m
+  fi
+  return 0
+}
+
+# Print the first complete line OUT receives. Returns 1 when SECONDS pass
+# first, and 3 when PID exits first without having written a complete line (a
+# partial line is not printed). SECONDS is a whole number.
+afdata_wait_line() {
+  if [ "$#" -ne 3 ]; then
+    _afdata_function_error \
+      "afdata_wait_line requires OUT, PID and SECONDS" \
+      "usage: afdata_wait_line OUT PID SECONDS"
+    return 2
+  fi
+  if ! _afdata_seconds_valid "$3"; then
+    _afdata_function_error \
+      "afdata_wait_line SECONDS must be a non-negative whole number, got: $3" \
+      "usage: afdata_wait_line OUT PID SECONDS"
+    return 2
+  fi
+  local _afdata_internal_out="$1" _afdata_internal_pid="$2"
+  local _afdata_internal_ticks=$((10#$3 * 10)) _afdata_internal_lines
+  while :; do
+    # OUT may not exist yet: the child opens it after the fork.
+    _afdata_internal_lines=$(wc -l 2>/dev/null <"$_afdata_internal_out") || _afdata_internal_lines=0
+    if [ $((_afdata_internal_lines + 0)) -gt 0 ]; then break; fi
+    if ! kill -0 "$_afdata_internal_pid" 2>/dev/null; then break; fi
+    if [ "$_afdata_internal_ticks" -le 0 ]; then return 1; fi
+    sleep 0.1
+    _afdata_internal_ticks=$((_afdata_internal_ticks - 1))
+  done
+  # The process may have written its line just before exiting.
+  _afdata_internal_lines=$(wc -l 2>/dev/null <"$_afdata_internal_out") || _afdata_internal_lines=0
+  if [ $((_afdata_internal_lines + 0)) -le 0 ]; then return 3; fi
+  head -n 1 "$_afdata_internal_out"
+}
+
+# Send SIGNAL (a name such as TERM) to TARGET, a pid or -pid for its whole
+# process group, wait up to SECONDS (default 10) for the process to exit, then
+# escalate to KILL with a warn log. Always reaps the child; returns 0 once the
+# process is gone.
+afdata_stop() {
+  if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    _afdata_function_error \
+      "afdata_stop requires SIGNAL and TARGET" \
+      "usage: afdata_stop SIGNAL TARGET [SECONDS]"
+    return 2
+  fi
+  if ! _afdata_seconds_valid "${3:-10}"; then
+    _afdata_function_error \
+      "afdata_stop SECONDS must be a non-negative whole number, got: $3" \
+      "usage: afdata_stop SIGNAL TARGET [SECONDS]"
+    return 2
+  fi
+  local _afdata_internal_signal="$1" _afdata_internal_target="$2"
+  local _afdata_internal_ticks=$((10#${3:-10} * 10))
+  local _afdata_internal_pid="${_afdata_internal_target#-}"
+  local _afdata_internal_escalated=false
+  # A signalled job started under `set -m` makes an interactive-style shell
+  # print "Terminated: 15" when it is reaped; that notice is noise here.
+  {
+    if kill -0 "$_afdata_internal_pid" 2>/dev/null; then
+      kill "-$_afdata_internal_signal" -- "$_afdata_internal_target" 2>/dev/null || :
+      while kill -0 "$_afdata_internal_pid" 2>/dev/null; do
+        if [ "$_afdata_internal_ticks" -le 0 ]; then
+          _afdata_internal_escalated=true
+          kill -KILL -- "$_afdata_internal_target" 2>/dev/null || :
+          break
+        fi
+        sleep 0.1
+        _afdata_internal_ticks=$((_afdata_internal_ticks - 1))
+      done
+    fi
+    wait "$_afdata_internal_pid" || :
+  } 2>/dev/null
+  if [ "$_afdata_internal_escalated" = true ]; then
+    afdata_log warn "Process ${_afdata_internal_pid} ignored ${_afdata_internal_signal}; sent KILL"
+  fi
+  ! kill -0 "$_afdata_internal_pid" 2>/dev/null
+}
+
+# Run COMMAND with the caller's stdin and redirections, in its own process
+# group. When SECONDS pass first, stops the whole group with afdata_stop TERM
+# (KILL after 5 seconds) and returns 124 (the coreutils convention), so a
+# child the command started (a `sleep` in a script, a helper process) cannot
+# outlive the deadline or keep a `$(...)` pipe open. Otherwise returns the
+# command's own status.
+#
+# COMMAND runs in a subshell, so a function's variable assignments do not
+# reach the caller. The wait loop uses `command sleep`, so a caller that
+# defines a `sleep` function still gets a wall-clock deadline. On timeout a
+# warn log names the command. A command that reads the terminal is
+# stopped (background process group) until the deadline.
+afdata_timeout() {
+  if [ "$#" -lt 2 ]; then
+    _afdata_function_error \
+      "afdata_timeout requires SECONDS and a command" \
+      "usage: afdata_timeout SECONDS COMMAND [ARG ...]"
+    return 2
+  fi
+  if ! _afdata_seconds_valid "$1"; then
+    _afdata_function_error \
+      "afdata_timeout SECONDS must be a non-negative whole number, got: $1" \
+      "usage: afdata_timeout SECONDS COMMAND [ARG ...]"
+    return 2
+  fi
+  local _afdata_internal_seconds="$1"
+  local _afdata_internal_ticks=$((10#$1 * 10)) _afdata_internal_pid
+  local _afdata_internal_monitor=false
+  shift
+  case "$-" in *m*) _afdata_internal_monitor=true ;; esac
+  # Job control gives the background command its own process group, whose id
+  # is its pid; `setsid` is not available on macOS.
+  set -m
+  "$@" <&0 &
+  _afdata_internal_pid=$!
+  if [ "$_afdata_internal_monitor" = false ]; then
+    set +m
+  fi
+  while kill -0 "$_afdata_internal_pid" 2>/dev/null; do
+    if [ "$_afdata_internal_ticks" -le 0 ]; then
+      afdata_log warn "$1 timed out after ${_afdata_internal_seconds}s"
+      afdata_stop TERM "-$_afdata_internal_pid" 5 || :
+      return 124
+    fi
+    command sleep 0.1
+    _afdata_internal_ticks=$((_afdata_internal_ticks - 1))
+  done
+  if wait "$_afdata_internal_pid"; then return 0; else return $?; fi
+}
+
 afdata_args_begin() {
   if [ "$#" -ne 1 ]; then
     _afdata_function_error \
@@ -635,6 +1008,8 @@ afdata_args_begin() {
   AFDATA_ARGS_USAGE="$1"
   AFDATA_OUTPUT="${AFDATA_OUTPUT:-json}"
   AFDATA_OUTPUT_TO="${AFDATA_OUTPUT_TO:-split}"
+  _AFDATA_RAW_OUTPUT=false
+  _AFDATA_ARGS_PHASE=declaring
   _AFDATA_ARGS_OPTION_VARS=()
   _AFDATA_ARGS_OPTION_FLAGS=()
   _AFDATA_ARGS_OPTION_VALUE_NAMES=()
@@ -650,6 +1025,25 @@ afdata_args_begin() {
   _AFDATA_ARGS_REST_NAME=""
   _AFDATA_ARGS_REST_DESCRIPTION=""
   AFDATA_ARGS_REST=()
+}
+
+# Declare that the script's stdout is a bare value it writes itself. Call it
+# between afdata_args_begin and afdata_args_parse.
+afdata_args_raw_output() {
+  if [ "$#" -ne 0 ]; then
+    _afdata_function_error \
+      "afdata_args_raw_output takes no arguments" \
+      "usage: afdata_args_raw_output"
+    return 2
+  fi
+  if [ "${_AFDATA_ARGS_PHASE:-}" != declaring ]; then
+    _afdata_function_error \
+      "afdata_args_raw_output must be called between afdata_args_begin and afdata_args_parse" \
+      "usage: afdata_args_begin ...; afdata_args_raw_output; afdata_args_parse \"\$@\""
+    return 2
+  fi
+  _AFDATA_RAW_OUTPUT=true
+  AFDATA_OUTPUT_TO=stderr
 }
 
 _afdata_args_valid_var() {
@@ -838,8 +1232,10 @@ afdata_args_help() {
       "${_AFDATA_ARGS_FLAG_FLAGS[index]}" \
       "${_AFDATA_ARGS_FLAG_DESCRIPTIONS[index]}"
   done
-  printf '  %-24s %s\n' '--output FORMAT' 'Output format: json, yaml, or plain'
-  printf '  %-24s %s\n' '--output-to DEST' 'Event destination: split, stdout, or stderr'
+  if ! _afdata_raw_output; then
+    printf '  %-24s %s\n' '--output FORMAT' 'Output format: json, yaml, or plain'
+    printf '  %-24s %s\n' '--output-to DEST' 'Event destination: split, stdout, or stderr'
+  fi
   printf '  %-24s %s\n' '--help' 'Print help'
 }
 
@@ -888,6 +1284,7 @@ afdata_args_parse() {
   # letting a later-invalid argv redirect or reformat its own diagnostic.
   local _afdata_internal_next_output="$AFDATA_OUTPUT"
   local _afdata_internal_next_output_to="$AFDATA_OUTPUT_TO"
+  _AFDATA_ARGS_PHASE=parsed
 
   # Help is raw human text, while output selection promises structured data.
   # Reject the contradictory request before either branch can win by argv
@@ -897,6 +1294,10 @@ afdata_args_parse() {
       --) break ;;
       --help) _afdata_internal_saw_help=true ;;
       --output|--output=*|--output-to|--output-to=*)
+        if _afdata_raw_output; then
+          _afdata_args_abort \
+            "this script writes a raw value; --output and --output-to are not accepted"
+        fi
         _afdata_internal_saw_output=true
         ;;
     esac

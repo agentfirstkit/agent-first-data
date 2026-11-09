@@ -25,9 +25,11 @@ mod write;
 
 use write::{guard_mutation, write_atomic, write_atomic_create};
 
+#[cfg(feature = "cli")]
+use read::read_capped_source;
 #[cfg(all(test, unix))]
 use read::{inspect_capped_source, read_capped_contents};
-use read::{open_read_handle, read_capped_source};
+use read::{open_read_handle, read_capped_source_bytes};
 use std::fs;
 #[cfg(all(test, unix))]
 use std::fs::OpenOptions;
@@ -35,6 +37,7 @@ use std::path::{Path, PathBuf};
 
 use crate::document::{Addressing, DocumentError, DocumentResult, Format, KeyedList, Value};
 
+#[cfg(feature = "cli")]
 pub(crate) fn read_capped_file(
     path: &Path,
     max_bytes: u64,
@@ -183,9 +186,79 @@ impl Document {
         mut reader: R,
         format: Format,
     ) -> DocumentResult<Document> {
-        let mut source = String::new();
-        reader.read_to_string(&mut source)?;
-        Document::parse(&source, format)
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        if let Some(document) = Document::parse_binary(&bytes, format)? {
+            return Ok(document);
+        }
+        let source = String::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        Document::parse_labelled(&source, format, "input")
+    }
+
+    /// Parse `source`; when it is zero bytes and the format rejects it, say so
+    /// as `EmptyInput` naming `label` instead of a parser position.
+    /// JSON that fails to parse but opens like an XML property list names
+    /// `--input-format plist` instead of a parser position.
+    fn parse_labelled(source: &str, format: Format, label: &str) -> DocumentResult<Document> {
+        match Document::parse(source, format) {
+            Err(DocumentError::ParseError { .. }) if source.is_empty() => {
+                Err(DocumentError::EmptyInput {
+                    source: label.to_string(),
+                })
+            }
+            #[cfg(feature = "plist")]
+            Err(DocumentError::ParseError { .. })
+                if format == Format::Json
+                    && crate::document::format::plist::looks_like_xml(source.as_bytes()) =>
+            {
+                Err(crate::document::format::plist::wrong_format_xml(
+                    format.name(),
+                ))
+            }
+            other => other,
+        }
+    }
+
+    /// Parse raw bytes: a binary property list is decoded without UTF-8
+    /// handling, everything else is decoded as UTF-8 text first.
+    fn from_bytes(bytes: Vec<u8>, format: Format, label: &str) -> DocumentResult<Document> {
+        if let Some(document) = Document::parse_binary(&bytes, format)? {
+            return Ok(document);
+        }
+        let source = String::from_utf8(bytes).map_err(|error| DocumentError::IoError {
+            detail: format!(
+                "read `{label}`: document is not UTF-8 (valid through byte {})",
+                error.utf8_error().valid_up_to()
+            ),
+        })?;
+        Document::parse_labelled(&source, format, label)
+    }
+
+    /// Recognise a binary property list from its magic. `Some` carries the
+    /// parsed document, whose `source` is empty because plist is read-only and
+    /// nothing reads the source of a read-only format; a binary plist read as
+    /// any other format is a parse failure naming `--input-format plist`.
+    #[cfg(feature = "plist")]
+    fn parse_binary(bytes: &[u8], format: Format) -> DocumentResult<Option<Document>> {
+        use crate::document::format::plist;
+        if !plist::is_binary(bytes) {
+            return Ok(None);
+        }
+        if format != Format::Plist {
+            return Err(plist::wrong_format(format.name()));
+        }
+        Ok(Some(Document {
+            source: String::new(),
+            value: plist::load_binary(bytes)?,
+            format,
+        }))
+    }
+
+    #[cfg(not(feature = "plist"))]
+    #[allow(clippy::unnecessary_wraps)]
+    fn parse_binary(_bytes: &[u8], _format: Format) -> DocumentResult<Option<Document>> {
+        Ok(None)
     }
 
     /// Borrow the parsed value (reflects the last successful edit).
@@ -325,11 +398,11 @@ impl DocumentFile {
     ) -> DocumentResult<DocumentFile> {
         let path = path.as_ref().to_path_buf();
         let format = resolve_format(&path, format_override)?;
-        let source = fs::read_to_string(&path).map_err(|error| DocumentError::IoError {
+        let bytes = fs::read(&path).map_err(|error| DocumentError::IoError {
             detail: format!("read `{}`: {error}", path.display()),
         })?;
         Ok(DocumentFile {
-            doc: Document::parse(&source, format)?,
+            doc: Document::from_bytes(bytes, format, &path.display().to_string())?,
             path,
         })
     }
@@ -368,9 +441,10 @@ impl DocumentFile {
     ) -> DocumentResult<DocumentFile> {
         let path = path.as_ref().to_path_buf();
         let format = resolve_format(&path, format_override)?;
-        let source = read_capped_file(&path, max_bytes, symlink_policy)?;
+        let file = open_read_handle(&path, symlink_policy)?;
+        let bytes = read_capped_source_bytes(file, &path, max_bytes)?;
         Ok(DocumentFile {
-            doc: Document::parse(&source, format)?,
+            doc: Document::from_bytes(bytes, format, &path.display().to_string())?,
             path,
         })
     }

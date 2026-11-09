@@ -115,6 +115,46 @@ The selected `AFDATA_OUTPUT` and `AFDATA_OUTPUT_TO` values are exported so a
 child Bash script using this authoring kit keeps the same event format and
 routing.
 
+## Scripts whose stdout is a bare value
+
+Some scripts exist to be captured: they print one path or token for a caller's
+`$(...)`. Such a script must not let `--output-to stdout`, or an inherited
+`AFDATA_OUTPUT_TO=stdout`, mix its events into the captured value. This is the
+Bash counterpart of the CLI's raw commands (`value`, `guard`), which write a
+bare value and reject `--output` and `--output-to`.
+
+Declare it with `afdata_args_raw_output`, between `afdata_args_begin` and
+`afdata_args_parse`. The declaration is shell-internal state, never inherited,
+so a child script is unaffected. Calling it before `afdata_args_begin` (which
+resets the declaration) or after `afdata_args_parse` is a usage error (status 2):
+
+```bash
+afdata_args_begin "locate.sh [OPTIONS] NAME"
+afdata_args_raw_output
+afdata_args_positional name NAME "Name to locate"
+afdata_args_parse "$@"
+
+afdata_log info "Resolving ${name}"
+printf '%s' "/opt/tools/${name}"
+```
+
+With the declaration the parser rejects `--output` and `--output-to`
+(`cli_error`, exit `2`), every event the kit emits goes to stderr whatever
+`AFDATA_OUTPUT_TO` the parent exported, and `afdata_result` is a function usage
+error (status `2`) because the script writes its value itself. Errors still
+reach stderr with the usual exit status.
+
+The caller captures it directly. Do not route it through `afdata_call`, which
+exists for children that take part in the parent's event stream and would not
+hand back the bare value:
+
+```bash
+tool_path="$(./locate.sh widget)"
+```
+
+Use this form only for a script whose whole job is that one value; a script
+that reports a result belongs on `afdata_result`.
+
 ## Config and events
 
 `afdata_config_get FILE KEY [DEFAULT]` delegates to `afdata value`, so the same
@@ -126,14 +166,37 @@ host="$(afdata_config_get config.toml server.host localhost)"
 token_secret="$(afdata_cli value config.toml service.token_secret --reveal-secret)"
 ```
 
+To build the JSON a config file or `afdata_result --json` needs, use
+`afdata object` and `afdata array` instead of `printf` templates; see the
+documents reference, "Building JSON in a shell".
+
 ### Iterating a container safely
 
-`afdata paths` and `afdata keys` print one entry per line, which is convenient
-until a key contains a newline — JSON permits it, and a line-based loop then
-silently reads one key as two. It does not fail; it just quietly does the wrong
-thing.
+`afdata paths`, `keys` and `values` print one entry per line, which is
+convenient until a key or value contains a newline — JSON permits it, and a
+line-based loop then silently reads one entry as two. It does not fail; it just
+quietly does the wrong thing.
 
-`--null` separates entries with NUL instead, the one byte a key cannot contain:
+`afdata_into ARRAY_NAME VERB ARGS...` reads the entries into a Bash array with
+NUL framing, so every entry survives intact and an empty entry stays an empty
+element. `VERB` is `values`, `keys` or `paths`; `--null` is added for you:
+
+```bash
+afdata_into names values config.json 'names.*' --missing-ok
+for name in ${names[@]+"${names[@]}"}; do
+  afdata_log info "found ${name}"
+done
+```
+
+Call it as a plain command, not inside `$(...)`, so afdata's exit status reaches
+`set -e`. On failure the array is left empty and afdata's status is returned;
+the helper returns, it never exits. `ARRAY_NAME` must be a plain variable name.
+It works on Bash 3.2 (no `mapfile`, no namerefs) by reading through a temporary
+file that is removed before it returns. It reads scalar arrays and object keys
+or child paths; for arrays of objects, list the paths and read each element.
+
+When you would rather not fill an array, use `--null` yourself; NUL is the one
+byte a key or value cannot contain:
 
 ```bash
 # Wrong for a key like "weird\nkey" — no error, just an extra iteration.
@@ -148,8 +211,8 @@ done < <(afdata paths config.json --null)
 afdata paths config.json --null | xargs -0 -n1 echo
 ```
 
-Use it whenever the output is consumed by a program rather than read by a
-person. `keys` takes the same flag.
+Use `--null` whenever the output is consumed by a program rather than read by a
+person. `keys` and `values` take the same flag.
 
 The event helpers are thin wrappers around `afdata emit`:
 
@@ -175,7 +238,7 @@ afdata emit error build_failed "Build failed" --hint "Inspect compiler output"
 
 ## Destructive operands
 
-`afdata_remove TYPE VALUE [--under ROOT]` removes a path, but only after
+`afdata_remove [--quiet] TYPE VALUE [--under ROOT]` removes a path, but only after
 `afdata guard` has approved it. `TYPE` and `--under` are forwarded to the guard
 untouched, so the call reads as the guard it wraps:
 
@@ -187,13 +250,36 @@ afdata_remove path "$out_dir/$name" --under "$out_dir"
 It exists because the inline spelling cannot be made to fail. In an argument
 position a command substitution's exit status is discarded, and `rm -f` is
 defined to exit 0 when its operand names nothing, so
-`rm -rf -- "$(afdata guard tmp_path "$dir")"` leaves the target untouched — the
+`afdata guard tmp_path "$dir"` substituted into the operand of `rm -rf --` leaves the target untouched — the
 guard working — while the script continues as though the cleanup had happened.
 As a command, `afdata_remove` returns the guard's own status, so `errexit`
 stops on a rejection. Removing a path that does not exist succeeds, matching
 `rm -rf`, so repeated cleanup stays idempotent. In an `EXIT` trap that cleans
 several paths, `errexit` makes the first rejection abort the trap and the later
 paths are never reached; append `|| :` per call when every path must be tried.
+
+`--quiet` silences the guard's rejection event while keeping its exit status.
+
+`afdata_mktemp [-d] VAR` creates a temporary file (directory with `-d`) under
+`$TMPDIR`, checks it with `guard tmp_path`, stores the path in `VAR`, and removes
+it when the shell exits. A `$TMPDIR` outside the platform temp area is reported
+as `tmpdir_outside_platform_temp` and nothing is left behind. The cleanup is
+chained onto an `EXIT` trap the caller already set, which runs first and must
+not call `exit` (the cleanup would be skipped); a trap set afterwards
+replaces it, and the next `afdata_mktemp` call re-attaches it. Call it in the
+main shell, not inside `$(...)`, where neither `VAR` nor the trap would survive.
+
+`afdata_try OUT_VAR STATUS_VAR COMMAND [ARG ...]` captures stdout and stderr
+merged into `OUT_VAR` and the exit status into `STATUS_VAR`, and always returns
+0, so `set -e` never fires on the captured failure:
+
+```bash
+afdata_try out status some-command --flag
+[ "$status" -eq 3 ] || fail "unexpected status $status"
+```
+
+The command runs in a subshell, so a function's variable assignments do not
+reach the caller.
 
 `afdata_trash TYPE VALUE [--under ROOT]` has the same shape but moves the entry
 to the platform's trash instead of deleting it. Which of the two to use is a
@@ -280,3 +366,45 @@ whose successful output is a result the caller needs.
 Passthrough mode deliberately permits native child bytes alongside AFDATA
 events. Use `--quiet`, `afdata_call`, or explicit capture when a consumer needs
 a protocol-only stream with exactly one terminal event.
+
+### Background processes
+
+A script that starts a daemon for an acceptance run needs the same four
+steps every time: start it, wait for its first line, wait for it with a
+deadline, and stop it without leaving a zombie. The kit provides them:
+
+```bash
+afdata_spawn out.log "&1" my-daemon --port 0   # sets AFDATA_SPAWN_PID
+line="$(afdata_wait_line out.log "$AFDATA_SPAWN_PID" 10)" || exit 1
+afdata_stop INT "-$AFDATA_SPAWN_PID"           # whole group; TERM-ignorers get KILL
+afdata_timeout 30 some-command arg             # 124 when it ran past 30 seconds
+```
+
+- `afdata_spawn OUT ERR COMMAND [ARG ...]` runs the command with stdin from
+  `/dev/null`, stdout to `OUT`, stderr to `ERR` (the literal `&1` merges it
+  into `OUT`), in its own process group so a signal reaches its descendants.
+  It enables `set -m` only for the launch and restores the caller's monitor
+  state, so the kit's promise not to change shell options holds.
+- `afdata_wait_line OUT PID SECONDS` prints the first complete line of `OUT`.
+  It returns `1` on timeout. If `PID` exits first, it still prints a complete
+  line written before exiting and returns `0`; with no complete line (nothing
+  written, or only a partial line) it prints nothing and returns `3`.
+  `SECONDS` is a whole number.
+- `afdata_stop SIGNAL TARGET [SECONDS]` signals a pid, or `-pid` for the whole
+  group, waits `SECONDS` (default 10, whole seconds), escalates to `KILL` with a `warn` log,
+  and always reaps the child. It returns `0` once the process is gone.
+- `afdata_timeout SECONDS COMMAND [ARG ...]` (whole seconds; anything else is a
+  usage error, status `2`) keeps the caller's stdin and
+  redirections and runs the command in its own process group. A command that
+  runs too long has its whole group stopped with `afdata_stop TERM` (KILL after
+  5 seconds), so children it started cannot hold a `$(...)` pipe open; it logs a
+  `warn` and returns `124`. Otherwise it returns the command's own status. The
+  command runs in a subshell: a function's variable assignments do not reach the
+  caller. The wait uses `command sleep`, so a caller-defined `sleep` function
+  does not affect the deadline. Its own process group is not the terminal's
+  foreground group, so a command that reads the terminal (a password prompt)
+  is stopped until the deadline; give it non-interactive input instead.
+
+Deadlines count `sleep 0.1` ticks rather than reading a clock, because Bash 3.2
+has no sub-second clock; a deadline can arrive late but never early. Job-control
+notices such as `Terminated: 15` are suppressed during `afdata_stop`.

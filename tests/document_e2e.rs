@@ -2211,3 +2211,27 @@ fn an_invalid_dotenv_name_blames_the_path_not_the_file() {
     assert_eq!(error.code(), "document_unsupported_operation", "{error}");
     assert_eq!(document.source(), "Z=1\n");
 }
+
+#[cfg(feature = "plist")]
+#[test]
+fn binary_plist_parses_like_xml_and_has_no_source() {
+    use agent_first_data::document::DocumentFile;
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/plist/");
+    let xml = DocumentFile::open(format!("{dir}Info.plist"), None).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let binary_path = temp.path().join("Info.binary.plist");
+    plist::Value::from_file(format!("{dir}Info.plist"))
+        .unwrap()
+        .to_file_binary(&binary_path)
+        .unwrap();
+    let binary = DocumentFile::open_capped(&binary_path, None, 1 << 20).unwrap();
+    assert_eq!(xml.value(), binary.value());
+    assert_eq!(binary.source(), "");
+    let bytes = std::fs::read(&binary_path).unwrap();
+    assert!(bytes.starts_with(b"bplist"));
+    let from_reader = Document::from_reader(std::io::Cursor::new(&bytes), Format::Plist).unwrap();
+    assert_eq!(from_reader.value(), xml.value());
+    let error = Document::from_reader(std::io::Cursor::new(&bytes), Format::Json).unwrap_err();
+    assert_eq!(error.code(), "document_parse_failed");
+    assert!(error.redacted_message().contains("--input-format plist"));
+}

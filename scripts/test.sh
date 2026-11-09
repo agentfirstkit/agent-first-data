@@ -82,6 +82,68 @@ run_shellcheck() {
   "$SCRIPT_DIR/install-shellcheck.sh" --check "$ROOTPATH"
 }
 
+# Build this tree's afdata and export it as AFDATA_BIN, so every helper script
+# below runs this code rather than an installed release (or nothing, on a
+# machine with no afdata on PATH). Windows names the binary afdata.exe.
+build_afdata() {
+  (cd "$ROOTPATH" && cargo build --quiet --bin afdata)
+  if [ -x "$ROOTPATH/target/debug/afdata.exe" ]; then
+    AFDATA_BIN="$ROOTPATH/target/debug/afdata.exe"
+  else
+    AFDATA_BIN="$ROOTPATH/target/debug/afdata"
+  fi
+  export AFDATA_BIN
+  # Every helper script sources its Bash kit from this binary, so a kit that
+  # does not parse would fail them all with errors that name the helper, not the
+  # cause. Say so here, once, before any of them runs.
+  local kit
+  kit="$("$AFDATA_BIN" shell bash)" || {
+    echo "afdata shell bash failed: the Bash kit cannot be exported" >&2
+    return 1
+  }
+  if ! bash -n <<<"$kit"; then
+    echo "afdata shell bash emitted a kit that does not parse" >&2
+    return 1
+  fi
+}
+
+# Markdown teaches the assign-then-test form: a command substitution that is
+# not the right-hand side of an assignment swallows the exit status, so a
+# failure reads as "absent" or "false" and the script carries on.
+check_doc_afdata_substitutions() {
+  local hits
+  hits="$(grep -rnE '"\$\(afdata ' --include='*.md' "$ROOTPATH/docs" "$ROOTPATH/skills" \
+    | grep -vE '[A-Za-z_][A-Za-z0-9_]*="\$\(afdata ' || true)"
+  if [ -n "$hits" ]; then
+    echo "Markdown substitutes the afdata CLI outside an assignment; assign first, then test:" >&2
+    printf '%s\n' "$hits" >&2
+    return 1
+  fi
+}
+
+# Markdown must not teach feeding a loop from an afdata enumeration held in a
+# variable: `$(...)` strips every trailing newline, so trailing empty values
+# vanish, and `<<<` appends one, so an empty result still yields one empty
+# iteration. Columns lose their alignment without any error. Use afdata_into
+# (a Bash array) or redirect the output to a file and read that.
+check_doc_afdata_here_string_loops() {
+  local file var vars hits="" found
+  while IFS= read -r file; do
+    vars="$(grep -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*="\$\(.*afdata[[:space:]].*\<(values|keys|paths)\>' "$file" \
+      | sed -E 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=.*/\1/' | sort -u || true)"
+    while IFS= read -r var; do
+      [ -n "$var" ] || continue
+      found="$(grep -nE "<<<[[:space:]]*\"\\$\{?${var}\}?\"" "$file" || true)"
+      [ -z "$found" ] || hits="${hits}${file}: \$${var}"$'\n'"${found}"$'\n'
+    done <<<"$vars"
+  done < <(find "$ROOTPATH/docs" "$ROOTPATH/skills" -name '*.md')
+  if [ -n "$hits" ]; then
+    echo "Markdown feeds a loop from an afdata values/keys/paths variable with <<<; use afdata_into or a file:" >&2
+    printf '%s' "$hits" >&2
+    return 1
+  fi
+}
+
 run_static() {
   echo "[1/6] Rust (fmt + clippy)"
   (cd "$ROOTPATH" && cargo fmt --all --check)
@@ -90,7 +152,7 @@ run_static() {
   # than by convention: with `cli` off, neither the compiler nor its adapter is
   # linked, so this only builds while the rest of the crate depends on neither.
   # The other half — the core not reaching back into AFDATA — is
-  # validate_cli_core_boundary.py.
+  # validate_cli_core_boundary.sh.
   (cd "$ROOTPATH" && cargo clippy --quiet --no-default-features -- -D warnings)
 
   echo ""
@@ -106,27 +168,25 @@ run_static() {
     "${OLDEST_BASH:-/bin/bash}" -n "$script"
   done < <(bash_sources)
   run_shellcheck
+  check_doc_afdata_substitutions
+  check_doc_afdata_here_string_loops
+  build_afdata
   # The gate must finish even when its caller keeps stdin open, which is what a
   # terminal does. Scripts here declare `source=/dev/stdin` for the generated
   # Bash kit, and ShellCheck follows that under `-x`.
-  (cd "$ROOTPATH" && python3 scripts/validate_shellcheck_stdin.py)
+  (cd "$ROOTPATH" && bash scripts/validate_shellcheck_stdin.sh)
 
   echo ""
   echo "[3/6] Spec registry"
-  # The spec checks below read this spore's own documents through this spore's
-  # own binary, so build it first: a clean checkout has no target/debug/afdata,
-  # and judging the tree with a previously installed release would test the
-  # wrong code.
-  (cd "$ROOTPATH" && cargo build --quiet --bin afdata)
-  (cd "$ROOTPATH" && python3 scripts/validate_registry.py)
+  (cd "$ROOTPATH" && bash scripts/validate_registry.sh)
   (cd "$ROOTPATH" && python3 scripts/validate_doc_examples.py)
   (cd "$ROOTPATH" && python3 scripts/validate_protocol_docs.py)
   (cd "$ROOTPATH" && python3 scripts/validate_protocol_schema.py)
   (cd "$ROOTPATH" && python3 scripts/validate_api_surface.py)
-  (cd "$ROOTPATH" && python3 scripts/validate_cli_core_boundary.py)
-  (cd "$ROOTPATH" && python3 scripts/validate_cli_spec_schema.py)
+  (cd "$ROOTPATH" && bash scripts/validate_cli_core_boundary.sh)
+  (cd "$ROOTPATH" && bash scripts/validate_cli_spec_schema.sh)
   (cd "$ROOTPATH" && bash scripts/validate_versions.sh)
-  (cd "$ROOTPATH" && python3 scripts/sync_offline_assets.py --check)
+  (cd "$ROOTPATH" && bash scripts/sync_offline_assets.sh --check)
   (cd "$ROOTPATH" && bash scripts/validate_no_binaries.sh)
 
   echo ""
@@ -456,24 +516,18 @@ GO
 }
 
 run_e2e() {
-  local afdata_bin
   echo "[e2e] Closed-world afdata CLI"
   ensure_typescript_deps
   (cd "$ROOTPATH" && AFDATA_PYTOOL="$PYTOOL" "$PYTOOL" tests/cli_e2e.py)
 
   echo ""
   echo "[e2e] Bash authoring kit"
-  (cd "$ROOTPATH" && cargo build --quiet --bin afdata)
-  if [ -x "$ROOTPATH/target/debug/afdata.exe" ]; then
-    afdata_bin="$ROOTPATH/target/debug/afdata.exe"
-  else
-    afdata_bin="$ROOTPATH/target/debug/afdata"
-  fi
-  AFDATA_BIN="$afdata_bin" bash "$ROOTPATH/tests/bash_e2e.sh"
+  build_afdata
+  bash "$ROOTPATH/tests/bash_e2e.sh"
 
   echo ""
   echo "[e2e] Help formats describe one surface"
-  (cd "$ROOTPATH" && python3 scripts/validate_help_formats_agree.py "$afdata_bin")
+  (cd "$ROOTPATH" && bash scripts/validate_help_formats_agree.sh "$AFDATA_BIN")
 }
 
 run_bench() {

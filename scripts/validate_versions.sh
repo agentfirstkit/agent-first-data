@@ -42,25 +42,14 @@ read_doc() {
   "$AFDATA" value "$ROOTPATH/$file" "$key" "$@" </dev/null
 }
 
-# The lockfile's own entry, whose index moves as dependencies come and go.
-#
-# One call for every package name. `value` re-parses the whole lockfile per
-# invocation, so the obvious loop is 110 processes and 110 parses (632ms here);
-# a pattern is one of each.
+# The lockfile's own entry, whose index moves as dependencies come and go:
+# addressed by its `name` field instead of by position.
 cargo_lock_self_version() {
-  local name index
+  local name segment
   name="$(read_doc Cargo.toml package.name --input-format toml)"
-  index=0
-  while IFS= read -r entry_name; do
-    if [ "$entry_name" = "$name" ]; then
-      read_doc Cargo.lock "package.$index.version" --input-format toml
-      return 0
-    fi
-    index=$((index + 1))
-  done < <("$AFDATA" values "$ROOTPATH/Cargo.lock" 'package.*.name' \
-    --input-format toml 2>/dev/null || true)
-  echo "Cargo.lock: no self entry for $name" >&2
-  return 1
+  segment="$("$AFDATA" path -- "$name")"
+  read_doc Cargo.lock "package.$segment.version" --input-format toml --slug-field name ||
+    { echo "Cargo.lock: no self entry for $name" >&2; return 1; }
 }
 
 CANONICAL="$(read_doc Cargo.toml package.version --input-format toml)"

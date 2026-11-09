@@ -986,6 +986,9 @@ fn test_a_star_key_is_still_reachable_beside_the_wildcard() {
     // A bare `*` where nothing can expand it is refused, not read as a key.
     let output = run(&["value", &config_path, "a.*"]);
     assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("document_invalid_path"), "{stderr}");
+    assert!(stderr.contains("`values`"), "{stderr}");
 }
 
 #[test]
@@ -1337,11 +1340,9 @@ fn test_bare_value_overwriting_existing_scalar_of_different_type_is_guarded() {
     assert!(guarded.stdout.is_empty());
     let response = json_stderr(&guarded);
     assert_eq!(response["error"]["code"], "document_usage_error");
-    assert!(
-        response["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("--value-type number") && m.contains("--value-type string"))
-    );
+    assert!(response["error"]["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("--value-type number") && m.contains("--value-type string")));
     // The file is untouched.
     assert_eq!(
         std::fs::read_to_string(&config_path).unwrap(),
@@ -4058,5 +4059,1263 @@ fn a_secret_never_replaces_a_collection_or_a_non_string() {
             "{response}"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original, "{name}");
+    }
+}
+
+#[test]
+fn test_keys_and_paths_list_slugs_with_explicit_slug_field() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = write_temp(
+        &temp_dir,
+        "runtimes.json",
+        "{\"runtimes\":[{\"name\":\"alpha 2.0\",\"ok\":true},{\"name\":\"beta\",\"ok\":false}]}\n",
+    );
+
+    // Slugs listed with the flag.
+    let keys = run(&["keys", &path, "runtimes", "--slug-field", "name", "--slugs"]);
+    assert!(keys.status.success());
+    assert_eq!(keys.stdout, b"alpha 2.0\nbeta\n");
+
+    // Escaped paths round-trip into `value`.
+    let paths = run(&[
+        "paths",
+        &path,
+        "runtimes",
+        "--slug-field",
+        "name",
+        "--slugs",
+    ]);
+    assert!(paths.status.success());
+    let text = String::from_utf8(paths.stdout).unwrap();
+    assert_eq!(text, "runtimes.alpha 2\\.0\nruntimes.beta\n");
+    let first = text.lines().next().unwrap();
+    let got = run(&[
+        "value",
+        &path,
+        &format!("{first}.ok"),
+        "--slug-field",
+        "name",
+    ]);
+    assert!(got.status.success(), "{:?}", got.stderr);
+    assert_eq!(got.stdout, b"true");
+
+    // Without the flag the output is unchanged.
+    let plain = run(&["keys", &path, "runtimes"]);
+    assert_eq!(plain.stdout, b"0\n1\n");
+}
+
+/// `--slug-field` alone only addresses: listing a nested array still prints
+/// indices even when its elements are not keyed by that field, and `--slugs`
+/// is the separate switch that lists slugs.
+#[test]
+fn test_slug_field_addresses_without_changing_listing_unless_slugs_is_given() {
+    let temp_dir = TempDir::new().unwrap();
+    let ports = write_temp(
+        &temp_dir,
+        "ports.json",
+        "{\"servers\":[{\"name\":\"web\",\"ports\":[80,443]},{\"name\":\"db\",\"ports\":[5432]}]}\n",
+    );
+    let keys = run(&["keys", &ports, "servers.web.ports", "--slug-field", "name"]);
+    assert_eq!(keys.status.code(), Some(0), "{keys:?}");
+    assert_eq!(keys.stdout, b"0\n1\n");
+    let count = run(&["count", &ports, "servers.web.ports", "--slug-field", "name"]);
+    assert_eq!(count.status.code(), Some(0), "{count:?}");
+    assert_eq!(count.stdout, b"2");
+
+    let mounts = write_temp(
+        &temp_dir,
+        "mounts.json",
+        "{\"servers\":[{\"name\":\"web\",\"mounts\":[{\"path\":\"/a\"},{\"path\":\"/b\"}]}]}\n",
+    );
+    let paths = run(&[
+        "paths",
+        &mounts,
+        "servers.web.mounts",
+        "--slug-field",
+        "name",
+    ]);
+    assert_eq!(paths.status.code(), Some(0), "{paths:?}");
+    assert_eq!(
+        paths.stdout,
+        b"servers.web.mounts.0\nservers.web.mounts.1\n"
+    );
+
+    let slugs = run(&["keys", &ports, "servers", "--slug-field", "name", "--slugs"]);
+    assert_eq!(slugs.status.code(), Some(0), "{slugs:?}");
+    assert_eq!(slugs.stdout, b"web\ndb\n");
+
+    // The slug listing is all-or-nothing on the array it lists.
+    let refused = run(&[
+        "keys",
+        &ports,
+        "servers.web.ports",
+        "--slug-field",
+        "name",
+        "--slugs",
+    ]);
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    assert!(refused.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&refused)["error"]["code"],
+        "document_type_mismatch"
+    );
+}
+
+#[test]
+fn test_slugs_requires_slug_field() {
+    let document = br#"{"items":[{"id":"one"}]}"#;
+    for args in [
+        &["keys", "-", "items", "--slugs"][..],
+        &["paths", "-", "items", "--slugs"][..],
+        &["keys", "-", "--slugs"][..],
+    ] {
+        let output = run_with_stdin(args, document);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+        assert_eq!(
+            json_stderr(&output)["error"]["code"],
+            "cli_unregistered_combination",
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn test_keys_slug_field_errors_leave_stdout_empty() {
+    let temp_dir = TempDir::new().unwrap();
+    let missing = write_temp(
+        &temp_dir,
+        "missing.json",
+        "{\"a\":[{\"name\":\"x\"},{\"other\":1}]}\n",
+    );
+    let out = run(&["keys", &missing, "a", "--slug-field", "name", "--slugs"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = json_stderr(&out);
+    assert_eq!(err["error"]["code"], "document_type_mismatch");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("element 1")
+    );
+
+    let non_string = write_temp(&temp_dir, "num.json", "{\"a\":[{\"name\":3}]}\n");
+    let out = run(&["paths", &non_string, "a", "--slug-field", "name", "--slugs"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = json_stderr(&out);
+    assert_eq!(err["error"]["code"], "document_type_mismatch");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("element 0")
+    );
+
+    let dup = write_temp(
+        &temp_dir,
+        "dup.json",
+        "{\"a\":[{\"name\":\"x\"},{\"name\":\"y\"},{\"name\":\"x\"}]}\n",
+    );
+    let out = run(&["keys", &dup, "a", "--slug-field", "name", "--slugs"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let err = json_stderr(&out);
+    assert_eq!(err["error"]["code"], "document_ambiguous_match");
+    assert!(err["error"]["message"].as_str().unwrap().contains("0, 2"));
+}
+
+#[test]
+fn test_not_scalar_and_not_container_messages_name_next_step() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = write_temp(&temp_dir, "c.json", "{\"items\":[1],\"k\":\"v\"}\n");
+    let out = run(&["value", &path, "items"]);
+    let msg = json_stderr(&out)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(msg.contains("list its children with `keys`"), "{msg}");
+    assert!(msg.contains("`get`"), "{msg}");
+    let out = run(&["keys", &path, "k"]);
+    let err = json_stderr(&out);
+    assert_eq!(err["error"]["code"], "document_not_container");
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("read it with `value`")
+    );
+}
+
+#[test]
+fn test_value_help_states_exact_bytes() {
+    let out = run(&["value", "--help"]);
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("no trailing newline"), "{text}");
+    assert!(text.contains("values"), "{text}");
+}
+
+#[cfg(feature = "plist")]
+const INFO_PLIST: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/plist/Info.plist"
+);
+#[cfg(feature = "plist")]
+const REGISTRY_PLIST: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/plist/registry.plist"
+);
+
+#[cfg(feature = "plist")]
+#[test]
+fn test_plist_get_maps_all_eight_value_types() {
+    // `.plist` is detected from the extension; no --input-format needed.
+    let output = run(&["get", INFO_PLIST]);
+    assert!(output.status.success(), "{output:?}");
+    let result = json_stdout(&output)["result"].clone();
+    assert_eq!(result["format"], "plist");
+    let value = &result["value"];
+    assert_eq!(value["CFBundleIdentifier"], "org.example.sample");
+    assert_eq!(value["CFBundleVersion"], 42);
+    assert_eq!(value["MinimumOSVersion"], 17.5);
+    assert_eq!(value["LSRequiresIPhoneOS"], true);
+    assert_eq!(value["UIStatusBarHidden"], false);
+    assert_eq!(value["BuildDate"], "2026-11-08T03:00:00Z");
+    assert_eq!(value["Fingerprint"], "aGVsbG8=");
+    assert_eq!(value["UIRequiredDeviceCapabilities"][1], "metal");
+    assert_eq!(
+        value["CFBundleURLTypes"][0]["CFBundleURLSchemes"][0],
+        "sample"
+    );
+
+    let output = run(&["get", INFO_PLIST, "CFBundleURLTypes.0.CFBundleURLName"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        json_stdout(&output)["result"]["value"],
+        "org.example.sample.link"
+    );
+}
+
+#[cfg(feature = "plist")]
+#[test]
+fn test_plist_value_values_keys_and_paths() {
+    let output = run(&["value", INFO_PLIST, "CFBundleShortVersionString"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"1.4.0");
+
+    let output = run(&[
+        "values",
+        INFO_PLIST,
+        "CFBundleVersion",
+        "MinimumOSVersion",
+        "LSRequiresIPhoneOS",
+        "BuildDate",
+        "Fingerprint",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "42\n17.5\ntrue\n2026-11-08T03:00:00Z\naGVsbG8=\n"
+    );
+
+    let output = run(&["keys", REGISTRY_PLIST, "0"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "IOAddress\nIOBusyState\nIOLastUpdate\nIOProbeScore\nIORegistryEntryChildren\n\
+         IORegistryEntryID\nIORegistryEntryName\n"
+    );
+
+    let output = run(&["paths", REGISTRY_PLIST, "0.IORegistryEntryChildren.0"]);
+    assert!(output.status.success(), "{output:?}");
+    let paths = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        paths.contains("0.IORegistryEntryChildren.0.IORegistryEntryName"),
+        "{paths}"
+    );
+    // An emitted address reads back.
+    let output = run(&[
+        "value",
+        REGISTRY_PLIST,
+        "0.IORegistryEntryChildren.0.IORegistryEntryChildren.0.IORegistryEntryName",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"Port0");
+
+    let output = run(&["value", REGISTRY_PLIST, "0.IORegistryEntryID"]);
+    assert_eq!(output.stdout, b"4294967296");
+}
+
+#[cfg(feature = "plist")]
+#[test]
+fn test_plist_reads_stdin_with_input_format() {
+    let xml = std::fs::read(INFO_PLIST).unwrap();
+    let output = run_with_stdin(
+        &[
+            "value",
+            "-",
+            "CFBundleIdentifier",
+            "--input-format",
+            "plist",
+        ],
+        &xml,
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"org.example.sample");
+}
+
+#[cfg(feature = "plist")]
+#[test]
+fn test_plist_is_read_only_at_argv() {
+    let temp_dir = TempDir::new().unwrap();
+    let copy = write_temp(
+        &temp_dir,
+        "Info.plist",
+        &std::fs::read_to_string(INFO_PLIST).unwrap(),
+    );
+    let original = std::fs::read(&copy).unwrap();
+    for args in [
+        vec!["set", &copy, "CFBundleVersion", "43"],
+        vec!["unset", &copy, "CFBundleVersion"],
+        vec!["add", &copy, "k", "x", "--slug-field", "n"],
+        vec!["remove", &copy, "k", "x", "--slug-field", "n"],
+    ] {
+        let mut argv = args.clone();
+        argv.extend(["--input-format", "plist"]);
+        let refused = run(&argv);
+        assert_eq!(refused.status.code(), Some(2), "{args:?}: {refused:?}");
+        assert_eq!(
+            json_stderr(&refused)["error"]["code"],
+            "cli_invalid_argument_value",
+            "{args:?}"
+        );
+    }
+    assert_eq!(std::fs::read(&copy).unwrap(), original);
+}
+
+#[cfg(feature = "plist")]
+#[test]
+fn test_lint_reads_plist_with_and_without_input_format() {
+    let by_extension = run(&["lint", INFO_PLIST]);
+    assert_eq!(by_extension.status.code(), Some(0), "{by_extension:?}");
+    let explicit = run(&["lint", INFO_PLIST, "--input-format", "plist"]);
+    assert_eq!(explicit.status.code(), Some(0), "{explicit:?}");
+    assert_eq!(by_extension.stdout, explicit.stdout);
+
+    let stdin = std::fs::read(INFO_PLIST).unwrap();
+    let piped = run_with_stdin(&["lint", "-", "--input-format", "plist"], &stdin);
+    assert_eq!(piped.status.code(), Some(0), "{piped:?}");
+}
+
+#[cfg(feature = "plist")]
+#[test]
+fn test_write_verbs_refuse_a_plist_found_by_extension_at_runtime() {
+    let temp_dir = TempDir::new().unwrap();
+    let copy = write_temp(
+        &temp_dir,
+        "Info.plist",
+        &std::fs::read_to_string(INFO_PLIST).unwrap(),
+    );
+    let original = std::fs::read(&copy).unwrap();
+    for args in [
+        vec!["set", &copy, "CFBundleVersion", "43"],
+        vec!["unset", &copy, "CFBundleVersion"],
+    ] {
+        let refused = run(&args);
+        assert_eq!(refused.status.code(), Some(1), "{args:?}: {refused:?}");
+        assert!(refused.stdout.is_empty(), "{args:?}");
+        assert_eq!(
+            json_stderr(&refused)["error"]["code"],
+            "document_unsupported_operation",
+            "{args:?}"
+        );
+    }
+    assert_eq!(std::fs::read(&copy).unwrap(), original);
+}
+
+#[cfg(feature = "plist")]
+fn binary_plist_from(dir: &TempDir, xml: &str, name: &str) -> String {
+    let path = dir.path().join(name);
+    plist::Value::from_file(xml)
+        .unwrap()
+        .to_file_binary(&path)
+        .unwrap();
+    assert!(std::fs::read(&path).unwrap().starts_with(b"bplist"));
+    path.to_str().unwrap().to_string()
+}
+
+#[cfg(feature = "plist")]
+#[test]
+fn test_binary_plist_reads_byte_identically_to_xml() {
+    let dir = TempDir::new().unwrap();
+    let info_binary = binary_plist_from(&dir, INFO_PLIST, "Info.binary.plist");
+    let registry_binary = binary_plist_from(&dir, REGISTRY_PLIST, "registry.binary.plist");
+    let cases: [(&str, &str, &[&str]); 2] = [
+        (INFO_PLIST, &info_binary, &["CFBundleVersion", "BuildDate"]),
+        (REGISTRY_PLIST, &registry_binary, &["0.IORegistryEntryID"]),
+    ];
+    for (xml, binary, keys) in cases {
+        let both = |args: &[&str]| {
+            let mut x = vec![args[0], xml];
+            x.extend(&args[1..]);
+            let mut b = vec![args[0], binary];
+            b.extend(&args[1..]);
+            (run(&x), run(&b))
+        };
+        let mut commands: Vec<Vec<&str>> = vec![vec!["get"], vec!["keys"], vec!["paths"]];
+        for key in keys {
+            commands.push(vec!["get", key]);
+            commands.push(vec!["value", key]);
+        }
+        for command in commands {
+            let (x, b) = both(&command);
+            assert!(x.status.success(), "{command:?} {x:?}");
+            assert_eq!(x.stdout, b.stdout, "{command:?}");
+            assert_eq!(x.stderr, b.stderr, "{command:?}");
+        }
+    }
+    // `get` names the file in its envelope only through the path, so also pin
+    // the value subtree.
+    let output = run(&["get", &info_binary, "CFBundleIdentifier"]);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("org.example.sample"),
+        "{output:?}"
+    );
+}
+
+#[cfg(feature = "plist")]
+#[test]
+fn test_binary_plist_reads_stdin_with_input_format() {
+    let dir = TempDir::new().unwrap();
+    let info_binary = binary_plist_from(&dir, INFO_PLIST, "Info.binary.plist");
+    let binary = std::fs::read(&info_binary).unwrap();
+    assert!(binary.starts_with(b"bplist"));
+    let output = run_with_stdin(
+        &[
+            "value",
+            "-",
+            "CFBundleIdentifier",
+            "--input-format",
+            "plist",
+        ],
+        &binary,
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"org.example.sample");
+}
+
+#[cfg(feature = "plist")]
+#[test]
+fn test_binary_plist_read_as_another_format_names_the_flag() {
+    let dir = TempDir::new().unwrap();
+    let info_binary = binary_plist_from(&dir, INFO_PLIST, "Info.binary.plist");
+    let expected = "failed to parse JSON: the input is a binary property list; read it with --input-format plist";
+    let output = run(&["get", &info_binary, "--input-format", "json"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let error = json_stderr(&output)["error"].clone();
+    assert_eq!(error["code"], "document_parse_failed");
+    assert_eq!(error["message"].as_str().unwrap(), expected);
+
+    let binary = std::fs::read(&info_binary).unwrap();
+    let output = run_with_stdin(&["get", "-"], &binary);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let error = json_stderr(&output)["error"].clone();
+    assert_eq!(error["code"], "document_parse_failed");
+    assert_eq!(error["message"].as_str().unwrap(), expected);
+
+    // Magic with a malformed body is a plist parse failure, not UTF-8.
+    let output = run_with_stdin(
+        &["get", "-", "--input-format", "plist"],
+        b"bplist00\xd1\x01\x02\xff\xfe",
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "document_parse_failed"
+    );
+}
+
+// ---- shell JSON construction and raw JSON reads: object / array / json / has ----
+
+const AWKWARD: &str = "q\"uote \\ back\nline é 日本";
+
+fn assert_usage_rejected(output: &std::process::Output) {
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn object_escapes_values_and_round_trips_through_value() {
+    let output = run(&["object", &format!("note={AWKWARD}"), "path.like=x"]);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(output.stdout.ends_with(b"\n"));
+    assert_eq!(output.stdout.iter().filter(|b| **b == b'\n').count(), 1);
+
+    let read = run_with_stdin(&["value", "-", "note"], &output.stdout);
+    assert_eq!(read.stdout, AWKWARD.as_bytes());
+    // A dotted FIELD is one literal key, not a path.
+    let read = run_with_stdin(&["keys", "-"], &output.stdout);
+    assert_eq!(String::from_utf8(read.stdout).unwrap(), "note\npath.like\n");
+}
+
+#[test]
+fn object_embeds_json_and_keeps_number_literals() {
+    let output = run(&[
+        "object",
+        "name=a=b",
+        "--json",
+        "n=1.50",
+        "--json",
+        "flag=true",
+        "--json",
+        "nothing=null",
+        "--json",
+        r#"nested={"k":[1,2]}"#,
+    ]);
+    assert!(output.status.success());
+    let parsed = json_stdout(&output);
+    assert_eq!(parsed["name"], "a=b");
+    assert_eq!(parsed["flag"], true);
+    assert!(parsed["nothing"].is_null());
+    assert_eq!(parsed["nested"]["k"][1], 2);
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("\"n\":1.50")
+    );
+}
+
+#[test]
+fn object_and_array_empty_forms() {
+    assert_eq!(run(&["object"]).stdout, b"{}\n");
+    assert_eq!(run(&["array"]).stdout, b"[]\n");
+}
+
+#[test]
+fn object_rejects_bad_json_duplicates_and_malformed_fields() {
+    let output = run(&["object", "--json", "a={nope"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(json_stderr(&output)["error"]["code"], "json_parse_failed");
+
+    assert_usage_rejected(&run(&["object", "a=1", "a=2"]));
+    assert_usage_rejected(&run(&["object", "a=1", "--json", "a=2"]));
+    assert_usage_rejected(&run(&["object", "no-equals"]));
+    assert_usage_rejected(&run(&["object", "=v"]));
+}
+
+#[test]
+fn object_accepts_secret_named_keys_like_set_does() {
+    // `set` takes a bare VALUE for a `_secret` key without complaint; object
+    // does the same and does not redact its own argv.
+    let output = run(&["object", "api_key_secret=sk-argv"]);
+    assert!(output.status.success());
+    assert_eq!(json_stdout(&output)["api_key_secret"], "sk-argv");
+}
+
+#[test]
+fn array_strings_and_json_modes() {
+    let output = run(&["array", "a", AWKWARD, "1"]);
+    assert!(output.status.success());
+    assert!(output.stdout.ends_with(b"\n"));
+    let parsed = json_stdout(&output);
+    assert_eq!(parsed[1], AWKWARD);
+    assert_eq!(parsed[2], "1");
+
+    let output = run(&["array", "--json", "1", "\"x\"", "null", "[true]"]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"[1,\"x\",null,[true]]\n");
+
+    let output = run(&["array", "--json", "1", "{bad"]);
+    assert_eq!(json_stderr(&output)["error"]["code"], "json_parse_failed");
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn construction_and_json_verbs_reject_output_options() {
+    for args in [
+        &["object", "--output", "yaml"][..],
+        &["object", "--output-to", "stdout"][..],
+        &["array", "--output", "yaml"][..],
+        &["array", "--output-to", "stderr"][..],
+        &["json", "-", "--output", "yaml"][..],
+        &["json", "-", "--output-to", "stdout"][..],
+        &["has", "-", "a", "--output", "yaml"][..],
+        &["has", "-", "a", "--output-to", "stdout"][..],
+        &["count", "-", "a", "--output", "yaml"][..],
+        &["count", "-", "a", "--output-to", "stdout"][..],
+    ] {
+        assert_usage_rejected(&run_with_stdin(args, b"{\"a\":1}"));
+    }
+}
+
+#[test]
+fn json_prints_bare_subtrees_and_round_trips() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = write_temp(
+        &temp_dir,
+        "doc.json",
+        r#"{"obj":{"k":[1,2.50],"s":"v"},"arr":[1,"two"],"str":"hi","n":3}"#,
+    );
+    for (key, expected) in [
+        ("obj", r#"{"k":[1,2.50],"s":"v"}"#),
+        ("arr", r#"[1,"two"]"#),
+        ("str", r#""hi""#),
+        ("n", "3"),
+        ("obj.k.1", "2.50"),
+    ] {
+        let output = run(&["json", &path, key]);
+        assert!(output.status.success(), "{key}");
+        assert_eq!(output.stdout, format!("{expected}\n").as_bytes(), "{key}");
+        let again = run_with_stdin(&["json", "-"], &output.stdout);
+        assert_eq!(again.stdout, output.stdout, "{key}");
+    }
+    let whole = run(&["json", &path]);
+    assert!(whole.status.success());
+    let again = run_with_stdin(&["json", "-"], &whole.stdout);
+    assert_eq!(again.stdout, whole.stdout);
+
+    let missing = run(&["json", &path, "nope"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(missing.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&missing)["error"]["code"],
+        "document_path_not_found"
+    );
+}
+
+#[test]
+fn json_reads_toml_and_yaml_subtrees() {
+    let toml = run_with_stdin(
+        &["json", "-", "package", "--input-format", "toml"],
+        b"[package]\nname = \"demo\"\ncount = 3\n",
+    );
+    assert!(toml.status.success());
+    assert_eq!(toml.stdout, b"{\"count\":3,\"name\":\"demo\"}\n");
+
+    let yaml = run_with_stdin(
+        &["json", "-", "svc", "--input-format", "yaml"],
+        b"svc:\n  port: 80\n  tags: [a, b]\n",
+    );
+    assert!(yaml.status.success());
+    assert_eq!(yaml.stdout, b"{\"port\":80,\"tags\":[\"a\",\"b\"]}\n");
+}
+
+#[test]
+fn json_redacts_like_get_and_reveals_on_request() {
+    const DOC: &[u8] = br#"{"db":{"host":"h","pass_secret":"hunter2"},"top_secret":"t"}"#;
+    let whole = run_with_stdin(&["json", "-"], DOC);
+    assert_eq!(
+        whole.stdout,
+        b"{\"db\":{\"host\":\"h\",\"pass_secret\":\"***\"},\"top_secret\":\"***\"}\n"
+    );
+    let leaf = run_with_stdin(&["json", "-", "db.pass_secret"], DOC);
+    assert_eq!(leaf.stdout, b"\"***\"\n");
+    let subtree = run_with_stdin(&["json", "-", "db"], DOC);
+    assert_eq!(
+        subtree.stdout,
+        b"{\"host\":\"h\",\"pass_secret\":\"***\"}\n"
+    );
+
+    let revealed = run_with_stdin(&["json", "-", "db", "--reveal-secret"], DOC);
+    assert_eq!(
+        revealed.stdout,
+        b"{\"host\":\"h\",\"pass_secret\":\"hunter2\"}\n"
+    );
+    let revealed = run_with_stdin(&["json", "-", "db.pass_secret", "--reveal-secret"], DOC);
+    assert_eq!(revealed.stdout, b"\"hunter2\"\n");
+}
+
+#[test]
+fn has_answers_in_stdout_with_exit_zero() {
+    const DOC: &[u8] = br#"{"s":"v","o":{"k":1},"e":{},"z":null,"a":[10]}"#;
+    for (key, expected) in [
+        ("s", "true"),
+        ("o", "true"),
+        ("o.k", "true"),
+        ("e", "true"),
+        ("z", "true"),
+        ("a.0", "true"),
+        ("missing", "false"),
+        ("missing.child", "false"),
+        ("s.child", "false"),
+        ("z.child", "false"),
+        ("a.5", "false"),
+    ] {
+        let output = run_with_stdin(&["has", "-", key], DOC);
+        assert_eq!(output.status.code(), Some(0), "{key}");
+        assert_eq!(output.stdout, expected.as_bytes(), "{key}");
+        assert!(output.stderr.is_empty(), "{key}");
+    }
+}
+
+#[test]
+fn has_errors_only_when_the_document_is_unreadable() {
+    let temp_dir = TempDir::new().unwrap();
+    let absent = temp_dir.path().join("absent.json");
+    let output = run(&["has", absent.to_str().unwrap(), "a"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+
+    let output = run_with_stdin(&["has", "-", "a"], b"{broken");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "document_parse_failed"
+    );
+}
+
+#[test]
+fn json_default_replaces_a_missing_or_null_key_with_compact_json() {
+    const DOC: &[u8] = br#"{"o":{"k":1},"z":null,"list":[{"id":"x","v":1}]}"#;
+    // The default is parsed and re-serialized, not echoed byte for byte.
+    for (key, expected) in [
+        ("missing", "[ 1 , 2 ]"),
+        ("o.missing.deeper", "[ 1 , 2 ]"),
+        ("z", "[ 1 , 2 ]"),
+    ] {
+        let output = run_with_stdin(&["json", "-", key, "--default", expected], DOC);
+        assert_eq!(output.status.code(), Some(0), "{key}");
+        assert_eq!(output.stdout, b"[1,2]\n", "{key}");
+        assert!(output.stderr.is_empty(), "{key}");
+    }
+    let named = run_with_stdin(
+        &[
+            "json",
+            "-",
+            "list.nope",
+            "--slug-field",
+            "id",
+            "--default",
+            "{}",
+        ],
+        DOC,
+    );
+    assert_eq!(named.status.code(), Some(0));
+    assert_eq!(named.stdout, b"{}\n");
+
+    // A present value ignores the default.
+    let present = run_with_stdin(&["json", "-", "o", "--default", "[]"], DOC);
+    assert_eq!(present.stdout, b"{\"k\":1}\n");
+    let present = run_with_stdin(&["json", "-", "list.0.v", "--default", "[]"], DOC);
+    assert_eq!(present.stdout, b"1\n");
+}
+
+#[test]
+fn json_default_does_not_hide_ambiguity_bad_defaults_or_unreadable_documents() {
+    const DOC: &[u8] = br#"{"list":[{"id":"x"},{"id":"x"}],"s":"v"}"#;
+    let ambiguous = run_with_stdin(
+        &[
+            "json",
+            "-",
+            "list.x",
+            "--slug-field",
+            "id",
+            "--default",
+            "[]",
+        ],
+        DOC,
+    );
+    assert_eq!(ambiguous.status.code(), Some(1));
+    assert!(ambiguous.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&ambiguous)["error"]["code"],
+        "document_ambiguous_match"
+    );
+
+    // An invalid default is refused even when the key exists.
+    for key in ["s", "missing"] {
+        let bad = run_with_stdin(&["json", "-", key, "--default", "{bad"], DOC);
+        assert_eq!(bad.status.code(), Some(1), "{key}");
+        assert!(bad.stdout.is_empty(), "{key}");
+        assert_eq!(
+            json_stderr(&bad)["error"]["code"],
+            "json_parse_failed",
+            "{key}"
+        );
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let absent = temp_dir.path().join("absent.json");
+    let unreadable = run(&["json", absent.to_str().unwrap(), "a", "--default", "[]"]);
+    assert_eq!(unreadable.status.code(), Some(1));
+    assert!(unreadable.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&unreadable)["error"]["code"],
+        "document_io_failed"
+    );
+
+    let parse = run_with_stdin(&["json", "-", "a", "--default", "[]"], b"{broken");
+    assert_eq!(parse.status.code(), Some(1));
+    assert!(parse.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&parse)["error"]["code"],
+        "document_parse_failed"
+    );
+
+    // Without --default a miss is still an error.
+    let plain = run_with_stdin(&["json", "-", "missing"], DOC);
+    assert_eq!(
+        json_stderr(&plain)["error"]["code"],
+        "document_path_not_found"
+    );
+}
+
+#[test]
+fn count_prints_direct_children_without_a_trailing_newline() {
+    const DOC: &[u8] = br#"{"arr":[1,[2,3],{"k":1}],"obj":{"a":{"x":1,"y":2},"b":1},"ea":[],"eo":{},"s":"v","z":null,"list":[{"id":"p"},{"id":"q"}]}"#;
+    for (key, expected) in [
+        ("arr", "3"),
+        ("obj", "2"),
+        ("ea", "0"),
+        ("eo", "0"),
+        ("obj.a", "2"),
+        ("arr.1", "2"),
+    ] {
+        let output = run_with_stdin(&["count", "-", key], DOC);
+        assert_eq!(output.status.code(), Some(0), "{key}");
+        assert_eq!(output.stdout, expected.as_bytes(), "{key}");
+        assert!(output.stderr.is_empty(), "{key}");
+    }
+    // --slug-field only changes how KEY addresses an element.
+    let by_slug = run_with_stdin(&["count", "-", "list", "--slug-field", "id"], DOC);
+    assert_eq!(by_slug.stdout, b"2");
+    let toml = run_with_stdin(
+        &["count", "-", "pkg", "--input-format", "toml"],
+        b"[pkg]\na = 1\nb = 2\nc = 3\n",
+    );
+    assert_eq!(toml.stdout, b"3");
+}
+
+#[test]
+fn count_refuses_scalars_and_reports_misses_unless_missing_ok() {
+    const DOC: &[u8] = br#"{"s":"v","n":1,"z":null,"o":{"k":1}}"#;
+    for key in ["s", "n"] {
+        let output = run_with_stdin(&["count", "-", key], DOC);
+        assert_eq!(output.status.code(), Some(1), "{key}");
+        assert!(output.stdout.is_empty(), "{key}");
+        assert_eq!(
+            json_stderr(&output)["error"]["code"],
+            "document_not_container",
+            "{key}"
+        );
+        // --missing-ok only forgives absence, never a scalar.
+        let output = run_with_stdin(&["count", "-", key, "--missing-ok"], DOC);
+        assert_eq!(
+            json_stderr(&output)["error"]["code"],
+            "document_not_container",
+            "{key}"
+        );
+    }
+    let missing = run_with_stdin(&["count", "-", "nope"], DOC);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(missing.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&missing)["error"]["code"],
+        "document_path_not_found"
+    );
+    for key in ["nope", "o.nope.deeper"] {
+        let forgiven = run_with_stdin(&["count", "-", key, "--missing-ok"], DOC);
+        assert_eq!(forgiven.status.code(), Some(0), "{key}");
+        assert_eq!(forgiven.stdout, b"0", "{key}");
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let absent = temp_dir.path().join("absent.json");
+    for extra in [&[][..], &["--missing-ok"][..]] {
+        let mut args = vec!["count", absent.to_str().unwrap(), "a"];
+        args.extend_from_slice(extra);
+        let output = run(&args);
+        assert_eq!(output.status.code(), Some(1), "{extra:?}");
+        assert!(output.stdout.is_empty(), "{extra:?}");
+        assert_eq!(json_stderr(&output)["error"]["code"], "document_io_failed");
+    }
+    let parse = run_with_stdin(&["count", "-", "a"], b"{broken");
+    assert_eq!(parse.status.code(), Some(1));
+    assert_eq!(
+        json_stderr(&parse)["error"]["code"],
+        "document_parse_failed"
+    );
+}
+
+#[test]
+fn values_missing_ok_forgives_a_missing_wildcard_container_only() {
+    const DOC: &[u8] = br#"{"a":{"e":[],"l":["x","y"],"o":[{"n":"p"},{"m":1}]},"s":"v"}"#;
+    let plain = run_with_stdin(&["values", "-", "a.nope.*"], DOC);
+    assert_eq!(plain.status.code(), Some(1));
+    assert!(plain.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&plain)["error"]["code"],
+        "document_path_not_found"
+    );
+
+    // The wildcard's container, or any segment before it, may be absent.
+    for key in ["a.nope.*", "nope.deeper.*", "nope.*"] {
+        let output = run_with_stdin(&["values", "-", key, "--missing-ok"], DOC);
+        assert_eq!(output.status.code(), Some(0), "{key}");
+        assert!(output.stdout.is_empty(), "{key}");
+        assert!(output.stderr.is_empty(), "{key}");
+    }
+    let empty = run_with_stdin(&["values", "-", "a.e.*", "--missing-ok"], DOC);
+    assert_eq!(empty.status.code(), Some(0));
+    assert!(empty.stdout.is_empty());
+
+    // Only the missing KEY contributes nothing.
+    let mixed = run_with_stdin(
+        &["values", "-", "a.l.*", "a.nope.*", "s", "--missing-ok"],
+        DOC,
+    );
+    assert_eq!(mixed.stdout, b"x\ny\nv\n");
+
+    // A scalar where a container is needed is still an error.
+    let scalar = run_with_stdin(&["values", "-", "s.*", "--missing-ok"], DOC);
+    assert_eq!(scalar.status.code(), Some(1));
+    assert_eq!(
+        json_stderr(&scalar)["error"]["code"],
+        "document_not_container"
+    );
+
+    // Leaf misses stay with --default, with or without --missing-ok.
+    let leaf = run_with_stdin(&["values", "-", "a.o.*.n", "--missing-ok"], DOC);
+    assert_eq!(leaf.status.code(), Some(1));
+    assert!(leaf.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&leaf)["error"]["code"],
+        "document_path_not_found"
+    );
+    let leaf = run_with_stdin(&["values", "-", "a.nope"], DOC);
+    assert_eq!(
+        json_stderr(&leaf)["error"]["code"],
+        "document_path_not_found"
+    );
+    let leaf = run_with_stdin(&["values", "-", "a.nope", "--missing-ok"], DOC);
+    assert_eq!(
+        json_stderr(&leaf)["error"]["code"],
+        "document_path_not_found"
+    );
+    let both = run_with_stdin(
+        &[
+            "values",
+            "-",
+            "a.o.*.n",
+            "a.nope.*",
+            "--missing-ok",
+            "--default",
+            "",
+        ],
+        DOC,
+    );
+    assert_eq!(both.stdout, b"p\n\n");
+}
+
+#[test]
+fn values_null_frames_records_with_nul_like_paths() {
+    const DOC: &[u8] = br#"{"l":["a","b\nc",""],"o":[{"n":"p"},{"m":1}]}"#;
+    let output = run_with_stdin(&["values", "-", "l.*", "--null"], DOC);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"a\0b\nc\0\0");
+
+    // The same document the default framing refuses.
+    let lines = run_with_stdin(&["values", "-", "l.*"], DOC);
+    assert_eq!(lines.status.code(), Some(1));
+    assert!(lines.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&lines)["error"]["code"],
+        "document_multiline_value"
+    );
+
+    // An empty element from --default is one empty record.
+    let defaulted = run_with_stdin(&["values", "-", "o.*.n", "--default", "", "--null"], DOC);
+    assert_eq!(defaulted.stdout, b"p\0\0");
+
+    // No records, no bytes.
+    let none = run_with_stdin(&["values", "-", "nope.*", "--missing-ok", "--null"], DOC);
+    assert_eq!(none.status.code(), Some(0));
+    assert!(none.stdout.is_empty());
+
+    // A NUL cannot be framed by NUL.
+    let nul = run_with_stdin(&["values", "-", "l.*", "--null"], br#"{"l":["a\u0000b"]}"#);
+    assert_eq!(nul.status.code(), Some(1));
+    assert!(nul.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&nul)["error"]["code"],
+        "document_unframeable_value"
+    );
+}
+
+#[test]
+fn path_output_reads_back_the_original_node() {
+    for key in ["a.b", "a\\b", "a*b", "*", "a b", "a\nb", "x\\.*"] {
+        let doc = serde_json::json!({ "outer": { key: "found" } }).to_string();
+        let joined = run(&["path", "outer", key]);
+        assert_eq!(joined.status.code(), Some(0), "{key:?}");
+        assert!(joined.stderr.is_empty(), "{key:?}");
+        assert!(
+            !joined.stdout.ends_with(b"\n") || key.ends_with('\n'),
+            "{key:?}"
+        );
+        let joined = String::from_utf8(joined.stdout).unwrap();
+        let read = run_with_stdin(&["value", "-", &joined], doc.as_bytes());
+        assert_eq!(read.status.code(), Some(0), "{key:?}: {joined:?}");
+        assert_eq!(read.stdout, b"found", "{key:?}: {joined:?}");
+    }
+}
+
+#[test]
+fn path_refuses_zero_or_empty_segments_and_output_overrides() {
+    // No segment at all is a usage error, caught before the command runs.
+    let output = run(&["path"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "cli_unregistered_combination"
+    );
+    for args in [&["path", "a", ""][..], &["path", ""][..]] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert_eq!(
+            json_stderr(&output)["error"]["code"],
+            "document_invalid_argument",
+            "{args:?}"
+        );
+    }
+    for args in [
+        &["path", "a", "--output", "yaml"][..],
+        &["path", "a", "--output-to", "stdout"][..],
+    ] {
+        let output = run(args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+    }
+}
+
+// ═══════════════════════════════════════════
+// A path through a scalar leads to no value, like a missing key
+// ═══════════════════════════════════════════
+
+const SCALAR_MIDDLE_DOC: &[u8] = br#"{"b":1,"c":{"version":"2"},"s":"text","list":[1,2]}"#;
+
+#[test]
+fn test_value_default_covers_a_path_through_a_scalar() {
+    let output = run_with_stdin(
+        &["value", "-", "b.version", "--default", "bare"],
+        SCALAR_MIDDLE_DOC,
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"bare");
+
+    // Without a fallback the fault stays loud, and stays a type mismatch.
+    let output = run_with_stdin(&["value", "-", "b.version"], SCALAR_MIDDLE_DOC);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "document_type_mismatch"
+    );
+
+    // The reachable shape still reads normally.
+    let output = run_with_stdin(
+        &["value", "-", "c.version", "--default", "bare"],
+        SCALAR_MIDDLE_DOC,
+    );
+    assert_eq!(output.stdout, b"2");
+
+    // A collection leaf is still an error, not a fallback.
+    let output = run_with_stdin(
+        &["value", "-", "list", "--default", "bare"],
+        SCALAR_MIDDLE_DOC,
+    );
+    assert_eq!(json_stderr(&output)["error"]["code"], "document_not_scalar");
+}
+
+#[test]
+fn test_values_default_and_missing_ok_cover_a_path_through_a_scalar() {
+    let output = run_with_stdin(
+        &["values", "-", "b.version", "c.version", "--default", ""],
+        SCALAR_MIDDLE_DOC,
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"\n2\n");
+
+    let output = run_with_stdin(
+        &["values", "-", "b.x.*.name", "--missing-ok"],
+        SCALAR_MIDDLE_DOC,
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+
+    let output = run_with_stdin(&["values", "-", "b.version"], SCALAR_MIDDLE_DOC);
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "document_type_mismatch"
+    );
+}
+
+#[test]
+fn test_json_default_covers_a_path_through_a_scalar() {
+    let output = run_with_stdin(
+        &["json", "-", "s.version", "--default", "[]"],
+        SCALAR_MIDDLE_DOC,
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "[]");
+
+    let output = run_with_stdin(&["json", "-", "s.version"], SCALAR_MIDDLE_DOC);
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "document_type_mismatch"
+    );
+}
+
+#[test]
+fn test_has_is_false_for_a_path_through_a_scalar() {
+    let output = run_with_stdin(&["has", "-", "b.version"], SCALAR_MIDDLE_DOC);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "false");
+    let output = run_with_stdin(&["has", "-", "c.version"], SCALAR_MIDDLE_DOC);
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
+}
+
+// ═══════════════════════════════════════════
+// Empty input and non-regular files name the way out
+// ═══════════════════════════════════════════
+
+#[test]
+fn test_empty_stdin_is_document_empty_naming_stdin() {
+    let output = run_with_stdin(&["value", "-", "x", "--input-format", "json"], b"");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error = json_stderr(&output)["error"].clone();
+    assert_eq!(error["code"], "document_empty");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("stdin is empty"),
+        "{error}"
+    );
+}
+
+#[test]
+fn test_empty_file_is_document_empty_naming_the_path() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = write_temp(&temp_dir, "empty.json", "");
+    let output = run(&["value", &path, "x"]);
+    let error = json_stderr(&output)["error"].clone();
+    assert_eq!(error["code"], "document_empty");
+    assert!(
+        error["message"].as_str().unwrap().contains(&path),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_non_regular_file_hints_at_stdin_dash() {
+    let output = run(&["value", "/dev/null", "x", "--input-format", "json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = json_stderr(&output)["error"].clone();
+    assert_eq!(error["code"], "document_io_failed");
+    assert_eq!(error["hint"], "pass `-` to read stdin");
+}
+
+// A `null` at a container position is "no value": `--missing-ok` reads it as
+// empty, without the flag it is `document_null_value`. A real scalar stays a
+// type error.
+#[cfg(feature = "yaml")]
+#[test]
+fn null_at_a_container_position_follows_missing_ok() {
+    let dir = TempDir::new().unwrap();
+    let json = write_temp(&dir, "nulls.json", r#"{"items":null,"label":"x"}"#);
+    let yaml = write_temp(&dir, "nulls.yaml", "items:\nlabel: x\n");
+    for file in [&json, &yaml] {
+        for args in [
+            vec!["count", file.as_str(), "items"],
+            vec!["keys", file.as_str(), "items"],
+            vec!["paths", file.as_str(), "items"],
+            vec!["values", file.as_str(), "items.*.name"],
+        ] {
+            let output = run(&args);
+            assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+            let error = json_stderr(&output)["error"].clone();
+            assert_eq!(error["code"], "document_null_value", "{args:?}");
+            assert!(output.stdout.is_empty(), "{args:?}");
+
+            let mut tolerant = args.clone();
+            tolerant.push("--missing-ok");
+            let output = run(&tolerant);
+            assert_eq!(output.status.code(), Some(0), "{tolerant:?}: {output:?}");
+            let expected: &[u8] = if args[0] == "count" { b"0" } else { b"" };
+            assert_eq!(output.stdout, expected, "{tolerant:?}");
+        }
+        let output = run(&["count", file, "label", "--missing-ok"]);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(
+            json_stderr(&output)["error"]["code"],
+            "document_not_container"
+        );
+        let output = run(&["has", file, "items"]);
+        assert_eq!(output.stdout, b"true");
+    }
+}
+
+#[test]
+fn count_without_a_key_counts_the_document_root() {
+    let dir = TempDir::new().unwrap();
+    let array = write_temp(&dir, "root.json", r#"[{"name":"a"},{"name":"b"}]"#);
+    let object = write_temp(&dir, "root-object.json", r#"{"a":1,"b":2,"c":3}"#);
+    let output = run(&["count", &array]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stdout, b"2");
+    let output = run(&["count", &object]);
+    assert_eq!(output.stdout, b"3");
+    let output = run_with_stdin(&["count", "-"], br#"[1,2,3,4]"#);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stdout, b"4");
+
+    let output = run(&["count", &array, "--missing-ok"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "cli_unregistered_combination"
+    );
+}
+
+#[test]
+fn json_default_needs_a_key() {
+    let dir = TempDir::new().unwrap();
+    let file = write_temp(&dir, "doc.json", r#"{"a":1}"#);
+    let output = run(&["json", &file]);
+    assert_eq!(output.stdout, b"{\"a\":1}\n");
+    let output = run(&["json", &file, "missing", "--default", "[]"]);
+    assert_eq!(output.stdout, b"[]\n");
+    let output = run(&["json", &file, "--default", "[]"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(
+        json_stderr(&output)["error"]["code"],
+        "cli_unregistered_combination"
+    );
+}
+
+#[cfg(feature = "plist")]
+#[test]
+fn xml_plist_on_stdin_names_the_flag() {
+    let expected = "failed to parse JSON: the input is an XML property list; read it with --input-format plist";
+    for input in [
+        &b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict/></plist>"[..],
+        b"  <plist version=\"1.0\"><dict/></plist>",
+        b"<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"x\"><plist/>",
+    ] {
+        let output = run_with_stdin(&["value", "-", "Name"], input);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let error = json_stderr(&output)["error"].clone();
+        assert_eq!(error["code"], "document_parse_failed");
+        assert_eq!(error["message"].as_str().unwrap(), expected);
     }
 }

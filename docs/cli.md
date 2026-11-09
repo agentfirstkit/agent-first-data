@@ -26,13 +26,19 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 ## Commands
 
 - [`afdata add`](#afdata-add) — Add an element to a keyed list
+- [`afdata array`](#afdata-array) — Build one JSON array from arguments, as one line of compact JSON with a trailing newline
+- [`afdata count`](#afdata-count) — Print how many direct children the container at KEY has, as a decimal integer with no trailing newline
 - [`afdata emit error`](#afdata-emit-error) — Emit a terminal error event
 - [`afdata emit log`](#afdata-emit-log) — Emit a diagnostic log event
 - [`afdata emit result`](#afdata-emit-result) — Emit a terminal result event
 - [`afdata get`](#afdata-get) — Read a document or one value as an AFDATA result
 - [`afdata guard`](#afdata-guard) — Validate a value against a destructive-verb operand type and print its normalized absolute path as raw stdout bytes
+- [`afdata has`](#afdata-has) — Print true or false, with no trailing newline, for whether KEY exists; null counts as present
+- [`afdata json`](#afdata-json) — Read a document or subtree as one line of compact JSON with a trailing newline, no envelope; secrets are redacted as in get
 - [`afdata keys`](#afdata-keys) — List child names as raw lines, without their parent path
 - [`afdata lint`](#afdata-lint) — Lint structured data for deterministic AFDATA issues
+- [`afdata object`](#afdata-object) — Build one JSON object from arguments, as one line of compact JSON with a trailing newline
+- [`afdata path`](#afdata-path) — Join literal key segments into one dot-path, escaping backslash, `.` and `*`; raw stdout bytes with no trailing newline
 - [`afdata paths`](#afdata-paths) — List each child's full dot-path as raw lines
 - [`afdata remove`](#afdata-remove) — Remove a keyed-list element by slug
 - [`afdata render`](#afdata-render) — Render JSON or JSONL through AFDATA redaction and formatting
@@ -44,7 +50,7 @@ A **shape** is one legal set of arguments that may appear together, under a stab
 - [`afdata skill validate`](#afdata-skill-validate) — Validate an Agent Skill
 - [`afdata unset`](#afdata-unset) — Remove one document entry
 - [`afdata validate`](#afdata-validate) — Validate protocol-v1 events or a finite event stream
-- [`afdata value`](#afdata-value) — Read one scalar as raw stdout bytes
+- [`afdata value`](#afdata-value) — Read one scalar as raw stdout bytes: exact bytes, no trailing newline; for one value per line use values
 - [`afdata values`](#afdata-values) — Read many scalars as raw lines, from one parse of the document
 
 ### `afdata add`
@@ -64,6 +70,50 @@ afdata add <FILE> <KEY> <SLUG> [<FIELD=VALUE>...] --slug-field <FIELD> [--input-
 | `--slug-field` | Field that identifies each list element |
 | `--input-format` | Document format override |
 | `--max-file-bytes` | Largest document file to read, in bytes |
+
+### `afdata array`
+
+Build one JSON array from arguments, as one line of compact JSON with a trailing newline
+
+```
+afdata array [<VALUE>...] [--json]
+```
+
+Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
+
+| Argument | Meaning |
+|---|---|
+| `VALUE` | Element; a string unless --json is given |
+| `--json` | Parse every VALUE as JSON text |
+
+### `afdata count`
+
+Print how many direct children the container at KEY has, as a decimal integer with no trailing newline
+
+#### `count-root` — Count the document root's immediate children
+
+```
+afdata count <FILE> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>]
+```
+
+#### `count-container` — Count one addressed container's immediate children
+
+```
+afdata count <FILE> <KEY> [--missing-ok] [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>]
+```
+
+Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
+
+Arguments across every shape above:
+
+| Argument | Meaning |
+|---|---|
+| `FILE` | Document file, or - for stdin (read as JSON unless --input-format is given) |
+| `KEY` | Optional dot-path to an object or array; omitted means the document root |
+| `--missing-ok` | Print 0 when the path leads to no container (missing, through a scalar, or null) |
+| `--input-format` | Document format override |
+| `--max-file-bytes` | Largest document file to read, in bytes |
+| `--slug-field` | Field naming each element of an array on the path |
 
 ### `afdata emit error`
 
@@ -123,13 +173,13 @@ Read a document or one value as an AFDATA result
 #### `get-document` — Read the entire document
 
 ```
-afdata get <FILE> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown>] [--max-file-bytes <BYTES>] [--secret-name <FIELD>...]
+afdata get <FILE> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--secret-name <FIELD>...]
 ```
 
 #### `get-value` — Read one value at KEY
 
 ```
-afdata get <FILE> <KEY> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>] [--secret-name <FIELD>...]
+afdata get <FILE> <KEY> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>] [--secret-name <FIELD>...]
 ```
 
 Arguments across every shape above:
@@ -159,6 +209,55 @@ Output: raw bytes on success; rejects `--output` and `--output-to`; redirect wit
 | `VALUE` | Value to validate, e.g. the contents of a shell variable |
 | `--under` | Additional containment root VALUE must sit strictly under, for a target anchored to a directory the caller knows and the TYPE vocabulary cannot name |
 
+### `afdata has`
+
+Print true or false, with no trailing newline, for whether KEY exists; null counts as present
+
+```
+afdata has <FILE> <KEY> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>]
+```
+
+Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
+
+| Argument | Meaning |
+|---|---|
+| `FILE` | Document file, or - for stdin (read as JSON unless --input-format is given) |
+| `KEY` | Dot-path to test |
+| `--input-format` | Document format override |
+| `--max-file-bytes` | Largest document file to read, in bytes |
+| `--slug-field` | Field naming each element of an array on the path |
+
+### `afdata json`
+
+Read a document or subtree as one line of compact JSON with a trailing newline, no envelope; secrets are redacted as in get
+
+#### `json-document` — Read the entire document
+
+```
+afdata json <FILE> [--reveal-secret] [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--secret-name <FIELD>...]
+```
+
+#### `json-value` — Read the subtree at KEY
+
+```
+afdata json <FILE> <KEY> [--reveal-secret] [--default <JSON>] [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>] [--secret-name <FIELD>...]
+```
+
+Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
+
+Arguments across every shape above:
+
+| Argument | Meaning |
+|---|---|
+| `FILE` | Document file, or - for stdin (read as JSON unless --input-format is given) |
+| `KEY` | Optional dot-path; omitted means the whole document |
+| `--reveal-secret` | Allow secret values and URL credentials |
+| `--default` | Fallback JSON text, printed as compact JSON, when the path leads to no value (missing, through a scalar, or null) |
+| `--input-format` | Document format override |
+| `--max-file-bytes` | Largest document file to read, in bytes |
+| `--slug-field` | Field naming each element of an array on the path |
+| `--secret-name` | Extra exact field name to redact |
+
 ### `afdata keys`
 
 List child names as raw lines, without their parent path
@@ -166,13 +265,19 @@ List child names as raw lines, without their parent path
 #### `keys-root` — List the document root's immediate children
 
 ```
-afdata keys <FILE> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown>] [--max-file-bytes <BYTES>] [--null]
+afdata keys <FILE> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--null]
 ```
 
 #### `keys-container` — List one addressed container's immediate children
 
 ```
-afdata keys <FILE> <KEY> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>] [--missing-ok] [--null]
+afdata keys <FILE> <KEY> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>] [--missing-ok] [--null]
+```
+
+#### `keys-slugs` — List one addressed array's elements by their --slug-field value
+
+```
+afdata keys <FILE> <KEY> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] --slug-field <FIELD> [--missing-ok] --slugs [--null]
 ```
 
 Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
@@ -186,7 +291,8 @@ Arguments across every shape above:
 | `--input-format` | Document format override |
 | `--max-file-bytes` | Largest document file to read, in bytes |
 | `--slug-field` | Field naming each element of an array on the path |
-| `--missing-ok` | Succeed with no output when KEY is absent |
+| `--missing-ok` | Print nothing and succeed when the path leads to no container (missing, through a scalar, or null) |
+| `--slugs` | When KEY is an array, list each element's --slug-field value instead of its index |
 | `--null` | Use NUL separators |
 
 ### `afdata lint`
@@ -194,7 +300,7 @@ Arguments across every shape above:
 Lint structured data for deterministic AFDATA issues
 
 ```
-afdata lint <INPUT> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter>] [--max-file-bytes <BYTES>] [--min-severity <warning|error>]
+afdata lint <INPUT> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|plist>] [--max-file-bytes <BYTES>] [--min-severity <warning|error>]
 ```
 
 | Argument | Meaning |
@@ -204,6 +310,35 @@ afdata lint <INPUT> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-fron
 | `--max-file-bytes` | Largest document file to read, in bytes |
 | `--min-severity` | Lowest severity to report; `error` drops the heuristic checks |
 
+### `afdata object`
+
+Build one JSON object from arguments, as one line of compact JSON with a trailing newline
+
+```
+afdata object [<FIELD=VALUE>...] [--json <FIELD=JSON>...]
+```
+
+Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
+
+| Argument | Meaning |
+|---|---|
+| `FIELD=VALUE` | String field; the key is literal and split at the first = |
+| `--json` | Field whose value is embedded JSON text (number, bool, null, array, object) |
+
+### `afdata path`
+
+Join literal key segments into one dot-path, escaping backslash, `.` and `*`; raw stdout bytes with no trailing newline
+
+```
+afdata path <SEGMENT>...
+```
+
+Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
+
+| Argument | Meaning |
+|---|---|
+| `SEGMENT` | One literal key or index; must not be empty |
+
 ### `afdata paths`
 
 List each child's full dot-path as raw lines
@@ -211,13 +346,19 @@ List each child's full dot-path as raw lines
 #### `paths-root` — List the document root's immediate children
 
 ```
-afdata paths <FILE> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown>] [--max-file-bytes <BYTES>] [--null]
+afdata paths <FILE> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--null]
 ```
 
 #### `paths-container` — List one addressed container's immediate children
 
 ```
-afdata paths <FILE> <KEY> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>] [--missing-ok] [--null]
+afdata paths <FILE> <KEY> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>] [--missing-ok] [--null]
+```
+
+#### `paths-slugs` — List one addressed array's elements by their --slug-field value
+
+```
+afdata paths <FILE> <KEY> [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] --slug-field <FIELD> [--missing-ok] --slugs [--null]
 ```
 
 Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
@@ -231,7 +372,8 @@ Arguments across every shape above:
 | `--input-format` | Document format override |
 | `--max-file-bytes` | Largest document file to read, in bytes |
 | `--slug-field` | Field naming each element of an array on the path |
-| `--missing-ok` | Succeed with no output when KEY is absent |
+| `--missing-ok` | Print nothing and succeed when the path leads to no container (missing, through a scalar, or null) |
+| `--slugs` | When KEY is an array, list each element's --slug-field value instead of its index |
 | `--null` | Use NUL separators |
 
 ### `afdata remove`
@@ -429,10 +571,10 @@ afdata validate <INPUT> [--strict] [--per-event]
 
 ### `afdata value`
 
-Read one scalar as raw stdout bytes
+Read one scalar as raw stdout bytes: exact bytes, no trailing newline; for one value per line use values
 
 ```
-afdata value <FILE> <KEY> [--reveal-secret] [--default <VALUE>] [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>] [--secret-name <FIELD>...]
+afdata value <FILE> <KEY> [--reveal-secret] [--default <VALUE>] [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>] [--secret-name <FIELD>...]
 ```
 
 Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
@@ -442,7 +584,7 @@ Output: raw bytes on success; rejects `--output` and `--output-to`; redirect wit
 | `FILE` | Document file, or - for stdin (read as JSON unless --input-format is given) |
 | `KEY` | Dot-path to one scalar |
 | `--reveal-secret` | Allow secret values and URL credentials |
-| `--default` | Fallback for missing or null |
+| `--default` | Fallback when the path leads to no value (missing, through a scalar, or null) |
 | `--input-format` | Document format override |
 | `--max-file-bytes` | Largest document file to read, in bytes |
 | `--slug-field` | Field naming each element of an array on the path |
@@ -453,7 +595,7 @@ Output: raw bytes on success; rejects `--output` and `--output-to`; redirect wit
 Read many scalars as raw lines, from one parse of the document
 
 ```
-afdata values <FILE> <KEY>... [--reveal-secret] [--default <VALUE>] [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>] [--secret-name <FIELD>...]
+afdata values <FILE> <KEY>... [--reveal-secret] [--default <VALUE>] [--missing-ok] [--null] [--input-format <json|toml|yaml|yml|dotenv|env|ini|toml-frontmatter|yaml-frontmatter|markdown|plist>] [--max-file-bytes <BYTES>] [--slug-field <FIELD>] [--secret-name <FIELD>...]
 ```
 
 Output: raw bytes on success; rejects `--output` and `--output-to`; redirect with `--stdout-file` or `--stderr-file`. Failures are still strict JSON on stderr.
@@ -461,9 +603,11 @@ Output: raw bytes on success; rejects `--output` and `--output-to`; redirect wit
 | Argument | Meaning |
 |---|---|
 | `FILE` | Document file, or - for stdin (read as JSON unless --input-format is given) |
-| `KEY` | Dot-path to one scalar; repeat for each value wanted |
+| `KEY` | Dot-path to one scalar; repeat for each value wanted. A `*` segment expands to every child in index or key order, so `items.*.name` yields one line per element; with --default a missing or null field gives an empty line and the line count stays aligned |
 | `--reveal-secret` | Allow secret values and URL credentials |
-| `--default` | Fallback for missing or null |
+| `--default` | Fallback when the path leads to no value (missing, through a scalar, or null) |
+| `--missing-ok` | A KEY whose `*` container, or any segment before it, is missing contributes no records; a missing leaf is still governed by --default |
+| `--null` | Use NUL separators, so values containing newlines are framed intact |
 | `--input-format` | Document format override |
 | `--max-file-bytes` | Largest document file to read, in bytes |
 | `--slug-field` | Field naming each element of an array on the path |

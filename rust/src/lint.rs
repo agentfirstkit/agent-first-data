@@ -238,7 +238,7 @@ fn decode_output_escapes(text: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8_lossy_owned(out)
 }
 
 /// Decode one escape body (the bytes after a `\`), returning it with the number

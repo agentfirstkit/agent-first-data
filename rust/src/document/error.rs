@@ -128,6 +128,12 @@ pub enum DocumentError {
         path: String,
         max_bytes: u64,
     },
+    /// The source held zero bytes and its format has no empty document (an
+    /// empty JSON text is not JSON). `source` names where the bytes came from
+    /// (`stdin` or a path) so the reader looks at the producer, not at syntax.
+    EmptyInput {
+        source: String,
+    },
     IoError {
         detail: String,
     },
@@ -182,6 +188,18 @@ impl fmt::Display for DocumentError {
                     prefix,
                     candidates
                 )
+            }
+            // An empty prefix is the document itself: name it, and say what an empty
+            // document parses to, rather than print an empty pair of backticks.
+            DocumentError::NotTraversable { path, got } if path.is_empty() => {
+                if got == "null" {
+                    write!(
+                        f,
+                        "the document is empty (its root is null), cannot traverse into it"
+                    )
+                } else {
+                    write!(f, "the document root is {}, cannot traverse into it", got)
+                }
             }
             DocumentError::NotTraversable { path, got } => {
                 write!(f, "path `{}` is {}, cannot traverse further", path, got)
@@ -240,6 +258,12 @@ impl fmt::Display for DocumentError {
             DocumentError::TooLarge { path, max_bytes } => {
                 write!(f, "`{path}` exceeds the {max_bytes}-byte read limit")
             }
+            DocumentError::EmptyInput { source } => {
+                write!(
+                    f,
+                    "{source} is empty (zero bytes); there is no document to read"
+                )
+            }
             DocumentError::IoError { detail } => {
                 write!(f, "io error: {}", detail)
             }
@@ -278,6 +302,7 @@ impl DocumentError {
             Self::SlugNotFound { .. } => "document_slug_not_found",
             Self::AmbiguousMatch { .. } => "document_ambiguous_match",
             Self::SlugAlreadyExists { .. } => "document_slug_exists",
+            Self::EmptyInput { .. } => "document_empty",
             Self::IoError { .. } => "document_io_failed",
             Self::UnsupportedOperation { .. } => "document_unsupported_operation",
             Self::EmptyPath | Self::EmptyValues | Self::InvalidArgument { .. } => {
@@ -354,6 +379,15 @@ impl DocumentError {
     #[must_use]
     pub fn redacted_message(&self) -> String {
         match self {
+            // afdata's own sentence about a binary property list read as the
+            // wrong format: it names the flag and quotes nothing from the file.
+            #[cfg(feature = "plist")]
+            Self::ParseError { detail, .. }
+                if detail == crate::document::format::plist::WRONG_FORMAT_DETAIL
+                    || detail == crate::document::format::plist::WRONG_FORMAT_XML_DETAIL =>
+            {
+                self.to_string()
+            }
             Self::ParseError { format, .. } => match self.location() {
                 Some(location) => format!("failed to parse {format} at {location}"),
                 None => format!("failed to parse {format}"),
@@ -469,6 +503,12 @@ mod tests {
                     path: "root.key".to_string(),
                 },
                 "document_path_not_found",
+            ),
+            (
+                DocumentError::EmptyInput {
+                    source: "stdin".to_string(),
+                },
+                "document_empty",
             ),
             (
                 DocumentError::IndexOutOfBounds {
@@ -620,5 +660,25 @@ mod tests {
             "path `token_secret.inner` is string, cannot traverse further"
         );
         assert_eq!(err.redacted_message(), err.to_string());
+    }
+
+    #[test]
+    fn not_traversable_at_the_root_names_the_document() {
+        let empty = DocumentError::NotTraversable {
+            path: String::new(),
+            got: "null".to_string(),
+        };
+        assert_eq!(
+            empty.to_string(),
+            "the document is empty (its root is null), cannot traverse into it"
+        );
+        let scalar = DocumentError::NotTraversable {
+            path: String::new(),
+            got: "string".to_string(),
+        };
+        assert_eq!(
+            scalar.to_string(),
+            "the document root is string, cannot traverse into it"
+        );
     }
 }

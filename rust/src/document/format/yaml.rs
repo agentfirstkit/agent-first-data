@@ -95,8 +95,7 @@ pub fn set_preserving(content: &str, path: &str, value: &Value) -> DocumentResul
                 if document.span_at(&parent).is_some_and(|(start, end)| {
                     let text = content[start..end].trim();
                     let empty = text
-                        .strip_prefix('{')
-                        .and_then(|inner| inner.strip_suffix('}'))
+                        .strip_circumfix('{', '}')
                         .is_some_and(|inner| inner.trim().is_empty());
                     text.starts_with('{') && !empty
                 }) {
