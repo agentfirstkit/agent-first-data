@@ -106,7 +106,7 @@ install() {
   # --retry-all-errors because the default --retry ignores a connection reset
   # part-way through the transfer, which is the failure this download actually
   # sees; without it a flaky network reads as a broken pin.
-  curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors "$url" -o "$dir/$asset"
+  curl -fsSL --retry 6 --retry-all-errors "$url" -o "$dir/$asset"
   tar -xzf "$dir/$asset" -C "$dir" --strip-components=1
   rm -f "$dir/$asset"
   if [ ! -x "$binary" ]; then
