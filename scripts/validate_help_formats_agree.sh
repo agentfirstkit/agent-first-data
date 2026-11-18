@@ -48,11 +48,7 @@ tool_name="${binary##*/}"
 tool_name="${tool_name%.*}"
 TOOL_PREFIX="$tool_name "
 
-WORK="$(mktemp -d)"
-cleanup() {
-  afdata_remove tmp_path "$WORK" || :
-}
-trap cleanup EXIT
+afdata_mktemp -d WORK
 
 disagree() {
   afdata_error help_formats_disagree "Help formats disagree: $1" || exit 1

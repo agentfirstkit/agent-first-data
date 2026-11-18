@@ -79,6 +79,7 @@ impl LintFinding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LintOptions {
     minimum_severity: LintSeverity,
+    untyped_text_scalars: bool,
 }
 
 impl LintOptions {
@@ -86,12 +87,19 @@ impl LintOptions {
     pub const fn new() -> Self {
         Self {
             minimum_severity: LintSeverity::Warning,
+            untyped_text_scalars: false,
         }
     }
 
     /// Return only findings at or above `minimum_severity`.
     pub const fn minimum_severity(mut self, minimum_severity: LintSeverity) -> Self {
         self.minimum_severity = minimum_severity;
+        self
+    }
+
+    /// Treat scalar strings as untyped text (for dotenv and INI).
+    pub const fn untyped_text_scalars(mut self, untyped_text_scalars: bool) -> Self {
+        self.untyped_text_scalars = untyped_text_scalars;
         self
     }
 
@@ -109,7 +117,7 @@ impl Default for LintOptions {
 /// Lint an actual serialized JSON value in-process.
 pub fn lint_value(value: &Value, options: LintOptions) -> Vec<LintFinding> {
     let mut findings = Vec::new();
-    lint_value_at(value, "", &mut findings);
+    lint_value_at(value, "", options.untyped_text_scalars, &mut findings);
     findings.retain(|finding| finding.severity >= options.minimum_severity);
     findings
 }
@@ -290,7 +298,12 @@ fn percent_byte(rest: &[u8]) -> Option<u8> {
         .and_then(|text| u8::from_str_radix(text, 16).ok())
 }
 
-fn lint_value_at(value: &Value, pointer: &str, findings: &mut Vec<LintFinding>) {
+fn lint_value_at(
+    value: &Value,
+    pointer: &str,
+    untyped_text_scalars: bool,
+    findings: &mut Vec<LintFinding>,
+) {
     lint_unsafe_integer(value, pointer, findings);
     match value {
         Value::Object(map) => {
@@ -310,14 +323,19 @@ fn lint_value_at(value: &Value, pointer: &str, findings: &mut Vec<LintFinding>) 
                     continue;
                 }
                 let child_pointer = join_pointer(pointer, key);
-                lint_suffix_type(key, child, &child_pointer, findings);
-                lint_missing_suffix(key, child, &child_pointer, findings);
-                lint_value_at(child, &child_pointer, findings);
+                lint_suffix_type(key, child, &child_pointer, untyped_text_scalars, findings);
+                lint_missing_suffix(key, child, &child_pointer, untyped_text_scalars, findings);
+                lint_value_at(child, &child_pointer, untyped_text_scalars, findings);
             }
         }
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
-                lint_value_at(item, &join_pointer(pointer, &index.to_string()), findings);
+                lint_value_at(
+                    item,
+                    &join_pointer(pointer, &index.to_string()),
+                    untyped_text_scalars,
+                    findings,
+                );
             }
         }
         _ => {}
@@ -333,8 +351,8 @@ fn lint_schema_property(
     let property_pointer = join_pointer(properties_pointer, name);
     let normalized_name = name.to_ascii_lowercase();
     if !matches!(schema, Value::Object(_) | Value::Bool(_)) {
-        lint_suffix_type(name, schema, &property_pointer, findings);
-        lint_value_at(schema, &property_pointer, findings);
+        lint_suffix_type(name, schema, &property_pointer, false, findings);
+        lint_value_at(schema, &property_pointer, false, findings);
         return;
     }
     if normalized_name.ends_with("_secret")
@@ -367,7 +385,7 @@ fn lint_schema_property(
         }
     }
     lint_schema_suffix_type(name, schema, &property_pointer, findings);
-    lint_value_at(schema, &property_pointer, findings);
+    lint_value_at(schema, &property_pointer, false, findings);
 }
 
 fn lint_schema_suffix_type(
@@ -419,12 +437,17 @@ fn schema_accepts_any_type(schema: &Value, expected: &[&str]) -> bool {
     };
 
     if let Some(schema_type) = object.get("type") {
+        let items_accepts = || match object.get("items") {
+            Some(items @ Value::Object(_)) => schema_accepts_any_type(items, expected),
+            _ => true,
+        };
         return match schema_type {
+            Value::String(value) if value == "array" => items_accepts(),
             Value::String(value) => expected.contains(&value.as_str()),
-            Value::Array(values) => values.iter().any(|value| {
-                value
-                    .as_str()
-                    .is_some_and(|value| expected.contains(&value))
+            Value::Array(values) => values.iter().any(|value| match value.as_str() {
+                Some("array") => items_accepts(),
+                Some(t) => expected.contains(&t),
+                None => false,
             }),
             _ => true,
         };
@@ -508,7 +531,6 @@ const UNSUFFIXED_STEMS: &[(&str, &str)] = &[
     ("passwd", "sensitive"),
     ("secret", "sensitive"),
     ("credential", "sensitive"),
-    ("credentials", "sensitive"),
 ];
 
 /// Whether a key already carries a suffix the renderer and redactor act on.
@@ -536,7 +558,31 @@ fn has_registered_suffix(key: &str) -> bool {
         })
 }
 
-fn lint_missing_suffix(key: &str, value: &Value, pointer: &str, findings: &mut Vec<LintFinding>) {
+fn parse_json_number_text(text: &str) -> Option<Value> {
+    serde_json::from_str::<serde_json::Number>(text)
+        .ok()
+        .map(Value::Number)
+}
+
+fn is_numeric_suffix(key: &str) -> bool {
+    let has = |suffix: &str| crate::formatting::has_suffix_ci(key, suffix);
+    has("_bytes")
+        || has("_epoch_s")
+        || has("_epoch_ms")
+        || has("_sats")
+        || has("_msats")
+        || has("_percent")
+        || is_duration_suffix(key)
+        || is_currency_minor_unit_suffix(key)
+}
+
+fn lint_missing_suffix(
+    key: &str,
+    value: &Value,
+    pointer: &str,
+    untyped_text_scalars: bool,
+    findings: &mut Vec<LintFinding>,
+) {
     if value.is_null() || has_registered_suffix(key) {
         return;
     }
@@ -546,16 +592,42 @@ fn lint_missing_suffix(key: &str, value: &Value, pointer: &str, findings: &mut V
     } else {
         UNSUFFIXED_STEMS
             .iter()
-            .find(|(stem, _)| lower == *stem || lower.ends_with(&format!("_{stem}")))
+            .find(|(stem, _)| {
+                lower == *stem
+                    || lower.ends_with(&format!("_{stem}"))
+                    || lower == format!("{stem}s")
+                    || lower.ends_with(&format!("_{stem}s"))
+            })
             .map(|(_, category)| *category)
     };
     let Some(category) = category else {
         return;
     };
-    let plausible = match category {
-        "duration" | "currency" | "size" | "percentage" => value.is_number(),
-        "timestamp" => value.is_number() || value.is_string(),
-        _ => value.is_string(),
+    let is_plausible_scalar = |val: &Value| {
+        let is_numeric = val.is_number()
+            || (untyped_text_scalars && val.as_str().and_then(parse_json_number_text).is_some());
+        match category {
+            "duration" | "currency" | "size" | "percentage" => is_numeric,
+            "timestamp" => is_numeric || val.is_string(),
+            _ => val.is_string(),
+        }
+    };
+    let plausible = if let Some(items) = value.as_array() {
+        let mut has_non_null = false;
+        let mut all_valid = true;
+        for item in items {
+            if item.is_null() {
+                continue;
+            }
+            has_non_null = true;
+            if !is_plausible_scalar(item) {
+                all_valid = false;
+                break;
+            }
+        }
+        has_non_null && all_valid
+    } else {
+        is_plausible_scalar(value)
     };
     if !plausible {
         return;
@@ -583,16 +655,13 @@ fn lint_missing_suffix(key: &str, value: &Value, pointer: &str, findings: &mut V
     ));
 }
 
-fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<LintFinding>) {
-    if value.is_null() {
-        return;
-    }
+fn lint_suffix_scalar_message(key: &str, value: &Value) -> Option<String> {
     // Suffix recognition uses the convention's own matching rule, not a
     // case-folded approximation: a key the renderer treats as plain must not be
     // held to a suffix's type contract, or the fix the message asks for leaves
     // the field just as untreated as before.
     let has = |suffix: &str| crate::formatting::has_suffix_ci(key, suffix);
-    let message = if has("_bytes") {
+    if has("_bytes") {
         (!is_non_negative_integer(value))
             .then(|| format!("{key:?} must be a non-negative integer byte count"))
     } else if has("_epoch_s") || has("_epoch_ms") {
@@ -619,19 +688,6 @@ fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<
             ))
         } else {
             Some(format!("{key:?} must be a string"))
-        }
-    } else if has("_url") {
-        // Redaction walks a URL-marked collection into its string leaves, so a
-        // collection is a shape the convention supports, not a type error. Only
-        // the leaves are held to the single-URL rule.
-        match url_field_violation(value) {
-            UrlFieldCheck::Ok => None,
-            UrlFieldCheck::NotAUrl => Some(format!(
-                "{key:?} must be a single URL (no internal whitespace or bare credentials)"
-            )),
-            UrlFieldCheck::NotAString => Some(format!(
-                "{key:?} must be a URL string, or a collection whose leaves are URL strings"
-            )),
         }
     } else if has("_bcp47") {
         if value.as_str().is_some_and(is_valid_bcp47) {
@@ -673,8 +729,87 @@ fn lint_suffix_type(key: &str, value: &Value, pointer: &str, findings: &mut Vec<
         }
     } else {
         None
-    };
-    if let Some(message) = message {
+    }
+}
+
+fn lint_suffix_type(
+    key: &str,
+    value: &Value,
+    pointer: &str,
+    untyped_text_scalars: bool,
+    findings: &mut Vec<LintFinding>,
+) {
+    if value.is_null() {
+        return;
+    }
+    if untyped_text_scalars
+        && let Some(text) = value.as_str()
+        && is_numeric_suffix(key)
+    {
+        if text.is_empty() {
+            return;
+        }
+        let message = match parse_json_number_text(text) {
+            Some(num_val) => lint_suffix_scalar_message(key, &num_val),
+            None => Some(format!("{key:?} must be a decimal numeric text value")),
+        };
+        if let Some(message) = message {
+            findings.push(LintFinding::error(
+                "suffix_type_mismatch",
+                pointer.to_string(),
+                message,
+            ));
+        }
+        return;
+    }
+    let has = |suffix: &str| crate::formatting::has_suffix_ci(key, suffix);
+    if has("_url") {
+        // Redaction walks a URL-marked collection into its string leaves, so a
+        // collection is a shape the convention supports, not a type error. Only
+        // the leaves are held to the single-URL rule.
+        let message = match url_field_violation(value) {
+            UrlFieldCheck::Ok => None,
+            UrlFieldCheck::NotAUrl => Some(format!(
+                "{key:?} must be a single URL (no internal whitespace or bare credentials)"
+            )),
+            UrlFieldCheck::NotAString => Some(format!(
+                "{key:?} must be a URL string, or a collection whose leaves are URL strings"
+            )),
+        };
+        if let Some(message) = message {
+            findings.push(LintFinding::error(
+                "suffix_type_mismatch",
+                pointer.to_string(),
+                message,
+            ));
+        }
+        return;
+    }
+    if has("_secret") {
+        return;
+    }
+    if let Some(items) = value.as_array() {
+        for (idx, item) in items.iter().enumerate() {
+            if item.is_null() {
+                continue;
+            }
+            let item_pointer = format!("{pointer}/{idx}");
+            let message = if item.is_array() {
+                Some(format!("{key:?} array elements must be scalar values"))
+            } else {
+                lint_suffix_scalar_message(key, item)
+            };
+            if let Some(message) = message {
+                findings.push(LintFinding::error(
+                    "suffix_type_mismatch",
+                    item_pointer,
+                    message,
+                ));
+            }
+        }
+        return;
+    }
+    if let Some(message) = lint_suffix_scalar_message(key, value) {
         findings.push(LintFinding::error(
             "suffix_type_mismatch",
             pointer.to_string(),

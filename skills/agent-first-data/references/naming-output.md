@@ -55,6 +55,7 @@ exception: use `_url` so embedded credentials can be scrubbed.
   deltas may be negative. Use `_{code}_micro` for millionths; never use
   floating cents.
 - `null` means absent/unset and is exempt from suffix type checks.
+- A suffixed field may be an array of that scalar type; objects are not allowed (write an array of records with suffixed fields instead).
 
 Do not put magic values such as `"auto"` in strict-format fields. Define such
 behavior in the owning tool's config semantics.

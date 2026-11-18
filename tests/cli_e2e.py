@@ -400,6 +400,160 @@ def assert_afdata_lint_suffix_type_regressions() -> None:
     )
 
 
+def assert_afdata_lint_suffix_arrays() -> None:
+    ok_proc = run_afdata(
+        ("lint", "-"),
+        '{"retry_delays_ms":[100,2500],"seen_epoch_ms":[1700000000000],"sizes_bytes":[1024],"accepted_bcp47":["zh-CN","en"],"seen_rfc3339":["2026-01-01T00:00:00Z"],"range_ms":[100,null],"empty_ms":[]}\n',
+    )
+    assert ok_proc.returncode == 0, (
+        f"afdata lint rejected valid suffix arrays: {ok_proc.stdout!r}"
+    )
+
+    bad_cases = [
+        ('{"retry_delays_ms":[100,"2500"]}\n', "/retry_delays_ms/1"),
+        ('{"seen_epoch_ms":[1.5]}\n', "/seen_epoch_ms/0"),
+        ('{"accepted_bcp47":["zh_CN"]}\n', "/accepted_bcp47/0"),
+        ('{"retry_delays_ms":[[100]]}\n', "/retry_delays_ms/0"),
+        ('{"latency_ms":{"p50":1}}\n', "/latency_ms"),
+    ]
+    for payload, expected_pointer in bad_cases:
+        proc = run_afdata(("lint", "-"), payload)
+        assert proc.returncode != 0, f"expected lint failure for {payload!r}: {proc.stdout!r}"
+        findings = terminal_events(proc)[0]["error"]["findings"]
+        assert len(findings) == 1, findings
+        assert findings[0]["rule_id"] == "suffix_type_mismatch", findings
+        assert findings[0]["pointer"] == expected_pointer, findings
+
+    schema_ok = run_afdata(
+        ("lint", "-"),
+        '{"properties":{"retry_delays_ms":{"type":"array","items":{"type":"integer"}}}}\n',
+    )
+    assert schema_ok.returncode == 0, schema_ok.stdout
+
+    schema_bad = run_afdata(
+        ("lint", "-"),
+        '{"properties":{"retry_delays_ms":{"type":"array","items":{"type":"string"}}}}\n',
+    )
+    assert schema_bad.returncode != 0, schema_bad.stdout
+
+    schema_no_items = run_afdata(
+        ("lint", "-"),
+        '{"properties":{"retry_delays_ms":{"type":"array"}}}\n',
+    )
+    assert schema_no_items.returncode == 0, schema_no_items.stdout
+
+    schema_url_array = run_afdata(
+        ("lint", "-"),
+        '{"properties":{"relay_url":{"type":"array","items":{"type":"string"}}}}\n',
+    )
+    assert schema_url_array.returncode == 0, schema_url_array.stdout
+
+    plain_render = run_afdata(
+        ("render", "--output", "plain", "-"),
+        '{"retry_delays_ms":[100,2500]}\n',
+    )
+    assert plain_render.returncode == 0, plain_render.stderr
+    assert plain_render.stdout.strip() == "retry_delays_ms=100,2500", plain_render.stdout
+
+
+def assert_afdata_lint_text_formats() -> None:
+    dotenv_ok = run_afdata(
+        ("lint", "--input-format", "dotenv", "-"),
+        (
+            "CACHE_TTL_S=3600\n"
+            "TOKEN_VALIDITY_HOURS=24\n"
+            "SIZE_BYTES=1024\n"
+            "CPU_PERCENT=99.5\n"
+            "SEEN_EPOCH_MS=1700000000000\n"
+            "EMPTY_MS=\n"
+        ),
+    )
+    assert dotenv_ok.returncode == 0, dotenv_ok.stdout
+
+    dotenv_bad_text = run_afdata(
+        ("lint", "--input-format", "dotenv", "-"),
+        "TIMEOUT_MS=5s\n",
+    )
+    assert dotenv_bad_text.returncode != 0, dotenv_bad_text.stdout
+    findings = terminal_events(dotenv_bad_text)[0]["error"]["findings"]
+    assert len(findings) == 1, findings
+    assert findings[0]["rule_id"] == "suffix_type_mismatch", findings
+    assert findings[0]["pointer"] == "/TIMEOUT_MS", findings
+
+    for payload in ("SIZE_BYTES=-1\n", "SEEN_EPOCH_MS=1.5\n"):
+        proc = run_afdata(("lint", "--input-format", "dotenv", "-"), payload)
+        assert proc.returncode != 0, f"expected lint failure for {payload!r}: {proc.stdout!r}"
+
+    dotenv_missing = run_afdata(
+        ("lint", "--input-format", "dotenv", "-"),
+        "TIMEOUT=5000\n",
+    )
+    assert dotenv_missing.returncode == 0, dotenv_missing.stdout
+    missing_findings = terminal_events(dotenv_missing)[0]["result"]["findings"]
+    assert any(
+        f["rule_id"] == "missing_suffix" and f["pointer"] == "/TIMEOUT"
+        for f in missing_findings
+    ), missing_findings
+
+    ini_ok = run_afdata(
+        ("lint", "--input-format", "ini", "-"),
+        "[s]\ntimeout_ms=5000\n",
+    )
+    assert ini_ok.returncode == 0, ini_ok.stdout
+
+    ini_bad = run_afdata(
+        ("lint", "--input-format", "ini", "-"),
+        "[s]\ntimeout_ms=fast\n",
+    )
+    assert ini_bad.returncode != 0, ini_bad.stdout
+    ini_findings = terminal_events(ini_bad)[0]["error"]["findings"]
+    assert len(ini_findings) == 1, ini_findings
+    assert ini_findings[0]["rule_id"] == "suffix_type_mismatch", ini_findings
+    assert ini_findings[0]["pointer"] == "/s/timeout_ms", ini_findings
+
+    json_bad = run_afdata(("lint", "-"), '{"timeout_ms":"5000"}\n')
+    assert json_bad.returncode != 0, json_bad.stdout
+
+
+def assert_afdata_lint_plural_missing_suffix() -> None:
+    warn_cases = [
+        ('{"tokens":["sk-live"]}\n', "/tokens"),
+        ('{"passwords":["p"]}\n', "/passwords"),
+        ('{"api_keys":["k"]}\n', "/api_keys"),
+        ('{"timeouts":[5]}\n', "/timeouts"),
+        ('{"retry_delays":[100,200]}\n', "/retry_delays"),
+        ('{"created_at":[1700000000]}\n', "/created_at"),
+        ('{"timeouts":5}\n', "/timeouts"),
+    ]
+    for payload, expected_pointer in warn_cases:
+        proc = run_afdata(("lint", "-"), payload)
+        assert proc.returncode == 0, f"expected warning exit 0 for {payload!r}: {proc.stdout!r}"
+        findings = terminal_events(proc)[0]["result"]["findings"]
+        assert len(findings) == 1, findings
+        assert findings[0]["rule_id"] == "missing_suffix", findings
+        assert findings[0]["severity"] == "warning", findings
+        assert findings[0]["pointer"] == expected_pointer, findings
+
+        err_only = run_afdata(("lint", "--min-severity", "error", "-"), payload)
+        assert err_only.returncode == 0, err_only.stdout
+        assert terminal_events(err_only)[0]["result"]["findings"] == [], err_only.stdout
+
+    ok_cases = [
+        '{"tokens":1500}\n',
+        '{"max_tokens":4096}\n',
+        '{"tokens":[]}\n',
+        '{"tokens":[{"id":1}]}\n',
+        '{"tokens_secret":["sk-live"]}\n',
+        '{"retry_delays_ms":[100]}\n',
+    ]
+    for payload in ok_cases:
+        proc = run_afdata(("lint", "-"), payload)
+        assert proc.returncode == 0, proc.stdout
+        assert terminal_events(proc)[0]["result"]["findings"] == [], (
+            f"unexpected findings for {payload!r}: {proc.stdout!r}"
+        )
+
+
 def assert_afdata_cli_capabilities() -> None:
     ver = run_afdata(("--version", "--output", "json"), "")
     assert ver.returncode == 0, f"afdata --version --output json failed: {ver.stderr!r}"
@@ -627,6 +781,9 @@ def main() -> None:
         assert_afdata_lint_null_suffix_exempt,
         assert_afdata_lint_null_suffix_exempt_nested,
         assert_afdata_lint_suffix_type_regressions,
+        assert_afdata_lint_suffix_arrays,
+        assert_afdata_lint_text_formats,
+        assert_afdata_lint_plural_missing_suffix,
         assert_afdata_cli_capabilities,
         assert_afdata_render_redacts,
         assert_afdata_render_routes_values_to_stderr,

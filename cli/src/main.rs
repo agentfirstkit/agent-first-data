@@ -1928,6 +1928,13 @@ fn run_lint(
             }
         })
         .unwrap_or(DocumentFormat::Json);
+    let options = if Some(effective) == DocumentFormat::from_cli_name("dotenv")
+        || Some(effective) == DocumentFormat::from_cli_name("ini")
+    {
+        options.untyped_text_scalars(true)
+    } else {
+        options
+    };
 
     let mut findings = Vec::new();
     if effective == DocumentFormat::Json {

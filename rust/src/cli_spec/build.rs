@@ -139,8 +139,11 @@ fn validate_command(
                         ),
                     ));
                 }
+                let canonical_id = name.trim_start_matches("--").replace('-', "_");
+                // A sensitive field may use a short public spelling and a
+                // separate structured identifier for the host's redactor.
                 if !is_canonical_long(name)
-                    || name.trim_start_matches("--").replace('-', "_") != argument.argument_id
+                    || (!argument.sensitive && argument.argument_id != canonical_id)
                 {
                     return Err(CliSpecError::new(
                         "invalid_long_argument",
