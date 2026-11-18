@@ -23,7 +23,7 @@ pub trait CliSchema {
 /// Render field definitions as markdown reference.
 pub fn render_doc_markdown(title: &str, fields: &[FieldDef]) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# {} Configuration Reference\n\n", title));
+    out.push_str(&format!("# {title} Configuration Reference\n\n"));
 
     // Group by section (first segment of path)
     let mut sections: std::collections::BTreeMap<&str, Vec<&FieldDef>> =
@@ -34,7 +34,7 @@ pub fn render_doc_markdown(title: &str, fields: &[FieldDef]) -> String {
     }
 
     for (section, section_fields) in sections {
-        out.push_str(&format!("## {}\n\n", section));
+        out.push_str(&format!("## {section}\n\n"));
         out.push_str("| Key | Type | Default | Description |\n");
         out.push_str("|-----|------|---------|-------------|\n");
 
@@ -55,8 +55,7 @@ pub fn render_doc_markdown(title: &str, fields: &[FieldDef]) -> String {
             let desc = format!("{}{}{}", field.description, required_marker, example);
 
             out.push_str(&format!(
-                "| {} | `{}` | `{}` | {} |\n",
-                key, type_str, default_str, desc
+                "| {key} | `{type_str}` | `{default_str}` | {desc} |\n"
             ));
         }
         out.push('\n');
@@ -223,7 +222,7 @@ fn render_yaml_with_comments(
             let current_path = if path.is_empty() {
                 key.clone()
             } else {
-                format!("{}.{}", path, key)
+                format!("{path}.{key}")
             };
 
             if let Some(field) = field_map.get(current_path.as_str()) {
@@ -231,7 +230,7 @@ fn render_yaml_with_comments(
                 out.push_str(&format!("# {}\n", field.description));
                 if let Some(default) = field.default {
                     out.push_str(&indent_str);
-                    out.push_str(&format!("# Default: {}\n", default));
+                    out.push_str(&format!("# Default: {default}\n"));
                 }
             }
 

@@ -40,8 +40,8 @@ fn parse_semantic(content: &str) -> DocumentResult<Value> {
     let mut values = BTreeMap::new();
 
     for (line_number, raw_line) in logical_lines(content)? {
-        let raw_line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line).trim_start();
+        let raw_line = raw_line.trim_suffix('\n');
+        let line = raw_line.trim_suffix('\r').trim_start();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -196,8 +196,8 @@ fn edit_line(content: &str, key: &str, replacement: Option<&str>) -> DocumentRes
     let mut output = String::with_capacity(content.len());
     let found = document.has_key(key);
     for (line_number, line) in logical_lines(content)? {
-        let body = line.strip_suffix('\n').unwrap_or(line);
-        let bare = body.strip_suffix('\r').unwrap_or(body);
+        let body = line.trim_suffix('\n');
+        let bare = body.trim_suffix('\r');
         let trimmed = bare.trim_start();
         let assignment = trimmed
             .strip_prefix("export")

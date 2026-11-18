@@ -2,7 +2,7 @@
   "$schema": "https://cmn.dev/schemas/v1/spore-core.json",
   "id": "agent-first-data",
   "name": "Agent-First Data",
-  "version": "0.38.0",
+  "version": "0.38.1",
   "domain": "agentfirstkit.com",
   "key": "ed25519.BwbSzqdDYyMN1pPW5snRk3afrJAovHn8aueMvDpfNKVw",
   "synopsis": "A naming convention that lets AI agents understand your data without being told what it means, plus the afdata CLI and a Rust library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents.",
@@ -13,7 +13,7 @@
   ],
   "license": "MIT",
   "mutations": [
-    "lint suffixed arrays and dotenv/ini suffix values, flag plural suffix-stem names, support shorter sensitive option names"
+    "Upgrade dependencies, replace chrono with jiff, adopt Rust 1.100"
   ],
   "bonds": [],
   "tree": {

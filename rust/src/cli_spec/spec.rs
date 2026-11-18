@@ -496,10 +496,7 @@ impl ArgSpec {
 
     fn long(long: impl Into<String>, value_type: ArgValueType, value_name: Option<String>) -> Self {
         let long = long.into();
-        let argument_id = long
-            .strip_prefix("--")
-            .unwrap_or(long.as_str())
-            .replace('-', "_");
+        let argument_id = long.trim_prefix("--").replace('-', "_");
         Self {
             argument_id,
             syntax: ArgSyntax::Long { name: long },

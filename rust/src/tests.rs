@@ -12,10 +12,10 @@ use serde_json::{Value, json};
 const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/spec/fixtures");
 
 fn load_fixture(name: &str) -> Value {
-    let path = format!("{}/{}", FIXTURES_DIR, name);
+    let path = format!("{FIXTURES_DIR}/{name}");
     let data =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
-    serde_json::from_str(&data).unwrap_or_else(|e| panic!("failed to parse {}: {}", path, e))
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+    serde_json::from_str(&data).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"))
 }
 
 struct SerializationFailure;

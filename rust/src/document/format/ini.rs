@@ -43,7 +43,7 @@ impl<'a> IniDocument<'a> {
         let mut sections = BTreeMap::<&str, usize>::new();
         for (index, raw) in source.lines().enumerate() {
             let line_number = index + 1;
-            let line = raw.strip_suffix('\r').unwrap_or(raw);
+            let line = raw.trim_suffix('\r');
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
                 continue;
@@ -122,7 +122,7 @@ impl<'a> IniDocument<'a> {
         let mut root = BTreeMap::<String, Value>::new();
         let mut current: Option<String> = None;
         for raw in self.source.lines() {
-            let line = raw.strip_suffix('\r').unwrap_or(raw);
+            let line = raw.trim_suffix('\r');
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
                 continue;
@@ -314,8 +314,8 @@ fn edit_entry(content: &str, path: &str, replacement: Option<&str>) -> DocumentR
             if let Some(name) = section_header(line) {
                 current = name;
             }
-            let body = line.strip_suffix('\n').unwrap_or(line);
-            let bare = body.strip_suffix('\r').unwrap_or(body);
+            let body = line.trim_suffix('\n');
+            let bare = body.trim_suffix('\r');
             let matches = current == section.as_str()
                 && bare
                     .trim()

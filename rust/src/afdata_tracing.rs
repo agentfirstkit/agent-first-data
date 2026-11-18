@@ -388,7 +388,7 @@ where
         // Adapter metadata wins over same-named span/event fields.
         map.insert(
             "timestamp_epoch_ms".into(),
-            serde_json::Value::Number(chrono::Utc::now().timestamp_millis().into()),
+            serde_json::Value::Number(jiff::Timestamp::now().as_millisecond().into()),
         );
         map.insert(
             "level".to_string(),
@@ -422,7 +422,7 @@ fn stamp_log_metadata(payload: serde_json::Value) -> serde_json::Value {
         .or_insert_with(|| serde_json::Value::String("info".to_string()));
     map.insert(
         "timestamp_epoch_ms".to_string(),
-        serde_json::Value::Number(chrono::Utc::now().timestamp_millis().into()),
+        serde_json::Value::Number(jiff::Timestamp::now().as_millisecond().into()),
     );
     serde_json::Value::Object(map)
 }
@@ -444,7 +444,7 @@ impl JsonVisitor {
 
 impl Visit for JsonVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let val = format!("{:?}", value);
+        let val = format!("{value:?}");
         if field.name() == "message" {
             self.message = Some(val);
         } else {

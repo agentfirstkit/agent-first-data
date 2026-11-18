@@ -154,21 +154,20 @@ impl fmt::Display for DocumentError {
                 write!(f, "at least one value required")
             }
             DocumentError::UnknownSegment { path, segment } => {
-                write!(f, "path `{}` segment `{}` not found", path, segment)
+                write!(f, "path `{path}` segment `{segment}` not found")
             }
             DocumentError::UnregisteredArray { path } => {
                 write!(
                     f,
-                    "array at `{}` has no rule for naming an element by its content; \
-                     address an element by index, or name the field that identifies one",
-                    path
+                    "array at `{path}` has no rule for naming an element by its content; \
+                     address an element by index, or name the field that identifies one"
                 )
             }
             DocumentError::SlugNotFound { prefix, slug } => {
-                write!(f, "no element with slug `{}` found in `{}`", slug, prefix)
+                write!(f, "no element with slug `{slug}` found in `{prefix}`")
             }
             DocumentError::SlugAlreadyExists { prefix, slug } => {
-                write!(f, "slug `{}` already exists in `{}`", slug, prefix)
+                write!(f, "slug `{slug}` already exists in `{prefix}`")
             }
             DocumentError::AmbiguousMatch {
                 prefix,
@@ -198,11 +197,11 @@ impl fmt::Display for DocumentError {
                         "the document is empty (its root is null), cannot traverse into it"
                     )
                 } else {
-                    write!(f, "the document root is {}, cannot traverse into it", got)
+                    write!(f, "the document root is {got}, cannot traverse into it")
                 }
             }
             DocumentError::NotTraversable { path, got } => {
-                write!(f, "path `{}` is {}, cannot traverse further", path, got)
+                write!(f, "path `{path}` is {got}, cannot traverse further")
             }
             DocumentError::TypeMismatch {
                 path,
@@ -210,46 +209,40 @@ impl fmt::Display for DocumentError {
                 got,
                 hint,
             } => {
-                write!(f, "field `{}` expects {}, got `{}`", path, expected, got)?;
+                write!(f, "field `{path}` expects {expected}, got `{got}`")?;
                 if let Some(h) = hint {
-                    write!(f, "\n  hint: {}", h)?;
+                    write!(f, "\n  hint: {h}")?;
                 }
                 Ok(())
             }
             DocumentError::PathNotFound { path } => {
-                write!(f, "path `{}` not found in document", path)
+                write!(f, "path `{path}` not found in document")
             }
             DocumentError::IndexOutOfBounds { path, index, len } => {
-                write!(
-                    f,
-                    "index {} out of bounds at `{}` (len {})",
-                    index, path, len
-                )
+                write!(f, "index {index} out of bounds at `{path}` (len {len})")
             }
             DocumentError::ParseError { format, detail } => {
-                write!(f, "failed to parse {}: {}", format, detail)
+                write!(f, "failed to parse {format}: {detail}")
             }
             DocumentError::PathSyntax { detail } => {
-                write!(f, "invalid path: {}", detail)
+                write!(f, "invalid path: {detail}")
             }
             DocumentError::SourceRefused { format, detail } => {
-                write!(f, "refusing to read this {}: {}", format, detail)
+                write!(f, "refusing to read this {format}: {detail}")
             }
             DocumentError::InvalidArgument { detail } => {
-                write!(f, "invalid argument: {}", detail)
+                write!(f, "invalid argument: {detail}")
             }
             DocumentError::WriteWouldCorrupt { format, detail } => {
                 write!(
                     f,
-                    "refusing to write: the edit produced {} this parser rejects ({}); the file is unchanged",
-                    format, detail
+                    "refusing to write: the edit produced {format} this parser rejects ({detail}); the file is unchanged"
                 )
             }
             DocumentError::FormatUnknown { path } => {
                 write!(
                     f,
-                    "cannot detect the format of `{}` from its extension; pass an explicit format",
-                    path
+                    "cannot detect the format of `{path}` from its extension; pass an explicit format"
                 )
             }
             DocumentError::AlreadyExists { path } => {
@@ -265,13 +258,13 @@ impl fmt::Display for DocumentError {
                 )
             }
             DocumentError::IoError { detail } => {
-                write!(f, "io error: {}", detail)
+                write!(f, "io error: {detail}")
             }
             DocumentError::UnsupportedOperation {
                 format,
                 operation,
                 detail,
-            } => write!(f, "{} does not support {}: {}", format, operation, detail),
+            } => write!(f, "{format} does not support {operation}: {detail}"),
         }
     }
 }

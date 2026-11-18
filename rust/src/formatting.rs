@@ -190,7 +190,7 @@ fn integer_text(value: &Value) -> Option<String> {
 }
 
 fn is_decimal_integer_string(s: &str) -> bool {
-    let digits = s.strip_prefix('-').unwrap_or(s);
+    let digits = s.trim_prefix('-');
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
@@ -544,9 +544,9 @@ fn format_ms_as_seconds(ms: f64) -> String {
     let formatted = format!("{:.3}", ms / 1000.0);
     let trimmed = formatted.trim_end_matches('0');
     if trimmed.ends_with('.') {
-        format!("{}0s", trimmed)
+        format!("{trimmed}0s")
     } else {
-        format!("{}s", trimmed)
+        format!("{trimmed}s")
     }
 }
 
@@ -581,16 +581,16 @@ const MIN_RFC3339_MS: i64 = -62135596800000;
 const MAX_RFC3339_MS: i64 = 253402300799999;
 
 fn format_rfc3339_ms(ms: i64) -> Option<String> {
-    use chrono::{DateTime, Utc};
     if !(MIN_RFC3339_MS..=MAX_RFC3339_MS).contains(&ms) {
         return None;
     }
-    let secs = ms.div_euclid(1000);
-    let nanos = (ms.rem_euclid(1000) * 1_000_000) as u32;
-    DateTime::from_timestamp(secs, nanos).map(|dt| {
-        dt.with_timezone(&Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-    })
+    // Civil time rather than jiff::Timestamp: Timestamp stops short of
+    // 9999-12-31 to leave room for UTC offsets, and this range ends there.
+    jiff::civil::date(1970, 1, 1)
+        .at(0, 0, 0, 0)
+        .checked_add(jiff::SignedDuration::from_millis(ms))
+        .ok()
+        .map(|utc| format!("{utc:.3}Z"))
 }
 
 /// Format non-negative bytes as human-readable binary size.
@@ -715,18 +715,18 @@ fn render_yaml_array_raw(arr: &[Value], indent: usize, lines: &mut Vec<String>) 
     for item in arr {
         match item {
             Value::Object(inner) if !inner.is_empty() => {
-                lines.push(format!("{}-", prefix));
+                lines.push(format!("{prefix}-"));
                 render_yaml_raw(item, indent + 1, lines);
             }
             Value::Array(nested) if !nested.is_empty() => {
-                lines.push(format!("{}-", prefix));
+                lines.push(format!("{prefix}-"));
                 render_yaml_array_raw(nested, indent + 1, lines);
             }
             Value::Object(_) => {
-                lines.push(format!("{}- {{}}", prefix));
+                lines.push(format!("{prefix}- {{}}"));
             }
             Value::Array(_) => {
-                lines.push(format!("{}- []", prefix));
+                lines.push(format!("{prefix}- []"));
             }
             _ => {
                 lines.push(format!("{}- {}", prefix, yaml_scalar(item)));
@@ -771,10 +771,8 @@ fn is_ambiguous_yaml_key(key: &str) -> bool {
     matches!(
         lower.as_str(),
         "true" | "false" | "null" | "~" | ".nan" | ".inf" | "+.inf" | "-.inf"
-    ) || matches!(
-        lower.strip_prefix(['+', '-']).unwrap_or(&lower),
-        "inf" | "infinity" | "nan"
-    ) || is_decimal_yaml_key(key)
+    ) || matches!(lower.trim_prefix(['+', '-']), "inf" | "infinity" | "nan")
+        || is_decimal_yaml_key(key)
 }
 
 fn is_decimal_yaml_key(key: &str) -> bool {
@@ -848,7 +846,7 @@ fn collect_plain_pairs(value: &Value, prefix: &str, pairs: &mut Vec<(String, Str
             let full_key = if prefix.is_empty() {
                 display_key
             } else {
-                format!("{}.{}", prefix, display_key)
+                format!("{prefix}.{display_key}")
             };
             if let Some(fv) = formatted {
                 pairs.push((full_key, fv));
@@ -880,7 +878,7 @@ fn collect_plain_pairs_raw(value: &Value, prefix: &str, pairs: &mut Vec<(String,
             let full_key = if prefix.is_empty() {
                 key.clone()
             } else {
-                format!("{}.{}", prefix, key)
+                format!("{prefix}.{key}")
             };
             match v {
                 Value::Object(map) if map.is_empty() => {
@@ -931,7 +929,7 @@ fn quote_logfmt_value(value: &str) -> String {
         .replace('\t', "\\t")
         .replace('\x0c', "\\f")
         .replace('\x0b', "\\v");
-    format!("\"{}\"", escaped)
+    format!("\"{escaped}\"")
 }
 
 /// A container inside a Plain array (or a YAML scalar position) is written as

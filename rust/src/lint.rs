@@ -885,7 +885,7 @@ fn number_is_integer_literal(number: &Number) -> bool {
 }
 
 fn decimal_number_is_integer(text: &str) -> bool {
-    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    let unsigned = text.trim_prefix('-');
     let exponent_index = unsigned.find(['e', 'E']);
     let (mantissa, exponent_text) = exponent_index.map_or((unsigned, None), |index| {
         (&unsigned[..index], Some(&unsigned[index + 1..]))
@@ -929,7 +929,7 @@ fn decimal_number_is_integer(text: &str) -> bool {
 }
 
 fn decimal_number_is_zero(text: &str) -> bool {
-    let unsigned = text.strip_prefix('-').unwrap_or(text);
+    let unsigned = text.trim_prefix('-');
     let mantissa = unsigned
         .split_once(['e', 'E'])
         .map_or(unsigned, |(mantissa, _)| mantissa);
@@ -943,7 +943,7 @@ fn is_decimal_integer_string(value: &Value) -> bool {
     let Value::String(text) = value else {
         return false;
     };
-    let digits = text.strip_prefix('-').unwrap_or(text);
+    let digits = text.trim_prefix('-');
     !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
 }
 

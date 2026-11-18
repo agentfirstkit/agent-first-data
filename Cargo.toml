@@ -1,8 +1,8 @@
 [package]
 name = "agent-first-data"
-version = "0.38.0"
+version = "0.38.1"
 edition = "2024"
-rust-version = "1.99"
+rust-version = "1.100"
 description = "A naming convention that lets AI agents understand your data without being told what it means, plus the afdata CLI and a Rust library for reading Markdown structure and safely editing structured JSON, TOML, YAML, dotenv, and INI documents."
 license = "MIT"
 repository = "https://github.com/agentfirstkit/agent-first-data"
@@ -84,14 +84,14 @@ schema = []
 # Earlier scanners lose the sign of a bare -0 even with arbitrary precision.
 serde_json = { version = "1.0.154", features = ["arbitrary_precision"] }
 serde = { version = "1", features = ["derive"] }
-chrono = "0.4"
+jiff = { version = "1", default-features = false, features = ["std"] }
 url = "2"
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"], optional = true }
 # Used by the `libc` feature for hardened document opens and by
 # `stream-redirect`, which enables that feature.
 libc = { version = "0.2", optional = true }
-noyalib = { version = "0.0.58", features = ["lossless-u64"], optional = true }
+noyalib = { version = "0.0.62", features = ["lossless-u64"], optional = true }
 toml = { version = "1", optional = true }
 toml_edit = { version = "0.25", optional = true }
 # `default-features = false` drops the HTML renderer and the getopts-driven
@@ -105,6 +105,7 @@ plist = { version = "1", default-features = false, optional = true }
 tempfile = "3"
 
 [lints.clippy]
+uninlined_format_args = "warn"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"

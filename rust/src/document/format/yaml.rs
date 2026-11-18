@@ -230,7 +230,7 @@ fn set_in_blank_document(
         nested = Value::Object([(segment.clone(), nested)].into_iter().collect());
     }
     let rendered = save(&nested)?;
-    let body = rendered.strip_prefix("---\n").unwrap_or(&rendered);
+    let body = rendered.trim_prefix("---\n");
     let newline = if content.contains("\r\n") {
         "\r\n"
     } else {

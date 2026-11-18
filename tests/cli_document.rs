@@ -599,7 +599,7 @@ fn bare_relative_document_mutation_commits_and_reports_success() {
 #[test]
 fn test_shell_bash_outputs_embedded_source() {
     let output = run(&["shell", "bash"]);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty());
     assert_eq!(output.stdout, include_bytes!("../bash/afdata.sh"));
 }
@@ -616,7 +616,7 @@ fn test_shell_bash_rejects_output_to_override() {
 #[test]
 fn test_emit_log_uses_diagnostic_stream() {
     let output = run(&["emit", "log", "info", "building project"]);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert!(output.stdout.is_empty());
     let response = json_stderr(&output);
     assert_eq!(response["kind"], "log");
@@ -628,7 +628,7 @@ fn test_emit_log_uses_diagnostic_stream() {
 #[test]
 fn test_emit_result_uses_stdout() {
     let output = run(&["emit", "result", "build complete"]);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty());
     let response = json_stdout(&output);
     assert_eq!(response["kind"], "result");
@@ -677,7 +677,7 @@ fn test_emit_honors_unified_destination_and_output_format() {
         "--output",
         "yaml",
     ]);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty());
     let text = String::from_utf8(output.stdout).expect("YAML output must be UTF-8");
     assert!(text.contains("kind: \"log\""), "{text}");
@@ -710,7 +710,7 @@ fn test_cli_parse_error_does_not_trust_unresolved_destination() {
 #[test]
 fn test_stdin_dash_defaults_to_json() {
     let output = run_with_stdin(&["get", "-"], br#"{"a":1}"#);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     let response = json_stdout(&output);
     assert_eq!(response["result"]["format"], "json");
     assert_eq!(response["result"]["value"]["a"], 1);
@@ -729,7 +729,7 @@ fn test_omitted_input_is_a_cli_parse_error_not_implicit_stdin() {
 #[test]
 fn test_input_format_override_applies_to_stdin() {
     let output = run_with_stdin(&["get", "--input-format", "yaml", "-"], b"a: 1\nb: 2\n");
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     let response = json_stdout(&output);
     assert_eq!(response["result"]["format"], "yaml");
     assert_eq!(response["result"]["value"]["a"], 1);
@@ -757,7 +757,7 @@ fn test_file_extension_inference_and_explicit_override() {
     );
 
     let overridden = run(&["get", "--input-format", "json", &config_path, "name"]);
-    assert!(overridden.status.success(), "{:?}", overridden);
+    assert!(overridden.status.success(), "{overridden:?}");
     let response = json_stdout(&overridden);
     assert_eq!(response["result"]["value"], "explicit");
 
@@ -1075,7 +1075,7 @@ fn test_value_secret_gate_requires_reveal_flag() {
         &["value", "-", "a.b_secret", "--reveal-secret"],
         br#"{"a":{"b_secret":"x"}}"#,
     );
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"x");
 }
 
@@ -1174,7 +1174,7 @@ fn test_value_default_covers_path_absent_and_null_not_empty_string() {
         &["value", "-", "missing", "--default", "fallback"],
         br#"{"present":null,"empty":""}"#,
     );
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"fallback");
 
     let output = run_with_stdin(
@@ -1207,7 +1207,7 @@ fn test_paths_and_keys_object_array_and_top_level() {
     let stdin = br#"{"extra":{"tools":[{"slug":"a"},{"slug":"b"}]},"deps":{"foo.bar":"1"}}"#;
 
     let paths = run_with_stdin(&["paths", "-", "extra.tools"], stdin);
-    assert!(paths.status.success(), "{:?}", paths);
+    assert!(paths.status.success(), "{paths:?}");
     assert_eq!(
         String::from_utf8_lossy(&paths.stdout),
         "extra.tools.0\nextra.tools.1\n"
@@ -1287,12 +1287,12 @@ fn test_paths_and_keys_missing_ok_and_null_separator() {
     assert!(!parse_error.status.success());
 
     let null_sep = run_with_stdin(&["paths", "-", "--null"], br#"{"a":1,"b":2}"#);
-    assert!(null_sep.status.success(), "{:?}", null_sep);
+    assert!(null_sep.status.success(), "{null_sep:?}");
     assert_eq!(null_sep.stdout, b"a\0b\0");
 
     // A key containing a newline needs NUL framing; the default refuses it.
     let newline_key = run_with_stdin(&["paths", "-", "--null"], br#"{"a":1,"b\nc":2}"#);
-    assert!(newline_key.status.success(), "{:?}", newline_key);
+    assert!(newline_key.status.success(), "{newline_key:?}");
     assert_eq!(newline_key.stdout, b"a\0b\nc\0");
 
     // `-0` is not an alias: AFDATA spells its flags out in full, so a
@@ -1325,7 +1325,7 @@ fn test_bare_value_is_zero_coercion_string() {
     let config_path = write_temp(&temp_dir, "config.json", "{}\n");
 
     let output = run(&["set", &config_path, "code", "007"]);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     let value = run(&["value", &config_path, "code"]);
     assert_eq!(value.stdout, b"007");
 }
@@ -1358,7 +1358,7 @@ fn test_bare_value_overwriting_existing_scalar_of_different_type_is_guarded() {
         "--value-type",
         "number",
     ]);
-    assert!(kept.status.success(), "{:?}", kept);
+    assert!(kept.status.success(), "{kept:?}");
     let value = run(&["value", &config_path, "port"]);
     assert_eq!(value.stdout, b"9090");
 
@@ -1375,7 +1375,7 @@ fn test_bare_value_overwriting_existing_scalar_of_different_type_is_guarded() {
 
     // A brand-new key never needs --value-type.
     let new_key = run(&["set", &config_path, "brand_new", "hello"]);
-    assert!(new_key.status.success(), "{:?}", new_key);
+    assert!(new_key.status.success(), "{new_key:?}");
 }
 
 #[test]
@@ -1384,13 +1384,13 @@ fn test_value_type_null_bool_number_and_json() {
     let config_path = write_temp(&temp_dir, "config.json", "{}\n");
 
     let null = run(&["set", &config_path, "a", "--value-type", "null"]);
-    assert!(null.status.success(), "{:?}", null);
+    assert!(null.status.success(), "{null:?}");
     let value = run(&["value", &config_path, "a"]);
     assert_eq!(value.status.code(), Some(1));
     assert!(value.stdout.is_empty());
     assert_eq!(json_stderr(&value)["error"]["code"], "document_null_value");
     let defaulted = run(&["value", &config_path, "a", "--default", "fallback"]);
-    assert!(defaulted.status.success(), "{:?}", defaulted);
+    assert!(defaulted.status.success(), "{defaulted:?}");
     assert_eq!(defaulted.stdout, b"fallback");
 
     // A bare string over null gets an actionable null-specific hint.
@@ -1411,7 +1411,7 @@ fn test_value_type_null_bool_number_and_json() {
     assert_eq!(run(&["value", &config_path, "b"]).stdout, b"true");
 
     let array = run(&["set", &config_path, "c", "[1,2,3]", "--value-type", "json"]);
-    assert!(array.status.success(), "{:?}", array);
+    assert!(array.status.success(), "{array:?}");
     let response = json_stdout(&run(&["get", &config_path, "c"]));
     assert_eq!(response["result"]["value"], serde_json::json!([1, 2, 3]));
 
@@ -1437,7 +1437,7 @@ fn test_add_field_value_is_always_string() {
         "id",
         "count=007",
     ]);
-    assert!(added.status.success(), "{:?}", added);
+    assert!(added.status.success(), "{added:?}");
     let response = json_stdout(&run(&[
         "get",
         &config_path,
@@ -1513,7 +1513,7 @@ fn test_number_fidelity_oversized_integer_and_high_precision_float() {
     );
 
     let value_huge = run(&["value", &config_path, "huge"]);
-    assert!(value_huge.status.success(), "{:?}", value_huge);
+    assert!(value_huge.status.success(), "{value_huge:?}");
     assert_eq!(value_huge.stdout, huge.as_bytes());
 
     let value_precise = run(&["value", &config_path, "precise"]);
@@ -1534,7 +1534,7 @@ fn test_number_fidelity_set_value_type_number_preserves_literal() {
     let config_path = write_temp(&temp_dir, "config.json", "{}\n");
     let huge = "123456789012345678901234567890";
     let set = run(&["set", &config_path, "n", huge, "--value-type", "number"]);
-    assert!(set.status.success(), "{:?}", set);
+    assert!(set.status.success(), "{set:?}");
     let value = run(&["value", &config_path, "n"]);
     assert_eq!(value.stdout, huge.as_bytes());
     // On-disk bytes preserve the literal too.
@@ -1702,7 +1702,7 @@ fn test_output_to_stderr_unifies_result_onto_stderr() {
     // Unified stderr mode: a successful result envelope goes to stderr; stdout
     // stays empty.
     let output = run_with_stdin(&["get", "-", "a", "--output-to", "stderr"], br#"{"a":1}"#);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert!(output.stdout.is_empty(), "{:?}", output.stdout);
     let response = json_stderr(&output);
     assert_eq!(response["result"]["code"], "document");
@@ -1805,7 +1805,7 @@ fn test_render_secret_name_matches_get_redaction() {
         ],
         br#"{"PASSWORD":"hunter2","api_key_secret":"sk-live","ok":true}"#,
     );
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     // Default `_secret` suffix redaction still applies...
     assert_eq!(value["api_key_secret"], "***");
@@ -1837,7 +1837,7 @@ fn test_lint_accepts_toml_document_via_extension_and_override() {
 
     // JSON/JSONL default behavior is unchanged.
     let jsonl = run_with_stdin(&["lint", "-"], b"{\"a\":1}\n{\"b\":2}\n");
-    assert!(jsonl.status.success(), "{:?}", jsonl);
+    assert!(jsonl.status.success(), "{jsonl:?}");
 }
 
 // ═══════════════════════════════════════════
@@ -1848,7 +1848,7 @@ fn test_lint_accepts_toml_document_via_extension_and_override() {
 fn test_validate_per_event_flag() {
     let valid = br#"{"kind":"log","log":{"event":"startup"},"trace":{}}"#;
     let output = run_with_stdin(&["validate", "-", "--strict", "--per-event"], valid);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
 }
 
 // ═══════════════════════════════════════════
@@ -1891,7 +1891,7 @@ fn test_set_preserves_toml_formatting() {
         "--value-type",
         "number",
     ]);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     let response = json_stdout(&output);
     assert_eq!(response["result"]["code"], "document_set");
     assert_eq!(response["result"]["format"], "toml");
@@ -1922,7 +1922,7 @@ fn test_set_missing_key_toml_and_yaml_preserve_comments() {
         "--value-type",
         "number",
     ]);
-    assert!(out.status.success(), "{:?}", out);
+    assert!(out.status.success(), "{out:?}");
     let after = std::fs::read_to_string(&toml_path).unwrap();
     assert!(after.contains("# keep"), "comment preserved: {after}");
     assert!(after.contains("port = 8080"), "new key inserted: {after}");
@@ -1938,7 +1938,7 @@ fn test_set_missing_key_toml_and_yaml_preserve_comments() {
             "--value-type",
             "number",
         ]);
-        assert!(out.status.success(), "{:?}", out);
+        assert!(out.status.success(), "{out:?}");
         let after = std::fs::read_to_string(&yaml_path).unwrap();
         assert_eq!(after, "a: 1\nsrv:\n  host: x\n  port: 8080\n");
     }
@@ -1960,7 +1960,7 @@ fn test_json_keyed_collection_edits_preserve_document() {
         "id",
         "name=B",
     ]);
-    assert!(added.status.success(), "{:?}", added);
+    assert!(added.status.success(), "{added:?}");
     let after_add = std::fs::read_to_string(&config_path).unwrap();
     assert!(after_add.contains("1e+3"));
     assert_eq!(
@@ -1972,7 +1972,7 @@ fn test_json_keyed_collection_edits_preserve_document() {
     );
 
     let removed = run(&["remove", &config_path, "items", "b", "--slug-field", "id"]);
-    assert!(removed.status.success(), "{:?}", removed);
+    assert!(removed.status.success(), "{removed:?}");
     let after_remove = std::fs::read_to_string(&config_path).unwrap();
     assert!(after_remove.contains("1e+3"));
     assert_eq!(
@@ -2140,7 +2140,7 @@ fn test_keyed_edits_on_nested_dotted_prefix() {
         "uid",
         "role=dev",
     ]);
-    assert!(added.status.success(), "{:?}", added);
+    assert!(added.status.success(), "{added:?}");
     let parsed: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(parsed["cfg"]["users"].as_array().unwrap().len(), 2);
@@ -2155,7 +2155,7 @@ fn test_keyed_edits_on_nested_dotted_prefix() {
         "--slug-field",
         "uid",
     ]);
-    assert!(removed.status.success(), "{:?}", removed);
+    assert!(removed.status.success(), "{removed:?}");
     let parsed: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(parsed["cfg"]["users"].as_array().unwrap().len(), 1);
@@ -2262,7 +2262,7 @@ fn test_secret_from_stdin_and_env_round_trip_exactly() {
         ],
         b"piped\n",
     );
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("piped"));
     let value = run(&["value", &config_path, "password_secret", "--reveal-secret"]);
     assert_eq!(value.stdout, b"piped\n");
@@ -2286,7 +2286,7 @@ fn test_secret_from_stdin_and_env_round_trip_exactly() {
         ])
         .output()
         .unwrap();
-    assert!(set.status.success(), "{:?}", set);
+    assert!(set.status.success(), "{set:?}");
     let got = run(&["value", &config_path2, "api_key_secret", "--reveal-secret"]);
     assert_eq!(String::from_utf8_lossy(&got.stdout), "s3kr3t-Ünïcode-#=");
 }
@@ -2506,7 +2506,7 @@ fn test_set_preserves_file_mode() {
     std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
 
     let out = run(&["set", &config_path, "a", "2", "--value-type", "number"]);
-    assert!(out.status.success(), "{:?}", out);
+    assert!(out.status.success(), "{out:?}");
     let mode = std::fs::metadata(&config_path)
         .unwrap()
         .permissions()
@@ -2568,7 +2568,7 @@ fn test_frontmatter_toml_read_and_body_frozen_on_set() {
         "--input-format",
         "toml-frontmatter",
     ]);
-    assert!(got.status.success(), "{:?}", got);
+    assert!(got.status.success(), "{got:?}");
     assert_eq!(String::from_utf8_lossy(&got.stdout), "Old");
 
     // edit a frontmatter field
@@ -2580,7 +2580,7 @@ fn test_frontmatter_toml_read_and_body_frozen_on_set() {
         "--input-format",
         "toml-frontmatter",
     ]);
-    assert!(set.status.success(), "{:?}", set);
+    assert!(set.status.success(), "{set:?}");
     assert_eq!(json_stdout(&set)["result"]["format"], "toml-frontmatter");
 
     let after = std::fs::read_to_string(&page).unwrap();
@@ -2611,7 +2611,7 @@ fn test_frontmatter_toml_insert_and_unset_keep_body() {
         "--input-format",
         "toml-frontmatter",
     ]);
-    assert!(ins.status.success(), "{:?}", ins);
+    assert!(ins.status.success(), "{ins:?}");
     let after_insert = std::fs::read_to_string(&page).unwrap();
     assert!(after_insert.contains("ask_prompt = \"Ask me\""));
     assert!(
@@ -2627,7 +2627,7 @@ fn test_frontmatter_toml_insert_and_unset_keep_body() {
         "--input-format",
         "toml-frontmatter",
     ]);
-    assert!(del.status.success(), "{:?}", del);
+    assert!(del.status.success(), "{del:?}");
     let after_unset = std::fs::read_to_string(&page).unwrap();
     assert!(!after_unset.contains("ask_prompt"));
     assert!(
@@ -2654,7 +2654,7 @@ fn test_frontmatter_yaml_read_and_edit() {
         "--input-format",
         "yaml-frontmatter",
     ]);
-    assert!(got.status.success(), "{:?}", got);
+    assert!(got.status.success(), "{got:?}");
     assert_eq!(String::from_utf8_lossy(&got.stdout), "Old");
 
     let set = run(&[
@@ -2665,7 +2665,7 @@ fn test_frontmatter_yaml_read_and_edit() {
         "--input-format",
         "yaml-frontmatter",
     ]);
-    assert!(set.status.success(), "{:?}", set);
+    assert!(set.status.success(), "{set:?}");
     assert_eq!(json_stdout(&set)["result"]["format"], "yaml-frontmatter");
 
     let after = std::fs::read_to_string(&page).unwrap();
@@ -2710,7 +2710,7 @@ fn test_frontmatter_secret_field_still_redacts_on_get() {
         "--input-format",
         "toml-frontmatter",
     ]);
-    assert!(got.status.success(), "{:?}", got);
+    assert!(got.status.success(), "{got:?}");
     assert_eq!(json_stdout(&got)["result"]["value"], "***");
 }
 

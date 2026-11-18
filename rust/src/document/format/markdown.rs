@@ -836,11 +836,8 @@ fn read_verbatim(events: &[SpannedEvent<'_>], cursor: &mut usize) -> String {
             _ => {}
         }
     }
-    let unterminated = text.strip_suffix('\n').unwrap_or(text.as_str());
-    unterminated
-        .strip_suffix('\r')
-        .unwrap_or(unterminated)
-        .to_string()
+    let unterminated = text.trim_suffix('\n');
+    unterminated.trim_suffix('\r').to_string()
 }
 
 /// Consume an unhandled container's whole subtree, including its own `End`.

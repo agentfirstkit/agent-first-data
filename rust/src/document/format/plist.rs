@@ -41,7 +41,7 @@ pub(crate) const WRONG_FORMAT_XML_DETAIL: &str =
 /// the opening bytes are looked at; this is a hint for a parse that already
 /// failed on another format, not format sniffing.
 pub(crate) fn looks_like_xml(bytes: &[u8]) -> bool {
-    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    let bytes = bytes.trim_prefix(b"\xEF\xBB\xBF");
     let start = bytes
         .iter()
         .position(|byte| !byte.is_ascii_whitespace())

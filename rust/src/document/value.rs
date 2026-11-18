@@ -208,10 +208,10 @@ impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Null => write!(f, "null"),
-            Value::Bool(b) => write!(f, "{}", b),
-            Value::Integer(i) => write!(f, "{}", i),
-            Value::Unsigned(i) => write!(f, "{}", i),
-            Value::Float(fl) => write!(f, "{}", fl),
+            Value::Bool(b) => write!(f, "{b}"),
+            Value::Integer(i) => write!(f, "{i}"),
+            Value::Unsigned(i) => write!(f, "{i}"),
+            Value::Float(fl) => write!(f, "{fl}"),
             Value::Number(text) => write!(f, "{text}"),
             Value::String(s) => write!(f, "\"{}\"", s.escape_default()),
             Value::Array(_) => write!(f, "[...]"),

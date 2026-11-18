@@ -602,7 +602,7 @@ fn read_prompt_line<R: std::io::BufRead>(reader: R) -> Result<String> {
         ));
     }
     let value = match value.strip_suffix('\n') {
-        Some(line) => line.strip_suffix('\r').unwrap_or(line),
+        Some(line) => line.trim_suffix('\r'),
         None => &value,
     };
     if value.len() > MAX_STREAM_BYTES {
